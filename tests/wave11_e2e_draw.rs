@@ -613,12 +613,16 @@ fn refused_draw_calls_leave_the_project_unchanged() {
 fn non_finite_scatter_is_refused() {
     // draw_stroke validates `scatter < 0.0` AND finiteness:
     // the argument helpers reject non-finite values before
-    // AND after the f64 -> f32 cast — so the JSON number
-    // 1e999, which serde_json parses as +infinity, is refused
-    // like the negative case instead of being stored verbatim
+    // AND after the f64 -> f32 cast — so a huge-but-finite
+    // JSON number like 1e300, whose f32 cast overflows to
+    // +infinity, is refused instead of being stored verbatim
     // as `scatter: f32::INFINITY` (the WAVE11-GAP behaviour
     // this test originally pinned). The same refusal covers
     // point coordinates and width via the same helpers.
+    // (A literal 1e999 never reaches a handler at all:
+    // serde_json refuses it at parse time — "number out of
+    // range" — so the stdio framing answers -32700. The
+    // cast-overflow case below is the one dispatch sees.)
     let dir = temp_dir("nonfinite");
     let mut s = Session::new();
     s.call_ok("new_project", json!({ "name": "NonFinite" }));
@@ -628,23 +632,22 @@ fn non_finite_scatter_is_refused() {
     );
     assert_eq!(seed["strokes_on_frame"], 1);
 
-    // Built as raw wire text: json! cannot express 1e999 (it
-    // is not a finite f64 literal), but a client's line on the
-    // stdio wire can — this is exactly what the server's line
-    // parser hands to dispatch.
-    let raw = r#"{"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"name":"draw_stroke","arguments":{"frame":0,"points":[[10.0,50.0],[90.0,50.0]],"scatter":1e999}}}"#;
+    // Built as raw wire text, the way a client's line on the
+    // stdio wire arrives — this is exactly what the server's
+    // line parser hands to dispatch.
+    let raw = r#"{"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"name":"draw_stroke","arguments":{"frame":0,"points":[[10.0,50.0],[90.0,50.0]],"scatter":1e300}}}"#;
     let msg: Value = serde_json::from_str(raw).expect("the wire line parses");
     let resp = s
         .server
         .handle(&msg)
-        .expect("the 1e999 call must be answered, never panic or hang the dispatch");
+        .expect("the 1e300 call must be answered, never panic or hang the dispatch");
     assert_eq!(resp["id"], 77);
     let is_error = resp["result"]["isError"].as_bool().unwrap_or(false);
     let text = resp["result"]["content"][0]["text"]
         .as_str()
         .expect("text content block")
         .to_string();
-    assert!(is_error, "1e999 scatter must be refused, got: {text}");
+    assert!(is_error, "1e300 scatter must be refused, got: {text}");
     assert!(
         text.contains("scatter") && text.contains("finite"),
         "the refusal should name the argument and the reason: {text}"
