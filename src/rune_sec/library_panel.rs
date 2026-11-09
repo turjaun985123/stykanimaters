@@ -349,11 +349,48 @@ use crate::State;
 /// the grouping below is derived from it.
 pub const BUILTIN_PREFIX: &str = "Built-in: ";
 
-/// Height of the scrolling list viewport. A scroll viewport
-/// needs a bounded height (rune `el/scroll.rs`); a fixed
-/// height keeps the panel predictable wherever the sidebar
-/// mounts it.
-pub const LIST_HEIGHT: f32 = 200.0;
+/// Height of one library entry row, in points: the
+/// [`THUMB_SIZE`] thumbnail line (44 — the name text
+/// beside it is a 15 pt LABEL line, so the canvas sets
+/// the line height), the row body's 4 pt gap, and the
+/// button line at 26 (the icon-only Delete button's
+/// 26 pt box; the labelled icon buttons are 25 — a
+/// 15 pt label line inside 5 pt vertical padding). The
+/// `list_row` shell adds no vertical padding (its
+/// `row_base` pads horizontally only), so the shell is
+/// exactly the body: 44 + 4 + 26 = 74.
+pub const ROW_H: f32 = 74.0;
+
+/// Vertical gap between two rows of one group (the
+/// group column's gap in `group` below).
+pub const ROW_GAP: f32 = 4.0;
+
+/// Cap (points) on the list's scroll viewport: one
+/// group's label line (a SECTION text line,
+/// 11.5 × 1.25 = 14.375), its 4 pt gap, five rows at
+/// [`ROW_H`] and the four [`ROW_GAP`]s between them —
+/// 404.375 pt. Five visible rows is the shell's list
+/// convention (the figures panel's `FIG_LIST_MAX_H`,
+/// the graph channel list's `CHAN_LIST_MAX_H`); the
+/// label rides inside this cap because a library list
+/// is never rendered without one. The viewport is
+/// `.min_h(0)` / `.max_h(LIST_MAX_H)` (the figures
+/// panel's pattern), so at or under five rows it is
+/// exactly the content height — no dead space under a
+/// short library — and past five rows (or once a
+/// second group's label joins the same budget) it
+/// scrolls internally.
+///
+/// Wave 13 (D4) replaces the fixed 200 pt `LIST_HEIGHT`
+/// this cap supersedes: Wave 12's thumbnail rows grew
+/// to 74 pt, so 200 showed two full rows and a cut
+/// third — the three built-in entries did not fit
+/// whole (their group is 248.375 pt). The panel's
+/// place in the sidebar column is unchanged: the
+/// column itself scrolls as a whole, and the figures
+/// panel's 342 pt cap already sits in the same column
+/// under the same rule.
+pub const LIST_MAX_H: f32 = 14.375 + ROW_GAP + 5.0 * ROW_H + 4.0 * ROW_GAP;
 
 /// View-state for this section: whether the panel body is
 /// collapsed, the search field, the rename session, and
@@ -1439,10 +1476,17 @@ pub fn library_panel(s: &State, t: &Theme) -> El {
                 .child(group("library-builtins", "Built-in", &builtins, s, t))
                 .child(group("library-saved", "Saved", &saved, s, t));
             card = card.child(
+                // Wave 13 (D4): the viewport sizes to its
+                // rows up to the five-row cap and scrolls
+                // past it (LIST_MAX_H — the figures list's
+                // min_h(0) / max_h pattern), replacing the
+                // fixed 200 pt height the taller Wave 12
+                // thumbnail rows outgrew.
                 list.scroll(ScrollSpec {
                     stick_bottom: false,
                 })
-                .h(LIST_HEIGHT),
+                .min_h(0.0)
+                .max_h(LIST_MAX_H),
             );
         }
         panel = panel.child(card);
@@ -2474,5 +2518,53 @@ mod tests {
         assert!(library_thumb_prims(&empty, THUMB_SIZE, Color::WHITE).is_empty());
         assert!(library_thumb_shape(&empty, THUMB_SIZE, Color::WHITE).is_empty());
         assert!(!library_thumb_shape(&FigureDef::humanoid(), THUMB_SIZE, Color::WHITE).is_empty());
+    }
+
+    #[test]
+    fn list_viewport_caps_at_five_rows() {
+        // The Wave 13 (D4) viewport rule, as an arithmetic
+        // pin in the figures panel's style
+        // (`fig_list_viewport_caps_at_five_rows`). One row
+        // lays out at 74 pt: the 44 pt thumbnail line, the
+        // row body's 4 pt gap, and the 26 pt button line
+        // (the icon-only Delete button's box; the labelled
+        // icon buttons are 25).
+        assert_eq!(ROW_H, THUMB_SIZE + 4.0 + 26.0);
+        assert_eq!(ROW_H, 74.0);
+        // The cap is one group's SECTION label line
+        // (11.5 pt at the 1.25 default line height), its
+        // gap, and five rows with the four gaps between
+        // them — the shell's five-visible-rows list
+        // convention (FIG_LIST_MAX_H / CHAN_LIST_MAX_H).
+        assert_eq!(LIST_MAX_H, 14.375 + ROW_GAP + 5.0 * ROW_H + 4.0 * ROW_GAP);
+        assert_eq!(LIST_MAX_H, 404.375);
+        // One group's content height for n rows, in the
+        // group column's own terms (label, gap, rows).
+        let content_h = |n: f32| 14.375 + ROW_GAP + n * ROW_H + (n - 1.0) * ROW_GAP;
+        // Five rows exactly fill the viewport: the fifth
+        // row is fully visible and nothing scrolls (the
+        // min_h(0) / max_h viewport is then exactly the
+        // content height).
+        assert_eq!(content_h(5.0), LIST_MAX_H);
+        // Exactly five FULL rows fit under the cap: the
+        // visible-row arithmetic the rule promises.
+        let full_rows = (LIST_MAX_H - 14.375 - ROW_GAP + ROW_GAP) / (ROW_H + ROW_GAP);
+        assert_eq!(full_rows, 5.0);
+        // The sixth row is the first that scrolls.
+        assert!(content_h(6.0) > LIST_MAX_H, "six rows must exceed the cap");
+        // The Wave 12 remainder this fixes: the retired
+        // fixed height was 200 pt, under which the three
+        // built-in entries (248.375 pt of group) did NOT
+        // fit whole — two full rows and a cut third. The
+        // same three rows sit comfortably under the cap,
+        // so a fresh library shows every built-in without
+        // scrolling.
+        assert_eq!(content_h(3.0), 248.375);
+        assert!(content_h(3.0) > 200.0, "the old 200 pt viewport cut the third built-in");
+        assert!(content_h(3.0) < LIST_MAX_H, "three rows size the viewport, no scroll");
+        // And two rows at 170.375 pt explain the old
+        // viewport's behaviour: 200 pt held two full rows
+        // plus a ~30 pt slice of the third.
+        assert_eq!(content_h(2.0), 170.375);
     }
 }

@@ -186,7 +186,7 @@ jobs:
           probe() { rm -rf ./projects; HOME="$(mktemp -d)" timeout "$@"; }
           mkdir -p headless-out
           missing=0
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated; do
             probe 60 "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
               > "headless-out/tree-$scene.log" 2>&1
             echo $? > "headless-out/tree-$scene.exit"
@@ -236,7 +236,7 @@ jobs:
           # CWD-relative, so probe() also wipes ./projects
           # before every invocation.
           probe() { rm -rf ./projects; HOME="$(mktemp -d)" timeout "$@"; }
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated; do
             if [ ! -f "headless-out/tree-$scene.json" ]; then
               probe 60 xvfb-run -a "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
                 > "headless-out/tree-$scene-xvfb.log" 2>&1
@@ -348,6 +348,20 @@ jobs:
           probe 120 "$BIN" --snap headless-out/snap-strokes-populated.png --scene strokes-populated --at 0 \
             > headless-out/snap-strokes-populated.log 2>&1
           echo $? > headless-out/snap-strokes-populated.exit
+          # Wave 13: the two populated states Wave 12's
+          # close-out named as unproven — the figure
+          # library carrying real entries, so the library
+          # rows' Wave 12 thumbnails render in a snap for
+          # the first time, and the stage carrying sprite
+          # instances with the Sprites panel mounted (this
+          # wave's headline surface, whose placeholder
+          # outlines only pixels can prove).
+          probe 120 "$BIN" --snap headless-out/snap-library-populated.png --scene library-populated --at 0 \
+            > headless-out/snap-library-populated.log 2>&1
+          echo $? > headless-out/snap-library-populated.exit
+          probe 120 "$BIN" --snap headless-out/snap-sprites-populated.png --scene sprites-populated --at 0 \
+            > headless-out/snap-sprites-populated.log 2>&1
+          echo $? > headless-out/snap-sprites-populated.exit
           # Two Effects-workspace snaps, because the scene
           # names are historical: the scene NAMED fx-selected
           # selects a particle event (State::particle_selected)

@@ -124,6 +124,59 @@ trees (rows running below the window's bottom edge
 included) scan clean, and one planted row escape per
 scene is caught by the content and card rules.
 
+Wave 13 audit -- the sprite surface and the saved
+library rows. Wave 13 adds two more tree shapes:
+sprites-panel rows (squad A's new panel) and the
+library panel carrying SAVED entries (scene
+`library-populated`, D1). Again no rule needed
+generalising, and none was weakened:
+
+- The sprites panel is an ordinary side-column card:
+  one row per instance (asset name, key count, Delete)
+  plus, for the selected instance, the per-key
+  steppers (x, y, rotation, scale). Steppers and
+  Delete buttons are fixed-width children ending at
+  the content edge -- exactly what rules 1-2 judge.
+  The panel has no horizontal-scroll subtree (its
+  list scrolls vertically at most), so no exemption
+  arises. The fixture's keys and row anatomy follow
+  A3's shipped source (`sprites_panel.rs`, which
+  landed during this audit); only the panel's mount
+  (column, y) is modelled, on the stroke inspector's
+  card geometry, because the workspace gating and
+  the `sprites-populated` scene are still in flight
+  -- when the real tree lands, the debrief scan
+  validates the shape against it and the fixture's
+  placement is corrected to the dump if they differ.
+- The library rows' width anatomy is unchanged by
+  the 44 pt thumbnails (Wave 12 D5): the thumb and
+  the seg count are the first line's only fixed
+  children (83 pt of its 236 pt) and the name
+  truncates, so the Wave 10 verdicts stand. What the
+  populated scene adds is the saved rows' button line
+  (Insert / Rename / Delete) -- the fixed children
+  whose 263 pt total caused the Wave 10 escape in
+  this very panel. The fixture is modelled on the
+  real Wave 12 dump geometry (card [16, 754, 300,
+  329], rows 73 pt, thumb 44x44 at row x+8, count
+  ending at 296, `lib-sort` and `library-collapse`
+  ending exactly at the 304 edge).
+- The library list rides a VERTICAL scroll (a
+  ScrollSpec at a fixed 200 pt height): scrolled
+  rows dump past the list's bottom and the window's,
+  legitimately, but scroll_y moves no x, so rules
+  1-2 judge every row exactly as they judge the
+  un-scrolled Home list. SCROLL_SEGMENTS stays a
+  horizontal-only closed list -- exempting the
+  library list would blind the scan in the one panel
+  where fixed row children have already escaped once.
+
+The self-test pins both shapes the same way:
+conforming trees (below-the-fold rows included) scan
+clean, and one planted escape per shape -- a stepper
+button, a saved row's Delete -- is caught by the
+content and card rules.
+
 Checks considered and NOT added (they would
 false-positive or judge what rects cannot show):
 
@@ -418,7 +471,9 @@ def scan_file(path):
 # (d) the Wave 12 populated-scene fixtures (home-populated,
 # strokes-populated) stay silent on conforming trees -- rows
 # below the window's bottom edge included -- and catch one
-# planted row escape per scene.
+# planted row escape per scene, and (e) the Wave 13 fixtures
+# (sprites-panel rows, library rows with 44 pt thumbnails
+# and saved-row button lines) do the same for their shapes.
 # ------------------------------------------------------------------
 
 def _el(path, rect, key=None):
@@ -622,6 +677,166 @@ def _strokes_populated_fixture(win_w, win_h, del_dx=0.0):
     }
 
 
+def _sprites_populated_fixture(win_w, win_h, step_dx=0.0):
+    """A minimal sprites-panel tree (Wave 13 scene
+    `sprites-populated`): the `sprite-panel` card root
+    in the right column holding the instance list, the
+    add picker and the selected instance's edit rows.
+
+    Keys and anatomy follow A3's shipped source
+    (`sprites_panel.rs`, which landed during this
+    audit): `sprite-list` rows keyed `sprite-row-{i}`
+    (a `sprite-select-{i}` button carrying the asset
+    name, an unkeyed key-count text, a `sprite-del-{i}`
+    Delete), an add column `sprite-add` with per-asset
+    `sprite-add-{a}` buttons, and the `sprite-edit`
+    column's stepper rows (`sprite-rot-dn` /
+    `sprite-rot-up`, `sprite-scale-dn` /
+    `sprite-scale-up`, ...). The panel's mount -- which
+    column, which y -- is still in flight with E8/D1,
+    so placement is modelled on the stroke inspector's
+    card geometry: card x=W-356, width 340, 12 pt
+    padding, content x=W-344, width 316, right edge
+    W-28. Each row's Delete and each stepper's up
+    button end exactly at the content edge. Row 2
+    sits below the window's bottom edge -- legitimate,
+    the right column scrolls vertically. step_dx
+    shifts the scale stepper's up button right: the
+    planted escape (a fixed-width stepper child pushed
+    past the card, the populated-row failure mode in
+    stepper form).
+    """
+    card_x = win_w - 356.0
+    cx = card_x + 12.0   # content x (W-344)
+    edge = win_w - 28.0  # content right edge
+    base = "#0/main-row/side-right/sprite-panel"
+    return {
+        "elements": [
+            _el("#0", [0.0, 0.0, win_w, win_h]),
+            _el("#0/main-row", [16.0, 141.0, win_w - 32.0, win_h - 157.0]),
+            _el("#0/main-row/side-right", [card_x, 157.0, 340.0, 1100.0]),
+            _el(base, [card_x, 300.0, 340.0, 460.0], "sprite-panel"),
+            # Add picker: one per-asset button.
+            _el(base + "/sprite-add",
+                [cx, 312.0, 316.0, 25.0], "sprite-add"),
+            _el(base + "/sprite-add/sprite-add-0",
+                [cx, 312.0, 132.0, 25.0], "sprite-add-0"),
+            # Row 0: select button (asset name), key
+            # count, Delete at the edge.
+            _el(base + "/sprite-list/sprite-row-0",
+                [cx, 345.0, 316.0, 33.0], "sprite-row-0"),
+            _el(base + "/sprite-list/sprite-row-0/sprite-select-0",
+                [cx + 8.0, 349.0, 150.0, 25.0], "sprite-select-0"),
+            _el(base + "/sprite-list/sprite-row-0/#1",
+                [cx + 166.0, 354.0, 52.0, 15.0]),  # "3 keys"
+            _el(base + "/sprite-list/sprite-row-0/sprite-del-0",
+                [edge - 64.0, 349.0, 64.0, 25.0], "sprite-del-0"),
+            # Row 1 (selected) and its edit rows:
+            # rotation conforming, scale carrying the
+            # planted escape when step_dx > 0.
+            _el(base + "/sprite-list/sprite-row-1",
+                [cx, 386.0, 316.0, 33.0], "sprite-row-1"),
+            _el(base + "/sprite-list/sprite-row-1/sprite-select-1",
+                [cx + 8.0, 390.0, 150.0, 25.0], "sprite-select-1"),
+            _el(base + "/sprite-list/sprite-row-1/sprite-del-1",
+                [edge - 64.0, 390.0, 64.0, 25.0], "sprite-del-1"),
+            _el(base + "/sprite-edit/sprite-rot-row",
+                [cx, 427.0, 316.0, 25.0], "sprite-rot-row"),
+            _el(base + "/sprite-edit/sprite-rot-row/sprite-rot-dn",
+                [edge - 56.0, 427.0, 26.0, 25.0], "sprite-rot-dn"),
+            _el(base + "/sprite-edit/sprite-rot-row/sprite-rot-up",
+                [edge - 26.0, 427.0, 26.0, 25.0], "sprite-rot-up"),
+            _el(base + "/sprite-edit/sprite-scale-row",
+                [cx, 460.0, 316.0, 25.0], "sprite-scale-row"),
+            _el(base + "/sprite-edit/sprite-scale-row/sprite-scale-dn",
+                [edge - 56.0, 460.0, 26.0, 25.0], "sprite-scale-dn"),
+            _el(base + "/sprite-edit/sprite-scale-row/sprite-scale-up",
+                [edge - 26.0 + step_dx, 460.0, 26.0, 25.0], "sprite-scale-up"),
+            # Row 2: below the window's bottom edge.
+            _el(base + "/sprite-list/sprite-row-2",
+                [cx, 950.0, 316.0, 33.0], "sprite-row-2"),
+            _el(base + "/sprite-list/sprite-row-2/sprite-del-2",
+                [edge - 64.0, 954.0, 64.0, 25.0], "sprite-del-2"),
+        ]
+    }
+
+
+def _library_populated_fixture(win_w, win_h, del_dx=0.0):
+    """A minimal populated-library tree (Wave 13 scene
+    `library-populated`): the `library-panel` card root
+    in the left column with a built-in row and a saved
+    row inside the vertically scrolled `library-list`.
+
+    Geometry is the real Wave 12 dump's (tree-default):
+    card [16, 754, 300, 329], content x=28, width 276,
+    right edge 304; `library-collapse` and `lib-sort`
+    end exactly at 304; each row is 73 pt tall (a 44 pt
+    thumbnail line over a 25 pt button line), the
+    `library-thumb-{i}` canvas 44x44 at row x+8, the
+    seg count ending at 296 (the row body's right
+    edge). The saved row -- the entry kind the Wave 12
+    dumps never carried -- adds Rename and Delete to
+    the button line. Rows run below the list's 200 pt
+    viewport and the window's bottom edge: legitimate
+    (vertical scroll moves no x). del_dx shifts the
+    saved row's Delete button right, modelling the
+    fixed button line outgrowing its budget -- the
+    Wave 10 escape returning to its home panel.
+    """
+    base = "#0/main-row/side-left/library-panel"
+    row0 = base + "/library-card/library-list/library-builtins/library-row-0"
+    saved = base + "/library-card/library-list/library-saved/library-row-3"
+    return {
+        "elements": [
+            _el("#0", [0.0, 0.0, win_w, win_h]),
+            _el("#0/main-row", [16.0, 141.0, win_w - 32.0, win_h - 157.0]),
+            _el("#0/main-row/side-left", [16.0, 157.0, 300.0, 1000.0]),
+            _el(base, [16.0, 754.0, 300.0, 329.0], "library-panel"),
+            _el(base + "/library-header",
+                [28.0, 766.0, 276.0, 25.0], "library-header"),
+            _el(base + "/library-header/library-collapse",
+                [257.5, 766.0, 46.5, 25.0], "library-collapse"),  # right = 304
+            _el(base + "/library-card",
+                [28.0, 808.0, 276.0, 263.0], "library-card"),
+            _el(base + "/library-card/library-save",
+                [28.0, 808.0, 276.0, 25.0], "library-save"),
+            _el(base + "/library-card/library-search-row",
+                [28.0, 839.0, 276.0, 26.0], "library-search-row"),
+            _el(base + "/library-card/library-search-row/library-search",
+                [49.0, 839.0, 141.0, 26.0], "library-search"),
+            _el(base + "/library-card/library-search-row/lib-sort",
+                [198.0, 840.0, 106.0, 25.0], "lib-sort"),  # right = 304
+            _el(base + "/library-card/library-list",
+                [28.0, 871.0, 276.0, 200.0], "library-list"),
+            _el(base + "/library-card/library-list/library-builtins",
+                [28.0, 871.0, 276.0, 245.0], "library-builtins"),
+            # Built-in row 0: thumbnail line + Insert.
+            _el(row0, [28.0, 890.0, 276.0, 73.0], "library-row-0"),
+            _el(row0 + "/#0/#0/library-thumb-0",
+                [36.0, 890.0, 44.0, 44.0], "library-thumb-0"),
+            _el(row0 + "/#0/#0/#1/#0",
+                [88.0, 904.0, 165.0, 15.0]),   # entry name
+            _el(row0 + "/#0/#0/#1/#1",
+                [261.5, 904.0, 34.5, 15.0]),   # "N seg", right = 296
+            _el(row0 + "/#0/#1/library-insert-0",
+                [36.0, 938.0, 70.0, 25.0], "library-insert-0"),
+            # Saved row, below the fold: the full
+            # Insert / Rename / Delete button line.
+            _el(saved, [28.0, 1141.0, 276.0, 73.0], "library-row-3"),
+            _el(saved + "/#0/#0/library-thumb-3",
+                [36.0, 1141.0, 44.0, 44.0], "library-thumb-3"),
+            _el(saved + "/#0/#0/#1/#1",
+                [261.5, 1155.0, 34.5, 15.0]),   # "N seg", right = 296
+            _el(saved + "/#0/#1/library-insert-3",
+                [36.0, 1189.0, 70.0, 25.0], "library-insert-3"),
+            _el(saved + "/#0/#1/library-rename-3",
+                [114.0, 1189.0, 86.0, 25.0], "library-rename-3"),
+            _el(saved + "/#0/#1/library-delete-3",
+                [208.0 + del_dx, 1189.0, 62.0, 25.0], "library-delete-3"),
+        ]
+    }
+
+
 def self_test():
     failures = []
 
@@ -760,6 +975,44 @@ def self_test():
           "strokes-populated: the escape names the content and card rules")
     check(abs(by_key.get("stroke-del-0", {}).get("overflow", 0) - 18.0) < 1e-9,
           "strokes-populated: overflow measures 18.0 pt")
+
+    # Wave 13: the sprite surface and the saved library
+    # rows. Conforming trees are silent at both window
+    # sizes -- including the below-the-fold rows and the
+    # edge-exact children (Delete and stepper buttons at
+    # the content edge, lib-sort and the seg counts
+    # inside theirs).
+    for win_w, win_h in ((1440.0, 900.0), (1280.0, 720.0)):
+        hits = scan_tree(_sprites_populated_fixture(win_w, win_h))
+        check(len(hits) == 0,
+              "sprites-populated W=%d: conforming sprites panel is clean (got %d hit(s))"
+              % (win_w, len(hits)))
+        hits = scan_tree(_library_populated_fixture(win_w, win_h))
+        check(len(hits) == 0,
+              "library-populated W=%d: conforming populated library is clean (got %d hit(s))"
+              % (win_w, len(hits)))
+
+    # One planted escape per shape: caught by the
+    # content and card rules, with the measured overflow.
+    hits = scan_tree(_sprites_populated_fixture(1440.0, 900.0, step_dx=24.0))
+    by_key = {h["key"]: h for h in hits}
+    check(len(hits) == 1 and "sprite-scale-up" in by_key,
+          "sprites-populated: stepper up button pushed past the card is caught")
+    check("content" in by_key.get("sprite-scale-up", {}).get("rules", "")
+          and "card" in by_key.get("sprite-scale-up", {}).get("rules", ""),
+          "sprites-populated: the escape names the content and card rules")
+    check(abs(by_key.get("sprite-scale-up", {}).get("overflow", 0) - 24.0) < 1e-9,
+          "sprites-populated: overflow measures 24.0 pt")
+
+    hits = scan_tree(_library_populated_fixture(1440.0, 900.0, del_dx=50.0))
+    by_key = {h["key"]: h for h in hits}
+    check(len(hits) == 1 and "library-delete-3" in by_key,
+          "library-populated: saved row's Delete pushed past the card is caught")
+    check("content" in by_key.get("library-delete-3", {}).get("rules", "")
+          and "card" in by_key.get("library-delete-3", {}).get("rules", ""),
+          "library-populated: the escape names the content and card rules")
+    check(abs(by_key.get("library-delete-3", {}).get("overflow", 0) - 16.0) < 1e-9,
+          "library-populated: overflow measures 16.0 pt")
 
     if failures:
         print("SELF-TEST: %d failure(s)" % len(failures))

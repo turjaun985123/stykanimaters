@@ -201,6 +201,30 @@
 //!   Animate landing is unreachable state for that
 //!   panel (Animate's list has no stroke section),
 //!   recorded here so the scene is not "fixed" back.
+//!
+//! The Wave 13 scenes close the next two populated-state
+//! blind spots:
+//!
+//! - `library-populated` replaces `core.library` in
+//!   memory with Wave 12 D5's two fixture entries — a
+//!   hand-styled def and a `FigureDef::simple()` copy.
+//!   A CI checkout has no `./library` files, so no saved
+//!   entry can be relied on from disk; the in-memory seed
+//!   is the fixture, while the panel still derives its
+//!   rows and thumbnail prims from `core.library` through
+//!   its normal render paths. The panel is left expanded
+//!   with an empty search, on Animate — the workspace
+//!   whose section list carries the Library panel.
+//! - `sprites-populated` plants two real PNG assets and
+//!   two keyframed `SpriteInstance`s by direct project
+//!   writes — the same fixture exception as
+//!   `strokes-populated`, because the scene needs chosen
+//!   asset bytes and chosen transform tracks, and A3's
+//!   panel-local state is integrator-owned rather than
+//!   part of the entering `State`. It lands on Animate;
+//!   the Sprites panel reads the project tables through
+//!   its normal paths once the integrator mounts it
+//!   there.
 
 use crate::State;
 
@@ -982,6 +1006,222 @@ fn scene_strokes_populated(s: &mut State) {
     s.stroke_selected = Some(base + 3);
 }
 
+/// `"library-populated"` — the Animate workspace with
+/// the Library panel expanded over two entries seeded
+/// directly in `core.library`, so a `--tree` dump
+/// contains the panel's populated Saved group and a
+/// `--snap` renders the per-entry thumbnails Wave 12
+/// D5 built. A CI checkout has no `./library` files:
+/// `load_library` can supply its built-ins there, but
+/// no saved entry exists to exercise a non-built-in
+/// row or a hand-styled def. The seed therefore
+/// REPLACES the vec in memory with exactly D5's
+/// fixture pair:
+///
+/// - `"styled-one"` — the thumb test's hand-built def
+///   replicated node for node: a plain head node, a red
+///   Point-cap taper, a colour-to-blue gradient, a
+///   half-opacity segment, a Circle shape node at
+///   quarter opacity, and a Polygon shape node. Its
+///   thumbnail exercises every styled path the prim
+///   builder has.
+/// - `"mini-copy"` — `FigureDef::simple()`, the plain
+///   compact def, as the unstyled contrast row.
+///
+/// Neither entry carries the `Built-in: ` prefix, so
+/// both render in the panel's Saved group with real
+/// slots 0 and 1 (`library-row-0` / `library-row-1`,
+/// `library-thumb-0` / `library-thumb-1`). The panel
+/// state is the state its own controls leave: expanded
+/// (`collapsed == false`, already the default, written
+/// explicitly so the scene does not depend on it) and
+/// the search text cleared, so no row is filtered out.
+/// `library_index` is pointed at the first entry, the
+/// slot a following insert would target. The workspace
+/// is Animate through the shell's own switch — the
+/// only workspace whose section list carries the
+/// Library panel.
+fn scene_library_populated(s: &mut State) {
+    use stykanimate_rs::model::{CapKind, FigureDef, NodeDef, NodeStyle, Shape};
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Animate,
+    );
+    // D5's hand-built def, replicated exactly (see the
+    // doc comment): the closure and per-node overrides
+    // mirror `thumb_prims_honour_node_colour_style_
+    // and_shape` in library_panel.rs.
+    let n = |parent: Option<usize>, length: f32, rest: f32| NodeDef {
+        name: "n".into(),
+        parent,
+        length,
+        rest_angle: rest,
+        head: false,
+        bend: 1.0,
+        thickness: 5.0,
+        color: None,
+        ik_end: false,
+        shape: Shape::Line,
+        style: NodeStyle::default(),
+        media: None,
+    };
+    let mut nodes = vec![
+        n(None, 0.0, 0.0),       // 0 root
+        n(Some(0), 40.0, 180.0), // 1 plain, head
+        n(Some(1), 30.0, 0.0),   // 2 red point taper
+        n(Some(1), 30.0, 90.0),  // 3 gradient
+        n(Some(0), 35.0, -90.0), // 4 opacity 0.5
+        n(Some(0), 20.0, 45.0),  // 5 circle
+        n(Some(0), 20.0, -45.0), // 6 polygon
+    ];
+    nodes[1].head = true;
+    nodes[2].color = Some(0xFF0000);
+    nodes[2].style = NodeStyle {
+        taper: 0.0,
+        cap: CapKind::Point,
+        color2: None,
+        opacity: 1.0,
+    };
+    nodes[3].style = NodeStyle {
+        taper: 1.0,
+        cap: CapKind::Round,
+        color2: Some(0x0000FF),
+        opacity: 1.0,
+    };
+    nodes[4].style.opacity = 0.5;
+    nodes[5].shape = Shape::Circle;
+    nodes[5].style.opacity = 0.25;
+    nodes[6].shape = Shape::Polygon(5);
+    s.core.library = vec![
+        ("styled-one".to_string(), FigureDef { nodes }),
+        ("mini-copy".to_string(), FigureDef::simple()),
+    ];
+    s.core.library_index = 0;
+    s.library_panel.collapsed = false;
+    s.library_panel.search.text.clear();
+}
+
+/// A small solid-colour PNG encoded with the `image`
+/// crate, the way the shell's other fixtures build one
+/// (media.rs's / snap_tests' `png_bytes`): a sprite
+/// asset's bytes must really decode, because every
+/// placement path asks the PNG for its dimensions — a
+/// dummy byte string would silently exercise only the
+/// skip path. Encoding a solid image cannot fail in
+/// practice; the write result is ignored regardless,
+/// so the scene stays total (a failed encode would
+/// leave an empty asset the renderers skip, never a
+/// panic).
+fn solid_png(width: u32, height: u32, rgb: [u8; 3]) -> Vec<u8> {
+    let img = image::RgbaImage::from_pixel(
+        width,
+        height,
+        image::Rgba([rgb[0], rgb[1], rgb[2], 255]),
+    );
+    let mut buf = Vec::new();
+    let _ = image::DynamicImage::ImageRgba8(img).write_to(
+        &mut std::io::Cursor::new(&mut buf),
+        image::ImageFormat::Png,
+    );
+    buf
+}
+
+/// `"sprites-populated"` — the Animate workspace with
+/// two sprite instances placed over two real assets,
+/// so a `--tree` dump contains the Sprites panel's
+/// populated rows (`sprite-row-0` / `sprite-row-1`)
+/// once the integrator mounts A3's panel, and a
+/// `--snap` shows the stage's placeholder outlines at
+/// the placed transforms. The assets and instances
+/// are planted by direct project writes — the
+/// module's fixture exception (see the module docs):
+/// the scene needs chosen PNG bytes and chosen
+/// keyframed tracks, and A3's panel-local state field
+/// is not part of the entering `State`, so there is
+/// no panel state for the scene to write; the panel
+/// reads `project.assets` / `project.sprites` through
+/// its normal paths. The tables are REPLACED, so the
+/// indices the rows key on are exactly 0 and 1:
+///
+/// - asset 0, `badge.png` — a 48×24 green PNG; sprite
+///   0 keys it from (300, 250) at frame 0 (scale 2.0,
+///   angle −12°) to (390, 300) at frame 4 (scale 2.4,
+///   angle 16°) — a two-key track, so the panel's key
+///   count reads 2 and the stage sample at frame 0 is
+///   a 96×48 outline.
+/// - asset 1, `marker.png` — a 24×48 orange PNG;
+///   sprite 1 keys it from (650, 440) at frame 0
+///   (scale 2.0, angle 12°) to (610, 395) at frame 2
+///   (scale 2.2, angle −10°).
+///
+/// Both instances sample at frame 0 (the landing
+/// frame), so both are placed in the snap. The
+/// workspace is Animate through the shell's own
+/// switch: the Sprites panel's home, beside the Scene
+/// panel whose placed-media readout points to it.
+fn scene_sprites_populated(s: &mut State) {
+    use stykanimate_rs::model::{ImageAsset, InstanceKey, SpriteInstance};
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Animate,
+    );
+    s.core.project.assets = vec![
+        ImageAsset {
+            name: "badge.png".to_string(),
+            png: solid_png(48, 24, [0, 200, 0]),
+        },
+        ImageAsset {
+            name: "marker.png".to_string(),
+            png: solid_png(24, 48, [230, 120, 0]),
+        },
+    ];
+    s.core.project.sprites = vec![
+        SpriteInstance {
+            asset: 0,
+            keys: vec![
+                InstanceKey {
+                    frame: 0.0,
+                    x: 300.0,
+                    y: 250.0,
+                    scale: 2.0,
+                    angle: -12.0,
+                },
+                InstanceKey {
+                    frame: 4.0,
+                    x: 390.0,
+                    y: 300.0,
+                    scale: 2.4,
+                    angle: 16.0,
+                },
+            ],
+        },
+        SpriteInstance {
+            asset: 1,
+            keys: vec![
+                InstanceKey {
+                    frame: 0.0,
+                    x: 650.0,
+                    y: 440.0,
+                    scale: 2.0,
+                    angle: 12.0,
+                },
+                InstanceKey {
+                    frame: 2.0,
+                    x: 610.0,
+                    y: 395.0,
+                    scale: 2.2,
+                    angle: -10.0,
+                },
+            ],
+        },
+    ];
+    // Wave 13 (integrator, per D1's splice note): select
+    // the first instance so the snap also proves the
+    // panel's populated edit area (readout + steppers)
+    // and the stage's selected-sprite corner marks.
+    s.sprites_panel.selected = Some(0);
+}
+
 /// The scene table for `AppSpec::scenes`, in `--list-scenes`
 /// display order. Element type is Rune's own, verbatim:
 /// `(&'static str, fn(&mut State))` (tooling.rs:25).
@@ -1013,6 +1253,8 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
         ("dopesheet-keys", scene_dopesheet_keys),
         ("home-populated", scene_home_populated),
         ("strokes-populated", scene_strokes_populated),
+        ("library-populated", scene_library_populated),
+        ("sprites-populated", scene_sprites_populated),
     ]
 }
 
@@ -1242,6 +1484,31 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
 ///    (workspaces.rs); the strokes themselves are
 ///    stage-canvas drawings, so their shapes are a
 ///    `--snap` fact.
+/// 30. Under `--scene library-populated` (Wave 13):
+///    elements keyed `library-row-0` and
+///    `library-row-1` exist — the two seeded entries
+///    (styled-one, mini-copy) as rows in the expanded
+///    Library panel's Saved group, the populated
+///    library state no earlier scene contained
+///    (CI checkouts have no `./library` files, so the
+///    entries are seeded in memory) — and elements
+///    keyed `library-thumb-0` and `library-thumb-1`
+///    exist (the per-entry thumbnail canvases the
+///    panel builds from those entries' defs). The
+///    thumbnail drawings themselves are canvas
+///    content, so their pixels are a `--snap` fact.
+/// 31. Under `--scene sprites-populated` (Wave 13):
+///    an element keyed `sprite-panel` exists (the
+///    Sprites panel root, mounted by the integrator's
+///    A3 wiring on the Animate workspace the scene
+///    selects) and elements keyed `sprite-row-0` and
+///    `sprite-row-1` exist — the panel's rows for the
+///    two placed instances (badge.png with two keys,
+///    marker.png with two keys), the populated sprite
+///    state no earlier scene contained. The stage's
+///    placeholder outlines for the instances are
+///    canvas drawings, so their positions and
+///    rotations are a `--snap` fact.
 pub fn layout_assertions() -> Vec<&'static str> {
     vec![
         "exactly one element keyed \"stage\"",
@@ -1273,6 +1540,8 @@ pub fn layout_assertions() -> Vec<&'static str> {
         "under --scene dopesheet-keys: the dopesheet lane shows two figure rows, figure 0 keyed at frames 0, 2, 4 (3 keys) and figure 1 keyed at frames 1, 3 (2 keys), no other cell keyed (the stats::figure_keyframes census — see fact 27)",
         "under --scene home-populated: elements keyed \"home-row-0\", \"home-row-1\" and \"home-row-2\" exist and an element keyed \"home-totals\" exists (three real library rows and the totals footer — see fact 28)",
         "under --scene strokes-populated: elements keyed \"stroke-measure\", \"stroke-width-row\" and \"stroke-opacity-row\" exist and elements keyed \"stroke-del-0\" through \"stroke-del-3\" exist (the selected-stroke rows and the four strokes' list rows — see fact 29)",
+        "under --scene library-populated: elements keyed \"library-row-0\" and \"library-row-1\" exist and elements keyed \"library-thumb-0\" and \"library-thumb-1\" exist (the two seeded library entries and their thumbnail canvases — see fact 30)",
+        "under --scene sprites-populated: an element keyed \"sprite-panel\" exists and elements keyed \"sprite-row-0\" and \"sprite-row-1\" exist (the Sprites panel and its two placed-instance rows — see fact 31)",
     ]
 }
 
@@ -1283,15 +1552,15 @@ mod tests {
         scene_dopesheet_keys, scene_draw_open,
         scene_effects_open, scene_export_open, scene_fx_selected, scene_fx_split_mid,
         scene_graph_duplicates, scene_graph_open, scene_home, scene_home_populated,
-        scene_loop_range, scene_menu_open, scene_palette_open, scene_settings_open,
-        scene_settings_open_light, scene_strokes_populated, scene_three_d,
-        scene_three_d_stage, scenes,
+        scene_library_populated, scene_loop_range, scene_menu_open, scene_palette_open,
+        scene_settings_open, scene_settings_open_light, scene_sprites_populated,
+        scene_strokes_populated, scene_three_d, scene_three_d_stage, scenes,
     };
     use crate::init;
     use crate::rune_sec::workspaces::Workspace;
 
     /// The scene table is the headless contract:
-    /// twenty-six scenes, each name unique (a duplicate
+    /// twenty-eight scenes, each name unique (a duplicate
     /// would shadow the later entry in `with_scene`'s
     /// lookup), with the Phase J scenes in their display
     /// positions, the two Phase K scenes appended after
@@ -1303,12 +1572,15 @@ mod tests {
     /// scenes appended after those, the Wave 9
     /// integration clips-populated scene appended after
     /// those, the Wave 10 dopesheet-keys scene appended
-    /// after those, and the two Wave 12 populated-state
-    /// scenes (home-populated, strokes-populated) last.
+    /// after those, the two Wave 12 populated-state
+    /// scenes (home-populated, strokes-populated)
+    /// appended after those, and the two Wave 13
+    /// populated-state scenes (library-populated,
+    /// sprites-populated) last.
     #[test]
-    fn scene_table_has_twentysix_uniquely_named_scenes() {
+    fn scene_table_has_twentyeight_uniquely_named_scenes() {
         let table = scenes();
-        assert_eq!(table.len(), 26, "twenty-six scenes are registered");
+        assert_eq!(table.len(), 28, "twenty-eight scenes are registered");
         let mut names: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
         let total = names.len();
         names.sort_unstable();
@@ -1336,6 +1608,8 @@ mod tests {
         assert_eq!(table[23].0, "dopesheet-keys");
         assert_eq!(table[24].0, "home-populated");
         assert_eq!(table[25].0, "strokes-populated");
+        assert_eq!(table[26].0, "library-populated");
+        assert_eq!(table[27].0, "sprites-populated");
     }
 
     /// The export scene reaches the Export workspace through
@@ -1892,6 +2166,136 @@ mod tests {
         assert!(
             stroke_inspector::measure_readout(&s.core, s.stroke_selected).is_some(),
             "the measure line renders for the selection"
+        );
+    }
+
+    /// The library-populated scene (Wave 13) lands on
+    /// Animate with the Library panel expanded and its
+    /// search empty, over exactly D5's two in-memory
+    /// entries: styled-one carrying the thumb test's
+    /// hand-built def (every styled path present, its
+    /// thumbnail prims the same 15 the library panel's
+    /// own test pins) and mini-copy carrying
+    /// `FigureDef::simple()`. The panel's own row
+    /// projection reads both as non-built-in rows at
+    /// real slots 0 and 1. This is the state behind
+    /// layout fact 30.
+    #[test]
+    fn library_populated_scene_seeds_the_two_d5_entries_expanded() {
+        use crate::rune_sec::library_panel;
+        use stykanimate_rs::model::{CapKind, Shape};
+        let mut s = init();
+        scene_library_populated(&mut s);
+        assert_eq!(s.workspace, Workspace::Animate);
+        assert!(!s.library_panel.collapsed, "the panel is expanded");
+        assert!(
+            s.library_panel.search.text.is_empty(),
+            "the search starts empty, so no row is filtered out"
+        );
+        assert_eq!(s.core.library.len(), 2, "exactly the two seeded entries");
+        assert_eq!(s.core.library_index, 0, "the first entry is the insert target");
+        let rows = library_panel::library_rows(&s.core);
+        assert_eq!(rows.len(), 2, "both entries project to rows");
+        assert_eq!(rows[0].index, 0);
+        assert_eq!(rows[0].name, "styled-one");
+        assert_eq!(rows[0].segments, 7);
+        assert!(!rows[0].builtin, "styled-one is a saved-group entry");
+        assert_eq!(rows[1].index, 1);
+        assert_eq!(rows[1].name, "mini-copy");
+        assert!(!rows[1].builtin, "mini-copy is a saved-group entry");
+        let styled = &s.core.library[0].1;
+        assert_eq!(styled.nodes.len(), 7, "the hand-built def has seven nodes");
+        assert!(styled.nodes[1].head, "node 1 is the head");
+        assert_eq!(styled.nodes[2].color, Some(0xFF0000), "node 2 is the red override");
+        assert_eq!(styled.nodes[2].style.taper, 0.0);
+        assert_eq!(styled.nodes[2].style.cap, CapKind::Point);
+        assert_eq!(
+            styled.nodes[3].style.color2,
+            Some(0x0000FF),
+            "node 3 carries the gradient end colour"
+        );
+        assert_eq!(styled.nodes[4].style.opacity, 0.5, "node 4 is half opaque");
+        assert_eq!(styled.nodes[5].shape, Shape::Circle);
+        assert_eq!(styled.nodes[5].style.opacity, 0.25);
+        assert_eq!(styled.nodes[6].shape, Shape::Polygon(5));
+        let prims = library_panel::library_thumb_prims(
+            styled,
+            library_panel::THUMB_SIZE,
+            rune::Color::WHITE,
+        );
+        assert_eq!(
+            prims.len(),
+            15,
+            "the styled entry's thumbnail prims match D5's pinned count"
+        );
+        let mini = &s.core.library[1].1;
+        assert_eq!(
+            mini.nodes.len(),
+            stykanimate_rs::model::FigureDef::simple().nodes.len(),
+            "mini-copy is the simple def"
+        );
+    }
+
+    /// The sprites-populated scene (Wave 13) lands on
+    /// Animate with two real PNG assets and two placed
+    /// sprite instances over them, proven through the
+    /// placement pass the renderers share: the PNGs
+    /// decode at their planted dimensions, both
+    /// instances have two-key tracks, and
+    /// `media::media_items` at frame 0 places exactly
+    /// the two sprite images, in instance order. (The
+    /// panel rows themselves are layout fact 31's
+    /// tree proof, behind the integrator's A3 mount.)
+    /// This is the state behind layout fact 31.
+    #[test]
+    fn sprites_populated_scene_seeds_two_placed_instances() {
+        use stykanimate_rs::media::{media_items, MediaItem};
+        use stykanimate_rs::model::InstanceKey;
+        let mut s = init();
+        scene_sprites_populated(&mut s);
+        assert_eq!(s.workspace, Workspace::Animate);
+        assert_eq!(s.core.project.assets.len(), 2, "two assets are planted");
+        assert_eq!(s.core.project.assets[0].name, "badge.png");
+        assert_eq!(s.core.project.assets[1].name, "marker.png");
+        assert_eq!(
+            stykanimate_rs::media::png_dims(&s.core.project, 0),
+            Some((48, 24)),
+            "the badge PNG decodes at its planted size"
+        );
+        assert_eq!(
+            stykanimate_rs::media::png_dims(&s.core.project, 1),
+            Some((24, 48)),
+            "the marker PNG decodes at its planted size"
+        );
+        let sprites = &s.core.project.sprites;
+        assert_eq!(sprites.len(), 2, "two instances are placed");
+        assert_eq!(sprites[0].asset, 0, "the first instance uses the badge");
+        assert_eq!(sprites[1].asset, 1, "the second instance uses the marker");
+        assert_eq!(sprites[0].keys.len(), 2, "the badge track has two keys");
+        assert_eq!(sprites[1].keys.len(), 2, "the marker track has two keys");
+        let first = sprites[0].keys[0];
+        assert_eq!(
+            (first.frame, first.x, first.y, first.scale, first.angle),
+            (0.0, 300.0, 250.0, 2.0, -12.0),
+            "the badge's frame-0 key is the planted transform"
+        );
+        let mid = InstanceKey::sample(&sprites[0].keys, 2.0).expect("the track samples mid-way");
+        assert_eq!(
+            (mid.x, mid.y, mid.scale, mid.angle),
+            (345.0, 275.0, 2.2, 2.0),
+            "the badge track interpolates between its keys"
+        );
+        let placed: Vec<usize> = media_items(&s.core.project, 0.0)
+            .iter()
+            .filter_map(|item| match item {
+                MediaItem::Image { asset, .. } => Some(*asset),
+                MediaItem::Text { .. } => None,
+            })
+            .collect();
+        assert_eq!(
+            placed,
+            vec![0, 1],
+            "frame 0 places exactly the two sprite images, in order"
         );
     }
 }

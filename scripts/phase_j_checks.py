@@ -372,6 +372,63 @@ wave for the gate itself):
   catalogue — existing-but-undocumented". The copy
   was deleted afterwards.
 
+Wave 13 additions (same gate, NO new check — upkeep
+only, following the Wave 12 pattern):
+
+- The Wave 13 deltas are likewise absorbed by the
+  existing live derivations; no check logic changed
+  and none of the expected numbers in this narrative
+  is read by a check. (a) Sprite tools: A4's five
+  handlers in src/media.rs enter the editing registry
+  when the integrator splices their Tool literals
+  into mcp_tools::tools() and adds their docs/MCP.md
+  catalogue rows — the post-splice expectation is
+  registry 230 -> 235. Check 9's handler census scans
+  every src/**/*.rs production region, so a handler
+  in a domain file resolves exactly as the Wave 12
+  asset handlers did, and doc sync remains a live
+  two-direction set comparison. (b) Scenes 26 -> 28:
+  check 5 counts and check 8 cross-references the
+  scenes() vec live, so library-populated and
+  sprites-populated need no gate edit. D2's
+  headless.yml loops landed before D1 registered
+  the scenes, so a mid-wave check 8 failure in the
+  REVERSE direction (the loops and --scene probes
+  name scenes scenes() does not register yet) is
+  the gate working; both directions go green
+  together once D1 lands, and a scene registered
+  without loop coverage still fails in the forward
+  direction. (c) Palette 132 -> 134: check 5's count
+  is a live read of command_palette.rs and follows
+  E3's sprite commands the moment they land (E3
+  shipped two, not three: `next-sprite` was dropped
+  in its audit — no sprite selection existed for it
+  to advance — so the wave's palette total is 134).
+- The State census needs no change for the Sprites
+  panel's new State field, and this was verified
+  against the code rather than assumed: check 3 does
+  NOT pin the entering 45 fields anywhere —
+  state_fields() parses the field list live from
+  src/main.rs's State struct and the census line
+  prints len(fields) — so the field the integrator
+  adds for A3's panel state is censused against
+  every full State literal automatically, exactly
+  as Phase K's playback_speed field was.
+- Help rows stay uncensused, as they have always
+  been: A8's Sprites/Project-assets rewrites keep
+  the 61-row count in the docs only, and no expected
+  help count exists anywhere in this script.
+- Check 7 gains NO pre-registered exception this
+  wave. The roster's D1 brief names the two new
+  scenes but pins no exact hex literal for them, so
+  there is nothing truthful to pin in advance: the
+  Wave 12 scenes.rs line exception already covers
+  the exact fixture literals it names if a new scene
+  reuses them, and any genuinely new scenes.rs
+  colour literal must earn its own named exception —
+  with its exact literal — once the landed source
+  shows it, never by guessing from a brief.
+
 Approximations are deliberate and documented inline:
 block capture is brace counting over comment/string-
 blanked source (the repo's established scan idiom), and
@@ -1441,6 +1498,11 @@ LITERAL_LINE_EXCEPTIONS = [
         "scenes.rs",
         r"0x(?:33_66_CC|CC_55_33|FF_CC_66|22_88_55|77_33_AA)",
         "project-content default (Wave 12 populated-scene fixture figure/stroke colours)",
+    ),
+    (
+        "scenes.rs",
+        r"0x(?:FF0000|0000FF)",
+        "project-content default (Wave 13 library-populated fixture: the styled def's red node and gradient end colour, replicated from library_panel's pin fixture)",
     ),
     (
         "library_panel.rs",

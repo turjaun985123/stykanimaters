@@ -53,6 +53,16 @@
 //! with the group it divided) and the File arm
 //! (menu-file-sep now sits between recents and
 //! Export, where the division actually is).
+//! Wave 13 (D5, dimmed recents): an Open recent entry
+//! whose file no longer resolves now renders DIMMED —
+//! the muted-live treatment (see [`dimmed_item`]):
+//! glyph and label in the kit's muted-text role, no
+//! hover/press light-up, press handler kept, because
+//! the press's refusal status ("Recent project not
+//! found") is the designed feedback. Resolved entries
+//! render exactly as before. This closes the Wave 12
+//! D7 remainder: the entries stayed visible but were
+//! indistinguishable from live ones.
 //! Wave 12 (D7, recents audit): the File menu's Open
 //! recent resolution gained the file-stem fallback
 //! Home ▸ Reopen last has had since Wave 10 — see
@@ -515,6 +525,61 @@ fn item(
     }
 }
 
+/// A dimmed menu item (Wave 13, D5): [`item_icon`]'s
+/// row geometry — same key, same 28-high / px 8 box,
+/// same leading slot, glyph included — rendered in the
+/// kit's MUTED-LIVE treatment, the menu form of
+/// `chrome_view::btn_muted_live` (P05 §4's rule): the
+/// resting card fill with NO hover or press light-up,
+/// and glyph + label in the design kit's muted-text
+/// role (`design::text_muted` — present but quiet), so
+/// the row reads as listed-but-inert rather than as a
+/// live control. The press handler is KEPT (through the
+/// same [`closing`] wrapper as every item): the one
+/// caller is an Open recent entry whose file is gone,
+/// and its press's refusal status ("Recent project not
+/// found: …", see [`open_recent`]) is the designed
+/// feedback — the chrome_view rule for muted-live is
+/// exactly "use only where a test pins that refusal
+/// status", and the `open_recent` no-file test below
+/// pins this one. A
+/// fully inert row (no handler at all, the `btn_inert`
+/// form) would swallow the press silently and the user
+/// would never learn why the entry does nothing.
+///
+/// Only the Open recent block builds these (see
+/// [`file_recent_items`]); the glyph dispatch mirrors
+/// [`item`]'s — the key's mapped glyph when it exists
+/// in the set, the empty slot otherwise — and recents
+/// carry no shortcut hint, so there is no hint slot to
+/// dim.
+fn dimmed_item(
+    key: &str,
+    label: &str,
+    t: &Theme,
+    f: impl Fn(&mut State) + 'static,
+) -> El {
+    let muted = crate::rune_sec::design::text_muted(t);
+    let icon = match menu_icon(key) {
+        Some(name) if crate::rune_sec::icons::has_icon(name) => Some(name),
+        _ => None,
+    };
+    row()
+        .key(key)
+        .px(8.0)
+        .py(5.0)
+        .h(28.0)
+        .radius(6.0)
+        .fill(t.card)
+        .hover(t.card)
+        .press(t.card)
+        .on_press(closing(f))
+        .center_y()
+        .gap(12.0)
+        .child(slot_and_label(icon, label, muted))
+        .child(row().grow(1.0))
+}
+
 /// How many Open recent entries the File menu shows at
 /// most (Phase J). The recents list itself keeps more
 /// (`shell::MAX_RECENTS`); a menu is a quick door, not
@@ -592,9 +657,11 @@ fn resolve_recent(name: &str, files: &[(String, PathBuf)]) -> Option<PathBuf> {
 ///
 /// A name with no matching file comes back as
 /// `(name, None)` rather than being dropped: the entry
-/// stays in the menu and its press reports "Recent
-/// project not found: {name}" on the status line (see
-/// [`open_recent`]). Silently dropping it would make the
+/// stays in the menu — rendered dimmed since Wave 13
+/// (see [`file_recent_items`]) — and its press reports
+/// "Recent project not found: {name}" on the status
+/// line (see [`open_recent`]). Silently dropping it
+/// would make the
 /// menu's contents depend on disk state without telling
 /// the user why an entry vanished — and the first recent
 /// is exactly the one whose disappearance would confuse.
@@ -740,6 +807,20 @@ fn mute_item_parts(muted: bool) -> (&'static str, &'static str) {
     (label, icon)
 }
 
+/// Whether a resolved Open recent entry renders
+/// dimmed (Wave 13, D5): exactly the entries whose
+/// file did not resolve — the project was deleted or
+/// renamed outside the editor, so there is nothing to
+/// open. Resolved entries never dim. The pure dispatch
+/// [`file_recent_items`] branches on, pinned by the
+/// `recent_dimming_follows_resolution` test (Rune's
+/// `El` exposes no tree-walk, so — the Phase J/L style
+/// — the branch is pinned here and the builders are
+/// exercised by construction).
+fn recent_is_dimmed(path: &Option<PathBuf>) -> bool {
+    path.is_none()
+}
+
 /// The File menu's Open recent block (Phase J): a
 /// separator plus one item per entry from
 /// [`recent_items`], keyed `file-recent-{i}` in recents
@@ -747,6 +828,15 @@ fn mute_item_parts(muted: bool) -> (&'static str, &'static str) {
 /// recent's display name. Empty when there are no
 /// recents — no disabled placeholder item: a menu that
 /// cannot do anything stays honest by not offering it.
+///
+/// Wave 13 (D5): an entry whose file did not resolve
+/// renders through [`dimmed_item`] — same key, same
+/// label, muted glyph and text, no hover/press
+/// light-up — so a dead entry is plainly inert next to
+/// the live ones; its press still runs [`open_recent`],
+/// whose not-found status is the designed answer to
+/// "why is this here but grey?". Resolved entries go
+/// through [`item`] exactly as before.
 fn file_recent_items(
     recents: &[String],
     files: &[(String, PathBuf)],
@@ -760,9 +850,15 @@ fn file_recent_items(
     for (i, (name, path)) in resolved.into_iter().enumerate() {
         let key = format!("file-recent-{i}");
         let label = name.clone();
-        items.push(item(&key, &label, false, t, move |s: &mut State| {
+        let dimmed = recent_is_dimmed(&path);
+        let handler = move |s: &mut State| {
             open_recent(s, &name, path.as_deref());
-        }));
+        };
+        if dimmed {
+            items.push(dimmed_item(&key, &label, t, handler));
+        } else {
+            items.push(item(&key, &label, false, t, handler));
+        }
     }
     items
 }
@@ -1511,6 +1607,76 @@ mod tests {
         let files = recent_pairs(&["Alpha"]);
         let block = file_recent_items(&recents, &files, &t);
         assert_eq!(block.len(), 2, "two recent items, separator lives in the File arm");
+    }
+
+    #[test]
+    fn recent_dimming_follows_resolution() {
+        // Wave 13 (D5): the dimmed branch is taken by
+        // exactly the entries whose file did not
+        // resolve — no resolved entry dims, every
+        // missing one does. Pinned on the pure pair
+        // `file_recent_items` dispatches on
+        // (`recent_items` + `recent_is_dimmed`), the
+        // Phase J/L style: Rune's `El` exposes no
+        // tree-walk to read the built rows back.
+        let recents: Vec<String> = ["Alpha", "Gone", "Beta"]
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        let files = recent_pairs(&["Alpha", "Beta"]);
+        let resolved = recent_items(&recents, &files);
+        let dimmed: Vec<bool> = resolved
+            .iter()
+            .map(|(_, path)| recent_is_dimmed(path))
+            .collect();
+        assert_eq!(dimmed, vec![false, true, false]);
+
+        // All resolved → nothing dims; none resolved →
+        // everything dims (the entries still list).
+        let all_found = recent_items(&recents[..1], &files);
+        assert!(all_found.iter().all(|(_, p)| !recent_is_dimmed(p)));
+        let none_found = recent_items(&recents, &[]);
+        assert_eq!(none_found.len(), 3);
+        assert!(none_found.iter().all(|(_, p)| recent_is_dimmed(p)));
+    }
+
+    #[test]
+    fn missing_recent_items_stay_listed_and_build_dimmed() {
+        // Wave 13 (D5): a mixed block still lists BOTH
+        // entries (the missing one is dimmed, not
+        // dropped), and both builders construct under
+        // the same `file-recent-{i}` key family — the
+        // resolved path through `item` (unchanged) and
+        // the missing path through `dimmed_item`, in
+        // its glyph branch (recents map to the clock)
+        // and its empty-slot fallback (an unmapped key).
+        let t = rune::tok::theme(true);
+        let recents: Vec<String> = ["Alpha", "Gone"]
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        let files = recent_pairs(&["Alpha"]);
+        let block = file_recent_items(&recents, &files, &t);
+        assert_eq!(block.len(), 2, "resolved and missing recents both list");
+
+        let _ = item("file-recent-0", "Alpha", false, &t, |_| {});
+        let _ = dimmed_item("file-recent-1", "Gone", &t, |_| {});
+        let _ = dimmed_item("unmapped-key", "Gone", &t, |_| {});
+
+        // The dimmed ink is the kit's muted-text role,
+        // visibly distinct from the live label colour.
+        let muted = crate::rune_sec::design::text_muted(&t);
+        assert_ne!(muted, t.text, "dimmed ink must differ from live ink");
+        assert_eq!(muted, t.text_secondary.alpha(0.6));
+
+        // The dimmed entry's press is the existing
+        // honest refusal, not a silent no-op: the
+        // handler is `open_recent` with no file, whose
+        // status and no-side-effects contract is pinned
+        // by `open_recent_without_a_file_reports_not_
+        // found_and_changes_nothing` below — the
+        // chrome_view muted-live rule (a kept handler
+        // only where a test pins its refusal status).
     }
 
     #[test]

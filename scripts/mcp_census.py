@@ -29,8 +29,15 @@ The three tool families, in `all_tools()` composition order
                in the same file, or in a DOMAIN file,
                referenced by bare name or by a `crate::…`
                path (the Wave 11 splice pattern: at the
-               Wave 12 opening, 113 of 224 registry
-               handlers live outside src/mcp_tools.rs).
+               Wave 13 opening, 119 of 230 registry
+               handlers live outside src/mcp_tools.rs.
+               The newest domain file is src/media.rs,
+               which joined in Wave 12 with the six asset
+               handlers; Wave 13's five sprite handlers
+               (tool_sprite_*, also in src/media.rs) take
+               the registry to 235 — and media.rs's share
+               to 11 of the 124 outside handlers — once
+               the integrator splices their entries).
   - io       — the `Tool { ... }` literals in
                `pub fn tools()` in src/mcp_io.rs; handlers
                likewise named, same file (all 9 today).
@@ -56,9 +63,11 @@ stderr) when they disagree:
     equal the `handler:` fields inside `tools()` and the
     `name:` literals inside `tools()` — three patterns,
     one scope. (Scoping is the point: src/mcp_tools.rs
-    holds a 92nd `name: "` literal OUTSIDE `tools()` —
-    `name: "Styk".into()` in a handler body — and a
-    whole-file count overcounts by exactly one.)
+    holds one further `name: "` literal OUTSIDE
+    `tools()` — 231 in the whole file against 230
+    inside, at the Wave 13 opening — `name:
+    "Styk".into()` in a handler body, and a whole-file
+    count overcounts by exactly one.)
   - every named handler must resolve to a definition, and
     every handler-shaped `fn tool_*` in the two registry
     files must be referenced by exactly one entry (no
@@ -85,9 +94,11 @@ WHAT IT CANNOT SEE (named blind spots):
     `src/**/*.rs` file (plus `tests/*.rs` for the
     invocation map), so a domain file joins the census
     the moment it gains handlers — src/media.rs did in
-    Wave 12, and its six asset handlers appear on the
-    checklist and resolve through the same code path as
-    every earlier domain file. Two cautions ride with
+    Wave 12 with its six asset handlers, and Wave 13's
+    five sprite handlers in the same file follow
+    exactly the same path: they appear on the checklist
+    and resolve through the same code path as every
+    earlier domain file. Two cautions ride with
     that list: a domain handler's fn name can collide
     with a registered handler's (draw_ops::tool_draw_stroke
     vs the registry's own) without being the same

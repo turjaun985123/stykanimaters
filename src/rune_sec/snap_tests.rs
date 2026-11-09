@@ -515,6 +515,52 @@
 //!   `open` flag starts false without a recovery
 //!   offer, so the test sets it directly (a State
 //!   write, with the file's invalidate discipline).
+//!
+//! Round 14 (Wave 13) adds two tests over the surfaces
+//! this wave lands. Facts they rest on:
+//! * The engine side of sprites is landed:
+//!   `EditorCore::add_sprite` (sprite_ops.rs) pushes
+//!   one `SpriteInstance` holding a single key at
+//!   frame 0 — stage centre, scale 1.0, angle 0.0 —
+//!   and `remove_sprite` deletes the whole instance;
+//!   both are one snapshot each, refusals status-only.
+//!   The panel (A3, in flight) forwards to those ops.
+//! * The panel's keys, reconciled against A3's
+//!   landed source (sprites_panel.rs) during this
+//!   wave: the panel roots at `sprite-panel`; the
+//!   add-from-assets picker renders one button per
+//!   asset, `sprite-add-{a}`, under the `sprite-add`
+//!   container (its press is `add_from_asset` — the
+//!   op plus selection of the new instance); rows are
+//!   `sprite-row-{i}` shells holding `sprite-select-{i}`
+//!   and the per-row `sprite-del-{i}`. Which workspace
+//!   hosts the panel is E8's gating call, in flight
+//!   when this round was written, so the sprite test
+//!   DISCOVERS the host: it walks the eight workspace
+//!   chips and settles where `sprite-panel` presents,
+//!   rather than presuming the gating. With exactly
+//!   one asset seeded (a direct `project.assets`
+//!   push — round 13's media-test discipline; the
+//!   asset table is in-project state, no files are
+//!   involved), the picker offers exactly one button,
+//!   `sprite-add-0`.
+//! * Library rows render one thumbnail canvas per
+//!   entry, keyed `library-thumb-{i}` with `i` the
+//!   entry's index in `core.library`
+//!   (library_panel.rs `entry_row`); the panel is
+//!   gated to the Animate workspace (`Sec::Library`).
+//!   `core.library` always carries the three built-ins
+//!   from `load_library`; the populated state D1's
+//!   library-populated scene pins is entries added in
+//!   memory, so the library test mirrors the scene —
+//!   it clones a def, styles one node and pushes two
+//!   entries directly (a State write, with the file's
+//!   invalidate discipline). No library files are
+//!   read or written, so there is nothing to clean up.
+//! * The sprite panel's column is E8's choice, so
+//!   round 14's scroll helper wheels over the target's
+//!   own column (its `find` centre x), generalising
+//!   round 6's right-column-only `scroll_into_view`.
 
 use std::collections::BTreeSet;
 
@@ -5003,4 +5049,264 @@ fn home_workspace_lists_the_seeded_projects() {
     // Leave the directory as the test found it.
     let _ = std::fs::remove_file(&alpha_path);
     let _ = std::fs::remove_file(&beta_path);
+}
+
+// ----------------------------------------------------------------
+// Round 14 (Wave 13): the Sprites panel flow and the
+// populated library's thumbnail canvases. See the file
+// header's round 14 note for the facts these tests rest
+// on; each test names the Wave 13 guarantee it pins and
+// the agent change it depends on, so a failure triages
+// to one owner.
+// ----------------------------------------------------------------
+
+/// Scroll whichever column holds the element keyed
+/// `key` until it sits inside the viewport, then settle
+/// (bounded) until it is fully presented — round 6's
+/// `scroll_into_view` generalised: that helper wheels
+/// over the right column only, and the Sprites panel's
+/// column is E8's gating choice, so this one wheels
+/// over the target's own centre x, in both directions,
+/// with the same step and settle discipline.
+fn scroll_any_column_into_view(rt: &mut Runtime<State>, key: &str) {
+    for _ in 0..24 {
+        let (x, y) = rt
+            .find(key)
+            .unwrap_or_else(|| panic!("no element keyed {key:?}"));
+        if y > 850.0 {
+            rt.wheel(x, 450.0, -600.0);
+        } else if y < 200.0 {
+            rt.wheel(x, 450.0, 600.0);
+        } else {
+            break;
+        }
+        rt.frame(DT);
+    }
+    for _ in 0..90 {
+        rt.frame(DT);
+        if let Some((_, opacity)) = rt.presented(key) {
+            if opacity > 0.99 {
+                break;
+            }
+        }
+    }
+}
+
+#[test]
+fn sprites_panel_adds_and_deletes_an_instance() {
+    // Wave 13 guarantee: a sprite can be added and
+    // deleted from the Sprites panel itself — before
+    // this wave instances arrived only via .nodes
+    // import and could not be removed in the app at
+    // all. Depends on: A3 (the panel and its shipped
+    // keys — the picker's `sprite-add-{a}` buttons,
+    // the rows' `sprite-select-{i}` / `sprite-del-{i}`),
+    // E8 (the workspace gating — the test discovers
+    // the host rather than presuming it) and A1 (the
+    // engine ops the panel forwards to, landed:
+    // `add_sprite` / `remove_sprite` in
+    // sprite_ops.rs). The asserted core state is A1's
+    // shipped contract: one instance for the picked
+    // asset, holding one key at frame 0 at the stage
+    // centre, scale 1.0, angle 0.0.
+    let mut rt = editor();
+
+    // Seed: exactly one asset in the project's table
+    // (round 13's direct-write discipline — the asset
+    // table is in-project state, no files involved),
+    // so the panel's add has exactly one asset it can
+    // pick. The demo project starts with no sprites.
+    assert!(
+        rt.state.core.project.sprites.is_empty(),
+        "the demo project starts with no sprite instances"
+    );
+    rt.state.core.project.assets.push(stykanimate_rs::model::ImageAsset {
+        name: "sprite.png".into(),
+        png: tiny_png(),
+    });
+    rt.invalidate();
+    rt.frame(DT);
+
+    // Discover the hosting workspace: walk the chips
+    // in row order and settle where the panel itself
+    // presents. Every workspace gets the same bounded
+    // settle the populated-Home test uses for its
+    // first render.
+    let mut hosted = false;
+    for chip in [
+        "ws-animate",
+        "ws-draw",
+        "ws-graph",
+        "ws-effects",
+        "ws-audio",
+        "ws-3d",
+        "ws-export",
+        "ws-home",
+    ] {
+        tap(&mut rt, chip);
+        for _ in 0..30 {
+            if presented_keys(&rt).contains("sprite-panel") {
+                hosted = true;
+                break;
+            }
+            rt.frame(DT);
+        }
+        if hosted {
+            break;
+        }
+    }
+    assert!(
+        hosted,
+        "no workspace presents the Sprites panel (sprite-panel)"
+    );
+
+    // The add press — the picker's button for the one
+    // seeded asset, wherever in its column it sits.
+    scroll_any_column_into_view(&mut rt, "sprite-add-0");
+    tap(&mut rt, "sprite-add-0");
+
+    // The instance exists in core state, shaped as
+    // A1's op writes it.
+    {
+        let core = &rt.state.core;
+        assert_eq!(
+            core.project.sprites.len(),
+            1,
+            "the panel's add created exactly one instance: {}",
+            core.status
+        );
+        let sprite = &core.project.sprites[0];
+        assert_eq!(sprite.asset, 0, "the instance references the seeded asset");
+        assert_eq!(
+            sprite.keys.len(),
+            1,
+            "the new instance holds its single frame-0 key"
+        );
+        let key = sprite.keys[0];
+        assert_eq!(key.frame, 0.0, "the key sits at frame 0");
+        let centre = [core.project.stage[0] / 2.0, core.project.stage[1] / 2.0];
+        assert!(
+            (key.x - centre[0]).abs() < 1e-6 && (key.y - centre[1]).abs() < 1e-6,
+            "the key places the sprite at the stage centre: ({}, {})",
+            key.x,
+            key.y
+        );
+        assert_eq!(key.scale, 1.0, "the key's scale is 1.0");
+        assert_eq!(key.angle, 0.0, "the key's angle is 0.0");
+    }
+
+    rt.invalidate();
+    rt.frame(DT);
+    assert!(
+        presented_keys(&rt).contains("sprite-row-0"),
+        "the panel lists the new instance as its first row"
+    );
+
+    // Delete through the row's own Delete button: the
+    // instance leaves core state and the row leaves
+    // the tree. (The add press already selected the
+    // new instance — `add_from_asset` selects what it
+    // places — and `sprite-del-{i}` is per-row, so no
+    // separate selection step is needed.)
+    scroll_any_column_into_view(&mut rt, "sprite-del-0");
+    tap(&mut rt, "sprite-del-0");
+    assert!(
+        rt.state.core.project.sprites.is_empty(),
+        "the panel's delete removed the instance: {}",
+        rt.state.core.status
+    );
+
+    rt.invalidate();
+    rt.frame(DT);
+    assert!(
+        !presented_keys(&rt).contains("sprite-row-0"),
+        "the deleted instance's row is gone from the panel"
+    );
+}
+
+#[test]
+fn library_panel_presents_thumbnail_canvases_for_seeded_entries() {
+    // Wave 13 guarantee: in the populated library state
+    // D1's library-populated scene pins for the
+    // headless snaps, every entry's row presents its
+    // thumbnail canvas (`library-thumb-{i}`, `i` the
+    // entry's index in `core.library`) — the canvases
+    // Wave 12's D5 built (each row's own def, drawn at
+    // render) and whose pixel proof was the Wave 12
+    // remainder this scene closes. Depends on: D1
+    // (the scene's in-memory seeding this test mirrors
+    // in state form) and D5's row construction
+    // (library_panel.rs `entry_row`). Thumbnails are
+    // canvas draws, not elements with children: the
+    // Runtime proves the canvases are PRESENTED for
+    // the built-in and both seeded indices; the drawn
+    // figure itself is the lib's unit-test surface
+    // (library_panel.rs's thumb-prims tests) and the
+    // headless snap's.
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+
+    // The built-ins alone populate the library
+    // (`load_library`'s three), so the panel and its
+    // first thumbnails exist before any seeding.
+    let base = rt.state.core.library.len();
+    assert!(
+        base >= 3,
+        "the library starts with at least the three built-ins: {base}"
+    );
+
+    // Seed the populated state in memory, as D1's
+    // scene does: a styled entry (one node tapered,
+    // with a gradient end colour — the styled
+    // thumbnail path) and a plain copy beside it. No
+    // files are read or written, so nothing needs
+    // cleaning up afterwards.
+    let plain = rt.state.core.library[0].1.clone();
+    let mut styled = plain.clone();
+    if let Some(node) = styled.nodes.get_mut(1) {
+        node.style.taper = 0.4;
+        node.style.color2 = Some(0x2B6FD2);
+    }
+    rt.state.core.library.push(("Wave13 Styled".into(), styled));
+    rt.state.core.library.push(("Wave13 Mini".into(), plain));
+    rt.invalidate();
+    rt.frame(DT);
+
+    // The seeded entries' first render is the bounded
+    // settle the file's structural asserts use.
+    for _ in 0..30 {
+        if presented_keys(&rt).contains(&format!("library-thumb-{}", base + 1)) {
+            break;
+        }
+        rt.frame(DT);
+    }
+
+    let keys = presented_keys(&rt);
+    assert!(keys.contains("library-panel"), "the Library panel is mounted");
+    assert!(
+        keys.contains(&format!("library-thumb-0")),
+        "the first built-in entry presents its thumbnail canvas"
+    );
+    assert!(
+        keys.contains(&format!("library-row-{base}")),
+        "the styled seed renders as a row"
+    );
+    assert!(
+        keys.contains(&format!("library-thumb-{base}")),
+        "the styled seed presents its thumbnail canvas"
+    );
+    assert!(
+        keys.contains(&format!("library-thumb-{}", base + 1)),
+        "the plain seed presents its thumbnail canvas"
+    );
+    let texts = element_texts(&rt);
+    assert!(
+        texts.iter().any(|t| t == "Wave13 Styled"),
+        "the styled seed names its row: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t == "Wave13 Mini"),
+        "the plain seed names its row: {texts:?}"
+    );
 }
