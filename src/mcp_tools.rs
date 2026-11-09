@@ -3010,6 +3010,12 @@ fn tool_save_project_copy(core: &mut EditorCore, _args: &Value) -> Result<Value,
     // walk (D8 GAP 2). The session keeps editing the original.
     let name = format!("{} copy", core.project.name);
     let path = crate::projects::save_copy(core, &name)?;
+    // Wave 12 (B3): the copy is a new file in ./projects —
+    // refresh the cached selector list so it names the copy
+    // too (selection preserved by identity; the session
+    // keeps editing the original, and recents stay untouched
+    // by design, matching the panel's Save a copy).
+    crate::projects::refresh_project_files(core);
     Ok(json!({
         "ok": true,
         "name": name,
@@ -3026,6 +3032,9 @@ fn tool_duplicate_project(core: &mut EditorCore, _args: &Value) -> Result<Value,
         return Err("no current project file to duplicate".into());
     };
     let new_path = crate::projects::duplicate_project(&path).map_err(|e| e.to_string())?;
+    // Wave 12 (B3): refresh the cached selector list for the
+    // new file (selection preserved by identity).
+    crate::projects::refresh_project_files(core);
     Ok(json!({
         "ok": true,
         "path": new_path.to_string_lossy(),
@@ -3051,6 +3060,11 @@ fn tool_project_rename(core: &mut EditorCore, args: &Value) -> Result<Value, Str
     };
     let new_path = crate::projects::rename_project(&path, new_name).map_err(|e| e.to_string())?;
     core.project.name = new_name.trim().to_string();
+    // Wave 12 (B3): refresh BEFORE note_project_loaded — the
+    // rescan drops the dead old path from the cached list
+    // (it would otherwise linger forever), and the loaded
+    // note then selects the new path in the fresh list.
+    crate::projects::refresh_project_files(core);
     core.note_project_loaded(&new_path);
     Ok(json!({
         "ok": true,
@@ -3303,12 +3317,12 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "set_node_opacity",
-            description: "Set a segment's opacity (the style panel's opacity stepper; clamped to 0.05-1.0 so a segment can never be made fully invisible). One undo step.",
+            description: "Set a segment's opacity (the style panel's opacity stepper). Opacity below 0 is refused; any other value is clamped to 0.05-1.0 and read back as stored. One undo step.",
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
                     "node": { "type": "integer" },
-                    "opacity": { "type": "number", "description": "Opacity, clamped to 0.05-1.0" }
+                    "opacity": { "type": "number", "description": "Opacity; below 0 refused, otherwise clamped to 0.05-1.0" }
                 }),
                 &["figure", "node", "opacity"],
             ),
@@ -4470,7 +4484,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "cycle_node_taper",
-            description: "Step a segment's taper one step (1.0 -> 0.6 -> 0.3 -> 0.0 -> 1.0), exactly the style panel's taper Step button. One undo step.",
+            description: "Step a segment's taper one step (1.0 -> 0.6 -> 0.3 -> 0.0 -> 1.0), exactly the style panel's taper Step button. A taper set directly snaps to the next step down. One undo step.",
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
@@ -4495,7 +4509,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "set_node_style",
-            description: "Write a segment's complete style (colour, gradient end, cap, opacity) in exactly one undo step — the write half of the style panel's copy/paste; pair with get_node_style to copy a style between segments. Omit 'color2' (or pass null) to clear the gradient. Taper is not part of this write; use set_node_taper. Opacity is clamped to 0.05-1.0 and read back as stored.",
+            description: "Write a segment's complete style (colour, gradient end, cap, opacity) in exactly one undo step — the write half of the style panel's copy/paste; pair with get_node_style to copy a style between segments. Omit 'color2' (or pass null) to clear the gradient. Taper is not part of this write; use set_node_taper. Opacity below 0 is refused; any other value is clamped to 0.05-1.0 and read back as stored.",
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
@@ -4503,7 +4517,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                     "color": { "type": "integer", "description": "0xRRGGBB" },
                     "color2": { "type": "integer", "description": "0xRRGGBB gradient end colour" },
                     "cap": { "type": "string", "enum": ["round", "square", "point"] },
-                    "opacity": { "type": "number", "description": "Opacity, clamped to 0.05-1.0" }
+                    "opacity": { "type": "number", "description": "Opacity; below 0 refused, otherwise clamped to 0.05-1.0" }
                 }),
                 &["figure", "node", "color", "cap", "opacity"],
             ),
@@ -5277,7 +5291,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "get_node",
-            description: "Read one node in full: definition (name, parent, length, thickness, colour override, shape, head flag), the segment style (colour override + effective colour, color2, cap, taper, opacity), and pose facts at 'frame' (default: current) — the stored parent-relative angle in degrees, the solved world direction of the bone ending at this joint in degrees [0, 360) (null for a root node), and the frame's bend in radians and degrees. Note: get_pose returns stored parent-relative angles; the segment inspector shows this same world direction. Read-only.",
+            description: "Read one node in full: definition (name, parent, length, thickness, colour override, shape, head flag), the segment style (colour override + effective colour, color2, cap, taper, opacity), the segment's attached media ('media': null, or {kind: 'image', asset} / {kind: 'text', content, size}), and pose facts at 'frame' (default: current) — the stored parent-relative angle in degrees, the solved world direction of the bone ending at this joint in degrees [0, 360) (null for a root node), and the frame's bend in radians and degrees. Note: get_pose returns stored parent-relative angles; the segment inspector shows this same world direction. Read-only.",
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
@@ -5305,7 +5319,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "figure_library_insert",
-            description: "Insert a figure from the 2D figure library into the project (the library panel's Insert). Choose the entry with 'index' or 'name'; with neither, the session's current library index is used. The inserted figure gets a palette colour (definitions carry no colour) and becomes the selection. One undo step.",
+            description: "Insert a figure from the 2D figure library into the project (the library panel's Insert). Choose the entry with 'index' or 'name'; with neither, the session's current library index is used. The inserted figure gets a palette colour (the library stores the definition — including its node colours and styles — not the instance colour) and becomes the selection. One undo step.",
             schema: obj_schema(
                 json!({
                     "index": { "type": "integer" },
@@ -5504,6 +5518,67 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             description: "Clear the media (sprite) attached to the SELECTED joint of the selected figure (the segment inspector's Clear media). Selection-scoped: steer the selection with set_selection first. One undo step.",
             schema: obj_schema(json!({}), &[]),
             handler: tool_clear_node_media,
+        },
+        Tool {
+            name: "assets_list",
+            description: "List the project's image asset table: for each asset its index, name, stored byte size, decoded pixel width/height (null when the stored bytes do not decode) and live reference counts split by kind (figure segment images, movieclip-def segment images, sprite instances). Read-only.",
+            schema: obj_schema(json!({}), &[]),
+            handler: crate::media::tool_assets_list,
+        },
+        Tool {
+            name: "asset_info",
+            description: "One asset's assets_list entry, addressed by its table index. Read-only.",
+            schema: obj_schema(
+                json!({ "index": { "type": "integer" } }),
+                &["index"],
+            ),
+            handler: crate::media::tool_asset_info,
+        },
+        Tool {
+            name: "asset_import",
+            description: "Import a PNG file from disk into the asset table (appended; its index is returned). The file must start with the PNG magic bytes, decode as an image and be at most 8388608 bytes (8 MiB) — anything else is refused before any change. The stored name defaults to the file's name; the optional 'name' argument overrides it. One undo step. (Unlike attach_image_to_node, this never touches ./import and attaches nothing.)",
+            schema: obj_schema(
+                json!({
+                    "path": { "type": "string" },
+                    "name": { "type": "string" }
+                }),
+                &["path"],
+            ),
+            handler: crate::media::tool_asset_import,
+        },
+        Tool {
+            name: "asset_rename",
+            description: "Rename the asset at 'index' to 'name' (trimmed; empty is refused). Renaming to the current name is a no-op that reports changed: false and spends no undo step; a real rename is one undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" },
+                    "name": { "type": "string" }
+                }),
+                &["index", "name"],
+            ),
+            handler: crate::media::tool_asset_rename,
+        },
+        Tool {
+            name: "asset_remove",
+            description: "Remove the asset at 'index' from the table. REFUSED, with the live counts, while anything still references it (a figure segment image, a movieclip-def segment image, or a sprite instance) — removal never orphans a reference; clear segment references first with clear_node_media or re-point them with asset_attach (sprite instances have no delete op, so an asset referenced only by sprites stays refused until the project changes). When it does remove, every reference to a higher index is remapped down by one in the same undo step, so references keep naming the same image. One undo step.",
+            schema: obj_schema(
+                json!({ "index": { "type": "integer" } }),
+                &["index"],
+            ),
+            handler: crate::media::tool_asset_remove,
+        },
+        Tool {
+            name: "asset_attach",
+            description: "Attach the EXISTING asset at index 'asset' to figure 'figure', node 'node' as that segment's image media, replacing whatever media the segment carried (the by-index counterpart of attach_image_to_node, which reads ./import and works on the selection). One undo step.",
+            schema: obj_schema(
+                json!({
+                    "figure": { "type": "integer" },
+                    "node": { "type": "integer" },
+                    "asset": { "type": "integer" }
+                }),
+                &["figure", "node", "asset"],
+            ),
+            handler: crate::media::tool_asset_attach,
         },
     ]
 }

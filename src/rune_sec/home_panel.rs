@@ -398,6 +398,56 @@
 //!   drain swaps the project — the C6 clear lives in
 //!   GUI press handlers the drain never runs.
 //!
+//! ## Wave 12 (D1) — the populated-Home audit
+//!
+//! The first pass over this panel aimed at a populated
+//! library (the `home-populated` headless scene, D2).
+//! Three defects, all fixed in this file:
+//!
+//! - **The scan cache's blind spot, generalised.**
+//!   The Wave 11 watch ([`HomePanelState::
+//!   sync_open_file`]) covers an in-place rewrite of
+//!   the *open* project's file; a rewrite of any other
+//!   listed file — a stdio MCP server saving a project
+//!   (its core's current file is not the GUI's), an
+//!   external editor — moves no directory mtime and
+//!   was invisible to the cache: the row kept its
+//!   pre-rewrite name and fps, and
+//!   [`HomePanelState::thumbnail_for`] kept serving
+//!   the pre-rewrite frame 0, because both key on the
+//!   scan entry's mtime, which never moved. A cache
+//!   hit in [`HomePanelState::projects`] now verifies
+//!   the fingerprint first ([`scan_entries_stale`]):
+//!   one stat per listed library file, the row loop's
+//!   existing cost class. A refill is the ordinary
+//!   one — `projects::scan` re-reads only the changed
+//!   file (its own stamp cache, projects.rs), and the
+//!   thumbnail fill re-renders only the file whose
+//!   mtime moved.
+//! - **Thumbnail render bound.** [`render_thumbnail`]
+//!   rasterises at the exporter's stage ×2 before any
+//!   size check ran, and a project file's `stage` is
+//!   raw JSON — the editor's own setter clamps each
+//!   axis to 4096 (editor.rs `set_stage_size`); a file
+//!   is bound by nothing. A stage past that made the
+//!   scan-time fill attempt an allocation the machine
+//!   cannot serve, taking the app down over one bad
+//!   file; the render is now refused up front
+//!   ([`THUMB_MAX_RENDER_SIDE`]) and cached as no
+//!   thumbnail, like any other unrenderable file.
+//! - **Control characters in budgeted labels.** A
+//!   stored name is file content; a newline in one
+//!   defeated the single-line width budgets the row
+//!   name and the reopen label are truncated under
+//!   (Wave 10's overflow class, through the vertical
+//!   door). [`display_name`] folds control characters
+//!   to spaces for those two display strings only —
+//!   byte-identical for every name without them. The
+//!   delete confirm still quotes the stored name
+//!   verbatim (it wraps, and a destructive confirm
+//!   must name the real file); handlers, the search
+//!   and the rename field keep the stored name itself.
+//!
 //! ## Integrator wiring (main.rs)
 //!
 //! ```ignore
@@ -505,12 +555,13 @@ pub struct HomePanelState {
     /// points at, as last seen by the panel builder
     /// ([`HomePanelState::sync_open_file`]). The scan
     /// cache is keyed on the projects *directory's*
-    /// mtime, which an in-place rewrite of an existing
-    /// file does not move — and an in-place rewrite is
-    /// exactly what a save is (`save_named_project_to`
-    /// writes with `fs::write`, no directory entry
-    /// changes), whether the press was the GUI's or a
-    /// live MCP client's `save_named_project`. Without
+    /// mtime, which cannot see a save that replaces an
+    /// existing file inside the same mtime tick as the
+    /// cached scan — and a save is exactly such a
+    /// replacement (`save_named_project_to` writes
+    /// atomically since Wave 11: temp sibling + rename),
+    /// whether the press was the GUI's or a live MCP
+    /// client's `save_named_project`. Without
     /// this stamp the panel kept serving the pre-save
     /// scan entry for that file: its row's thumbnail —
     /// keyed on the scan entry's mtime, which never
@@ -617,8 +668,9 @@ impl HomePanelState {
     }
 
     /// The saved-project library, scanned at most once per
-    /// change to the `projects` directory (see the module
-    /// docs). The returned borrow covers the raw scan —
+    /// change to the `projects` directory or to any file
+    /// it lists (see the module docs). The returned
+    /// borrow covers the raw scan —
     /// including the `.recovery.json` entry, which parses as
     /// a project; row building filters it out via
     /// [`visible_projects`].
@@ -627,8 +679,14 @@ impl HomePanelState {
         let key = dir_mtime(&dir);
         {
             let cache = self.scan_cache.borrow();
-            if let Some((cached_key, _)) = cache.as_ref() {
-                if *cached_key == key {
+            if let Some((cached_key, entries)) = cache.as_ref() {
+                // The directory key alone cannot see an
+                // in-place rewrite of a listed file (see
+                // `scan_entries_stale`): a hit is served
+                // only while every listed library file
+                // still stands at the mtime the scan
+                // recorded for it.
+                if *cached_key == key && !scan_entries_stale(entries, file_mtime) {
                     return Ref::map(cache, |c| &c.as_ref().unwrap().1);
                 }
             }
@@ -749,10 +807,12 @@ impl HomePanelState {
     /// cost class as the directory stat the scan cache
     /// already pays. When the same file's mtime has
     /// moved since the last render, the file was
-    /// rewritten in place (a save: the GUI's Save press
-    /// and a live MCP `save_named_project` both write
-    /// with `fs::write`, which moves no directory mtime,
-    /// so the scan cache's key cannot see it), and all
+    /// rewritten (a save: the GUI's Save press and a
+    /// live MCP `save_named_project` both replace the
+    /// file — atomically, temp + rename, since Wave 11 —
+    /// and a replacement inside the same mtime tick
+    /// leaves the scan cache's directory key reading
+    /// unchanged, so the cache cannot see it), and all
     /// three caches are dropped: the next
     /// [`HomePanelState::projects`] call rescans, and the
     /// row for the saved project re-reads its counts and
@@ -812,10 +872,10 @@ impl HomePanelState {
 
 /// The projects directory every backend agrees on:
 /// `./projects` relative to the working directory
-/// (shell.rs's private `default_dir`, editor.rs's named-save
+/// (shell.rs's [`shell::projects_dir`], editor.rs's named-save
 /// directory, and the GPUI panel's scan root).
 pub fn projects_dir() -> PathBuf {
-    PathBuf::from("projects")
+    shell::projects_dir()
 }
 
 /// A directory's modification time, swallowing every error
@@ -824,6 +884,15 @@ pub fn projects_dir() -> PathBuf {
 /// an empty list for it).
 fn dir_mtime(dir: &Path) -> Option<SystemTime> {
     std::fs::metadata(dir).and_then(|m| m.modified()).ok()
+}
+
+/// A file's modification time, swallowing every error
+/// into `None` — [`dir_mtime`]'s rule applied to a
+/// file: an unstat'able file is a state the scan
+/// fingerprint ([`scan_entries_stale`]) compares like
+/// any other, not a failure.
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 // ---- Pure helpers ----
@@ -860,6 +929,42 @@ pub fn is_shell_owned_entry(info: &ProjectInfo) -> bool {
         || name == shell::LAYOUT_FILE
         || name == shell::RECOVERY_FILE
         || name == shell::RECENTS_FILE
+}
+
+/// Whether any *library* file in a cached scan has
+/// changed since the scan read it (Wave 12, D1): each
+/// entry's recorded mtime against the file's current
+/// one — one `stat` per entry, the same cost class the
+/// row loop already pays in
+/// [`HomePanelState::metadata_for`]. An entry whose
+/// file vanished (a stat that now fails where the scan
+/// recorded one), appeared, or moved its mtime makes
+/// the cached scan stale. This closes the scan cache's
+/// blind spot: the cache is keyed on the projects
+/// *directory's* mtime, which an in-place rewrite of an
+/// existing file does not move, so a stdio MCP save
+/// (that server's core holds its own current file) or
+/// an external edit to any listed project other than
+/// the GUI's open one left the rows serving the
+/// pre-rewrite name/fps and the thumbnail cache
+/// serving the pre-rewrite frame 0 indefinitely. (The
+/// Wave 11 watch, [`HomePanelState::sync_open_file`],
+/// covers the open project's file the same way, one
+/// render earlier and wholesale.) Shell-owned and
+/// recovery entries are excluded: they are never rows,
+/// and the recovery snapshot is rewritten by the shell
+/// itself (every Home open) — keying the scan to it
+/// would rescan on the panel's own writes. The stamp
+/// source is a parameter so the rule is testable
+/// without the filesystem.
+fn scan_entries_stale(
+    entries: &[ProjectInfo],
+    stamp_of: impl Fn(&Path) -> Option<SystemTime>,
+) -> bool {
+    entries
+        .iter()
+        .filter(|info| !is_recovery_entry(info) && !is_shell_owned_entry(info))
+        .any(|info| stamp_of(&info.path) != info.modified)
 }
 
 /// The rows the panel lists: library entries whose name
@@ -1039,8 +1144,26 @@ pub fn reopen_label(target: &ProjectInfo) -> String {
     let room = REOPEN_LABEL_BUDGET - text_width(prefix, label_char_width);
     format!(
         "{prefix}{}",
-        truncate_middle(&target.name, room, label_char_width)
+        truncate_middle(&display_name(&target.name), room, label_char_width)
     )
+}
+
+/// A stored name made safe for the panel's two
+/// single-line, width-budgeted display strings — the
+/// row name ([`row_display_name`]) and the reopen
+/// label ([`reopen_label`]): control characters (a
+/// newline above all) fold to spaces, so the painted
+/// string is the string the budget model charged — a
+/// name carrying one otherwise breaks the single line
+/// the budget bought (Wave 12, D1). Display only, and
+/// byte-identical for every name without control
+/// characters: handlers, the search, the rename field
+/// and the delete confirm all keep the stored name
+/// itself.
+fn display_name(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 /// The reopen button label's width budget, points
@@ -1329,6 +1452,18 @@ fn cached_meta(
 /// shrink once, cache the small result.
 pub const THUMB_W_PX: u32 = 112;
 
+/// The largest thumbnail render side, pixels: the
+/// exporter renders at stage size ×2 supersample, and
+/// the editor's own stage setter clamps each stage
+/// axis to 4096 pt (editor.rs `set_stage_size`), so no
+/// project the editor can produce renders past 8192 px
+/// on a side. A project *file's* stage is raw JSON,
+/// bound by no clamp — [`render_thumbnail`] refuses a
+/// stage whose render would exceed this side rather
+/// than attempt the allocation at scan time (see the
+/// module docs, Wave 12).
+pub const THUMB_MAX_RENDER_SIDE: u32 = 8192;
+
 /// Thumbnail display width in a project row, points.
 /// The height follows the project's own stage aspect
 /// ([`thumb_el`]), so a 4:3 project shows a taller thumb
@@ -1353,13 +1488,36 @@ pub const THUMB_W_PT: f32 = 56.0;
 ///
 /// `None` — cached by the caller as a failed render —
 /// when the file cannot be loaded, the project has no
-/// frames to render, the render comes back empty, or
-/// the image decode fails: a row without a thumbnail is
+/// frames to render, the project's stage would render
+/// past [`THUMB_MAX_RENDER_SIDE`] on a side (or to a
+/// zero side), the render comes back empty, or the
+/// image decode fails: a row without a thumbnail is
 /// the honest outcome for a file whose first frame
 /// cannot be drawn, never a placeholder.
 pub fn render_thumbnail(path: &Path) -> Option<rune::Image> {
     let project = projects::load(path).ok()?;
     if project.frames.is_empty() {
+        return None;
+    }
+    // The renderer's own dimensions (export::
+    // render_frame_at: stage ×2 supersample, each axis
+    // truncated to u32 — a negative or NaN axis lands
+    // on 0), checked BEFORE the rasterise: a file whose
+    // stage the editor itself could never set must not
+    // take the scan down with an unservable allocation.
+    // The multiply saturates: a huge axis casts to a
+    // huge u32, and the plain `* 2` the exporter does
+    // would overflow it (a debug-build panic) before
+    // the comparison could refuse it.
+    let (render_w, render_h) = (
+        (project.stage[0] as u32).saturating_mul(2),
+        (project.stage[1] as u32).saturating_mul(2),
+    );
+    if render_w == 0
+        || render_h == 0
+        || render_w > THUMB_MAX_RENDER_SIDE
+        || render_h > THUMB_MAX_RENDER_SIDE
+    {
         return None;
     }
     let frame = stykanimate_rs::export::render_frame_at(&project, 0.0);
@@ -1522,13 +1680,21 @@ pub fn dispatch_open(core: &mut EditorCore, path: &Path, name: &str) {
 /// is the scan cache's key.
 pub fn dispatch_duplicate(core: &mut EditorCore, path: &Path) {
     core.status = match projects::duplicate_project(path) {
-        Ok(new_path) => format!(
-            "Duplicated project: {}.",
-            new_path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        ),
+        Ok(new_path) => {
+            // Wave 12 (B3): the duplicate is a new file in
+            // ./projects — refresh the core's cached selector
+            // list so it names the copy too (the MCP drain
+            // refresh in main.rs covers tool writes, not this
+            // panel action).
+            projects::refresh_project_files(core);
+            format!(
+                "Duplicated project: {}.",
+                new_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            )
+        }
         Err(e) => format!("Duplicate failed: {e}"),
     };
 }
@@ -1903,6 +2069,7 @@ pub fn toggle_open(s: &mut State) {
         };
         *s.home_panel.offer_mark.borrow_mut() = mark;
         let _ = shell::write_recovery(&s.core.project);
+        s.core.note_recovery_written();
     }
 }
 
@@ -2065,8 +2232,11 @@ pub const ROW_NAME_BUDGET: f32 = 188.0;
 /// it fits [`ROW_NAME_BUDGET`] at the TITLE charges,
 /// middle-truncated with "…" past it (display only —
 /// callers keep using `info.name` for everything real).
+/// Control characters fold to spaces first
+/// ([`display_name`], Wave 12): the budget charges a
+/// single line, so the painted string must be one.
 fn row_display_name(name: &str) -> String {
-    truncate_middle(name, ROW_NAME_BUDGET, title_char_width)
+    truncate_middle(&display_name(name), ROW_NAME_BUDGET, title_char_width)
 }
 
 /// One project row: the scan-time thumbnail (Wave 4,
@@ -3975,5 +4145,132 @@ mod tests {
             core.status
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- Wave 12 (D1): the populated-Home audit ----
+
+    /// A scan entry carrying a recorded mtime (the
+    /// `info` helper leaves it `None`).
+    fn info_at(name: &str, path: &str, modified: Option<SystemTime>) -> ProjectInfo {
+        let mut entry = info(name, path);
+        entry.modified = modified;
+        entry
+    }
+
+    #[test]
+    fn scan_entries_stale_follows_each_listed_files_mtime() {
+        let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let t1 = t0 + std::time::Duration::from_secs(60);
+        let entries = vec![
+            info_at("Alpha", "projects/alpha.json", Some(t0)),
+            info_at("Beta", "projects/beta.json", Some(t0)),
+        ];
+        // Every file still at its recorded mtime: the
+        // cached scan stands.
+        assert!(!scan_entries_stale(&entries, |_| Some(t0)));
+        // An in-place rewrite of ANY listed file moves
+        // its mtime and stales the scan — the directory
+        // mtime never moved, which is the whole point.
+        assert!(scan_entries_stale(&entries, |p| {
+            if p.ends_with("beta.json") {
+                Some(t1)
+            } else {
+                Some(t0)
+            }
+        }));
+        // A listed file that vanished (its stat now
+        // fails) stales the scan too: the row must not
+        // outlive the file.
+        assert!(scan_entries_stale(&entries, |p| {
+            if p.ends_with("alpha.json") {
+                None
+            } else {
+                Some(t0)
+            }
+        }));
+        // And the mirror image: an entry the scan could
+        // not stat (recorded None) whose file now stats
+        // has changed state — rescan.
+        let nostat = vec![info_at("Alpha", "projects/alpha.json", None)];
+        assert!(!scan_entries_stale(&nostat, |_| None));
+        assert!(scan_entries_stale(&nostat, |_| Some(t0)));
+        // An empty scan is never stale.
+        assert!(!scan_entries_stale(&[], |_| None));
+    }
+
+    #[test]
+    fn scan_entries_stale_ignores_shell_owned_and_recovery_entries() {
+        // The shell's own files churn under the panel —
+        // the recovery snapshot is rewritten on every
+        // Home open — and none of them is a row: their
+        // mtimes must never stale the scan.
+        let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let t1 = t0 + std::time::Duration::from_secs(60);
+        let entries = vec![
+            info_at("Alpha", "projects/alpha.json", Some(t0)),
+            info_at("Untitled", "projects/.recovery.json", Some(t0)),
+            info_at("Animate", "projects/.layout.json", Some(t0)),
+            info_at("recents", "projects/recents.json", Some(t0)),
+        ];
+        assert!(!scan_entries_stale(&entries, |p| {
+            if p.ends_with("alpha.json") {
+                Some(t0)
+            } else {
+                Some(t1)
+            }
+        }));
+    }
+
+    #[test]
+    fn render_thumbnail_refuses_a_stage_the_editor_cannot_set() {
+        // A project file's stage is raw JSON, bound by
+        // no clamp (the editor's setter caps each axis
+        // at 4096): past the render bound the rasterise
+        // is refused up front — no thumbnail, and no
+        // attempt at the allocation. A zero or negative
+        // axis renders to a zero side and is refused the
+        // same way.
+        let dir = temp_dir("thumb-stage");
+        let mut project = Project::new_demo();
+        project.stage = [100_000.0, 100_000.0];
+        let huge = dir.join("huge.json");
+        std::fs::write(&huge, serde_json::to_string(&project).unwrap()).unwrap();
+        assert!(render_thumbnail(&huge).is_none());
+        project.stage = [0.0, 720.0];
+        let zero = dir.join("zero.json");
+        std::fs::write(&zero, serde_json::to_string(&project).unwrap()).unwrap();
+        assert!(render_thumbnail(&zero).is_none());
+        project.stage = [-960.0, 720.0];
+        let negative = dir.join("negative.json");
+        std::fs::write(&negative, serde_json::to_string(&project).unwrap()).unwrap();
+        assert!(render_thumbnail(&negative).is_none());
+        // An axis so large its u32 cast saturates the
+        // supersample multiply: refused, not overflowed.
+        project.stage = [3.0e9, 720.0];
+        let saturating = dir.join("saturating.json");
+        std::fs::write(&saturating, serde_json::to_string(&project).unwrap()).unwrap();
+        assert!(render_thumbnail(&saturating).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn display_name_folds_control_characters_only() {
+        // Ordinary names — punctuation, accents, the
+        // ellipsis included — pass through byte-identical.
+        assert_eq!(display_name("Demo"), "Demo");
+        assert_eq!(
+            display_name("Café — Director's Cut…"),
+            "Café — Director's Cut…"
+        );
+        // Control characters fold to spaces, one for one.
+        assert_eq!(display_name("A\nB\tC\rD"), "A B C D");
+        // Through the row's display name, a newline name
+        // stays a single line inside the title budget.
+        let shown = row_display_name("First Line\nSecond Line");
+        assert!(!shown.contains('\n'), "{shown}");
+        assert!(text_width(&shown, title_char_width) <= ROW_NAME_BUDGET);
+        // And through the reopen label.
+        let label = reopen_label(&info("A\nB", "projects/ab.json"));
+        assert_eq!(label, "Reopen A B");
     }
 }

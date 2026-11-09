@@ -136,6 +136,24 @@
 //! background presets are kit `chip_btn`s, superseding the
 //! Phase L colour-core chip construction. Keys, handlers,
 //! status strings and value formatters are unchanged.
+//!
+//! Placed-media readout (Wave 12, B5): the panel ends with
+//! a read-only "Placed media" section ([`media_readout`] +
+//! [`media_note`]). This panel is NOT the sprite surface —
+//! no sprite surface exists in the shell: there is no
+//! `Section` for sprites/assets (workspaces.rs), no engine
+//! op creates, moves or deletes a free-floating
+//! `SpriteInstance` outside the `.nodes` importer
+//! (nodes_anim.rs), and the Rune stage draws no sprite
+//! instances at all (stage_text.rs covers text only;
+//! sprites composite only in exports, via
+//! `media::composite_media`). A project can therefore
+//! carry sprites that change its exports while looking
+//! exactly like a project without any. The readout makes
+//! that state visible and says plainly that sprites are
+//! export-only today. It is deliberately read-only — no
+//! buttons, nothing that pretends to edit — until the
+//! engine ops exist (spec in the Wave 12 B5 report).
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, Drag, El, Phase, Tx};
@@ -550,6 +568,47 @@ pub fn stage_readout(core: &EditorCore) -> String {
     }
 }
 
+/// The placed-media readout (Wave 12, B5): one line
+/// naming what the project actually carries in its asset
+/// table and sprite list — `"{s} sprite(s) placed ·
+/// {a} image asset(s)."`, or the empty form when both are
+/// zero. Pure: reads `project.sprites` / `project.assets`,
+/// writes nothing. The counts are the whole truth the
+/// shell can currently show: assets also enter the table
+/// via node media (`EditorCore::attach_image_to_node`),
+/// so assets can be nonzero with zero sprites placed.
+pub fn media_readout(core: &EditorCore) -> String {
+    let sprites = core.project.sprites.len();
+    let assets = core.project.assets.len();
+    if sprites == 0 && assets == 0 {
+        return "No image assets or sprites in this project.".to_string();
+    }
+    format!(
+        "{} sprite{} placed · {} image asset{}.",
+        sprites,
+        if sprites == 1 { "" } else { "s" },
+        assets,
+        if assets == 1 { "" } else { "s" },
+    )
+}
+
+/// The placed-media honesty note (Wave 12, B5): present
+/// only when the project carries at least one free-floating
+/// sprite. Sprites composite into exports
+/// (`media::composite_media`) but the Rune stage does not
+/// draw them and no shell control can select, move or
+/// delete them, so a project with sprites must not look
+/// identical to one without — the note says exactly where
+/// they show up and what cannot be done with them yet.
+/// `None` when there is nothing to warn about.
+pub fn media_note(core: &EditorCore) -> Option<&'static str> {
+    if core.project.sprites.is_empty() {
+        None
+    } else {
+        Some("Sprites render in exports only — they can't be moved or edited in the app yet.")
+    }
+}
+
 /// The frame rate one stepper press asks for (Phase K):
 /// the current rate stepped by `dir` (±1) whole frames,
 /// clamped to the `set_project_fps` op's range [1, 60] —
@@ -870,7 +929,9 @@ fn weather_slider(
 /// (Phase K), and background colour swatches with RGB
 /// channel steppers under the Background header, with a
 /// named-preset row between the header and the steppers
-/// (Phase L).
+/// (Phase L). A read-only placed-media readout
+/// ([`media_readout`] / [`media_note`]) closes the panel
+/// (Wave 12, B5).
 pub fn scene_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let weather = core.project.weather;
@@ -965,6 +1026,30 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
             ));
         }
         stage_presets = stage_presets.child(preset_row);
+    }
+
+    // Placed-media readout (Wave 12, B5): a read-only
+    // section at the panel's foot — the counts line, and
+    // the honesty note only when sprites are present (see
+    // `media_note`). No controls: nothing in the shell can
+    // edit sprites yet, and this section must not pretend
+    // otherwise.
+    let mut media_section = col()
+        .gap(4.0)
+        .child(design::section_label("Placed media", t))
+        .child(
+            text(media_readout(core))
+                .key("scene-media-readout")
+                .font(type_::LABEL)
+                .color(t.text),
+        );
+    if let Some(note) = media_note(core) {
+        media_section = media_section.child(
+            text(note)
+                .key("scene-media-note")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
     }
 
     design::panel_col("scene-panel", t)
@@ -1108,6 +1193,7 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
         .child(bg_channel_row(1, "G", bg_g, t))
         .child(bg_channel_row(2, "B", bg_b, t))
         .child(swatches)
+        .child(media_section)
 }
 
 #[cfg(test)]
@@ -1705,5 +1791,67 @@ mod tests {
         // Out-of-range indices are never active.
         assert!(!bg_preset_active(&core, BG_PRESETS.len()));
         assert!(!bg_preset_active(&core, 99));
+    }
+
+    fn core_with_media(assets: usize, sprites: usize) -> EditorCore {
+        let mut core = EditorCore::new();
+        for i in 0..assets {
+            core.project.assets.push(stykanimate_rs::model::ImageAsset {
+                name: format!("a{i}.png"),
+                png: Vec::new(),
+            });
+        }
+        for _ in 0..sprites {
+            core.project.sprites.push(stykanimate_rs::model::SpriteInstance {
+                asset: 0,
+                keys: Vec::new(),
+            });
+        }
+        core
+    }
+
+    #[test]
+    fn media_readout_names_the_empty_project_honestly() {
+        // A fresh project carries no assets and no sprites
+        // (model.rs's defaults), and the readout says so
+        // instead of the section vanishing.
+        let core = EditorCore::new();
+        assert_eq!(
+            media_readout(&core),
+            "No image assets or sprites in this project."
+        );
+        assert_eq!(media_note(&core), None);
+    }
+
+    #[test]
+    fn media_readout_counts_sprites_and_assets_with_plurals() {
+        assert_eq!(
+            media_readout(&core_with_media(1, 1)),
+            "1 sprite placed · 1 image asset."
+        );
+        assert_eq!(
+            media_readout(&core_with_media(3, 2)),
+            "2 sprites placed · 3 image assets."
+        );
+        // Assets without sprites are real state too (node
+        // media imports land in the table): counted, and no
+        // sprite warning is raised for them.
+        let core = core_with_media(2, 0);
+        assert_eq!(media_readout(&core), "0 sprites placed · 2 image assets.");
+        assert_eq!(media_note(&core), None);
+    }
+
+    #[test]
+    fn media_note_warns_only_when_sprites_are_present() {
+        // The note exists because sprites change exports
+        // while staying invisible on the stage — with a
+        // sprite placed it must be present and say so.
+        let core = core_with_media(1, 1);
+        assert_eq!(
+            media_note(&core),
+            Some(
+                "Sprites render in exports only — they can't be moved or edited in the app yet."
+            )
+        );
     }
 }

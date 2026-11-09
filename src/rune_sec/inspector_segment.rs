@@ -105,6 +105,43 @@
 //!   key `node-color`; the only op that can return a segment
 //!   to the figure colour (`set_node_color` always writes
 //!   `Some(rgb)`), so it stays as the "default" path.
+//! * Media (Wave 12) — keys `seg-media-readout`,
+//!   `seg-media-attach-{i}`, `seg-media-cycle`,
+//!   `seg-media-import`, `seg-media-clear`. Before this
+//!   wave the panel had NO media surface at all: the
+//!   only attach path in the app was the core's
+//!   `attach_image_to_node`, which takes the first PNG
+//!   in ./import, appends it as a NEW asset and attaches
+//!   that — no way to pick an asset the project already
+//!   holds — and `clear_node_media` had no panel caller
+//!   at all (only MCP reached it, while its own tool
+//!   description still called it "the segment
+//!   inspector's Clear media", a GPUI-era leftover).
+//!   Now a Media section closes the section list: the
+//!   readout names the attached media (`media_label` —
+//!   the sprite's asset name, the text label's content,
+//!   or "No media attached"); one button per asset in
+//!   `project.assets` (the fx_browser wrapping-row
+//!   idiom; the attached asset's button renders active)
+//!   attaches THAT asset via `attach_asset` (this
+//!   module — the core has no attach-by-index op, so
+//!   the write follows `rotate_selected`'s pattern:
+//!   validate → one `snapshot()` → write → status, and
+//!   re-attaching the already-attached asset is a
+//!   silent no-op, like Straighten at bend 0). The row
+//!   is capped at `ASSET_BUTTON_CAP` buttons; past the
+//!   cap a `seg-media-cycle` "Next sprite" button
+//!   reaches every remaining asset by cycling the
+//!   attachment. "Attach from import" keeps the core's
+//!   import-folder op one press away (and is the only
+//!   attach path while the project holds no assets),
+//!   and Clear — rendered only while media is attached
+//!   — calls `clear_node_media` directly. Text labels
+//!   are READ here but EDITED in the text tool panel
+//!   (its `SegTextEdit` owns content and size); the
+//!   model has ONE media slot per segment, so attaching
+//!   a sprite replaces a label, and `attach_asset`'s
+//!   status says so when it happens.
 //! * + Segment → `add_segment()` (editor.rs:402) — key
 //!   `add-seg`.
 //! * Delete segment → `delete_segment()` (editor.rs:434) —
@@ -188,7 +225,7 @@
 use rune::tok::{type_, Theme};
 use rune::{row, text, Color, El};
 use stykanimate_rs::editor::EditorCore;
-use stykanimate_rs::model::{angle_of, NodeDef, Shape};
+use stykanimate_rs::model::{angle_of, ImageAsset, NodeDef, SegmentMedia, Shape};
 
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
@@ -258,6 +295,24 @@ pub struct InspectorSegmentState {
     /// Human label of the node's shape ("Line", "Circle",
     /// "Triangle", …).
     pub shape_label: String,
+    /// The node's attached media, cloned from the
+    /// definition (Wave 12) — the raw value behind
+    /// `media_label`, carried so the builder stays a
+    /// pure function of this state.
+    pub media: Option<SegmentMedia>,
+    /// The attached sprite's asset index, when `media`
+    /// is `SegmentMedia::Image` — the picker button that
+    /// renders active. `None` for a text label or no
+    /// media.
+    pub attached_asset: Option<usize>,
+    /// Readout text for the Media section: the attached
+    /// sprite's asset name, the text label's content, or
+    /// "No media attached" (see `media_label`).
+    pub media_label: String,
+    /// Names of the project's assets (`project.assets`),
+    /// in asset order — the sprite picker's buttons.
+    /// Names only: the PNG bytes stay in the model.
+    pub asset_names: Vec<String>,
 }
 
 /// Wrap an angle in degrees into `[0, 360)`.
@@ -531,6 +586,167 @@ pub fn straighten_selected(core: &mut EditorCore) {
     bend_selected(core, -cur);
 }
 
+/// How many per-asset buttons the Media section's
+/// picker row shows before the "Next sprite" cycle
+/// button takes over (Wave 12). The row wraps
+/// (fx_browser's idiom), so the cap is about panel
+/// height, not width: past it, one button per asset
+/// would crowd out the geometry controls that are this
+/// panel's first job, while the cycle button still
+/// reaches every asset.
+pub const ASSET_BUTTON_CAP: usize = 8;
+
+/// Readout text for a node's media slot: the single
+/// formatter behind the Media section's
+/// `seg-media-readout` line (and stored on
+/// [`InspectorSegmentState`]), so the wording lives in
+/// exactly one place. Display copies are fitted to the
+/// header-name budget — an imported file name or label
+/// is unbounded while the card is not; the model's
+/// name/content is never touched. A stored asset index
+/// past the end of the table (a stale import, a hand-
+/// edited file) reads as missing rather than panicking
+/// or inventing a name.
+pub fn media_label(media: &Option<SegmentMedia>, assets: &[ImageAsset]) -> String {
+    match media {
+        None => "No media attached".to_string(),
+        Some(SegmentMedia::Image { asset }) => match assets.get(*asset) {
+            Some(a) => format!("Sprite: {}", fit_segment_header_name(&a.name)),
+            None => format!("Sprite: asset {} (missing)", *asset + 1),
+        },
+        Some(SegmentMedia::Text { content, .. }) => {
+            if content.is_empty() {
+                "Text label (empty)".to_string()
+            } else {
+                format!("Text: {}", fit_segment_header_name(content))
+            }
+        }
+    }
+}
+
+/// The selected node's attached sprite asset index, or
+/// `None` when it carries a text label, no media, or
+/// the selection is stale — the defensive read the
+/// "Next sprite" cycle button steps from, mirroring
+/// `bend_degrees`' discipline.
+pub fn attached_asset(core: &EditorCore) -> Option<usize> {
+    let ni = core.selected_node?;
+    let node = core
+        .project
+        .figures
+        .get(core.selected_figure)?
+        .def
+        .nodes
+        .get(ni)?;
+    match &node.media {
+        Some(SegmentMedia::Image { asset }) => Some(*asset),
+        _ => None,
+    }
+}
+
+/// The asset the "Next sprite" cycle button attaches:
+/// the one after the currently attached sprite,
+/// wrapping at the end of the table; asset 0 when no
+/// sprite is attached (no media, a text label, or a
+/// stale stored index); `None` when the project holds
+/// no assets at all (the button is not rendered then —
+/// this is the armour, not an expected path).
+pub fn next_asset_target(current: Option<usize>, count: usize) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    Some(match current {
+        Some(i) if i + 1 < count => i + 1,
+        _ => 0,
+    })
+}
+
+/// Attach the project asset `asset` to the selected
+/// node's media slot (Wave 12) — the panel-side twin of
+/// the core's `attach_image_to_node`, minus the import
+/// folder: that op can only attach the first PNG in
+/// ./import as a NEW asset, so until this fn the user
+/// had no way to attach an asset the project already
+/// holds. The core has no attach-by-index op, so —
+/// exactly as `rotate_selected` writes the pose angle
+/// the core has no op for — this writes the definition
+/// directly in the core ops' own pattern: validate →
+/// ONE `snapshot()` → mutate → status, so one press is
+/// exactly one undo step. Refusals (no selection, a
+/// stale asset index, a stale node) are status-only,
+/// no snapshot. Two deliberate details:
+///
+/// * Re-attaching the asset that is already attached
+///   is a SILENT no-op — no write, no status, no undo
+///   step — the Straighten-at-zero rule: the picker
+///   button for the attached asset renders active, and
+///   pressing it must not mint a phantom undo step.
+/// * The slot holds ONE media value, so attaching a
+///   sprite over a text label replaces it; the status
+///   says so plainly (undo restores the label).
+pub fn attach_asset(core: &mut EditorCore, asset: usize) {
+    let Some(ni) = core.selected_node else {
+        core.status = "Select a segment first, then attach a sprite.".into();
+        return;
+    };
+    let Some(name) = core
+        .project
+        .assets
+        .get(asset)
+        .map(|a| a.name.clone())
+    else {
+        core.status = format!("There is no asset {} to attach.", asset + 1);
+        return;
+    };
+    let fi = core.selected_figure;
+    let (already, replaced_text) = match core
+        .project
+        .figures
+        .get(fi)
+        .and_then(|f| f.def.nodes.get(ni))
+    {
+        Some(node) => (
+            node.media == Some(SegmentMedia::Image { asset }),
+            matches!(node.media, Some(SegmentMedia::Text { .. })),
+        ),
+        None => {
+            core.status = format!(
+                "Figure {} has no segment {} to attach to.",
+                fi + 1,
+                ni
+            );
+            return;
+        }
+    };
+    if already {
+        return;
+    }
+    core.snapshot();
+    // Validated above; the `if let` is unreachable
+    // armour, not an expected path.
+    if let Some(node) = core
+        .project
+        .figures
+        .get_mut(fi)
+        .and_then(|f| f.def.nodes.get_mut(ni))
+    {
+        node.media = Some(SegmentMedia::Image { asset });
+    }
+    core.status = if replaced_text {
+        format!(
+            "Sprite \"{}\" attached to segment {}, replacing its text label.",
+            fit_segment_header_name(&name),
+            ni
+        )
+    } else {
+        format!(
+            "Sprite \"{}\" attached to segment {}.",
+            fit_segment_header_name(&name),
+            ni
+        )
+    };
+}
+
 /// Label for a node shape, naming the polygons `cycle_shape`
 /// steps through (editor.rs:494).
 pub fn shape_label(shape: &Shape) -> String {
@@ -603,6 +819,18 @@ pub fn segment_state(core: &EditorCore) -> Option<InspectorSegmentState> {
         bend_deg,
         color: node.color,
         shape_label: shape_label(&node.shape),
+        media_label: media_label(&node.media, &core.project.assets),
+        attached_asset: match &node.media {
+            Some(SegmentMedia::Image { asset }) => Some(*asset),
+            _ => None,
+        },
+        media: node.media.clone(),
+        asset_names: core
+            .project
+            .assets
+            .iter()
+            .map(|a| a.name.clone())
+            .collect(),
     })
 }
 
@@ -1005,6 +1233,78 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
         s.core.cycle_node_color()
     }));
     panel = panel.child(swatches);
+    // The Media section (Wave 12): what the segment
+    // carries, and the means to change it — see the
+    // module docs. The readout is keyed like the Bend
+    // readout above it; the picker row wraps
+    // (fx_browser's idiom) with the attached asset's
+    // button active; past the cap the cycle button
+    // reaches the rest.
+    panel = panel
+        .child(design::section_label("Media", t))
+        .child(
+            text(st.media_label.clone())
+                .key("seg-media-readout")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
+    if !st.asset_names.is_empty() {
+        let mut picker = row().gap(6.0).w_full().flex_wrap();
+        for (idx, name) in st
+            .asset_names
+            .iter()
+            .take(ASSET_BUTTON_CAP)
+            .enumerate()
+        {
+            let label = fit_segment_header_name(name);
+            picker = picker.child(btn(
+                &format!("seg-media-attach-{idx}"),
+                &label,
+                st.attached_asset == Some(idx),
+                t,
+                move |s: &mut State| attach_asset(&mut s.core, idx),
+            ));
+        }
+        if st.asset_names.len() > ASSET_BUTTON_CAP {
+            picker = picker.child(btn(
+                "seg-media-cycle",
+                "Next sprite",
+                false,
+                t,
+                |s: &mut State| {
+                    if let Some(a) = next_asset_target(
+                        attached_asset(&s.core),
+                        s.core.project.assets.len(),
+                    ) {
+                        attach_asset(&mut s.core, a);
+                    }
+                },
+            ));
+        }
+        panel = panel.child(picker);
+    }
+    // Import + Clear row: "Attach from import" is the
+    // core's import-folder op (with an empty asset
+    // table it is the only attach path); Clear renders
+    // only while media is attached, so it can never be
+    // a dead press.
+    let mut media_row = row()
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(btn("seg-media-import", "Attach from import", false, t, |s| {
+            s.core.attach_image_to_node()
+        }));
+    if st.media.is_some() {
+        media_row = media_row.child(btn(
+            "seg-media-clear",
+            "Clear media",
+            false,
+            t,
+            |s| s.core.clear_node_media(),
+        ));
+    }
+    panel = panel.child(media_row);
     panel.child(
         row()
             .w_full()
@@ -1868,5 +2168,216 @@ playback_speed: 1.0,
         select_parent(&mut stale);
         select_first_child(&mut stale);
         assert_eq!(stale.selected_node, Some(999));
+    }
+
+    /// An asset fixture: the picker and readout read
+    /// only the name, so the PNG bytes stay empty.
+    fn asset(name: &str) -> ImageAsset {
+        ImageAsset {
+            name: name.into(),
+            png: Vec::new(),
+        }
+    }
+
+    fn core_with_assets(ni: Option<usize>, names: &[&str]) -> EditorCore {
+        let mut core = core_with_selection(ni);
+        core.project.assets = names.iter().map(|n| asset(n)).collect();
+        core
+    }
+
+    #[test]
+    fn media_label_names_each_slot_state() {
+        let assets = vec![asset("hero.png"), asset("cape.png")];
+        assert_eq!(media_label(&None, &assets), "No media attached");
+        assert_eq!(
+            media_label(&Some(SegmentMedia::Image { asset: 1 }), &assets),
+            "Sprite: cape.png"
+        );
+        // A stored index past the table reads as
+        // missing — never a panic, never an invented
+        // name.
+        assert_eq!(
+            media_label(&Some(SegmentMedia::Image { asset: 7 }), &assets),
+            "Sprite: asset 8 (missing)"
+        );
+        assert_eq!(
+            media_label(
+                &Some(SegmentMedia::Text {
+                    content: "Hello".into(),
+                    size: 14.0
+                }),
+                &assets
+            ),
+            "Text: Hello"
+        );
+        assert_eq!(
+            media_label(
+                &Some(SegmentMedia::Text {
+                    content: String::new(),
+                    size: 14.0
+                }),
+                &assets
+            ),
+            "Text label (empty)"
+        );
+    }
+
+    #[test]
+    fn next_asset_target_cycles_and_wraps() {
+        assert_eq!(next_asset_target(None, 0), None);
+        assert_eq!(next_asset_target(Some(0), 0), None);
+        assert_eq!(next_asset_target(None, 3), Some(0), "from nothing, first");
+        assert_eq!(next_asset_target(Some(0), 3), Some(1));
+        assert_eq!(next_asset_target(Some(2), 3), Some(0), "wraps at the end");
+        assert_eq!(
+            next_asset_target(Some(9), 3),
+            Some(0),
+            "a stale stored index restarts at the first asset"
+        );
+    }
+
+    #[test]
+    fn segment_state_carries_the_media_surface() {
+        // Fresh: no assets, no media.
+        let core = core_with_selection(Some(1));
+        let st = segment_state(&core).unwrap();
+        assert_eq!(st.media, None);
+        assert_eq!(st.attached_asset, None);
+        assert_eq!(st.media_label, "No media attached");
+        assert!(st.asset_names.is_empty());
+        // Populated: names in asset order, the attached
+        // index resolved, the readout naming the asset.
+        let mut core = core_with_assets(Some(1), &["hero.png", "cape.png"]);
+        core.project.figures[core.selected_figure].def.nodes[1].media =
+            Some(SegmentMedia::Image { asset: 1 });
+        let st = segment_state(&core).unwrap();
+        assert_eq!(st.asset_names, ["hero.png", "cape.png"]);
+        assert_eq!(st.attached_asset, Some(1));
+        assert_eq!(st.media_label, "Sprite: cape.png");
+    }
+
+    #[test]
+    fn segment_state_rereads_external_media_edits() {
+        // An MCP attach / clear writes the same model
+        // fields; the panel holds no cache, so the next
+        // `segment_state` call reports the new media.
+        let mut core = core_with_assets(Some(1), &["hero.png"]);
+        assert_eq!(segment_state(&core).unwrap().media, None);
+        core.project.figures[core.selected_figure].def.nodes[1].media =
+            Some(SegmentMedia::Image { asset: 0 });
+        let st = segment_state(&core).unwrap();
+        assert_eq!(st.attached_asset, Some(0));
+        assert_eq!(st.media_label, "Sprite: hero.png");
+        core.project.figures[core.selected_figure].def.nodes[1].media = None;
+        assert_eq!(segment_state(&core).unwrap().media_label, "No media attached");
+    }
+
+    #[test]
+    fn attach_asset_writes_the_chosen_asset_in_one_undo_step() {
+        let mut core = core_with_assets(Some(1), &["hero.png", "cape.png"]);
+        let fi = core.selected_figure;
+        let depth = core.undo_depth();
+        attach_asset(&mut core, 1);
+        assert_eq!(
+            core.project.figures[fi].def.nodes[1].media,
+            Some(SegmentMedia::Image { asset: 1 }),
+            "the CHOSEN asset is attached, not an import-folder pick"
+        );
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot per press");
+        assert!(
+            core.status.contains("cape.png"),
+            "status names the asset: {}",
+            core.status
+        );
+        assert_eq!(attached_asset(&core), Some(1));
+        core.undo();
+        assert_eq!(core.project.figures[fi].def.nodes[1].media, None);
+    }
+
+    #[test]
+    fn attach_asset_reattaching_the_current_asset_is_a_silent_no_op() {
+        // The attached asset's picker button renders
+        // active; pressing it must not mint a phantom
+        // undo step (the Straighten-at-zero rule).
+        let mut core = core_with_assets(Some(1), &["hero.png"]);
+        attach_asset(&mut core, 0);
+        let depth = core.undo_depth();
+        core.status = "Sentinel.".into();
+        attach_asset(&mut core, 0);
+        assert_eq!(core.undo_depth(), depth, "no snapshot for a no-change press");
+        assert_eq!(core.status, "Sentinel.", "no status churn");
+    }
+
+    #[test]
+    fn attach_asset_refusals_are_status_only() {
+        // Stale asset index.
+        let mut core = core_with_assets(Some(1), &["hero.png"]);
+        let depth = core.undo_depth();
+        attach_asset(&mut core, 5);
+        assert_eq!(core.undo_depth(), depth);
+        assert!(
+            core.status.contains("no asset 6"),
+            "refusal explains itself: {}",
+            core.status
+        );
+        // No selection.
+        let mut core = core_with_assets(None, &["hero.png"]);
+        let depth = core.undo_depth();
+        attach_asset(&mut core, 0);
+        assert_eq!(core.undo_depth(), depth);
+        assert!(core.status.contains("Select a segment"));
+        // Stale node index.
+        let mut core = core_with_assets(Some(999), &["hero.png"]);
+        let depth = core.undo_depth();
+        attach_asset(&mut core, 0);
+        assert_eq!(core.undo_depth(), depth);
+        assert!(core.status.contains("no segment 999"));
+    }
+
+    #[test]
+    fn attach_asset_replacing_a_text_label_says_so() {
+        // One media slot: the sprite replaces the
+        // label, the status owns up to it, and undo
+        // restores the label whole.
+        let mut core = core_with_assets(Some(1), &["hero.png"]);
+        let fi = core.selected_figure;
+        let label = SegmentMedia::Text {
+            content: "Hero".into(),
+            size: 14.0,
+        };
+        core.project.figures[fi].def.nodes[1].media = Some(label.clone());
+        attach_asset(&mut core, 0);
+        assert_eq!(
+            core.project.figures[fi].def.nodes[1].media,
+            Some(SegmentMedia::Image { asset: 0 })
+        );
+        assert!(
+            core.status.contains("replacing its text label"),
+            "status owns the replacement: {}",
+            core.status
+        );
+        core.undo();
+        assert_eq!(core.project.figures[fi].def.nodes[1].media, Some(label));
+    }
+
+    #[test]
+    fn attached_asset_reads_only_image_media() {
+        let mut core = core_with_assets(Some(1), &["hero.png"]);
+        assert_eq!(attached_asset(&core), None, "no media");
+        let fi = core.selected_figure;
+        core.project.figures[fi].def.nodes[1].media = Some(SegmentMedia::Text {
+            content: "Hi".into(),
+            size: 12.0,
+        });
+        assert_eq!(attached_asset(&core), None, "a label is not a sprite");
+        core.project.figures[fi].def.nodes[1].media =
+            Some(SegmentMedia::Image { asset: 0 });
+        assert_eq!(attached_asset(&core), Some(0));
+        assert_eq!(attached_asset(&EditorCore::new()), None, "no selection");
+        assert_eq!(
+            attached_asset(&core_with_assets(Some(999), &["hero.png"])),
+            None,
+            "stale selection"
+        );
     }
 }

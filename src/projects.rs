@@ -31,6 +31,11 @@
 //! unchanged projects costs one stat per file instead of a
 //! full read + JSON parse per file; a file whose stamp moves
 //! is re-read and re-parsed on the next scan.
+//!
+//! [`refresh_project_files`] is the seam every save path
+//! calls after writing a project file, so the editor core's
+//! cached selector list can never miss a file a save just
+//! created (Wave 12; the Wave 11 §6.6 remainder).
 
 use crate::editor::EditorCore;
 use crate::export::render_frame_at;
@@ -260,6 +265,99 @@ pub fn scan(dir: &Path) -> Vec<ProjectInfo> {
     SCAN_CACHE.with(|c| cache_prune_dir(&mut c.borrow_mut(), dir, &seen));
     infos.sort_by(|a, b| b.modified.cmp(&a.modified));
     infos
+}
+
+/// List the project files directly under `dir`, sorted by
+/// path — the selector's view of the library: every `.json`
+/// file except the shell's own (its layout, recovery and
+/// recents files, and dotfiles generally, are not openable
+/// projects — the stray ".layout" row, Phase F). Unlike
+/// [`scan`], parseability is NOT required and nothing is
+/// parsed: the selector names files, and a corrupt project
+/// file is still a file the user may want to see named.
+/// A missing directory yields an empty list.
+/// `EditorCore`'s private copy of this listing predates
+/// it; the Wave 12 integration patch delegates that copy
+/// here so the two cannot drift.
+pub fn list_project_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+                // The shell keeps its own files in this
+                // directory (layout prefs, recovery snapshot,
+                // recents); they are not openable projects
+                // and must never surface in the selector.
+                .filter(|p| {
+                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    !name.starts_with('.')
+                        && name != crate::shell::LAYOUT_FILE
+                        && name != crate::shell::RECOVERY_FILE
+                        && name != crate::shell::RECENTS_FILE
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+    files
+}
+
+/// Rescan `./projects/` into the core's cached selector list
+/// (`EditorCore::project_files` / `project_index`) — THE
+/// refresh seam every save path calls after it writes a
+/// project file (Wave 12, closing the Wave 11 §6.6
+/// remainder: an MCP save that created a new file left the
+/// cache stale, so the selector and Home's current-project
+/// marking missed the file until something else happened to
+/// rescan). The GUI's named save always refreshed inline
+/// (inside `EditorCore::save_named_project_to`); the MCP
+/// save / save-a-copy / duplicate / rename paths could not
+/// reach that refresh and now call this instead.
+///
+/// The seam is list + selection only, deliberately: recents
+/// and the recovery snapshot stay with the save call sites,
+/// exactly as the GUI splits them (the core op refreshes the
+/// list; the press handler's `after_save` follow-up writes
+/// recents and recovery). A copy or a duplicate is not the
+/// session's current file and must not enter recents; the
+/// named-save paths, GUI and MCP alike, already touch
+/// recents themselves.
+pub fn refresh_project_files(core: &mut EditorCore) {
+    let dir = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("projects");
+    refresh_project_files_in(core, &dir);
+}
+
+/// [`refresh_project_files`] against an explicit projects
+/// directory (the codebase's split, as in [`save_copy_to`],
+/// so tests can aim the refresh at a temp dir).
+///
+/// The selection is preserved BY FILE IDENTITY: the path the
+/// index names before the refresh is the path it names
+/// after, wherever the rescan moved it — a new file sorting
+/// before the current one must not silently retarget the
+/// selector onto a different project. If the current file
+/// itself vanished (a rename's old path, say), the index
+/// clamps onto the last live entry — the fallback
+/// `save_named_project_to`'s inline refresh already used.
+/// A missing directory is a no-op rather than an empty
+/// list: a transient working-directory problem must not
+/// empty the selector.
+fn refresh_project_files_in(core: &mut EditorCore, dir: &Path) {
+    if !dir.is_dir() {
+        return;
+    }
+    let current = core.project_files.get(core.project_index).cloned();
+    core.project_files = list_project_files(dir);
+    let followed =
+        current.and_then(|path| core.project_files.iter().position(|p| p == &path));
+    if let Some(pos) = followed {
+        core.project_index = pos;
+    } else if core.project_index >= core.project_files.len() {
+        core.project_index = core.project_files.len().saturating_sub(1);
+    }
 }
 
 /// Load a project from a JSON file.
@@ -1049,6 +1147,132 @@ mod tests {
         let infos = scan(&dir);
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].name, "Betta");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An `EditorCore` whose cached selector list is exactly
+    /// `files` with `index` selected — the state any save
+    /// path hands to a refresh call.
+    fn core_with_files(files: Vec<PathBuf>, index: usize) -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project_files = files;
+        core.project_index = index;
+        core
+    }
+
+    #[test]
+    fn list_project_files_excludes_shell_files_and_sorts() {
+        let dir = temp_dir("list-files");
+        // The shell's own files live in the projects dir but
+        // are not openable projects: they never appear in the
+        // selector list, and neither do dotfiles or non-JSON
+        // files.
+        std::fs::write(dir.join(crate::shell::LAYOUT_FILE), "{}").unwrap();
+        std::fs::write(dir.join(crate::shell::RECOVERY_FILE), "{}").unwrap();
+        std::fs::write(dir.join(crate::shell::RECENTS_FILE), "[]").unwrap();
+        std::fs::write(dir.join(".hidden.json"), "{}").unwrap();
+        std::fs::write(dir.join("notes.txt"), "hello").unwrap();
+        let mut project = Project::new_demo();
+        project.name = "Bravo".into();
+        let bravo = save(&project, &dir).unwrap();
+        project.name = "Alpha".into();
+        let alpha = save(&project, &dir).unwrap();
+        // An unparseable `.json` still lists: the selector
+        // names files; parseability is `scan`'s concern.
+        let broken = dir.join("broken.json");
+        std::fs::write(&broken, "{ not a project").unwrap();
+
+        let files = list_project_files(&dir);
+        assert_eq!(
+            files,
+            vec![alpha, bravo, broken],
+            "path-sorted, shell files excluded"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refresh_project_files_picks_up_a_newly_created_file() {
+        let dir = temp_dir("refresh-new");
+        let mut project = Project::new_demo();
+        project.name = "Alpha".into();
+        let alpha = save(&project, &dir).unwrap();
+        let mut core = core_with_files(list_project_files(&dir), 0);
+        assert_eq!(core.project_files, vec![alpha.clone()]);
+
+        // A save path (an MCP save, say) creates a second
+        // project file behind the core's back: the cache
+        // misses it until the refresh runs — the Wave 11
+        // §6.6 bug, reproduced.
+        project.name = "Beta".into();
+        let beta = save(&project, &dir).unwrap();
+        assert_eq!(
+            core.project_files.len(),
+            1,
+            "the cache is stale until refreshed"
+        );
+
+        refresh_project_files_in(&mut core, &dir);
+        assert_eq!(core.project_files, vec![alpha.clone(), beta]);
+        // The selection still names the file it named before.
+        assert_eq!(core.project_files[core.project_index], alpha);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refresh_project_files_selection_follows_its_file() {
+        let dir = temp_dir("refresh-identity");
+        let mut project = Project::new_demo();
+        project.name = "Bravo".into();
+        let bravo = save(&project, &dir).unwrap();
+        let mut core = core_with_files(vec![bravo.clone()], 0);
+
+        // A new file that sorts BEFORE the selected one: a
+        // raw-index refresh would silently retarget the
+        // selection onto it; the identity refresh must not.
+        project.name = "Alpha".into();
+        let alpha = save(&project, &dir).unwrap();
+        refresh_project_files_in(&mut core, &dir);
+        assert_eq!(core.project_files, vec![alpha, bravo.clone()]);
+        assert_eq!(core.project_index, 1);
+        assert_eq!(core.project_files[core.project_index], bravo);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refresh_project_files_on_a_missing_dir_is_a_no_op() {
+        let dir = temp_dir("refresh-missing");
+        let missing = dir.join("no-such-dir");
+        assert!(!missing.exists());
+        let files = vec![dir.join("a.json"), dir.join("b.json")];
+        let mut core = core_with_files(files.clone(), 1);
+        refresh_project_files_in(&mut core, &missing);
+        // Not an empty list, not a panic: list and selection
+        // are exactly as they were.
+        assert_eq!(core.project_files, files);
+        assert_eq!(core.project_index, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refresh_project_files_drops_vanished_files_and_clamps() {
+        let dir = temp_dir("refresh-vanished");
+        let mut project = Project::new_demo();
+        project.name = "Alpha".into();
+        let alpha = save(&project, &dir).unwrap();
+        project.name = "Bravo".into();
+        let bravo = save(&project, &dir).unwrap();
+        let mut core = core_with_files(vec![alpha.clone(), bravo.clone()], 1);
+
+        // The selected file is renamed away — its old path
+        // is gone, exactly the MCP rename's leftover in the
+        // cache. The refresh drops the dead entry and the
+        // index clamps onto a live file instead of pointing
+        // past the end of the list.
+        std::fs::remove_file(&bravo).unwrap();
+        refresh_project_files_in(&mut core, &dir);
+        assert_eq!(core.project_files, vec![alpha]);
+        assert_eq!(core.project_index, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

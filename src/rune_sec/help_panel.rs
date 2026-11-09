@@ -318,6 +318,39 @@
 //! the Settings toggle (`settings-live-mcp` in
 //! `settings_popover`) is the only path, and the row
 //! says Settings. The panel now holds 58 rows.
+//!
+//! Wave 12 refresh, 2026-11-09: three more Features
+//! rows, for the wave's asset surface. The census
+//! first checked this panel for a row describing the
+//! old attach flow and found none to correct: no row
+//! here has ever mentioned attaching — the only
+//! sprite text in the panel is the Spritesheet in the
+//! Range export row (an export, not an attachment)
+//! and the frame-swap census in the Phase M paragraph
+//! above. The old flow itself is `EditorCore::
+//! attach_image_to_node`: one step that takes the
+//! first PNG in the import folder, appends it as a new
+//! asset and attaches it to the selected segment.
+//! Wave 12 separates managing from attaching: the MCP
+//! asset tools (`assets_list`, `asset_info`,
+//! `asset_import`, `asset_rename`, `asset_remove`,
+//! `asset_attach`, written by the wave's media.rs
+//! squad) over the project's asset table
+//! (`Project.assets` — named PNGs, `model.rs`), with
+//! panel parity in the segment inspector (attach and
+//! clear). Integration correction, recorded honestly:
+//! the wave's audit (B5) proved the Scene panel has no
+//! asset list and no sprite surface — it carries a
+//! read-only Placed media counts readout, and sprite
+//! instances arrive only via .nodes import and cannot
+//! be placed or edited in the app yet — so the Project
+//! assets and Sprites rows below state exactly that
+//! rather than the charter's assumed panels. The
+//! Project assets row states the removal refusal in
+//! plain words: an asset a segment's media or a
+//! sprite instance still references cannot be
+//! removed — detach it first. The panel now holds
+//! 61 rows.
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
@@ -505,6 +538,18 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
                 "Export panel — SVG and Spritesheet now take the loop range too",
             ),
             (
+                "Project assets",
+                "Scene panel — a Placed media readout counts the project's assets in use; the asset list itself is managed with the MCP tools assets_list, asset_info, asset_import, asset_rename, asset_attach and asset_remove — an asset a segment or sprite still uses cannot be removed, detach it first",
+            ),
+            (
+                "Attach asset to segment",
+                "Segment inspector — attach an image from the project's assets to the selected segment, or clear the segment's image; MCP clients use asset_attach",
+            ),
+            (
+                "Sprites",
+                "Free-floating images from the project's assets, placed with keyframed position, rotation and scale — they arrive via .nodes import and render in exports (the stage draws a placeholder outline); they cannot be placed or edited in the app yet. An image fixed to a segment is attached from the segment inspector instead",
+            ),
+            (
                 "MCP stdio server",
                 "The mcp_server program serves the same MCP (Model Context Protocol) tools over stdio (JSON-RPC, one message per line) to clients that launch it — it works on its own copy of a project and never sees or drives this editor window",
             ),
@@ -673,9 +718,9 @@ mod tests {
     use super::{group_rows, section_note, section_rows, shortcut_rows};
 
     #[test]
-    fn shortcut_rows_has_exactly_58_rows() {
+    fn shortcut_rows_has_exactly_61_rows() {
         // 10 Shortcuts + 8 Workspaces + 2 Posing + 5 Timeline
-        // + 33 Features; Drawing contributes none (see the
+        // + 36 Features; Drawing contributes none (see the
         // module docs for which GPUI-era rows were dropped
         // and why). Phase G added the four palette/menu rows
         // to Shortcuts; Phase I added the Features section;
@@ -690,7 +735,9 @@ mod tests {
         // rows (View zoom, Live MCP control). The Wave 10
         // refresh added one more (Dopesheet). The Wave 11
         // refresh added one more (MCP stdio server).
-        assert_eq!(shortcut_rows().len(), 58);
+        // The Wave 12 refresh added three more (Project
+        // assets, Attach asset to segment, Sprites).
+        assert_eq!(shortcut_rows().len(), 61);
     }
 
     #[test]
@@ -743,7 +790,7 @@ mod tests {
         // this order, and nowhere else. (The count covers
         // the Phase J, Phase K, Phase L and Phase M rows
         // too — see those tests.)
-        assert_eq!(section_rows("Features").len(), 33);
+        assert_eq!(section_rows("Features").len(), 36);
     }
 
     #[test]
@@ -787,9 +834,10 @@ mod tests {
         // Wave 10 refresh added the Dopesheet row, so
         // thirty-two stood then; the Wave 11 refresh
         // added the MCP stdio server row, so thirty-three
-        // stand now.
+        // stood then; the Wave 12 refresh added the three
+        // asset rows, so thirty-six stand now.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 33);
+        assert_eq!(features.len(), 36);
         let jump = features
             .iter()
             .position(|(label, _)| *label == "Keyframe jump")
@@ -860,7 +908,7 @@ mod tests {
         // Placement: Playback speed sits with the
         // transport rows directly after Loop playback.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 33);
+        assert_eq!(features.len(), 36);
         let loop_row = features
             .iter()
             .position(|(label, _)| *label == "Loop playback")
@@ -932,7 +980,7 @@ mod tests {
         // Palette recents sits with the project rows,
         // directly after Reload from disk.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 33);
+        assert_eq!(features.len(), 36);
         let channel_row = features
             .iter()
             .position(|(label, _)| *label == "Delete graph channel")
@@ -1032,7 +1080,7 @@ mod tests {
         // after Split FX clip. No earlier phase's pinned
         // adjacency is disturbed by any of these.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 33);
+        assert_eq!(features.len(), 36);
         let clear_row = features
             .iter()
             .position(|(label, _)| *label == "Clear keys in loop range")
@@ -1105,7 +1153,7 @@ mod tests {
         // see the Wave 11 test). No earlier phase's
         // pinned adjacency is disturbed by either.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 33);
+        assert_eq!(features.len(), 36);
         let swap_row = features
             .iter()
             .position(|(label, _)| *label == "Swap frames")
@@ -1139,7 +1187,7 @@ mod tests {
         // ruler. No earlier phase's pinned adjacency is
         // disturbed by the insertion.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 33);
+        assert_eq!(features.len(), 36);
         let ruler_row = features
             .iter()
             .position(|(label, _)| *label == "Timeline ruler")
@@ -1185,12 +1233,68 @@ mod tests {
         // last (the Wave 9 test's pin). No earlier
         // phase's pinned adjacency is disturbed.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 33);
+        assert_eq!(features.len(), 36);
         assert_eq!(
             features[features.len() - 2].0,
             "MCP stdio server"
         );
         assert_eq!(features.last().map(|(label, _)| *label), Some("Live MCP control"));
+    }
+
+    #[test]
+    fn wave_12_feature_rows_are_listed() {
+        // The Wave 12 refresh — the asset surface (see
+        // the module docs). Project assets — the
+        // project's asset table (`Project.assets`, named
+        // PNGs in `model.rs`), managed by MCP clients
+        // through the wave's media.rs tools; the Scene
+        // panel's part is a read-only Placed media
+        // counts readout (the wave's audit proved no
+        // asset list exists there — the row says so);
+        // the row states the removal refusal plainly (an
+        // asset a segment's media or a sprite instance
+        // still references cannot be removed). Attach
+        // asset to segment — the segment inspector's
+        // parity home for attaching an existing asset to
+        // the selected segment (the old one-step flow,
+        // `EditorCore::attach_image_to_node`, imported
+        // the first import-folder PNG as a new asset
+        // while attaching; clearing a segment's image is
+        // the existing `clear_node_media` op). Sprites —
+        // the free-standing instances (`Project.sprites`:
+        // centre, rotation and scale per `InstanceKey`,
+        // per `media.rs`' docs), import-only and not
+        // editable in the app yet, as distinct from
+        // images fixed to a segment.
+        let rows = shortcut_rows();
+        assert!(rows.contains(&(
+            "Project assets",
+            "Scene panel — a Placed media readout counts the project's assets in use; the asset list itself is managed with the MCP tools assets_list, asset_info, asset_import, asset_rename, asset_attach and asset_remove — an asset a segment or sprite still uses cannot be removed, detach it first"
+        )));
+        assert!(rows.contains(&(
+            "Attach asset to segment",
+            "Segment inspector — attach an image from the project's assets to the selected segment, or clear the segment's image; MCP clients use asset_attach"
+        )));
+        assert!(rows.contains(&(
+            "Sprites",
+            "Free-floating images from the project's assets, placed with keyframed position, rotation and scale — they arrive via .nodes import and render in exports (the stage draws a placeholder outline); they cannot be placed or edited in the app yet. An image fixed to a segment is attached from the segment inspector instead"
+        )));
+        // Placement: the three asset rows sit together
+        // with the project rows, directly after Range
+        // export, and the MCP pair still closes the
+        // section (the Wave 11 test's pin: stdio server
+        // second-to-last, Live MCP control last). No
+        // earlier phase's pinned adjacency is disturbed.
+        let features = section_rows("Features");
+        assert_eq!(features.len(), 36);
+        let range_row = features
+            .iter()
+            .position(|(label, _)| *label == "Range export")
+            .expect("Range export row");
+        assert_eq!(features[range_row + 1].0, "Project assets");
+        assert_eq!(features[range_row + 2].0, "Attach asset to segment");
+        assert_eq!(features[range_row + 3].0, "Sprites");
+        assert_eq!(features[range_row + 4].0, "MCP stdio server");
     }
 
     #[test]

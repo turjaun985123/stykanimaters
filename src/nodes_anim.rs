@@ -30,6 +30,21 @@
 //! exception: they are baked at import — a joined instance's
 //! root is superseded by the evaluated end of its host's named
 //! node (see `resolve_join_roots` and §17 of the spec).
+//!
+//! Figure nodes never gain `SegmentMedia` from this importer:
+//! the figure grammar's node kinds are purely geometric (the
+//! original's `NODE_TYPES` table — root plus eight shapes — has
+//! no image or text kind, and node records carry no string or
+//! image payload), so there is no node-attached media in the
+//! source bytes to decode or to drop. Media enters a project
+//! from these containers only as sprite-library images and
+//! main-frame texts, both handled above; segment media in the
+//! model comes from Pivot `.stk` figures and editor-attached
+//! media instead. Imported asset indices are likewise always
+//! relative to the asset table built by the same import —
+//! `import_nodes_animation` returns a whole fresh project and
+//! its callers replace, never merge — so no index offsetting
+//! arises here.
 
 use crate::model::{
     evaluate, norm_deg, CameraKey, ClipDef, ClipLoop, Easing, FigureDef, FigureInstance, Frame,
@@ -1923,7 +1938,12 @@ fn encode_sprite_png(img: &SpriteImage) -> Option<Vec<u8>> {
 /// Build the project asset table from a sprite library: one asset
 /// per image entry, in library order. Returns the assets and, per
 /// library index, the project asset index (None for groups and for
-/// images that fail to encode).
+/// images that fail to encode). After the parser's byte-count
+/// validation the only un-encodable images are zero-dimension
+/// ones (no pixels to display); they map to None and their
+/// instances are skipped in `build_instance_tracks` — a deliberate
+/// lenient outcome, pinned by
+/// `zero_size_sprite_image_is_skipped_not_scrambled`.
 fn sprite_assets(sprites: &[SpriteLib]) -> (Vec<ImageAsset>, Vec<Option<usize>>) {
     let mut assets = Vec::new();
     let mut map = Vec::with_capacity(sprites.len());
@@ -3423,6 +3443,7 @@ mod tests {
             assert!((a.thickness - b.thickness).abs() < 1e-4);
             assert_eq!(a.color, b.color);
             assert_eq!(a.shape, b.shape);
+            assert_eq!(a.media, b.media);
         }
     }
 
@@ -4551,5 +4572,138 @@ mod tests {
         assert!(project.camera.is_empty());
         let back = import_nodes_animation(&export_nodes_animation(&project)).unwrap();
         assert!(back.camera.is_empty());
+    }
+
+    // ---- Wave 12 B7: media/asset truth on import ----
+
+    /// A `.stknds` project packed byte-by-byte at 431/117 whose
+    /// sprite library holds TWO images ("First" red, "Second"
+    /// green) and a group wrapping the second; the single main
+    /// frame instances the second image directly and the group.
+    fn hand_packed_project_two_images_group() -> Vec<u8> {
+        let mut b = B::default();
+        b.i32(431); // version
+        b.i32(117); // build (v >= 401)
+        b.string("Proj M");
+        project_header_431_117(&mut b);
+        b.i32(0); // figure count
+        b.i32(0); // sound count (v >= 160)
+        b.i32(3); // sprite library count (v >= 400)
+        b.raw(&[0]); // image
+        b.string("First");
+        sprite_image_body_431_117(&mut b, false, 1, 1, &[255, 0, 0]);
+        b.raw(&[0]); // image
+        b.string("Second");
+        sprite_image_body_431_117(&mut b, false, 1, 1, &[0, 255, 0]);
+        b.raw(&[1]); // group
+        b.string("G");
+        b.i32(1); // member count
+        b.i32(1); // member: image 1 ("Second")
+        b.i32(0); // clip count (v >= 300)
+        b.i32(1); // frame count
+        main_settings_431_117(&mut b);
+        b.i32(2); // instance count
+        // Direct reference to the SECOND library image.
+        sprite_instance_431_117(&mut b, 2, 1, 11, 1.0, 1.0, 10.0, 20.0, 0.0, None);
+        // Group instance: groupFrame 0 displays "Second".
+        sprite_instance_431_117(&mut b, 3, 2, 12, 1.0, 1.0, 30.0, 40.0, 0.0, Some(0));
+        b.i32(0); // joins count
+        b.i32(0); // text count
+        camera_431_117(&mut b);
+        trailer_431_117(&mut b);
+        b.v
+    }
+
+    #[test]
+    fn stknds_asset_indices_follow_library_order() {
+        let project = import_nodes_animation(&hand_packed_project_two_images_group())
+            .expect("hand-packed two-image project imports");
+        // Imported asset count matches the decoded media: one
+        // asset per image entry, in library order; the group
+        // contributes none.
+        assert_eq!(project.assets.len(), 2);
+        assert_eq!(project.assets[0].name, "First");
+        assert_eq!(project.assets[1].name, "Second");
+        let first = image::load_from_memory(&project.assets[0].png)
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(*first.get_pixel(0, 0), image::Rgba([255, 0, 0, 255]));
+        let second = image::load_from_memory(&project.assets[1].png)
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(*second.get_pixel(0, 0), image::Rgba([0, 255, 0, 255]));
+        // Both tracks — the direct reference and the one resolved
+        // through the group — point at asset 1, the image their
+        // library entries actually name. Every track index is
+        // valid against the imported table.
+        assert_eq!(project.sprites.len(), 2);
+        for track in &project.sprites {
+            assert!(track.asset < project.assets.len());
+            assert_eq!(track.asset, 1);
+        }
+        key_eq(&project.sprites[0].keys[0], 0.0, 10.0, 20.0, 1.0, 0.0);
+        key_eq(&project.sprites[1].keys[0], 0.0, 30.0, 40.0, 1.0, 0.0);
+    }
+
+    #[test]
+    fn imported_figure_nodes_never_carry_media() {
+        // The figure grammar encodes no node-attached media (see
+        // the module docs), so every conversion path — the
+        // primary `.nodes` conversion, the local fallback for
+        // pre-160 figures, and a full container import — must
+        // yield media-free nodes rather than inventing or
+        // dropping attachments.
+        let bytes = modern_nodes();
+        let scan = scan_figure(&bytes, 0).unwrap();
+        let (primary, _) = figure_def(&bytes, &scan);
+        assert!(primary.nodes.iter().all(|n| n.media.is_none()));
+        let (fallback, _) = convert_fallback(&scan);
+        assert!(fallback.nodes.iter().all(|n| n.media.is_none()));
+        let project = import_nodes_animation(&hand_packed_clip()).unwrap();
+        assert_eq!(project.figures.len(), 1);
+        for fig in &project.figures {
+            assert!(fig.def.nodes.iter().all(|n| n.media.is_none()));
+        }
+    }
+
+    /// A `.stknds` project whose only sprite library entry is a
+    /// zero-width image (0 pixels), instanced once in frame 0.
+    fn hand_packed_project_zero_size_sprite() -> Vec<u8> {
+        let mut b = B::default();
+        b.i32(431); // version
+        b.i32(117); // build (v >= 401)
+        b.string("Proj Z");
+        project_header_431_117(&mut b);
+        b.i32(0); // figure count
+        b.i32(0); // sound count (v >= 160)
+        b.i32(1); // sprite library count (v >= 400)
+        b.raw(&[0]); // image
+        b.string("Empty");
+        sprite_image_body_431_117(&mut b, false, 0, 2, &[]);
+        b.i32(0); // clip count (v >= 300)
+        b.i32(1); // frame count
+        main_settings_431_117(&mut b);
+        b.i32(1); // instance count
+        sprite_instance_431_117(&mut b, 2, 0, 3, 1.0, 1.0, 50.0, 60.0, 0.0, None);
+        b.i32(0); // joins count
+        b.i32(0); // text count
+        camera_431_117(&mut b);
+        trailer_431_117(&mut b);
+        b.v
+    }
+
+    #[test]
+    fn zero_size_sprite_image_is_skipped_not_scrambled() {
+        // A zero-dimension image parses (its byte count, 0,
+        // matches its dimensions) but cannot be PNG-encoded and
+        // has no pixels to display: the import stays lenient —
+        // no asset, no track, and no other index disturbed —
+        // rather than failing the whole project or pointing a
+        // track at a different image.
+        let project = import_nodes_animation(&hand_packed_project_zero_size_sprite())
+            .expect("zero-size sprite project imports");
+        assert!(project.assets.is_empty());
+        assert!(project.sprites.is_empty());
+        assert_eq!(project.frames.len(), 1);
     }
 }

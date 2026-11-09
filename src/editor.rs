@@ -207,28 +207,11 @@ impl EditorCore {
         let dir = std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join("projects");
-        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
-            .map(|entries| {
-                entries
-                    .filter_map(|e| e.ok().map(|e| e.path()))
-                    .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
-                    // The shell keeps its own files in this
-                    // directory (layout prefs, recovery snapshot,
-                    // recents); they are not openable projects
-                    // and must never surface in the selector —
-                    // the stray ".layout" row (Phase F fix).
-                    .filter(|p| {
-                        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                        !name.starts_with('.')
-                            && name != crate::shell::LAYOUT_FILE
-                            && name != crate::shell::RECOVERY_FILE
-                            && name != crate::shell::RECENTS_FILE
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        files.sort();
-        files
+        // Wave 12 (B3): the listing itself lives in
+        // `projects::list_project_files` (shell-owned files
+        // filtered there) — one implementation, so this
+        // selector listing and the refresh seam's cannot drift.
+        crate::projects::list_project_files(&dir)
     }
 
     /// The local figure library: JSON figure definitions from
@@ -1857,7 +1840,15 @@ impl EditorCore {
             .map_err(std::io::Error::other)
             .and_then(|txt| std::fs::write(&path, txt))
         {
-            Ok(()) => self.status = format!("Saved to {}", path.display()),
+            Ok(()) => {
+                // Wave 12 (B4/B3): a dialog save that lands in
+                // ./projects creates a file the cached selector
+                // list has never heard of; refresh it (the seam
+                // preserves the selection by identity and is a
+                // no-op for the list when the path is elsewhere).
+                crate::projects::refresh_project_files(self);
+                self.status = format!("Saved to {}", path.display());
+            }
             Err(e) => self.status = format!("Save failed: {e}"),
         }
     }
@@ -1913,6 +1904,19 @@ impl EditorCore {
     /// autosave (0 right after a successful one).
     pub fn edits_since_autosave(&self) -> u64 {
         self.edit_count.saturating_sub(self.last_autosave_count)
+    }
+
+    /// Wave 12 (E8): note that a recovery snapshot of the
+    /// current state was just written OUTSIDE `maybe_autosave`
+    /// (the GUI save paths write one as a follow-up). Without
+    /// this, the status strip's autosave segment kept counting
+    /// edits the snapshot already covers while its dirty dot
+    /// read the same counter differently — the two segments
+    /// contradicted each other after every GUI save. (MCP
+    /// saves skip `write_recovery` by standing product call,
+    /// so no MCP path needs this.)
+    pub fn note_recovery_written(&mut self) {
+        self.last_autosave_count = self.edit_count;
     }
 
     /// Wave 9: if at least `AUTOSAVE_EVERY` edits have
@@ -2462,6 +2466,30 @@ impl EditorCore {
             self.status = "Select a joint first.".into();
             return;
         };
+        // Wave 12 (B4): validate the target BEFORE the
+        // snapshot and the asset push. The selection can be
+        // stale in one specific way — `redo` restores the
+        // project without clamping `selected_figure` (undo
+        // does clamp it) — and the old order pushed the
+        // asset first and looked the node up afterwards, so
+        // a stale figure index silently appended an
+        // unreferenced asset to the table, took an undo
+        // snapshot for an edit that never landed, and left
+        // the previous status standing. The asset table is
+        // append-only (nothing in this core removes or
+        // reorders entries), so an orphan is never
+        // reclaimed; refusing here keeps the table and its
+        // references in agreement by construction.
+        let target_exists = self
+            .project
+            .figures
+            .get(self.selected_figure)
+            .and_then(|f| f.def.nodes.get(node_idx))
+            .is_some();
+        if !target_exists {
+            self.status = "Select a joint first.".into();
+            return;
+        }
         let Some(path) = self.first_file_with("import", &["png"]) else {
             self.status = "Put a PNG in the import folder first.".into();
             return;
@@ -2489,13 +2517,25 @@ impl EditorCore {
     }
 
     pub fn clear_node_media(&mut self) {
+        // Wave 12 (B2, the B4 pattern): resolve the selection
+        // BEFORE the snapshot — the refusal path used to spend
+        // a phantom undo step on a change that never happens.
+        // The check mirrors `selected_node_mut`'s own
+        // resolution exactly.
+        let resolves = self.selected_node.is_some_and(|ni| {
+            self.project
+                .figures
+                .get(self.selected_figure)
+                .is_some_and(|f| f.def.nodes.get(ni).is_some())
+        });
+        if !resolves {
+            self.status = "Select a joint first.".into();
+            return;
+        }
         self.snapshot();
-        match self.selected_node_mut() {
-            Some(node) => {
-                node.media = None;
-                self.status = "Segment media cleared.".into();
-            }
-            None => self.status = "Select a joint first.".into(),
+        if let Some(node) = self.selected_node_mut() {
+            node.media = None;
+            self.status = "Segment media cleared.".into();
         }
     }
 
@@ -2755,14 +2795,35 @@ impl EditorCore {
             return;
         }
         self.snapshot();
-        let (name, def) = self.library[self.library_index].clone();
+        let (name, mut def) = self.library[self.library_index].clone();
+        // Wave 12 (B7): strip segment IMAGE media on insert.
+        // A library file stores the FigureDef only — no asset
+        // bytes — so a stored image index would resolve
+        // against THIS project's asset table: the wrong image
+        // drawn, or a silent skip when the index is out of
+        // range. Text media is self-contained and survives.
+        // (The library format carrying referenced PNGs would
+        // be a format change; unbuilt — see §6.7.)
+        let mut dropped = 0usize;
+        for node in &mut def.nodes {
+            if matches!(node.media, Some(crate::model::SegmentMedia::Image { .. })) {
+                node.media = None;
+                dropped += 1;
+            }
+        }
         let idx = self.project.figures.len();
         let color = FIGURE_COLORS[idx % FIGURE_COLORS.len()];
         let root = [300.0 + 80.0 * idx as f32, 450.0];
         self.project.add_figure_with(def, &name, color, root);
         self.selected_figure = idx;
         self.selected_node = None;
-        self.status = format!("Inserted {name} from the library.");
+        self.status = if dropped > 0 {
+            format!(
+                "Inserted {name} from the library (segment images dropped: the library stores no image data)."
+            )
+        } else {
+            format!("Inserted {name} from the library.")
+        };
     }
 
     pub fn save_figure_to_library(&mut self) {

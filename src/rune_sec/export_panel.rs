@@ -47,6 +47,20 @@
 //! carries the sound, full or range; the WebM row's own
 //! note says that where the button is.)
 //!
+//! Wave 12 adds one more conditional note, in the Project
+//! formats group: when the project carries media a .piv
+//! export would drop — image/text segments, which .piv
+//! v2/v3/v4 write as plain segments (only v5 writes
+//! segment media, through its side tables), or sprite /
+//! text instances, which no .piv version writes at all —
+//! a note under the .piv rows (key `xc-piv-media-note`,
+//! decision in `piv_media_note`) says so where the buttons
+//! are, instead of the export's bare success status being
+//! the only word. The drops themselves are the writers'
+//! documented behaviour (`pivot.rs`); the note only
+//! repeats them at the point of export. Media-free
+//! projects show nothing, so their panel is unchanged.
+//!
 //! Two bundle buttons sit under the categories: "Export
 //! all images" (PNG + JPEG + SVG + spritesheet) and "Export
 //! all video" (MP4 + WebM). A bundle is a composition of the
@@ -326,6 +340,53 @@ pub fn range_audio_note_shown(core: &EditorCore, use_range: bool) -> bool {
         .audio
         .iter()
         .any(|clip| !clip.muted && Path::new(&clip.path).exists())
+}
+
+/// Does any figure carry segment media — a node with an
+/// image or text segment (`NodeDef::media`)? Pure: reads
+/// the project only.
+pub fn project_has_segment_media(core: &EditorCore) -> bool {
+    core.project
+        .figures
+        .iter()
+        .any(|fig| fig.def.nodes.iter().any(|node| node.media.is_some()))
+}
+
+/// The .piv media note (element key `xc-piv-media-note`),
+/// shown under the .piv rows when the project carries
+/// media a .piv export would drop. The Pivot writers
+/// document the drops (`pivot.rs`): the shared figure
+/// stream behind v2/v3/v4 stores geometry and shape only,
+/// so image/text segments export as plain segments there;
+/// v5 writes segment media (its image side tables hold
+/// the referenced assets' PNG bytes, its text side tables
+/// encode the bitmap glyphs). No .piv writer reads
+/// `project.sprites` or `project.texts` at all — the
+/// grammar has no free-floating instances — so sprite and
+/// text instances are dropped by every version. Until now
+/// the only word was the ops' bare success status; the
+/// note says it before the export instead. Each clause
+/// appears only when the project actually carries that
+/// kind of media, so a media-free project shows nothing
+/// and the panel geometry is unchanged.
+pub fn piv_media_note(core: &EditorCore) -> Option<String> {
+    let segment_media = project_has_segment_media(core);
+    let instances = !core.project.sprites.is_empty() || !core.project.texts.is_empty();
+    match (segment_media, instances) {
+        (false, false) => None,
+        (true, false) => Some(
+            "Media note: .piv v2/v3/v4 export image and text segments as plain segments — only v5 keeps segment media."
+                .into(),
+        ),
+        (false, true) => Some(
+            "Media note: no .piv version writes sprite or text instances — they are left out of .piv exports."
+                .into(),
+        ),
+        (true, true) => Some(
+            "Media note: .piv v2/v3/v4 export image and text segments as plain segments (only v5 keeps them), and no .piv version writes sprite or text instances — they are left out of .piv exports."
+                .into(),
+        ),
+    }
 }
 
 /// The `./export` directory under the working directory —
@@ -1492,7 +1553,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         ));
     panel = panel.child(video);
 
-    let formats = col()
+    let mut formats = col()
         .gap(6.0)
         .child(design::section_label("Project formats", t))
         .child(plain_row(
@@ -1534,7 +1595,23 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             EditorCore::export_v5_file,
             ".piv v5",
             "out/animation-v5.piv",
-        ))
+        ));
+    // The .piv media note sits directly under the four
+    // .piv rows it describes (and above the figure-file
+    // rows it does not): a wrapped line inside the card,
+    // the range audio note's treatment, present only when
+    // the project carries media a .piv export would drop.
+    if let Some(note) = piv_media_note(core) {
+        formats = formats.child(
+            text(note)
+                .key("xc-piv-media-note")
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .wrap()
+                .w_full(),
+        );
+    }
+    formats = formats
         .child(plain_row(
             "xc-stk",
             None,
@@ -2213,5 +2290,104 @@ mod tests {
         core.project.audio.push(clip(&file.to_string_lossy(), false));
         assert!(range_audio_note_shown(&core, true));
         let _ = std::fs::remove_file(&file);
+    }
+
+    // ---- .piv media note (Wave 12) ----
+
+    /// Give the demo project's first figure a text segment
+    /// on its second node — the segment-media fixture.
+    fn with_segment_media(core: &mut EditorCore) {
+        assert!(
+            core.project.figures[0].def.nodes.len() > 1,
+            "demo figure premise: it has a second node"
+        );
+        core.project.figures[0].def.nodes[1].media =
+            Some(stykanimate_rs::model::SegmentMedia::Text {
+                content: "Hi".into(),
+                size: 20.0,
+            });
+    }
+
+    /// A text-instance fixture (its keys are irrelevant —
+    /// the note only reads that instances exist).
+    fn text_instance() -> stykanimate_rs::model::TextInstance {
+        stykanimate_rs::model::TextInstance {
+            content: "Title".into(),
+            size: 24.0,
+            color: 0xFFFFFF,
+            keys: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn piv_media_note_hidden_for_the_demo_project() {
+        // Premise: the demo project carries no segment
+        // media, no sprite instances and no text instances,
+        // so no .piv export drops anything — the note stays
+        // hidden and the panel geometry is unchanged.
+        let core = EditorCore::new();
+        assert!(!project_has_segment_media(&core), "demo premise");
+        assert!(core.project.sprites.is_empty(), "demo premise");
+        assert!(core.project.texts.is_empty(), "demo premise");
+        assert_eq!(piv_media_note(&core), None);
+    }
+
+    #[test]
+    fn piv_media_note_names_the_plain_segment_drop() {
+        // Segment media only: the note must name the
+        // v2/v3/v4 plain-segment drop and v5 as the keeper,
+        // and must not claim an instance drop the project
+        // does not have.
+        let mut core = EditorCore::new();
+        with_segment_media(&mut core);
+        assert!(project_has_segment_media(&core));
+        assert_eq!(
+            piv_media_note(&core).as_deref(),
+            Some(
+                "Media note: .piv v2/v3/v4 export image and text segments as plain segments — only v5 keeps segment media."
+            )
+        );
+    }
+
+    #[test]
+    fn piv_media_note_names_the_instance_drop_for_a_sprite() {
+        let mut core = EditorCore::new();
+        core.project
+            .sprites
+            .push(stykanimate_rs::model::SpriteInstance {
+                asset: 0,
+                keys: Vec::new(),
+            });
+        assert_eq!(
+            piv_media_note(&core).as_deref(),
+            Some(
+                "Media note: no .piv version writes sprite or text instances — they are left out of .piv exports."
+            )
+        );
+    }
+
+    #[test]
+    fn piv_media_note_names_the_instance_drop_for_a_text_instance() {
+        let mut core = EditorCore::new();
+        core.project.texts.push(text_instance());
+        assert_eq!(
+            piv_media_note(&core).as_deref(),
+            Some(
+                "Media note: no .piv version writes sprite or text instances — they are left out of .piv exports."
+            )
+        );
+    }
+
+    #[test]
+    fn piv_media_note_combines_both_drops() {
+        let mut core = EditorCore::new();
+        with_segment_media(&mut core);
+        core.project.texts.push(text_instance());
+        assert_eq!(
+            piv_media_note(&core).as_deref(),
+            Some(
+                "Media note: .piv v2/v3/v4 export image and text segments as plain segments (only v5 keeps them), and no .piv version writes sprite or text instances — they are left out of .piv exports."
+            )
+        );
     }
 }
