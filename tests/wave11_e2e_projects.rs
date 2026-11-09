@@ -562,12 +562,19 @@ fn project_and_library_lifecycle_over_mcp() {
     );
     assert_eq!(saved_fig["ok"], true);
     let lib = mcp.call_ok("figure_library_list", json!({}));
-    assert_eq!(lib["count"], 1, "one entry after one save: {lib}");
+    // The library always carries the three built-in entries
+    // (Humanoid / Quadruped / Mini, in-memory — no files);
+    // the save adds the file-backed entry beside them.
     assert_eq!(
-        lib["entries"][0]["name"], "lifecycle-partner",
-        "entries are named by their file stem (the format's rule)"
+        lib["count"], 4,
+        "three built-ins plus the saved entry: {lib}"
     );
-    assert_eq!(lib["entries"][0]["nodes"], 11, "the def's node count is stored");
+    let entries = lib["entries"].as_array().expect("entries array");
+    let partner = entries
+        .iter()
+        .find(|e| e["name"] == "lifecycle-partner")
+        .expect("the saved entry is listed by its file stem (the format's rule)");
+    assert_eq!(partner["nodes"], 11, "the def's node count is stored");
 
     // Insert it into a fresh project: the def (and so the
     // node count) survives the round trip. Two format truths
