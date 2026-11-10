@@ -1,0 +1,438 @@
+//! MCP subtitle file exchange (Wave P, P30): the SRT and
+//! WebVTT import/export tools — the path-based twins over the
+//! converters in [`crate::subtitles`].
+//!
+//! The discipline is the settled path-based IO contract (the
+//! same one the `mcp_io` family follows):
+//!
+//! - Export takes a required `path`, serialises the project's
+//!   cues at the project's frame rate and writes the document.
+//!   It is read-only: no snapshot (no undo step), no status-line
+//!   write — the success sentence travels in the reply's
+//!   `status` field only. A path that cannot be written is
+//!   refused and changes nothing.
+//! - Import reads the file and parses it BEFORE anything
+//!   mutates: an unreadable file or a document in which
+//!   nothing parses is refused with the reader's/parser's own
+//!   error, and the project is untouched. A successful parse
+//!   replaces the whole cue list, re-sorted into the kept
+//!   order (`sort_subtitle_cues`). An import identical to the
+//!   current list reports `changed: false` and spends NO undo
+//!   step; a changed list spends exactly one (`snapshot()`
+//!   before the replace). The reply carries `changed` and the
+//!   cue `count` either way.
+//!
+//! There is deliberately no core op for the bulk replace:
+//! these handlers are the MCP surface, mirroring the GUI
+//! import/export behaviour directly, the way `mcp_io`'s
+//! handlers mirror the editor's save/load.
+
+use crate::editor::EditorCore;
+use crate::mcp::Tool;
+use crate::subtitles::{subtitles_from_srt, subtitles_from_vtt, subtitles_to_srt, subtitles_to_vtt};
+use serde_json::{json, Value};
+use std::path::Path;
+
+// ---------------------------------------------------------------------
+// Argument / filesystem helpers (the `mcp_io` shapes, duplicated
+// the way this tree's MCP modules duplicate their small helpers)
+// ---------------------------------------------------------------------
+
+/// Required `path` argument: missing, non-string or empty all
+/// refuse with the `mcp_io` family's sentence.
+fn sio_arg_path(args: &Value) -> Result<String, String> {
+    args.get("path")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "missing required string argument: path".to_string())
+}
+
+fn sio_ensure_parent(path: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("could not create directory {}: {e}", parent.display()))?;
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// export (read-only)
+// ---------------------------------------------------------------------
+
+/// Shared export body: serialise with `to_document`, write to
+/// `path`, reply with the count and the success sentence. No
+/// snapshot, no `core.status` write — the tool is read-only.
+fn export_document(
+    core: &mut EditorCore,
+    args: &Value,
+    to_document: fn(&crate::model::Project) -> String,
+) -> Result<Value, String> {
+    let path = sio_arg_path(args)?;
+    let path_ref = Path::new(&path);
+    sio_ensure_parent(path_ref)?;
+    let text = to_document(&core.project);
+    std::fs::write(path_ref, &text)
+        .map_err(|e| format!("could not write {}: {e}", path_ref.display()))?;
+    let count = core.project.subtitles.len();
+    Ok(json!({
+        "ok": true,
+        "path": path,
+        "count": count,
+        "status": format!("Exported {count} subtitle cue(s) to {path}"),
+    }))
+}
+
+fn tool_subtitle_export_srt(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    export_document(core, args, subtitles_to_srt)
+}
+
+fn tool_subtitle_export_vtt(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    export_document(core, args, subtitles_to_vtt)
+}
+
+// ---------------------------------------------------------------------
+// import (one undo step when changed, none when identical)
+// ---------------------------------------------------------------------
+
+/// Shared import body: read + parse before any mutation,
+/// re-sort, then the changed/identical fork. `format_label`
+/// is the sentence fragment ("SRT" / "WebVTT") the status
+/// lines use.
+fn import_document(
+    core: &mut EditorCore,
+    args: &Value,
+    from_document: fn(&str, f32) -> Result<Vec<crate::subtitles::SubtitleCue>, String>,
+    format_label: &str,
+) -> Result<Value, String> {
+    let path = sio_arg_path(args)?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("could not read {path}: {e}"))?;
+    // The parse runs before anything mutates: a document in
+    // which nothing parses refuses here, with the parser's
+    // own error, and the project is untouched.
+    let mut cues = from_document(&text, core.project.fps)?;
+    crate::subtitles::sort_subtitle_cues(&mut cues);
+    if cues == core.project.subtitles {
+        core.status =
+            format!("{format_label} import matched the current subtitles; nothing changed.");
+        return Ok(json!({
+            "ok": true,
+            "path": path,
+            "count": cues.len(),
+            "changed": false,
+            "status": core.status,
+        }));
+    }
+    let count = cues.len();
+    core.snapshot();
+    core.project.subtitles = cues;
+    core.status = format!("Imported {count} subtitle(s) from {format_label}.");
+    Ok(json!({
+        "ok": true,
+        "path": path,
+        "count": count,
+        "changed": true,
+        "status": core.status,
+    }))
+}
+
+fn tool_subtitle_import_srt(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    import_document(core, args, subtitles_from_srt, "SRT")
+}
+
+fn tool_subtitle_import_vtt(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    import_document(core, args, subtitles_from_vtt, "WebVTT")
+}
+
+// ---------------------------------------------------------------------
+// registration — NOTE: this module's tools() is NOT yet merged
+// into `mcp::all_tools()`; that wiring (plus the lib.rs module
+// line) is an integrator action filed in the P30 findings.
+// ---------------------------------------------------------------------
+
+pub fn tools() -> Vec<Tool> {
+    vec![
+        Tool {
+            name: "subtitle_export_srt",
+            description: "Write the project's subtitle cues as an SRT (SubRip) document to the file at 'path', timed at the project's frame rate (the Subtitles panel's SRT export). Read-only; no undo step. A path that cannot be written is refused and changes nothing. (Wave P, P30)",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Destination .srt file path" }
+                },
+                "required": ["path"]
+            }),
+            handler: tool_subtitle_export_srt,
+        },
+        Tool {
+            name: "subtitle_import_srt",
+            description: "Replace the project's whole subtitle cue list with the cues parsed from the SRT (SubRip) file at 'path', timed at the project's frame rate (the Subtitles panel's SRT import): timestamps convert to half-open frame ranges and the list is kept sorted. A file that cannot be read, or in which nothing parses, is refused before any change. An import matching the current list changes nothing and spends no undo step; a changed list is one undo step. The reply's 'changed' says which happened. (Wave P, P30)",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Source .srt file path" }
+                },
+                "required": ["path"]
+            }),
+            handler: tool_subtitle_import_srt,
+        },
+        Tool {
+            name: "subtitle_export_vtt",
+            description: "Write the project's subtitle cues as a WebVTT document to the file at 'path', timed at the project's frame rate (the Subtitles panel's WebVTT export). Read-only; no undo step. A path that cannot be written is refused and changes nothing. (Wave P, P30)",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Destination .vtt file path" }
+                },
+                "required": ["path"]
+            }),
+            handler: tool_subtitle_export_vtt,
+        },
+        Tool {
+            name: "subtitle_import_vtt",
+            description: "Replace the project's whole subtitle cue list with the cues parsed from the WebVTT file at 'path', timed at the project's frame rate (the Subtitles panel's WebVTT import): timestamps convert to half-open frame ranges and the list is kept sorted. A file that cannot be read, or with no WEBVTT header, or in which nothing parses, is refused before any change. An import matching the current list changes nothing and spends no undo step; a changed list is one undo step. The reply's 'changed' says which happened. (Wave P, P30)",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Source .vtt file path" }
+                },
+                "required": ["path"]
+            }),
+            handler: tool_subtitle_import_vtt,
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------
+// tests
+// ---------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::subtitles::SubtitleCue;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("styk-mcp-subtitle-io-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn tool_named(name: &str) -> Tool {
+        tools()
+            .into_iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("tool {name} not registered"))
+    }
+
+    fn call(name: &str, core: &mut EditorCore, args: Value) -> Result<Value, String> {
+        let tool = tool_named(name);
+        (tool.handler)(core, &args)
+    }
+
+    /// A core at 24 fps (set explicitly — never the demo
+    /// rate) with two stored cues.
+    fn cued_core() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.fps = 24.0;
+        core.project.subtitles = vec![
+            SubtitleCue {
+                start_frame: 0,
+                end_frame: 24,
+                text: "First line".to_string(),
+            },
+            SubtitleCue {
+                start_frame: 24,
+                end_frame: 48,
+                text: "Second line".to_string(),
+            },
+        ];
+        core
+    }
+
+    #[test]
+    fn export_srt_writes_the_document_and_is_read_only() {
+        let dir = temp_dir("export-srt");
+        let path = dir.join("cues.srt");
+        let mut core = cued_core();
+        let status_before = core.status.clone();
+        let depth_before = core.undo_depth();
+        let reply = call(
+            "subtitle_export_srt",
+            &mut core,
+            json!({ "path": path.to_string_lossy() }),
+        )
+        .expect("export succeeds");
+        assert_eq!(reply["count"], json!(2));
+        assert_eq!(reply["ok"], json!(true));
+        let written = std::fs::read_to_string(&path).expect("the file was written");
+        assert_eq!(written, subtitles_to_srt(&core.project));
+        assert!(written.contains("00:00:00,000 --> 00:00:01,000"));
+        // Read-only: no undo step spent, no status-line write.
+        assert_eq!(core.undo_depth(), depth_before);
+        assert_eq!(core.status, status_before);
+    }
+
+    #[test]
+    fn export_vtt_writes_a_webvtt_document() {
+        let dir = temp_dir("export-vtt");
+        let path = dir.join("cues.vtt");
+        let mut core = cued_core();
+        let reply = call(
+            "subtitle_export_vtt",
+            &mut core,
+            json!({ "path": path.to_string_lossy() }),
+        )
+        .expect("export succeeds");
+        assert_eq!(reply["count"], json!(2));
+        let written = std::fs::read_to_string(&path).expect("the file was written");
+        assert!(written.starts_with("WEBVTT"), "vtt document: {written}");
+        assert_eq!(written, subtitles_to_vtt(&core.project));
+    }
+
+    #[test]
+    fn export_refuses_an_unwritable_path_and_a_missing_path() {
+        let dir = temp_dir("export-refuse");
+        // A path whose parent is a regular file cannot be
+        // created or written.
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, "not a directory").unwrap();
+        let bad = blocker.join("cues.srt");
+        let mut core = cued_core();
+        let depth_before = core.undo_depth();
+        let err = call(
+            "subtitle_export_srt",
+            &mut core,
+            json!({ "path": bad.to_string_lossy() }),
+        )
+        .expect_err("an unwritable path refuses");
+        assert!(err.contains("could not"), "refusal voice: {err}");
+        assert_eq!(core.undo_depth(), depth_before);
+        assert_eq!(core.project.subtitles.len(), 2);
+        // Missing/empty path: the mcp_io family's sentence.
+        let err = call("subtitle_export_srt", &mut core, json!({}))
+            .expect_err("a missing path refuses");
+        assert_eq!(err, "missing required string argument: path");
+        let err = call("subtitle_import_vtt", &mut core, json!({ "path": "" }))
+            .expect_err("an empty path refuses");
+        assert_eq!(err, "missing required string argument: path");
+    }
+
+    #[test]
+    fn import_srt_changes_once_and_matches_for_free() {
+        let dir = temp_dir("import-srt");
+        let path = dir.join("in.srt");
+        std::fs::write(
+            &path,
+            "1\n00:00:01,000 --> 00:00:02,000\nLater cue\n\n\
+             2\n00:00:00,000 --> 00:00:01,000\nEarlier cue\n",
+        )
+        .unwrap();
+        let mut core = EditorCore::new();
+        core.project.fps = 24.0;
+        let depth_before = core.undo_depth();
+        let reply = call(
+            "subtitle_import_srt",
+            &mut core,
+            json!({ "path": path.to_string_lossy() }),
+        )
+        .expect("import succeeds");
+        assert_eq!(reply["changed"], json!(true));
+        assert_eq!(reply["count"], json!(2));
+        // Exactly one undo step for the whole-list replace.
+        assert_eq!(core.undo_depth(), depth_before + 1);
+        // Kept sorted by (start_frame, end_frame).
+        assert_eq!(core.project.subtitles[0].text, "Earlier cue");
+        assert_eq!(core.project.subtitles[1].text, "Later cue");
+        assert_eq!(core.project.subtitles[0].start_frame, 0);
+        assert_eq!(core.project.subtitles[1].start_frame, 24);
+        // The identical import again: changed == false, no
+        // further undo step.
+        let reply = call(
+            "subtitle_import_srt",
+            &mut core,
+            json!({ "path": path.to_string_lossy() }),
+        )
+        .expect("second import succeeds");
+        assert_eq!(reply["changed"], json!(false));
+        assert_eq!(core.undo_depth(), depth_before + 1);
+    }
+
+    #[test]
+    fn import_refusals_change_nothing() {
+        let dir = temp_dir("import-refuse");
+        let mut core = cued_core();
+        let cues_before = core.project.subtitles.clone();
+        let depth_before = core.undo_depth();
+        // Unreadable file.
+        let missing = dir.join("nope.srt");
+        let err = call(
+            "subtitle_import_srt",
+            &mut core,
+            json!({ "path": missing.to_string_lossy() }),
+        )
+        .expect_err("an unreadable file refuses");
+        assert!(err.contains("could not read"), "refusal voice: {err}");
+        // Zero-yield document: parses to nothing, refused
+        // before any mutation with the parser's own error.
+        let junk = dir.join("junk.srt");
+        std::fs::write(&junk, "nothing parseable\n").unwrap();
+        call(
+            "subtitle_import_srt",
+            &mut core,
+            json!({ "path": junk.to_string_lossy() }),
+        )
+        .expect_err("a zero-yield document refuses");
+        // Headerless WebVTT: the one whole-file refusal.
+        let headerless = dir.join("junk.vtt");
+        std::fs::write(
+            &headerless,
+            "00:00:00.000 --> 00:00:01.000\nNo header\n",
+        )
+        .unwrap();
+        call(
+            "subtitle_import_vtt",
+            &mut core,
+            json!({ "path": headerless.to_string_lossy() }),
+        )
+        .expect_err("a headerless WebVTT file refuses");
+        assert_eq!(core.project.subtitles, cues_before);
+        assert_eq!(core.undo_depth(), depth_before);
+    }
+
+    #[test]
+    fn srt_export_then_vtt_import_round_trips() {
+        let dir = temp_dir("cross");
+        let srt_path = dir.join("cues.srt");
+        let vtt_path = dir.join("cues.vtt");
+        let mut core = cued_core();
+        call(
+            "subtitle_export_srt",
+            &mut core,
+            json!({ "path": srt_path.to_string_lossy() }),
+        )
+        .unwrap();
+        call(
+            "subtitle_export_vtt",
+            &mut core,
+            json!({ "path": vtt_path.to_string_lossy() }),
+        )
+        .unwrap();
+        // Importing either document back into the same core
+        // is a no-change import: frame-exact at 24 fps.
+        for (tool, path) in [
+            ("subtitle_import_srt", &srt_path),
+            ("subtitle_import_vtt", &vtt_path),
+        ] {
+            let reply = call(tool, &mut core, json!({ "path": path.to_string_lossy() }))
+                .expect("round-trip import succeeds");
+            assert_eq!(reply["changed"], json!(false), "{tool} round trip");
+            assert_eq!(reply["count"], json!(2));
+        }
+    }
+}

@@ -14,31 +14,33 @@ Both transports route through the same JSON-RPC router
 (`McpServer::handle` / `McpServer::handle_on` in `src/mcp.rs`) and
 the same registry (`all_tools()` in `src/mcp.rs`). A tool behaves
 identically on both; only the session it edits differs — with
-one named exception: the 35 `shell_*` tools act on the GUI
-shell; 31 of them take effect only through live control (on
+one named exception: the 38 `shell_*` tools act on the GUI
+shell; 34 of them take effect only through live control (on
 stdio they answer an error result), and the 4 transport tools
 execute on stdio against its own core.
 
-## Tool count — 370, and how to check it
+## Tool count — 381, and how to check it
 
-At the time of writing the registry holds **370 tools**:
+At the time of writing the registry holds **381 tools**:
 
 | Source | Count | Where they are defined |
 |---|---|---|
 | Built-ins | 44 | `fn tool_*` constructors assembled in `all_tools()`, `src/mcp.rs` |
-| Editing registry | 317 | `pub fn tools()`, `src/mcp_tools.rs` |
+| Editing registry | 319 | `pub fn tools()`, `src/mcp_tools.rs` |
 | File IO / export | 9 | `pub fn tools()`, `src/mcp_io.rs` |
-| **Total** | **370** | `all_tools()` = built-ins, then `mcp_tools`, then `mcp_io` |
+| Subtitle cues and style | 5 | `pub fn tools()`, `src/mcp_subtitle_tools.rs` |
+| Subtitle file IO | 4 | `pub fn tools()`, `src/mcp_subtitle_io.rs` |
+| **Total** | **381** | `all_tools()` = built-ins, then `mcp_tools`, then `mcp_io`, then `mcp_subtitle_io`, then `mcp_subtitle_tools` |
 
 Runtime cross-check: call the `server_info` tool — it returns
 `all_tools().len()` — or count the entries of a `tools/list`
 response. Source cross-check: `scripts/mcp_census.py` re-derives
-the whole surface from the three source files and fails on any
+the whole surface from the five source files and fails on any
 duplicate name, unregistered handler or orphan handler; the
 pre-commit gate (check 9 of `scripts/phase_j_checks.py`) also
 verifies that every registered tool is named in the catalogue
 below and that the catalogue names no tool that does not exist.
-35 of the registry tools are the **shell family** (`shell_*`): they drive the running editor's GUI shell — see the shell catalogue table below.
+38 of the registry tools are the **shell family** (`shell_*`): they drive the running editor's GUI shell — see the shell catalogue table below.
 
 The catalogue lists every tool by name, in registry order.
 
@@ -376,7 +378,7 @@ true` with the reason as text and leaves the session usable.
 | `audio_crossfade` | Crossfade an audio clip into the following one (the audio panel's Crossfade): clip 'index' (0-based; the legacy name 'clip' is also accepted) blends with the following clip. Errors when the clip has no following clip or a file cannot be read. | — | `index`, `clip` |
 | `audio_mixdown` | Mix all audio clips down to a single WAV file (out/mixdown.wav; the audio panel's Mixdown button runs the same operation). The project's clips are left in place — the mix is a rendered file, not a new clip. Errors when the project has no audio clips or the mix fails. | — | — |
 | `particle_add_event` | Add a particle event at a stage position on a frame (the Particles panel's add): 0-based 'frame', 'x'/'y' in stage coordinates. The event takes the panel's default kind and the selected figure's colour. One undo step. | `frame`, `x`, `y` | — |
-| `clear_particles` | Clear ALL particle events and FX clips (the command palette's Clear particles / the panel Clear). One undo step. | — | — |
+| `clear_particles` | Clear ALL particle events and FX clips (the command palette's Clear particles and FX). One undo step. | — | — |
 | `fig3_library_list` | List the display names of every figure in the 3D library (the 3D panel's library), sorted; empty when the library holds nothing readable. | — | — |
 | `fig3_load_from_library` | Load a 3D library figure by name (the 3D panel's library Load), replacing the current 3D session or starting one; an active session's camera is kept. Errors when no library figure has that name. | `name` | — |
 | `fig3_save_to_library` | Save the current 3D session's figure and pose to the 3D library under the figure's name (the 3D panel's Save to library). Errors when no 3D session is active (see fig3_enter) or the write fails. | — | — |
@@ -393,14 +395,14 @@ true` with the reason as text and leaves the session usable.
 | `goto_next_key` | Move the playhead to the next key strictly after the current frame (the transport's Next key button, pb-next-key): the keys are the sorted union of the camera keys and every graph channel's keys — not any one figure's pose keys (for those, goto_next_keyframe). Like the button, the jump only moves the playhead — playback state is untouched. An error when no key follows (the button renders inert in that state). | — | — |
 | `goto_prev_key` | Move the playhead to the previous key strictly before the current frame (the transport's Prev key button, pb-prev-key): the keys are the sorted union of the camera keys and every graph channel's keys — not any one figure's pose keys (for those, goto_prev_keyframe). Like the button, the jump only moves the playhead — playback state is untouched. An error when no key precedes (the button renders inert in that state). | — | — |
 
-### Editing registry (317, `src/mcp_tools.rs`)
+### Editing registry (319, `src/mcp_tools.rs`)
 
 | Tool | Purpose | Required | Optional |
 |---|---|---|---|
 | `new_project` | Replace the session project with a fresh one (a single default humanoid figure, one frame). | — | `name`, `fps`, `width`, `height` |
 | `add_figure` | Add a figure of the given kind to the project; returns its index. | `kind` | `name`, `color` |
 | `list_figures` | List all figures with index, name, colour, layer state and node count. | — | — |
-| `figure_set_color` | Set a figure's colour (0xRRGGBB) — the colour its segments draw in unless a segment carries its own colour override. | `figure`, `color` | — |
+| `figure_set_color` | Set a figure's colour (0xRRGGBB) — the colour its segments draw in unless a segment carries its own colour override. A direct field write like the inspector's colour swatches — not an undo step; a real change marks the project dirty. | `figure`, `color` | — |
 | `figure_duplicate` | Duplicate a figure: the copy (same definition, colour and per-frame poses) is inserted right after the original and becomes the selected figure. Returns the new figure index. | `figure` | — |
 | `get_project_stats` | Project summary counts: figures, frames, fps, duration in seconds, FX/audio clips, sprites, texts, weather kind (or null), movieclips and graph channels. | — | — |
 | `add_frame` | Append a copy of the current frame after it and move to it. On a zero-frame project it recovers by creating the first frame instead of failing. | — | — |
@@ -571,13 +573,13 @@ true` with the reason as text and leaves the session usable.
 | `fx_set_angle` | Set an FX clip's emission angle in degrees — the value `fx_list` reports; the directed kinds (beam, trail, fountain) emit along it. One undo step. | `index`, `angle` | — |
 | `fx_set_length` | Set an FX clip's length in stage units — beam reach / trail span (the value `add_fx_clip`'s `length` sets at creation and `fx_list` reports). One undo step. | `index`, `length` | — |
 | `fx_preset_list` | List the FX clip presets saved in ./fx-presets/ by name, sorted — the read side of fx_preset_save / fx_preset_add (the panel's preset list). Read-only. | — | — |
-| `particle_list_events` | List every particle event in the project: index, frame, stage position, kind, colour and anchor (figure/node) — the read the Particles panel rows show. Read-only. | — | — |
+| `particle_list_events` | List every particle event in the project: index, frame, stage position, kind, colour, seed and anchor (figure/node) — the read the Particles panel rows show. Read-only. | — | — |
 | `particle_delete_event` | Delete the particle event at 'index' (the Particles panel's Delete). Events after it shift down one index — re-read with particle_list_events. One undo step. | `index` | — |
 | `particle_set_frame` | Move the particle event at 'index' to 0-based 'frame', clamped to the project's last frame (the panel's frame stepper and To playhead). The reply reports the frame the event actually landed on. One undo step. | `index`, `frame` | — |
 | `particle_nudge_frame` | Move the particle event at 'index' by signed 'delta' frames, clamped at both ends of the timeline. The reply reports the frame the event actually landed on. One undo step. | `index`, `delta` | — |
 | `particle_set_position` | Move the particle event at 'index' to the stage point (x, y) — the point its effect renders from, independent of its anchor (the panel's nudge pad writes this in 4-unit steps). One undo step. | `index`, `x`, `y` | — |
 | `particle_set_anchor` | Anchor the particle event at 'index' to figure 'figure', joint 'node' (the panel's Anchor to figure / Anchor to joint), or clear the anchor back to a free stage event by passing 'figure' as null or omitting it (the panel's Clear anchor). The figure/node are validated before anything changes. One undo step. | `index` | `figure`, `node` |
-| `particle_add_anchored` | Add a particle event anchored to the SELECTED figure's selected joint at the current frame (the panel's anchored add). 'kind' is a particle kind name (default burst). Refuses when the selection cannot anchor an event. One undo step. | — | `kind` |
+| `particle_add_anchored` | Add a particle event anchored to the SELECTED figure's selected joint at the current frame (the command palette's Add particle: Burst / Sparkle). 'kind' is a particle kind name (default burst). Refuses when the selection cannot anchor an event. One undo step. | — | `kind` |
 | `particle_set_seed` | Set a particle event's random seed — the value `particle_list_events` reports; the same kind with a different seed draws a different particle pattern. One undo step. | `index`, `seed` | — |
 | `draw_spray` | Append a spray-mark stroke on a frame (the Spray brush's stroke kind — draw_stroke cannot create one): dots are scattered around 'points' within 'radius'. 'frame' and 'points' are required; color (0xRRGGBB), width, radius, opacity and seed default from the active brush preset. One undo step. | `frame`, `points` | `color`, `width`, `radius`, `opacity`, `seed` |
 | `get_stroke_style` | Read one stroke's style back by its project-wide index (see list_strokes): colour, width, per-point widths, fill, spray mark, opacity and scatter — the read half of set_stroke_style. Read-only. | `index` | — |
@@ -633,7 +635,7 @@ true` with the reason as text and leaves the session usable.
 | `figure_library_insert` | Insert a figure from the 2D figure library into the project (the library panel's Insert). Choose the entry with 'index' or 'name'; with neither, the session's current library index is used. The inserted figure gets a palette colour (the library stores the definition — including its node colours and styles — not the instance colour) and becomes the selection. One undo step. | — | `index`, `name` |
 | `figure_library_cycle` | Cycle the 2D figure library selection to the next entry (the library panel's cycle). Selection only — inserts nothing. Errors when the library is empty. | — | — |
 | `figure_library_rename` | Rename a saved figure-library entry (the library panel's per-row Rename): the backing file in ./library is renamed first, then the entry takes the new name. 'new_name' is sanitised to a file stem (trimmed; spaces and path separators become dashes; lowercased). Refuses built-in entries, an empty sanitised name, a name another entry already owns, and a target file that already exists in ./library — including one no loaded entry owns; a failed file rename is reported and the entry keeps its old name. Renaming to the entry's own name succeeds with renamed=false. A file operation, not an undo step. | `index`, `new_name` | — |
-| `fig3_set_camera` | — / `distance`, `target`, `fov_deg` | `yaw`, `pitch`, `distance`, `target`, `fov_deg` | ✗ → §4 |
+| `fig3_set_camera` | Set the 3D session camera absolutely: any of 'yaw', 'pitch' (clamped to +-89.9), 'distance' (clamped to 40..=4000), 'target' [x, y, z] and 'fov_deg'; omitted fields keep their values. At least one field is required. The absolute complement of fig3_orbit/fig3_camera_zoom. No undo step (session camera, like orbit/zoom). Requires an active 3D session. | — | `yaw`, `pitch`, `distance`, `target`, `fov_deg` |
 | `fig3_set_rotation` | Set a 3D joint's Euler rotation absolutely, in degrees: 'joint' (defaults to the selected joint) and any of 'x', 'y', 'z'; omitted axes keep their values. At least one axis is required. The absolute complement of fig3_rotate. No undo step (session pose). Requires an active 3D session. | — | `joint`, `x`, `y`, `z` |
 | `fig3_set_root` | Set the 3D pose's root position from 'position' [x, y, z] — the value fig3_get reports as pose_root; bakes project from the root. No undo step (session pose). Requires an active 3D session. | `position` | — |
 | `fig3_rename` | Rename the 3D session figure — the name a later fig3_save_to_library files it under. Trimmed; a blank name is refused. A session field write, not an undo step. Requires an active 3D session. | `name` | — |
@@ -673,12 +675,14 @@ true` with the reason as text and leaves the session usable.
 | `sprite_add` | Place a new sprite instance of the image asset at 'asset': one key at frame 0 puts it at the stage centre, scale 1, no rotation. Returns the new instance's index. One undo step. | `asset` | — |
 | `sprite_remove` | Remove the sprite instance at 'sprite'. Later instances shift down one index; nothing references an instance by index, so no remapping is owed. One undo step. | `sprite` | — |
 | `sprite_set_key` | Write sprite 'sprite''s transform key at 'frame' (0-based, a whole frame number; clamped to the project's last frame): insert a new key or replace the one there. 'x', 'y', 'rotation' (degrees) and 'scale' are each optional — an omitted field takes the value the sprite samples at that frame (or x 0, y 0, rotation 0, scale 1 for a sprite with no keys). 'scale' must be greater than 0. One undo step. | `sprite`, `frame` | `x`, `y`, `scale`, `rotation` |
-| `sprite_delete_key` | Delete sprite 'sprite''s key at 'frame' (0-based, a whole frame number; clamped to the project's last frame). A frame with no key is refused before any change, so no undo step is spent. Deleting the last remaining key is allowed — the instance then draws nothing. One undo step on success. | `sprite`, `frame` | — |
+| `sprite_delete_key` | Delete sprite 'sprite''s key at 'frame' (0-based, a whole frame number). A frame at/past the project's frame count is refused, never clamped onto the last frame; a frame with no key is refused before any change, so no undo step is spent. Deleting the last remaining key is allowed — the instance then draws nothing. A stale key past the end is deleted by exact frame via sprite_delete_key_at. One undo step on success. | `sprite`, `frame` | — |
+| `sprite_move_key` | Move (retime) sprite 'sprite''s transform key from 'from_frame' to 'to_frame' by exact frame. The source frame is addressed exactly (never clamped), so a key left past the timeline end by a shortened timeline can be rescued back into range; the destination must be inside the timeline — a past-the-end destination is refused, never clamped. The stored transform travels verbatim (including a scale of 0 or less, which `sprite_set_key` refuses to write) and a key already at the destination is replaced. Moving a key onto its own frame changes nothing and spends no undo step; a real move is one undo step. (Wave P, P38) | `sprite`, `from_frame`, `to_frame` | — |
+| `sprite_delete_key_at` | Delete sprite 'sprite''s transform key at exactly 'frame': unlike `sprite_delete_key`, whose frame must be inside the timeline (a frame at/past the frame count is refused there, never clamped onto the last frame), this deletes the key at the frame named — including a stale key left past the timeline end by a shortened timeline — and never a different frame's key. A frame holding no key is refused before any change, so no undo step is spent. One undo step on success. (Wave P, P38) | `sprite`, `frame` | — |
 | `sprite_sample` | Read sprite 'sprite''s sampled transform at 'frame' (fractional frames allowed): the interpolated key between its authored keys, clamped outside the keyed range — the transform the stage and exports draw. Read-only; no undo step. | `sprite`, `frame` | — |
 
 ### Shell control — live endpoint only (38, `src/shell_tools_*.rs`, registered in `src/mcp_tools.rs`)
 
-The shell family drives the running editor's window itself — see "Shell control — driving the window itself" below for how it works and the security posture. Thirty-one of the thirty-five are live-only in effect: registered on both transports, but on stdio each answers an `isError` result saying it needs the live editor. The four transport tools are the exception — playback state is editor-core state, so they execute on stdio too, against the stdio server's own core (nothing advances it there).
+The shell family drives the running editor's window itself — see "Shell control — driving the window itself" below for how it works and the security posture. Thirty-four of the thirty-eight are live-only in effect: registered on both transports, but on stdio each answers an `isError` result saying it needs the live editor. The four transport tools are the exception — playback state is editor-core state, so they execute on stdio too, against the stdio server's own core (nothing advances it there).
 
 | Tool | Purpose | Required | Optional |
 |---|---|---|---|
@@ -735,9 +739,23 @@ The shell family drives the running editor's window itself — see "Shell contro
 | `render_contact_sheet` | Render a contact sheet (grid of frame thumbnails) as a PNG file at 'path'. Frame selection: 'frames' is an optional array of frame indices (out-of-range indices are clamped and reported in a note); or pass 'from'/'to' (0-based, inclusive, together) to draw the picks from that window; with neither, the default is up to 12 evenly spaced frames across the timeline — NOT one tile per frame (the export panel's sheet differs: it tiles every frame). 'frames' and 'from'/'to' together are an error. 'cols' is the grid column count (default 4, at least 1); 'thumb_width' is each thumbnail's width in pixels (default 240, 16..=1024). Returns {path, width, height, frames, cols, thumb_width}. Parent directories are created. | `path` | `frames`, `from`, `to`, `cols`, `thumb_width` |
 | `project_summary` | Summarise the current project: name, figure names, frame count, fps, duration in seconds, stage size, whether it has audio, its weather setting, and the number of camera keys. | — | — |
 
+### Subtitles (9, `src/mcp_subtitle_tools.rs` + `src/mcp_subtitle_io.rs`)
+
+| Tool | Purpose | Required | Optional |
+|---|---|---|---|
+| `subtitle_list` | List the project's subtitle cues in their kept order (sorted by start frame, then end frame): each cue's index in the list, its half-open frame range [start_frame, end_frame) and its text. Indices are 0-based, the convention of every index in this registry. Read-only. (Wave P, P29) | — | — |
+| `subtitle_add` | Add a subtitle cue over the half-open frame range [start_frame, end_frame) with the given text: the cue shows at start_frame and is gone at end_frame, so end_frame must be after start_frame and the text must not be empty. The cue list is kept sorted by (start_frame, end_frame) and the reply's 'index' is the new cue's position in it. Frames are 0-based and are not clamped to the timeline. Refused cues (bad range, empty text) change nothing. One undo step. (Wave P, P29) | `start_frame`, `end_frame`, `text` | — |
+| `subtitle_update` | Replace the subtitle cue at 'index' (its index in subtitle_list) with a new half-open frame range [start_frame, end_frame) and text — a full replace, all four arguments required. The list is re-sorted afterwards and the reply's 'index' is the cue's position in the list now, which may differ from the index addressed. Refused updates (no such cue, bad range, empty text) change nothing. One undo step. (Wave P, P29) | `index`, `start_frame`, `end_frame`, `text` | — |
+| `subtitle_delete` | Delete the subtitle cue at 'index' (its index in subtitle_list). Refused (no such cue) changes nothing. One undo step. (Wave P, P29) | `index` | — |
+| `subtitle_set_style` | Replace the project's subtitle style in one call — a full replace, all four arguments required: 'position' ("bottom" or "top", the stage edge the cue block is anchored to), 'font_scale' (multiplier on the renderers' house subtitle size; a finite value is clamped to 0.5-3.0, a non-finite one is refused), 'text_color' and 'box_color' (packed 0xRRGGBB integers: the cue text colour and its backing/outline colour). The reply's 'style' is the style as stored, after clamping. Refused calls (unknown position, missing or mistyped arguments) change nothing. One undo step. (Wave P, P29) | `position`, `font_scale`, `text_color`, `box_color` | — |
+| `subtitle_export_srt` | Write the project's subtitle cues as an SRT (SubRip) document to the file at 'path', timed at the project's frame rate (the Subtitles panel's SRT export). Read-only; no undo step. A path that cannot be written is refused and changes nothing. (Wave P, P30) | `path` | — |
+| `subtitle_import_srt` | Replace the project's whole subtitle cue list with the cues parsed from the SRT (SubRip) file at 'path', timed at the project's frame rate (the Subtitles panel's SRT import): timestamps convert to half-open frame ranges and the list is kept sorted. A file that cannot be read, or in which nothing parses, is refused before any change. An import matching the current list changes nothing and spends no undo step; a changed list is one undo step. The reply's 'changed' says which happened. (Wave P, P30) | `path` | — |
+| `subtitle_export_vtt` | Write the project's subtitle cues as a WebVTT document to the file at 'path', timed at the project's frame rate (the Subtitles panel's WebVTT export). Read-only; no undo step. A path that cannot be written is refused and changes nothing. (Wave P, P30) | `path` | — |
+| `subtitle_import_vtt` | Replace the project's whole subtitle cue list with the cues parsed from the WebVTT file at 'path', timed at the project's frame rate (the Subtitles panel's WebVTT import): timestamps convert to half-open frame ranges and the list is kept sorted. A file that cannot be read, or with no WEBVTT header, or in which nothing parses, is refused before any change. An import matching the current list changes nothing and spends no undo step; a changed list is one undo step. The reply's 'changed' says which happened. (Wave P, P30) | `path` | — |
+
 ## Shell control — driving the window itself
 
-The shell tools (`shell_*`, 35 in the catalogue below) operate
+The shell tools (`shell_*`, 38 in the catalogue below) operate
 the running editor's GUI shell: its workspace, its transport
 as the user sees it, the view layer, the panels' selections,
 the theme and settings, and the File menu's project actions.

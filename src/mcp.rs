@@ -75,7 +75,8 @@ pub struct Tool {
 
 /// The full tool registry: this module's built-ins first, then the
 /// editing tools from `mcp_tools` and the IO/export tools from
-/// `mcp_io`.
+/// `mcp_io`, then the subtitle tools from `mcp_subtitle_io` and
+/// `mcp_subtitle_tools` (Wave P, P29/P30).
 pub fn all_tools() -> Vec<Tool> {
     let mut tools = vec![
         tool_server_info(),
@@ -130,6 +131,8 @@ pub fn all_tools() -> Vec<Tool> {
     ];
     tools.extend(crate::mcp_tools::tools());
     tools.extend(crate::mcp_io::tools());
+    tools.extend(crate::mcp_subtitle_io::tools());
+    tools.extend(crate::mcp_subtitle_tools::tools());
     tools
 }
 
@@ -2459,6 +2462,59 @@ mod tests {
         assert_eq!(resp["id"], 3);
         let message = resp["error"]["message"].as_str().unwrap();
         assert!(message.contains("does_not_exist"));
+    }
+
+    #[test]
+    fn unknown_tool_contract_exact_message_near_miss_and_empty() {
+        // Wave P (P40): the unknown-tool contract, pinned
+        // at full strength. The test above proves the code
+        // and the no-result shape for one invented name and
+        // only that the message CONTAINS the name; the
+        // contract is stricter — the message is byte-exactly
+        // `unknown tool: {name}` — and it must hold for the
+        // names most likely to be misrouted: near-misses of
+        // real tools and the empty name.
+        let mut server = McpServer::new();
+        // Baseline: `set_frame` is real and dispatchable,
+        // so its near-misses refusing below is meaningful
+        // (an exact-match miss, not a broken tool).
+        let (_out, is_error) = call_payload(&mut server, "set_frame", json!({ "frame": 0 }));
+        assert!(!is_error, "the real set_frame must dispatch");
+        for name in [
+            "does_not_exist", // plainly unknown
+            "set_frames",     // near-miss: extra suffix
+            "set_frame2",     // near-miss: digit suffix
+            "setframe",       // near-miss: missing separator
+            "Set_frame",      // near-miss: case differs
+            "set_frame ",     // near-miss: trailing space
+            "new_project2",   // near-miss of a destructive no-arg tool
+            "",               // empty: well-typed but unknown
+        ] {
+            let before = state_witness(&server);
+            let resp = server
+                .handle(&request(
+                    7,
+                    "tools/call",
+                    json!({ "name": name, "arguments": {} }),
+                ))
+                .expect("tools/call must be answered");
+            assert!(
+                resp.get("result").is_none(),
+                "{name:?} must be a protocol error, never an isError result: {resp}"
+            );
+            assert_eq!(resp["error"]["code"], -32602, "{name:?}: {resp}");
+            assert_eq!(resp["id"], 7, "{name:?}: {resp}");
+            assert_eq!(
+                resp["error"]["message"].as_str().unwrap(),
+                format!("unknown tool: {name}"),
+                "{name:?}: the message is byte-exactly `unknown tool: {{name}}`"
+            );
+            assert_eq!(
+                state_witness(&server),
+                before,
+                "{name:?} must not dispatch anywhere: state must not move"
+            );
+        }
     }
 
     #[test]

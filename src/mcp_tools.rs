@@ -308,6 +308,9 @@ fn tool_new_project(core: &mut EditorCore, args: &Value) -> Result<Value, String
         texts: Vec::new(),
         weather: None,
         head_ring_scale: 1.0,
+        subtitles: Vec::new(),
+        subtitle_style: Default::default(),
+        format_version: crate::model::FORMAT_VERSION_CURRENT,
     };
     core.current = 0;
     core.selected_figure = 0;
@@ -3293,7 +3296,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "figure_set_color",
-            description: "Set a figure's colour (0xRRGGBB) — the colour its segments draw in unless a segment carries its own colour override.",
+            description: "Set a figure's colour (0xRRGGBB) — the colour its segments draw in unless a segment carries its own colour override. A direct field write like the inspector's colour swatches — not an undo step; a real change marks the project dirty.",
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
@@ -5778,7 +5781,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "sprite_delete_key",
-            description: "Delete sprite 'sprite''s key at 'frame' (0-based, a whole frame number; clamped to the project's last frame). A frame with no key is refused before any change, so no undo step is spent. Deleting the last remaining key is allowed — the instance then draws nothing. One undo step on success.",
+            description: "Delete sprite 'sprite''s key at 'frame' (0-based, a whole frame number). A frame at/past the project's frame count is refused, never clamped onto the last frame; a frame with no key is refused before any change, so no undo step is spent. Deleting the last remaining key is allowed — the instance then draws nothing. A stale key past the end is deleted by exact frame via sprite_delete_key_at. One undo step on success.",
             schema: obj_schema(
                 json!({
                     "sprite": { "type": "integer" },
@@ -5787,6 +5790,31 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["sprite", "frame"],
             ),
             handler: crate::media::tool_sprite_delete_key,
+        },
+        Tool {
+            name: "sprite_move_key",
+            description: "Move (retime) sprite 'sprite''s transform key from 'from_frame' to 'to_frame' by EXACT frame. The source frame is addressed exactly (never clamped), so a key left past the timeline end by a shortened timeline can be rescued back into range; the destination must be inside the timeline — a past-the-end destination is refused, never clamped. The stored transform travels verbatim (including a scale of 0 or less, which sprite_set_key refuses to write) and a key already at the destination is replaced. Moving a key onto its own frame changes nothing and spends no undo step; a real move is one undo step.",
+            schema: obj_schema(
+                json!({
+                    "sprite": { "type": "integer" },
+                    "from_frame": { "type": "integer" },
+                    "to_frame": { "type": "integer" }
+                }),
+                &["sprite", "from_frame", "to_frame"],
+            ),
+            handler: crate::mcp_sprite_tools::tool_sprite_move_key,
+        },
+        Tool {
+            name: "sprite_delete_key_at",
+            description: "Delete sprite 'sprite''s transform key at EXACTLY 'frame': unlike sprite_delete_key, whose frame must be inside the timeline (a frame at/past the frame count is refused there, never clamped onto the last frame), this deletes the key at the frame named — including a stale key left past the timeline end by a shortened timeline — and never a different frame's key. A frame holding no key is refused before any change, so no undo step is spent. One undo step on success.",
+            schema: obj_schema(
+                json!({
+                    "sprite": { "type": "integer" },
+                    "frame": { "type": "integer" }
+                }),
+                &["sprite", "frame"],
+            ),
+            handler: crate::mcp_sprite_tools::tool_sprite_delete_key_at,
         },
         // ---------------------------------------------------------
         // Wave 14 — parity fill (Squad A + clip media + transport):
@@ -6583,12 +6611,14 @@ mod tests {
         // +4 in the Focused Wave (figure_library_rename
         // plus the shell_select_graph_channel,
         // shell_set_timeline and shell_get_recent_colours
-        // stubs).
-        assert_eq!(tools.len(), 317);
+        // stubs); +2 in Wave P (sprite_move_key and
+        // sprite_delete_key_at, spliced from the TOOL
+        // ENTRY SPECs in src/mcp_sprite_tools.rs).
+        assert_eq!(tools.len(), 319);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 317, "tool names must be unique");
+        assert_eq!(names.len(), 319, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }

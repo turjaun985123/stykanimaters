@@ -16,7 +16,7 @@ Answers, from source alone, three questions about the MCP
      map (stdio binary, live HTTP through the GUI poll loop,
      and the test suites that drive the real dispatch).
 
-The three tool families, in `all_tools()` composition order
+The five tool families, in `all_tools()` composition order
 (src/mcp.rs `all_tools`):
 
   - builtin  — the constructors `fn tool_*() -> Tool` in
@@ -41,6 +41,30 @@ The three tool families, in `all_tools()` composition order
   - io       — the `Tool { ... }` literals in
                `pub fn tools()` in src/mcp_io.rs; handlers
                likewise named, same file (all 9 today).
+  - subtitle_io — the `Tool { ... }` literals in
+               `pub fn tools()` in src/mcp_subtitle_io.rs
+               (Wave P, P30: the SRT/WebVTT import/export
+               quartet); handlers likewise named, same
+               file (all 4).
+  - subtitle — the `Tool { ... }` literals in
+               `pub fn tools()` in
+               src/mcp_subtitle_tools.rs (Wave P, P29:
+               cue list/add/update/delete + set_style);
+               handlers likewise named, same file
+               (all 5).
+
+  Wave Q extension (P35 IA-2 discharged here): until
+  this wave the census read only the first three
+  families, so the two subtitle modules were invisible
+  to it — it printed 370 while `all_tools()` assembled
+  379. The sprite pair (Wave P, P38) takes the older
+  domain-file path instead: src/mcp_sprite_tools.rs
+  holds only the handlers, and their `Tool` literals
+  are spliced into `mcp_tools::tools()` (P38 IA-2), so
+  they count as registry (317 -> 319) the moment the
+  splice lands; before it, they sit on the
+  unregistered-handlers checklist below, where this
+  census has always kept splice-pending handlers.
 
 The report prints per-family subtotals — the text
 `[family counts]` block and the JSON `totals` object —
@@ -161,7 +185,7 @@ import os
 import re
 import sys
 
-FAMILY_ORDER = ("builtin", "registry", "io")
+FAMILY_ORDER = ("builtin", "registry", "io", "subtitle_io", "subtitle")
 
 
 # ---------------------------------------------------------------------
@@ -355,11 +379,19 @@ def extract_builtins(mcp: Source) -> tuple[list[dict], list[str]]:
     checks.append(
         f"builtin: {len(ctors)} constructors == {len(vec_calls)} all_tools() vec entries (set-equal)"
     )
-    # Composition: the two extends must still be there.
-    for ext in ("crate::mcp_tools::tools()", "crate::mcp_io::tools()"):
+    # Composition: the four extends must still be there.
+    for ext in (
+        "crate::mcp_tools::tools()",
+        "crate::mcp_io::tools()",
+        "crate::mcp_subtitle_io::tools()",
+        "crate::mcp_subtitle_tools::tools()",
+    ):
         if ext not in body_masked:
             fail(f"builtin verification failed: all_tools() no longer extends {ext}")
-    checks.append("builtin: all_tools() extends mcp_tools::tools() + mcp_io::tools()")
+    checks.append(
+        "builtin: all_tools() extends mcp_tools::tools() + mcp_io::tools() "
+        "+ mcp_subtitle_io::tools() + mcp_subtitle_tools::tools()"
+    )
 
     tools = []
     for fn_name, (start, end, fn_line) in sorted(ctors.items()):
@@ -808,8 +840,16 @@ def build(root: str) -> dict:
     checks += c
     io_tools, c = extract_registry_file(sources["src/mcp_io.rs"], "io", sources)
     checks += c
+    subtitle_io, c = extract_registry_file(
+        sources["src/mcp_subtitle_io.rs"], "subtitle_io", sources
+    )
+    checks += c
+    subtitle, c = extract_registry_file(
+        sources["src/mcp_subtitle_tools.rs"], "subtitle", sources
+    )
+    checks += c
 
-    tools = builtins + registry + io_tools
+    tools = builtins + registry + io_tools + subtitle_io + subtitle
     seen: dict[str, str] = {}
     for t in tools:
         if t["name"] in seen:
@@ -830,7 +870,7 @@ def build(root: str) -> dict:
 
     registered_defs = {
         (t["handler"]["file"], t["handler"]["symbol"])
-        for t in registry + io_tools
+        for t in registry + io_tools + subtitle_io + subtitle
         if not t["handler"]["symbol"].startswith("closure")
     }
     unregistered = extract_unregistered(sources, registered_defs)
@@ -848,6 +888,8 @@ def build(root: str) -> dict:
             "builtin": len(by_family["builtin"]),
             "registry": len(by_family["registry"]),
             "io": len(by_family["io"]),
+            "subtitle_io": len(by_family["subtitle_io"]),
+            "subtitle": len(by_family["subtitle"]),
             "total": len(tools),
         },
         "tools_by_family": by_family,
@@ -866,7 +908,8 @@ def render_text(data: dict) -> str:
     lines.append("MCP surface census — StykAnimate-RS")
     lines.append(
         f"Totals: {t['total']} callable tools "
-        f"(builtin {t['builtin']} + registry {t['registry']} + io {t['io']})"
+        f"(builtin {t['builtin']} + registry {t['registry']} + io {t['io']} "
+        f"+ subtitle_io {t['subtitle_io']} + subtitle {t['subtitle']})"
     )
     # One greppable line per family, so a close-out can
     # lift a subtotal without parsing the combined line.

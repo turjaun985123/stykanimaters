@@ -396,18 +396,30 @@ fn tool_export_file(core: &mut EditorCore, args: &Value) -> Result<Value, String
         let to = arg_usize(args, "to")?;
         let path_ref = Path::new(&path);
         ensure_parent(path_ref)?;
+        let mut missing_audio: Vec<String> = Vec::new();
         if format == "mp4_range" {
-            crate::export::export_mp4_range(&core.project, from, to, path_ref)
+            let outcome = crate::export::export_mp4_range(&core.project, from, to, path_ref)
+                .map_err(|e| format!("render to {path} failed: {e}"))?;
+            missing_audio = outcome.missing_audio;
         } else {
             crate::export::export_webm_range(&core.project, from, to, path_ref)
+                .map_err(|e| format!("render to {path} failed: {e}"))?;
         }
-        .map_err(|e| format!("render to {path} failed: {e}"))?;
-        return Ok(json!({
+        let mut out = json!({
             "path": path,
             "format": format,
             "from": from,
             "to": to,
-        }));
+        });
+        // Wave P (P15): an MP4 range export that had to
+        // leave out clips whose files are missing names
+        // them here; with every clip present (and for
+        // WebM, which carries no audio) the reply keeps
+        // the shape it always had.
+        if !missing_audio.is_empty() {
+            out["missing_audio"] = json!(missing_audio);
+        }
+        return Ok(out);
     }
     let bytes: Vec<u8> = match format {
         "piv2" => crate::pivot::export_piv_v2(&core.project),
@@ -555,6 +567,10 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
         ));
     }
     let path_ref = Path::new(&path);
+    // Wave P (P15): the MP4 arm fills this with the clips
+    // the export had to leave out (missing files); it
+    // surfaces as a reply field below, only when non-empty.
+    let mut mp4_missing_audio: Vec<String> = Vec::new();
     let frames = match format {
         "png" => {
             let frame = arg_frame(core, args)?;
@@ -580,7 +596,10 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
         }
         "mp4" => {
             ensure_parent(path_ref)?;
-            crate::export::export_mp4(project, path_ref)
+            crate::export::export_mp4(project, path_ref).map(|outcome| {
+                mp4_missing_audio = outcome.missing_audio;
+                outcome.frames
+            })
         }
         "webm" => {
             ensure_parent(path_ref)?;
@@ -651,6 +670,14 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     if let Some((f, t)) = range {
         out["from"] = json!(f);
         out["to"] = json!(t);
+    }
+    // Wave P (P15): the missing-audio list rides along on
+    // the same discipline — present only when the MP4
+    // export actually had to skip clips, so an export
+    // with all its audio present replies exactly as
+    // before.
+    if !mp4_missing_audio.is_empty() {
+        out["missing_audio"] = json!(mp4_missing_audio);
     }
     Ok(out)
 }
@@ -797,6 +824,12 @@ struct BundleMember {
     name: &'static str,
     target: String,
     result: Result<usize, String>,
+    /// Clips the member's export had to leave out because
+    /// their files are missing (Wave P, P15). Only the MP4
+    /// member can fill this — it is the bundle's only
+    /// audio-carrying export — and it surfaces in the
+    /// member's reply object only when non-empty.
+    missing_audio: Vec<String>,
 }
 
 fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
@@ -841,48 +874,72 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
                 name: "png_sequence",
                 target: png_dir.display().to_string(),
                 result: engine(crate::export::export_png_sequence(project, &png_dir)),
+                missing_audio: Vec::new(),
             },
             BundleMember {
                 name: "jpeg_sequence",
                 target: jpeg_dir.display().to_string(),
                 result: engine(crate::export::export_jpeg_sequence(project, &jpeg_dir)),
+                missing_audio: Vec::new(),
             },
             BundleMember {
                 name: "svg",
                 target: svg_dir.display().to_string(),
                 result: engine(crate::svg::export_svg(project, &svg_dir)),
+                missing_audio: Vec::new(),
             },
             BundleMember {
                 name: "spritesheet",
                 target: sheet.display().to_string(),
                 result: engine(crate::export::export_spritesheet(project, &sheet)),
+                missing_audio: Vec::new(),
             },
         ]
     } else {
         let mp4 = dir.join(format!("{stem}.mp4"));
         let webm = dir.join(format!("{stem}.webm"));
+        // The MP4 export's outcome is inspected before it
+        // is flattened to a frame count, so the clips it
+        // had to skip (missing files) ride on the member
+        // and into its reply object (Wave P, P15).
+        let mp4_outcome = crate::export::export_mp4(project, &mp4);
+        let mp4_missing_audio = match &mp4_outcome {
+            Ok(outcome) => outcome.missing_audio.clone(),
+            Err(_) => Vec::new(),
+        };
         vec![
             BundleMember {
                 name: "mp4",
                 target: mp4.display().to_string(),
-                result: engine(crate::export::export_mp4(project, &mp4)),
+                result: engine(mp4_outcome.map(|outcome| outcome.frames)),
+                missing_audio: mp4_missing_audio,
             },
             BundleMember {
                 name: "webm",
                 target: webm.display().to_string(),
                 result: engine(crate::export::export_webm(project, &webm)),
+                missing_audio: Vec::new(),
             },
         ]
     };
     let member_json: Vec<Value> = members
         .iter()
         .map(|m| match &m.result {
-            Ok(frames) => json!({
-                "format": m.name,
-                "path": m.target,
-                "ok": true,
-                "frames": frames,
-            }),
+            Ok(frames) => {
+                let mut member = json!({
+                    "format": m.name,
+                    "path": m.target,
+                    "ok": true,
+                    "frames": frames,
+                });
+                // Wave P (P15): only when the member
+                // actually skipped clips — every other
+                // member object keeps its old shape.
+                if !m.missing_audio.is_empty() {
+                    member["missing_audio"] = json!(m.missing_audio);
+                }
+                member
+            }
             Err(reason) => json!({
                 "format": m.name,
                 "path": m.target,
