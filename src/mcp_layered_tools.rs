@@ -138,7 +138,7 @@ pub fn tool_import_layered_set(core: &mut EditorCore, args: &Value) -> Result<Va
             "assets_added": report.assets_added,
             "attached": report.attached,
             "sprites": report.sprites,
-            "attached_opacity_dropped": report.attached_opacity_dropped,
+            "attached_opacity_stored": report.attached_opacity_stored,
             "status": core.status,
         }))
     } else {

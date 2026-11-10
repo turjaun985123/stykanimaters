@@ -5764,7 +5764,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "get_node",
-            description: "Read one node in full: definition (name, parent, length, thickness, colour override, shape, head flag), the segment style (colour override + effective colour, color2, cap, taper, opacity), the segment's attached media ('media': null, or {kind: 'image', asset, offset, scale, angle_offset, flip} / {kind: 'text', content, size}), and pose facts at 'frame' (default: current) — the stored parent-relative angle in degrees, the solved world direction of the bone ending at this joint in degrees [0, 360) (null for a root node), and the frame's bend in radians and degrees. Note: get_pose returns stored parent-relative angles; the segment inspector shows this same world direction. Read-only.",
+            description: "Read one node in full: definition (name, parent, length, thickness, colour override, shape, head flag), the segment style (colour override + effective colour, color2, cap, taper, opacity), the segment's attached media ('media': null, or {kind: 'image', asset, offset, scale, angle_offset, flip, opacity} / {kind: 'text', content, size}), and pose facts at 'frame' (default: current) — the stored parent-relative angle in degrees, the solved world direction of the bone ending at this joint in degrees [0, 360) (null for a root node), and the frame's bend in radians and degrees. Note: get_pose returns stored parent-relative angles; the segment inspector shows this same world direction. Read-only.",
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
@@ -6044,7 +6044,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "asset_attach",
-            description: "Attach the EXISTING asset at index 'asset' to figure 'figure', node 'node' as that segment's image media, replacing whatever media the segment carried (the by-index counterpart of attach_image_to_node, which reads ./import and works on the selection). One undo step. Optional 'offset' ([along, across] stage units in the segment's own frame), 'scale' (a positive multiplier on the fitted size), 'angle_offset' (degrees) and 'flip' (boolean) set the sprite's local transform; unnamed components take the identity, and re-attaching the same asset with new transform values is how an attached sprite's transform is set. When any transform argument is given, the reply's 'media' names the resulting media in clip_get_node_media's shape.",
+            description: "Attach the EXISTING asset at index 'asset' to figure 'figure', node 'node' as that segment's image media, replacing whatever media the segment carried (the by-index counterpart of attach_image_to_node, which reads ./import and works on the selection). One undo step. Optional 'offset' ([along, across] stage units in the segment's own frame), 'scale' (a positive multiplier on the fitted size), 'angle_offset' (degrees) and 'flip' (boolean) set the sprite's local transform, and 'opacity' (0.0-1.0) sets the attached image's stored opacity; unnamed components take the identity, and re-attaching the same asset with new transform values is how an attached sprite's transform is set. When any transform argument is given, the reply's 'media' names the resulting media in clip_get_node_media's shape.",
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
@@ -6053,7 +6053,8 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                     "offset": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
                     "scale": { "type": "number" },
                     "angle_offset": { "type": "number" },
-                    "flip": { "type": "boolean" }
+                    "flip": { "type": "boolean" },
+                    "opacity": { "type": "number" }
                 }),
                 &["figure", "node", "asset"],
             ),
@@ -6551,7 +6552,7 @@ Tool {
   },
 Tool {
       name: "clip_asset_attach",
-      description: "Attach the EXISTING asset at index 'asset' to movieclip definition 'clip', node 'node' as that segment's image media, replacing whatever media the definition's segment carried (the clip-def counterpart of asset_attach, which writes a figure's own definition). The media renders on every instance of the clip whose own definition carries no media at that node — an instance's own media wins. One undo step. Optional 'offset', 'scale', 'angle_offset' and 'flip' set the sprite's local transform exactly as on asset_attach; when any is given, the reply's 'media' names the resulting media.",
+      description: "Attach the EXISTING asset at index 'asset' to movieclip definition 'clip', node 'node' as that segment's image media, replacing whatever media the definition's segment carried (the clip-def counterpart of asset_attach, which writes a figure's own definition). The media renders on every instance of the clip whose own definition carries no media at that node — an instance's own media wins. One undo step. Optional 'offset', 'scale', 'angle_offset', 'flip' and 'opacity' set the sprite's local transform and stored opacity exactly as on asset_attach; when any is given, the reply's 'media' names the resulting media.",
       schema: obj_schema(
           json!({
               "clip": { "type": "integer" },
@@ -6560,7 +6561,8 @@ Tool {
               "offset": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
               "scale": { "type": "number" },
               "angle_offset": { "type": "number" },
-              "flip": { "type": "boolean" }
+              "flip": { "type": "boolean" },
+              "opacity": { "type": "number" }
           }),
           &["clip", "node", "asset"],
       ),
@@ -6580,7 +6582,7 @@ Tool {
   },
 Tool {
       name: "clip_get_node_media",
-      description: "Read the segment media attached to movieclip definition 'clip', node 'node': null, or {kind: 'image', asset, offset, scale, angle_offset, flip} / {kind: 'text', content, size} — the same shape get_node returns for a figure's node. Read-only.",
+      description: "Read the segment media attached to movieclip definition 'clip', node 'node': null, or {kind: 'image', asset, offset, scale, angle_offset, flip, opacity} / {kind: 'text', content, size} — the same shape get_node returns for a figure's node. Read-only.",
       schema: obj_schema(
           json!({
               "clip": { "type": "integer" },

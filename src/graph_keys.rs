@@ -1228,7 +1228,9 @@ pub fn tool_graph_reduce_keys(core: &mut EditorCore, args: &Value) -> Result<Val
     let idx = gk_check_channel(core, gk_req_usize(args, "channel")?)?;
     // The graph panel's Reduce keys button tolerance
     // (`REDUCE_TOLERANCE`, rune_sec/graph_panel.rs) is the
-    // default, so a bare call matches the panel exactly.
+    // default; note the panel converts it to radians for
+    // Bend channels (Wave Z, Z11 G2) while this tool's
+    // bare default stays 0.5 in the caller's units.
     let tolerance = gk_opt_f32(args, "tolerance")?.unwrap_or(0.5);
     if tolerance < 0.0 {
         return Err("argument 'tolerance' must not be negative".into());

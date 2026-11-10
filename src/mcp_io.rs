@@ -1248,6 +1248,14 @@ struct BundleMember {
     name: &'static str,
     target: String,
     result: Result<usize, String>,
+    /// Whether this member's writer is the alpha variant
+    /// (Wave Z, Z6 — the bundle alpha contract): true only
+    /// for the PNG sequence and spritesheet members of an
+    /// `alpha` images bundle, whose formats carry per-pixel
+    /// alpha. Recorded on the member's reply object only
+    /// when the call requested alpha (see the contract in
+    /// the handler).
+    alpha: bool,
     /// Clips the member's export had to leave out because
     /// their files are missing (Wave P, P15). Only the MP4
     /// member can fill this — it is the bundle's only
@@ -1305,6 +1313,20 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
             }
         }
     };
+    // Wave Z (Z6): an optional 'alpha' boolean (default
+    // false), read exactly as tool_render reads it — the
+    // bundle alpha contract: in the 'images' bundle the PNG
+    // sequence and spritesheet members (the two members
+    // whose formats carry per-pixel alpha) route to X8's
+    // alpha entries on the premultiplied funnel; the JPEG
+    // member (no alpha channel exists), the SVG member
+    // (the by-nature vector exception) and the whole
+    // 'video' bundle (opaque funnels) are written by
+    // exactly their opaque calls, and the reply records
+    // the fact per member (see the manifest construction
+    // below). Alpha never refuses: a bad scale above is
+    // still the only option-level refusal.
+    let bundle_alpha = args.get("alpha").and_then(Value::as_bool).unwrap_or(false);
     let dir = Path::new(&path);
     std::fs::create_dir_all(dir)
         .map_err(|e| format!("could not create directory {path}: {e}"))?;
@@ -1359,14 +1381,31 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
                 Some(cb) => Some(cb),
                 None => None,
             };
-        let result = engine(match bundle_scale {
-            Some(s) => crate::export::export_png_sequence_scaled_with_render_progress(
+        // The (scale × alpha) matrix, exactly tool_render's
+        // png_sequence routing (Wave Z, Z6): the alpha arms
+        // are X8's hooked alpha entries, so the member's
+        // bundle progress translator threads unchanged.
+        let result = engine(match (bundle_scale, bundle_alpha) {
+            (Some(s), true) => {
+                crate::export::export_png_alpha_sequence_scaled_with_render_progress(
+                    project,
+                    &png_dir,
+                    s,
+                    member_progress,
+                )
+            }
+            (None, true) => crate::export::export_png_alpha_sequence_with_render_progress(
+                project,
+                &png_dir,
+                member_progress,
+            ),
+            (Some(s), false) => crate::export::export_png_sequence_scaled_with_render_progress(
                 project,
                 &png_dir,
                 s,
                 member_progress,
             ),
-            None => crate::export::export_png_sequence_with_render_progress(
+            (None, false) => crate::export::export_png_sequence_with_render_progress(
                 project,
                 &png_dir,
                 member_progress,
@@ -1379,6 +1418,7 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
             name: "png_sequence",
             target: png_dir.display().to_string(),
             result,
+            alpha: bundle_alpha,
             missing_audio: Vec::new(),
         });
         let member_cb = tracker.as_ref().map(|t| t.render_callback(1));
@@ -1399,6 +1439,7 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
             name: "jpeg_sequence",
             target: jpeg_dir.display().to_string(),
             result,
+            alpha: false,
             missing_audio: Vec::new(),
         });
         let result = engine(crate::svg::export_svg(project, &svg_dir));
@@ -1409,9 +1450,18 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
             name: "svg",
             target: svg_dir.display().to_string(),
             result,
+            alpha: false,
             missing_audio: Vec::new(),
         });
-        let result = engine(crate::export::export_spritesheet(project, &sheet));
+        // Wave Z (Z6): with 'alpha' the sheet member is
+        // X8's alpha sheet; the bundle scale never applies
+        // to this member, opaque or alpha (T8's rule), so
+        // the unscaled alpha entry is the exact counterpart.
+        let result = engine(if bundle_alpha {
+            crate::export::export_spritesheet_alpha(project, &sheet)
+        } else {
+            crate::export::export_spritesheet(project, &sheet)
+        });
         if let Some(t) = &tracker {
             t.complete_member(result.is_ok());
         }
@@ -1419,6 +1469,7 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
             name: "spritesheet",
             target: sheet.display().to_string(),
             result,
+            alpha: bundle_alpha,
             missing_audio: Vec::new(),
         });
     } else {
@@ -1448,6 +1499,7 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
             name: "mp4",
             target: mp4.display().to_string(),
             result,
+            alpha: false,
             missing_audio: mp4_missing_audio,
         });
         let member_cb = tracker.as_ref().map(|t| t.encode_callback(1));
@@ -1468,6 +1520,7 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
             name: "webm",
             target: webm.display().to_string(),
             result,
+            alpha: false,
             missing_audio: Vec::new(),
         });
     }
@@ -1490,25 +1543,49 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
                 if !m.missing_audio.is_empty() {
                     member["missing_audio"] = json!(m.missing_audio);
                 }
+                // Wave Z (Z6): only when the call
+                // requested alpha — the member records
+                // whether it was actually written with
+                // alpha, so a partially-alpha bundle is
+                // never mistaken for a fully-alpha one.
+                if bundle_alpha {
+                    member["alpha"] = json!(m.alpha);
+                }
                 member
             }
-            Err(reason) => json!({
-                "format": m.name,
-                "path": m.target,
-                "ok": false,
-                "error": reason,
-            }),
+            Err(reason) => {
+                let mut member = json!({
+                    "format": m.name,
+                    "path": m.target,
+                    "ok": false,
+                    "error": reason,
+                });
+                // Wave Z (Z6): as on a success — the
+                // member's writer was / was not the
+                // alpha variant, beside the error.
+                if bundle_alpha {
+                    member["alpha"] = json!(m.alpha);
+                }
+                member
+            }
         })
         .collect();
     let succeeded = members.iter().filter(|m| m.result.is_ok()).count();
-    Ok(json!({
+    let mut out = json!({
         "ok": true,
         "kind": kind,
         "directory": path,
         "members": member_json,
         "succeeded": succeeded,
         "failed": members.len() - succeeded,
-    }))
+    });
+    // Wave Z (Z6): the top-level record of the request,
+    // present only when alpha was requested — an opaque
+    // bundle's reply is byte-identical to before.
+    if bundle_alpha {
+        out["alpha"] = json!(true);
+    }
+    Ok(out)
 }
 
 fn tool_project_summary(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
@@ -1597,13 +1674,14 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "export_bundle",
-            description: "Export a whole bundle of formats into the DIRECTORY at 'path' in one call (the export panel's two bundle buttons). kind 'images': a PNG sequence (png/ subdir), a JPEG sequence (jpeg/), one SVG per frame (svg/) and a spritesheet (spritesheet.png). kind 'video': '<project>.mp4' and '<project>.webm'. Member content matches the render tool per format: the image members are full raster frames (composited media included) and the SVG member matches the render tool's SVG (media included; text as font glyphs is its standing divergence); the mp4 member muxes usable project audio, the webm member is silent. Bundles always cover the WHOLE timeline — they deliberately ignore frame ranges, matching the panel. An optional 'scale' (default 1.0) scales the 'images' bundle's PNG sequence member (a true re-render at that scale); every other member is unaffected, and an invalid scale (not a positive finite number) refuses the call before anything is written. Every member is attempted: the reply lists each member with ok + frame count, or ok:false + the failure's reason; member failures never fail the call itself. Progress: on a streaming transport (the stdio server), passing '_meta.progressToken' in the tools/call params streams notifications/progress during the call — one combined bundle count (frames completed across all members against the bundle's total, allocated before the first member runs; members without a phase contract of their own count when they complete; if a member fails, the stream ends without a terminal count); the reply is unchanged.",
+            description: "Export a whole bundle of formats into the DIRECTORY at 'path' in one call (the export panel's two bundle buttons). kind 'images': a PNG sequence (png/ subdir), a JPEG sequence (jpeg/), one SVG per frame (svg/) and a spritesheet (spritesheet.png). kind 'video': '<project>.mp4' and '<project>.webm'. Member content matches the render tool per format: the image members are full raster frames (composited media included) and the SVG member matches the render tool's SVG (media included; text as font glyphs is its standing divergence); the mp4 member muxes usable project audio, the webm member is silent. Bundles always cover the WHOLE timeline — they deliberately ignore frame ranges, matching the panel. An optional 'scale' (default 1.0) scales the 'images' bundle's PNG sequence member (a true re-render at that scale); every other member is unaffected, and an invalid scale (not a positive finite number) refuses the call before anything is written. Every member is attempted: the reply lists each member with ok + frame count, or ok:false + the failure's reason; member failures never fail the call itself. Progress: on a streaming transport (the stdio server), passing '_meta.progressToken' in the tools/call params streams notifications/progress during the call — one combined bundle count (frames completed across all members against the bundle's total, allocated before the first member runs; members without a phase contract of their own count when they complete; if a member fails, the stream ends without a terminal count); the reply is unchanged. An optional 'alpha' boolean (default false) exports the 'images' bundle's PNG sequence and spritesheet members with a transparent background and per-pixel coverage alpha instead of the project background (the PNG member rides the bundle 'scale'); the JPEG and SVG members and the whole 'video' bundle have no alpha form and are written exactly as without it, and the reply then records 'alpha' on the call and on each member — true only where the member was actually written with alpha.",
             schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Destination directory (created if needed)" },
                     "kind": { "type": "string", "enum": ["images", "video"], "description": "Which bundle to export" },
-                    "scale": { "type": "number", "exclusiveMinimum": 0, "description": "Output scale for the PNG sequence member relative to the stage size (default 1.0); an invalid value refuses the call before anything is written" }
+                    "scale": { "type": "number", "exclusiveMinimum": 0, "description": "Output scale for the PNG sequence member relative to the stage size (default 1.0); an invalid value refuses the call before anything is written" },
+                    "alpha": { "type": "boolean", "description": "Transparent background with per-pixel coverage alpha for the PNG sequence and spritesheet members of the 'images' bundle (default false)" }
                 },
                 "required": ["path", "kind"]
             }),
@@ -2922,6 +3000,267 @@ mod tests {
             );
             last = report.progress;
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------
+    // Wave Z (Z6): export_bundle alpha — the bundle alpha
+    // contract: the images bundle's PNG sequence and
+    // spritesheet members ride X8's alpha funnel; the JPEG,
+    // SVG and video members are written exactly as without
+    // it; the reply (the bundle's manifest) records 'alpha'
+    // on the call and on each member, only when requested.
+    // -----------------------------------------------------------------
+
+    /// bundle_core re-rooted on-canvas: at bundle_core's
+    /// 120x90 stage the demo figure (rooted at the 960x720
+    /// stage's centre) renders nothing, and the alpha pins
+    /// assert absolute coverage — the fixture move
+    /// export.rs's alpha_export_tests make for the same
+    /// reason.
+    fn bundle_alpha_core() -> EditorCore {
+        let mut core = bundle_core();
+        for frame in &mut core.project.frames {
+            for pose in &mut frame.poses {
+                pose.root = [60.0, 45.0];
+            }
+        }
+        core
+    }
+
+    /// One member object of a bundle reply, by format name.
+    fn bundle_member<'v>(reply: &'v Value, format: &str) -> &'v Value {
+        reply["members"]
+            .as_array()
+            .expect("bundle reply members")
+            .iter()
+            .find(|m| m["format"] == format)
+            .unwrap_or_else(|| panic!("no {format} member in {reply}"))
+    }
+
+    /// (any fully transparent pixel, any fully opaque pixel)
+    /// of an image file decoded as RGBA.
+    fn file_alpha_stats(path: &Path) -> (bool, bool) {
+        let img = image::open(path)
+            .unwrap_or_else(|e| panic!("{} does not decode: {e}", path.display()))
+            .to_rgba8();
+        (
+            img.pixels().any(|p| p[3] == 0),
+            img.pixels().any(|p| p[3] == 255),
+        )
+    }
+
+    /// The files directly inside a bundle member directory,
+    /// sorted by name.
+    fn member_files(dir: &Path) -> Vec<std::path::PathBuf> {
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+            .map(|entry| entry.expect("member entry").path())
+            .filter(|p| p.is_file())
+            .collect();
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn bundle_alpha_images_members_carry_alpha_and_the_manifest_records_it() {
+        let mut core = bundle_alpha_core();
+        let opaque_dir = temp_dir("bundle-alpha-opaque");
+        let opaque = call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": opaque_dir.to_string_lossy(), "kind": "images" }),
+        )
+        .expect("opaque bundle failed");
+        assert_eq!(opaque["succeeded"], 4, "{opaque}");
+        // No alpha requested: the manifest gains no field
+        // at any level — the pre-contract reply shape.
+        assert!(opaque.get("alpha").is_none(), "{opaque}");
+        for member in opaque["members"].as_array().unwrap() {
+            assert!(member.get("alpha").is_none(), "{member}");
+        }
+
+        let alpha_dir = temp_dir("bundle-alpha-on");
+        let alpha = call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": alpha_dir.to_string_lossy(), "kind": "images", "alpha": true }),
+        )
+        .expect("alpha bundle failed");
+        assert_eq!(alpha["succeeded"], 4, "{alpha}");
+        assert_eq!(alpha["alpha"], true, "{alpha}");
+        assert_eq!(bundle_member(&alpha, "png_sequence")["alpha"], true);
+        assert_eq!(bundle_member(&alpha, "spritesheet")["alpha"], true);
+        assert_eq!(bundle_member(&alpha, "jpeg_sequence")["alpha"], false);
+        assert_eq!(bundle_member(&alpha, "svg")["alpha"], false);
+
+        // The PNG member's frames are RGBA with a truly
+        // transparent background and fully covered figure
+        // pixels; the opaque member's frames have no
+        // transparent pixel at all.
+        let alpha_png = member_files(&alpha_dir.join("png"))[0].clone();
+        let (clear, opaque_px) = file_alpha_stats(&alpha_png);
+        assert!(clear, "the alpha PNG background is transparent");
+        assert!(opaque_px, "the alpha PNG figure pixels are fully covered");
+        let opaque_png = member_files(&opaque_dir.join("png"))[0].clone();
+        let (clear, _) = file_alpha_stats(&opaque_png);
+        assert!(!clear, "the opaque PNG member stays opaque");
+        assert_ne!(
+            std::fs::read(&alpha_png).unwrap(),
+            std::fs::read(&opaque_png).unwrap(),
+            "the alpha PNG member's bytes differ from the opaque member's"
+        );
+
+        // The spritesheet member: same geometry as the
+        // opaque sheet, on a transparent sheet.
+        let alpha_sheet = image::open(alpha_dir.join("spritesheet.png"))
+            .expect("alpha sheet does not decode");
+        let opaque_sheet = image::open(opaque_dir.join("spritesheet.png"))
+            .expect("opaque sheet does not decode");
+        assert_eq!(alpha_sheet.dimensions(), opaque_sheet.dimensions());
+        let (clear, opaque_px) = file_alpha_stats(&alpha_dir.join("spritesheet.png"));
+        assert!(clear && opaque_px, "the alpha sheet tiles keep coverage alpha");
+
+        // The members with no alpha form are byte-identical
+        // to the opaque bundle's, member for member.
+        assert_eq!(
+            bundle_tree(&alpha_dir.join("jpeg")),
+            bundle_tree(&opaque_dir.join("jpeg")),
+            "the JPEG member must be byte-unaffected by bundle alpha"
+        );
+        assert_eq!(
+            bundle_tree(&alpha_dir.join("svg")),
+            bundle_tree(&opaque_dir.join("svg")),
+            "the SVG member must be byte-unaffected by bundle alpha"
+        );
+        let _ = std::fs::remove_dir_all(&opaque_dir);
+        let _ = std::fs::remove_dir_all(&alpha_dir);
+    }
+
+    #[test]
+    fn bundle_alpha_absent_and_explicit_false_are_byte_identical() {
+        let mut core = bundle_alpha_core();
+        let absent_dir = temp_dir("bundle-alpha-absent");
+        let absent = call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": absent_dir.to_string_lossy(), "kind": "images" }),
+        )
+        .expect("absent-alpha bundle failed");
+        let false_dir = temp_dir("bundle-alpha-false");
+        let explicit = call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": false_dir.to_string_lossy(), "kind": "images", "alpha": false }),
+        )
+        .expect("explicit-false bundle failed");
+        assert!(absent.get("alpha").is_none() && explicit.get("alpha").is_none());
+        assert_eq!(
+            bundle_tree(&absent_dir),
+            bundle_tree(&false_dir),
+            "an explicit alpha:false writes the absent-alpha bundle, byte for byte"
+        );
+        let _ = std::fs::remove_dir_all(&absent_dir);
+        let _ = std::fs::remove_dir_all(&false_dir);
+    }
+
+    #[test]
+    fn bundle_alpha_png_member_rides_the_bundle_scale() {
+        let mut core = bundle_alpha_core();
+        let plain_dir = temp_dir("bundle-alpha-scale1");
+        call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": plain_dir.to_string_lossy(), "kind": "images", "alpha": true }),
+        )
+        .expect("unscaled alpha bundle failed");
+        let scaled_dir = temp_dir("bundle-alpha-scale2");
+        let reply = call(
+            "export_bundle",
+            &mut core,
+            json!({
+                "path": scaled_dir.to_string_lossy(),
+                "kind": "images",
+                "alpha": true,
+                "scale": 2.0,
+            }),
+        )
+        .expect("scaled alpha bundle failed");
+        assert_eq!(reply["succeeded"], 4, "{reply}");
+        // The PNG member is a true re-render at 2.0 WITH
+        // its alpha; the sheet member takes no bundle
+        // scale, alpha or not, so its geometry is the
+        // unscaled sheet's.
+        let scaled_png = member_files(&scaled_dir.join("png"))[0].clone();
+        let bytes = std::fs::read(&scaled_png).unwrap();
+        assert_eq!(png_dims_of(&bytes), (240, 180), "scaled alpha PNG size");
+        let (clear, _) = file_alpha_stats(&scaled_png);
+        assert!(clear, "the scaled alpha PNG keeps its transparent background");
+        let plain_sheet = image::open(plain_dir.join("spritesheet.png")).unwrap();
+        let scaled_sheet = image::open(scaled_dir.join("spritesheet.png")).unwrap();
+        assert_eq!(
+            scaled_sheet.dimensions(),
+            plain_sheet.dimensions(),
+            "the sheet member ignores the bundle scale"
+        );
+        let _ = std::fs::remove_dir_all(&plain_dir);
+        let _ = std::fs::remove_dir_all(&scaled_dir);
+    }
+
+    #[test]
+    fn bundle_alpha_video_kind_records_no_alpha_member() {
+        let mut core = bundle_core();
+        let dir = temp_dir("bundle-alpha-video");
+        let reply = call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": dir.to_string_lossy(), "kind": "video", "alpha": true }),
+        )
+        .expect("video bundle failed");
+        assert_eq!(reply["succeeded"], 2, "{reply}");
+        // The request is recorded; no video member claims
+        // an alpha form it does not have.
+        assert_eq!(reply["alpha"], true, "{reply}");
+        assert_eq!(bundle_member(&reply, "mp4")["alpha"], false);
+        assert_eq!(bundle_member(&reply, "webm")["alpha"], false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bundle_alpha_images_progress_stream_is_the_opaque_stream() {
+        // Alpha changes pixels, not counts: over
+        // bundle_core's 3 frames the tokened alpha bundle
+        // streams exactly the opaque bundle's stream
+        // (X11's pin) — the alpha PNG member's hooked
+        // entries thread the same translator.
+        let mut core = bundle_core();
+        let reports = park_recording_sink(&mut core);
+        let dir = temp_dir("bundle-alpha-progress");
+        let reply = call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": dir.to_string_lossy(), "kind": "images", "alpha": true }),
+        )
+        .expect("alpha images bundle failed");
+        assert_eq!(reply["succeeded"], 4, "{reply}");
+        let reports = reports.lock().unwrap();
+        let stream: Vec<(usize, usize, bool)> = reports
+            .iter()
+            .map(|r| (r.progress, r.total, r.finished))
+            .collect();
+        assert_eq!(
+            stream,
+            vec![
+                (1, 12, false),
+                (2, 12, false),
+                (3, 12, false),
+                (4, 12, false),
+                (5, 12, false),
+                (6, 12, false),
+                (12, 12, true),
+            ],
+            "one combined count across all members, terminal last"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
