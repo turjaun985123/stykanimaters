@@ -1224,6 +1224,15 @@ fn run_job(
             )
             .map(ExportJobResult::Webm)
         }
+        // Bundle kinds never run here: `begin_job`'s work
+        // closure for a bundle calls `run_bundle_job`
+        // (the plan-driven worker). Reaching this arm is
+        // a dispatch bug, surfaced as a failed job rather
+        // than a panic.
+        JobKind::BundleImages | JobKind::BundleVideo => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "bundle jobs run through run_bundle_job",
+        )),
     };
     result.map_err(|e| e.to_string())
 }
