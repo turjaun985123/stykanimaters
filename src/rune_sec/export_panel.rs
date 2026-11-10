@@ -2891,9 +2891,9 @@ mod tests {
             ("export_effective_none", "The project has no frames to export."),
             ("export_effective_no_range", "Loop range selected, but no loop range is set — exports write all frames. Set a loop range in the timeline first."),
             ("export_range_audio_note", "Range MP4 and WebM exports include audio from WAV and other ffmpeg-readable clips cut to the range — a clip whose file cannot be probed or decoded fails the export instead of being left out silently."),
-            ("export_piv_note_segments", "Media note: .piv v2/v3/v4 export image and text segments as plain segments — only v5 keeps segment media."),
+            ("export_piv_note_segments", "Media note: .piv v2/v3/v4 export image and text segments as plain segments — only v5 keeps segment media. Not even it keeps a media's local payload: the transform and opacity stay behind."),
             ("export_piv_note_instances", "Media note: no .piv version writes sprite or text instances — they are left out of .piv exports."),
-            ("export_piv_note_both", "Media note: .piv v2/v3/v4 export image and text segments as plain segments (only v5 keeps them), and no .piv version writes sprite or text instances — they are left out of .piv exports."),
+            ("export_piv_note_both", "Media note: .piv v2/v3/v4 export image and text segments as plain segments (only v5 keeps them), and no .piv version writes sprite or text instances — they are left out of .piv exports. Neither keeps a media's local payload: the transform and opacity stay behind."),
             ("export_sprite_note", "Sprite note: .stk and .nodes carry only the selected figure, so project sprite instances are left out of those two exports. .stknds carries the sprite tracks (on re-import, groups come back as plain images and text instances are not carried)."),
             ("export_age_now", "just now"),
         ] {
@@ -3640,7 +3640,7 @@ mod tests {
         assert_eq!(
             piv_media_note(&core).as_deref(),
             Some(
-                "Media note: .piv v2/v3/v4 export image and text segments as plain segments — only v5 keeps segment media."
+                "Media note: .piv v2/v3/v4 export image and text segments as plain segments — only v5 keeps segment media. Not even it keeps a media's local payload: the transform and opacity stay behind."
             )
         );
     }
@@ -3682,7 +3682,7 @@ mod tests {
         assert_eq!(
             piv_media_note(&core).as_deref(),
             Some(
-                "Media note: .piv v2/v3/v4 export image and text segments as plain segments (only v5 keeps them), and no .piv version writes sprite or text instances — they are left out of .piv exports."
+                "Media note: .piv v2/v3/v4 export image and text segments as plain segments (only v5 keeps them), and no .piv version writes sprite or text instances — they are left out of .piv exports. Neither keeps a media's local payload: the transform and opacity stay behind."
             )
         );
     }
