@@ -226,6 +226,13 @@ present and fall back to a folder-based flow when neither exists.
     a scale as well: it scales only the bundle's PNG sequence
     member, every other member is unaffected, and an invalid
     scale refuses the call before anything is written.
+    MP4/WebM exports also have an optional encode-phase
+    progress hook in the library: a caller passing a callback
+    receives the encoder's own frame counts as the encode
+    runs, ending with a single finished event for the video
+    encode (an MP4's audio mux runs afterwards and can still
+    fail the export). The hook is core-level only for now —
+    neither the export panel nor the MCP server surfaces it.
   - *Subtitles:* cues import and export as SRT and WebVTT;
     speaker credits ride WebVTT voice tags (SRT has no speaker
     syntax, and an SRT export reports how many credits it
@@ -237,8 +244,9 @@ present and fall back to a folder-based flow when neither exists.
   (`src/projects.rs`), a recovery snapshot and
   session-continuity helpers (`src/shell.rs`), native open/save
   dialogs, save/load as JSON (`project.styk.json`), and
-  **28 languages** (the original's 27 + Bengali) in
-  `src/i18n.rs`. These library features survived the Rune
+  **28 languages** (the original's 27 + Bengali; 662 UI
+  strings in each language's table) in `src/i18n.rs`.
+  These library features survived the Rune
   migration untouched, and the Home panel and settings
   surfaces that present them are Rune shell sections in
   `src/rune_sec/`.

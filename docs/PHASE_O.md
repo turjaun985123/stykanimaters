@@ -467,21 +467,53 @@ scan's output for those dumps plus its in-file
 model pins (§3).
 
 **That table is now written — the debt is
-discharged (Wave S, S8).** Source: **Headless Rune
-probe run `42759195547`**, completed **SUCCESS** on
+discharged (Wave S, S8) — and refreshed against a
+newer dispatch (Wave V, V19).** Original source:
+**Headless Rune probe run `42759195547`**,
+completed **SUCCESS** on
 `59cb0bec36b80648c9f9fe0dfd7d30cd6266d5c3`
 (`59cb0be`, the Wave R integrated tree — it
 contains the integrated Wave P+Q tree `911cf77` as
 an ancestor, so every Phase O repair is in it),
 artifact `headless-probe-output` (204 files, 34
-`tree-*.json` dumps). Method: exactly p05 §2 as
+`tree-*.json` dumps); its scan exited 0 with
+`OVERFLOW SCAN: CLEAN (0 hits, scan set complete)`
+under the then-current 13-tree SCAN_SET. One
+disclosure the original discharge did not make:
+that run's `subtitle-census.txt` reads
+`SUBTITLE CENSUS: FAIL (5 assertion(s) failed)`
+inside the green workflow — the fail-soft pattern
+first flagged on this very run (the census then
+sampled tree points in capture pixels; §10's
+refresh notes below carry the current state).
+The overflow verdict itself was genuinely
+measured and stands, but a citation is only as
+strong as its weakest transcript, so the table
+below is re-sourced.
+
+Current source: **Headless Rune probe run
+`42765217055`**, completed **SUCCESS** on
+`9d7dd0a6e0853ce6fd6f0eef3c2ceee9a96bbd85`
+(`9d7dd0a`, the Waves S+T tree carrying the
+capture-scale census fix), artifact
+`headless-probe-output` (217 files, 36
+`tree-*.json` dumps). Its `subtitle-census.txt`
+reads `SUBTITLE CENSUS: PASS` (19 PASS, 0 FAIL)
+and its Home missing-audio marker reads `PASS` —
+both read from the artifact itself, not from the
+workflow conclusion. Method: exactly p05 §2 as
 kept — `python3 scripts/overflow_scan.py --dir
 <artifact dir>` (content / card / window rules,
-0.5 pt tolerance, the closed exemption list). The
-scan exited 0; its final line reads `OVERFLOW
-SCAN: CLEAN (0 hits, scan set complete)`. Per
-§2's output shape each scene's hit list is empty,
-so the table records the verdict per scene:
+0.5 pt tolerance, the closed exemption list).
+Every one of the 36 dumps reads 0 non-exempt
+hits, and every per-tree figure and per-item
+measurement below was re-measured in these dumps:
+each reproduces the original discharge's value
+exactly, so the refresh moves no number — it
+adds two rows, two SCAN_SET flags, and the
+census-clean citation. Per §2's output shape each
+scene's hit list is empty, so the table records
+the verdict per scene:
 
 | Scene tree | Window | Elements | SCAN_SET | Non-exempt hits | Verdict |
 |---|---|---|---|---|---|
@@ -503,6 +535,7 @@ so the table records the verdict per scene:
 | tree-graph-open.json | 1440×900 | 407 | — | 0 | CLEAN |
 | tree-home-populated.json | 1440×900 | 375 | — | 0 | CLEAN |
 | tree-home.json | 1440×900 | 291 | — | 0 | CLEAN |
+| tree-home-missing-audio.json | 1440×900 | 334 | required | 0 | CLEAN |
 | tree-library-populated.json | 1440×900 | 1160 | — | 0 | CLEAN |
 | tree-loop-range.json | 1440×900 | 1196 | required | 0 | CLEAN |
 | tree-menu-open.json | 1440×900 | 1169 | — | 0 | CLEAN |
@@ -515,6 +548,7 @@ so the table records the verdict per scene:
 | tree-sprites-populated.json | 1440×900 | 1174 | — | 0 | CLEAN |
 | tree-strokes-populated.json | 1440×900 | 514 | — | 0 | CLEAN |
 | tree-subtitles-populated.json | 1440×900 | 1169 | required | 0 | CLEAN |
+| tree-subtitles-speaker.json | 1440×900 | 1169 | required | 0 | CLEAN |
 | tree-subtitles-top.json | 1440×900 | 1169 | required | 0 | CLEAN |
 | tree-three-d-1280.json | 1280×720 | 433 | — | 0 | CLEAN |
 | tree-three-d-stage.json | 1440×900 | 433 | required | 0 | CLEAN |
@@ -549,6 +583,42 @@ that do not fill their card (O-7, O-8's playback
 pair, O-9, O-1's chips) end with real headroom, as
 measured above. QA_RUNE §17's matching row closes
 on this same evidence.
+
+**Refresh notes (Wave V, V19).** Three things
+moved around the table even though no number in
+it did. (1) *The scan set grew.* SCAN_SET stood
+at 13 required trees for the original discharge
+and 15 at the refresh dispatch — the subtitle
+lane's speaker tree (Wave S) and the Home
+missing-audio tree (Wave T), both rows above,
+both CLEAN — and it stands at 16 in the current
+contract (Wave U, IA-U12-1:
+`tree-home-scan-fallback.json`). A rescan of the
+refresh artifact under the current contract
+therefore reads `OVERFLOW SCAN: scan set
+INCOMPLETE`, for exactly one reason: the refresh
+dispatch predates the Wave U scene and cannot
+contain its tree. That is a provenance gap, not
+a hit — every dump present reads 0. (2) *The
+current tree's own dispatch has not yet produced
+an artifact.* The first headless run on the
+Wave U integrated tree, `42766902475`
+(`1c7a70d`), concluded **FAILURE** at its own
+"Build (release, all binaries)" step —
+`error[E0308]` at `src/rune_sec/fx_clips.rs:452`
+(expected `&str`, found `String`, at the
+IA-U4-2 `kind_label` replace site) — so every
+scene step was skipped and its artifact carries
+only fail-soft stubs (its stub census reads FAIL
+for absent snap inputs: nothing ran). Fixing
+that is the integrator's work, not this table's;
+it is recorded here so no one cites that run for
+anything. (3) *What the next successful dispatch
+owes:* the `tree-home-scan-fallback.json` row
+(the 37th dump), a 16/16 complete scan, and a
+census transcript read alongside the conclusion —
+this table's citation upgrades to that run when
+it lands.
 
 **CI, stated once and exactly.** The last completed
 master CI run before Wave R was on `0b75051`

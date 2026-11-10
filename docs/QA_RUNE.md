@@ -9,6 +9,18 @@ the file cited. Where a file landed after the hand-audit pass,
 it is marked PRESENT–NOT-AUDITED rather than described from
 assumption.
 
+**Re-audit pointer (Wave V, V18, 2026-11-10):** §§1–5 above
+are the Phase D snapshot and are kept verbatim as the audit
+trail — their present-tense claims ("the Phase C shell is
+the only wired UI", "NOT YET RUN") describe 2026-11-08, not
+the current tree. §§6–17 are per-phase closure maps whose
+counts and CI cells are true as of their own phase. For
+standing claims about the settled tree, read **§18**: a
+full re-audit against the Wave U integration HEAD
+(`1c7a70d`) that re-verifies every count, surface and
+contract this doc carries, fills §4's open rows, and
+supersedes §17's in-flight CI column.
+
 ## Headline findings
 
 1. **The Phase C shell is the only wired UI.** `src/main.rs`
@@ -491,9 +503,9 @@ has been measured, and no stage height is claimed.
 | 1 | Phase B: GPUI removed, Rune shell lands | `6f03dd4` | `42455193634` | ✅ GREEN — 701 tests (691 unit + 10 integration) |
 | 2 | Phase C: interactive shell (stage/timeline/transport) | `7083701` | `42456311759` | ✅ GREEN — 708 tests (691 unit + 7 bin + 10 integration) |
 | 3 | Phase D: `rune_sec` wired into the binary (mod decls, `State` fields, panel mounting, `AppSpec.scenes`) | `9f26d44` + fixes `75116de`, `66f4e46` | `42457752206` | ✅ GREEN — 1,020 tests (691 lib + 319 bin + 10 integration); 362 element keys inventoried |
-| 4 | Headless `--tree` assertions (§3, facts 1–7) in CI | _TBD_ | _TBD_ | _TBD_ |
-| 5 | Headless `--snap` stage-height measurement (§3, step 4) | _TBD_ | _TBD_ | _TBD_ |
-| 6 | First user-PC screenshot review of the Rune shell | — | — | _TBD — user_ |
+| 4 | Headless `--tree` assertions (§3, facts 1–7) in CI | through `9d7dd0a` | `42765217055` (latest of a routine series) | ✅ RUNNING — the probe now dumps all 34 scenes per dispatch; the original seven facts grew into layout facts 1..=36, the overflow SCAN_SET (16 required trees) and the fail-soft subtitle-census + Home-marker transcripts, which are read, not just concluded (§18) |
+| 5 | Headless `--snap` stage-height measurement (§3, step 4) | — | `42467268661` (first proof) | ✅ SUPERSEDED — the §3 rect question resolved itself: `--tree` dumps DO carry element rects plus a top-level capture `scale`, and two instruments (`overflow_scan.py`, `subtitle_census.py`) read the stage rect from them (seeded family 744×464 pt at the 1440×900 harness window; Phase N's tree-default stage measured 485 pt). The literal one-off 1280×720 ≥ 360 assertion was never run as designed; the budget is instead guarded on every headless run by the layout facts + overflow scan (§18) |
+| 6 | First user-PC screenshot review of the Rune shell | — | — | ✅ DONE 2026-11-08 — the user ran the Phase E build on their PC (screenshot + screen video, §8's opening event); two defects it exposed were fixed in Phase F |
 
 ---
 
@@ -900,3 +912,154 @@ its dispatch, not its rendering.
 | Sound unverified on a real screen (§16, unchanged) | Needs the user's Play test on a real screen; no Phase O item touches the audio path | open — unchanged | — |
 | **Counts at Phase O close** — keys **979** total unique by the gate's current counter (863 static + 116 dynamic), floor 949; the charter's 804 baseline was the Phase N figure under an earlier extractor calibration (the same tree at 0b75051 reads 940 under the current counter — 827 + 113) | Gate checks 1–2 (inventory + key diff vs HEAD) green at every integration stage; Phase O's own items added zero keys — the growth to 979 belongs to Wave P/Q's other themes (itemised in REDESIGN_PROGRESS §6.11). Icons 163, scenes 31, palette 134 — none moved by this phase. Local instruments at 911cf77, run at close-out (python only): gate PASS 10/10, MCP census PASS (381 — not a Phase O surface), overflow self-test PASS | verified locally | in flight on 911cf77 |
 | **CI evidence for this section** | The last completed master CI run before Wave R was on `0b75051` (Build, Test & Binary, SUCCESS — observed via `gh` during Wave Q's docs pass). The integrated Wave P+Q tree's CI on `911cf77` is in flight; no verdict is claimed anywhere in this section, and every status above is stated as in-tree / locally gated, which is what the evidence supports | — | in flight |
+
+**§17 CI column — superseded (Wave V re-audit, §18):**
+every "in flight on 911cf77" cell above has since resolved.
+On `911cf77` itself: headless `42755921970` GREEN; build
+`42755902602` FAILED in the Test step (a lib test-target
+compile error in Wave P's missing-audio tests — test-side,
+fixed on the Wave R line). The §17 items' substance was
+then re-proven by later headless runs (§18's CI frame):
+the overflow scan reads CLEAN over the real artifacts of
+runs `42759195547`, `42764348922` and `42765217055`, and
+§17's counts row (keys 979 / floor 949, scenes 31) is
+superseded by §18's settled counts.
+
+## 18. Wave V re-audit — current-state verification
+
+Appended 2026-11-10 (Wave V, V18). **Audit base: HEAD
+`1c7a70d`** (the Wave U integration), read from a pristine
+`git archive` snapshot so concurrent Wave V edits could
+not contaminate the counts; CI state via `gh` at the
+final check. Method as always in this doc: static reading
++ the python instruments — no cargo (repo rule). The one
+gate check that needs a git ref (check 2, key diff vs
+HEAD) cannot run in an archive snapshot and is the
+snapshot run's only non-pass; the integrator's in-repo
+run on the same committed tree reported PASS 10/10.
+
+### 18.1 Standing counts — re-verified
+
+| Claim | Settled value at `1c7a70d` | Evidence |
+|---|---|---|
+| MCP surface | **381 tools** (44 builtin + 319 registry + 9 io + 4 subtitle_io + 5 subtitle) | `mcp_census.py` totals line on the snapshot; gate checks 9–10 PASS (handler integrity: 337 handlers resolve 1:1; docs/MCP.md catalogue in exact sync) |
+| Element keys | **980 total** (864 static + 116 dynamic), gate floor 980 | gate check 1 on the snapshot. §17's 979 / floor 949 is superseded (+1 key; the floor ratcheted to the verified total) |
+| Shell `State` | 48 fields, 22 full literals, every field in every literal | gate check 3 |
+| Palette commands | **134** | pin `command_palette.rs:2156`; gate checks 5 + 10 derive 134 from source. §§13–16's 95–108 figures are their phases' closes, not the current count |
+| Curated icons | **163** | pin `icon_data.rs:355` (`curated_set_has_163_names`); gate check 5. Unchanged since Phase N |
+| Headless scenes | **34** (layout facts 1..=36) | scene table in `scenes.rs` (`home-scan-fallback` is the 34th); gate checks 5 + 8 (all 34 names appear in the headless.yml tree loops) |
+| Overflow SCAN_SET | **16 required / 0 pending** | direct parse of `overflow_scan.py`'s SCAN_SET; §17's 13 grew by the speaker tree (Wave S) and the two Home trees (Waves T/U) |
+| i18n catalogue | 28 tables, **identical key sequences in all 28**, no duplicates | this audit's structural parse. Stated count **563** is the project's line-wise convention; the tuple-true count is **564** — the difference is exactly one entry per table, `status_ready` (`src/i18n.rs:445`), the catalogue's only multi-line tuple, which line-wise counters miss. No key is lost, duplicated or desynchronised; the artefact is remainder **R1** |
+| Help rows | **61 total, 36 of them Features** | pins `help_panel.rs:752` (`shortcut_rows().len() == 61`) and `:805` (Features == 36). §16's "54 rows" was the Phase N close; the +7 reconciles exactly with the UI-mission Waves 9–12 refreshes (+2/+1/+1/+3) traced in the pin's own comment. `help_panel.rs`'s module prose still says 54 — remainder **R2** |
+
+### 18.2 Surfaces and contracts landed since §17 — verified in tree
+
+§§1–17 predate the entire subtitle subsystem and the
+Wave R–U feature set; the standing record for them is
+here.
+
+- **Subtitles (Waves P–T).** Core in `src/subtitles.rs`:
+  cues with half-open `[start, end)` liveness, style model,
+  the `speaker` field (`:118`, `Option<String>`, serde
+  default; normalised by `normalise_speaker`), the display
+  prefix composed by `subtitle_display_lines` (`:431` —
+  `"{speaker}: {first}"`), SRT import/export with the
+  counted `speakers_dropped` (`:543`), WebVTT `<v>` voice
+  tags round-tripping the speaker. Shell: subtitle panel +
+  timeline lane; MCP: 5 subtitle tools + 4 subtitle IO
+  tools (in the 381 above). Pixel proof: the subtitle
+  census (below). One stale doc line inside the file —
+  remainder **R3**.
+- **Subtitle census capture-scale contract (S+T CI
+  fix, `9d7dd0a`).** Tree dumps are window POINTS; snaps
+  are capture PIXELS at the dump-declared scale (2.0 in
+  CI: 2880×1800 snaps vs a 1440×900-point window).
+  `subtitle_census.py`'s `tree_scale` (`:463`) derives
+  the scale as snap width / dump window bounds (the
+  dump's `scale` field is the fallback), converts the
+  seeded stage rect and the lane block ONCE into pixel
+  space (`:728`), and gates stage agreement across the
+  seeded family only — the default scene's stage element
+  is legitimately 40 pt taller (no subtitle lane) and is
+  reported, not gated. Floors unchanged; the self-test
+  carries a scale-2 honest set pinning the conversion
+  (PASS on the snapshot). Proven on real artifacts: the
+  `42764348922` transcript failed 10 assertions under the
+  old contract; after the fix the same artifacts read
+  PASS locally, and run `42765217055`'s transcript is
+  PASS (19/0) in CI. **Lesson, restated for this doc:
+  a headless workflow's conclusion is never the verdict —
+  its fail-soft transcripts are.**
+- **Export scale matrix + JPEG import (Waves R/T).**
+  Every raster format takes a scale (SVG excepted by
+  nature), JPEG sequence included; `export_bundle`
+  validates scale before any write; JPEG imports by
+  magic through the decode-checked funnel. Proof suites
+  in tree (`tests/wave_u_undo_census.rs`,
+  `wave_u_determinism.rs`, `wave_u_e2e.rs`).
+- **Encode-phase export progress (Wave U, U11).**
+  `EncodeProgressEvent` (`src/export.rs:1407`) +
+  `EncodeProgressCallback` (`:1425`): the count is the
+  ENCODER's own, from ffmpeg's `-progress` stream —
+  never the render counter; strictly increasing
+  intermediates, exactly one terminal event after
+  successful exit + drain, failures keep the historical
+  error voice with no terminal. Eight
+  `*_with_encode_progress` entries; the eight historical
+  entries delegate with `None` (byte-identical
+  invocation). MCP is deliberately NOT wired — zero
+  `EncodeProgress` references across `src/mcp*.rs`
+  (IA-U11-1: the handler type has no notification sink;
+  a post-hoc field would be fake progress). Panel wiring
+  is remainder **R4**.
+- **Home missing-audio + scan fallback (Waves S–U).**
+  Both Home read paths (scan full-parse and light read)
+  surface missing-audio counts; the fallback arm is now
+  headless-proven by scene 34, `home-scan-fallback` (a
+  project file trimmed of its `frames` key full-parses
+  through serde defaults while the light read's gate
+  refuses it). Marker steps in `headless.yml` (both tree
+  loops carry all 34 scenes; markers at `:539ff`);
+  transcripts PASS in runs `42764348922` and
+  `42765217055`.
+- **§3's open questions are closed.** `--tree` dumps
+  carry element rects (consumed by the overflow scan
+  and the subtitle census on every run); `--snap` on
+  software Vulkan has been proven since Phase I (run
+  `42467268661`) and is routine; §4 rows 4–6 are filled
+  above. `headless.yml` remains `workflow_dispatch`-only
+  by design (its header states why) and is dispatched
+  manually on every integration.
+
+### 18.3 CI frame at this audit's final check
+
+| Tree | Build, Test & Binary | Headless Rune probe | Note |
+|---|---|---|---|
+| `911cf77` (Wave P+Q) | `42755902602` FAILED (Test step, test-target compile error) | `42755921970` GREEN | §17's "in flight" — resolved as above |
+| `7f9bce5` (Wave R line) | round 6 `42762884625` GREEN | GREEN | all six R-line rounds failed test-side only, never product code |
+| `9d7dd0a` (S+T close) | `42765201236` GREEN | `42765217055` GREEN | transcripts verified on the artifacts: census PASS 19/0, Home marker PASS, overflow CLEAN |
+| `1c7a70d` (Wave U; this audit's base) | round 1 `42766879504` FAILED | round 1 `42766902475` FAILED | sole error E0308 at `fx_clips.rs:452` — IA-U4-2's replacement text missed a borrow (`kind_label` returns `String`; `str::replace` wants `&str`). Integrator fix `fbc3644` (one character); round 2 build `42767519353` **GREEN**; round 2 headless `42767540386` still in flight at filing — its transcripts are unread, so no headless verdict is claimed for the Wave U tree yet |
+
+### 18.4 Carried open items (unchanged, not re-litigated)
+
+The standing user decisions and by-design entries from
+§§11–17 stand exactly as recorded: white-on-accent
+contrast (measured 3.14:1 as rendered; the user's call),
+`tab_visits_controls` OFF, the two-"New project"
+disagreement, range MP4/WebM exports carrying no audio
+(the panel warns), sound verifiable only by the user,
+`core.onion_frames` orphaned by design, the status-strip
+Audio-glyph refusal, the settings-card Esc reading, the
+menu-open non-Esc leak (a product decision), and MCP
+(381) vs palette (134) remaining distinct surfaces that
+merely overlap.
+
+### 18.5 Remainders needing a slice
+
+| # | Remainder | Evidence | Owner |
+|---|---|---|---|
+| R1 | i18n stated count (563) undercounts the catalogue by one in every table: `status_ready` is written as a multi-line tuple (`src/i18n.rs:445`), invisible to the line-wise counters the docs and headers (`i18n.rs:13`, `i18n_wire.rs:6`) rely on. Fix is mechanical — reformat the tuple to one line in all 28 tables (counts then read 564 everywhere) or restate the count as 564 | this audit's parse: one-line entries 563 vs 564 tuples per table; difference exactly `status_ready`; sequences identical ×28 | integrator (i18n.rs is frozen for Wave V agents) |
+| R2 | `help_panel.rs` module prose still states "54 rows" (`:197`, `:220`, `:234`) while its own pins assert 61 total / 36 Features (`:752`, `:805`) | grep + pins above | V5 (owns the help surface this wave) — prose only |
+| R3 | `src/subtitles.rs` module doc (`:30–36`) says the speaker "is metadata… No renderer draws it yet (the prefix display is a filed IA…)" — stale since Wave R: `subtitle_display_lines` (`:431`) composes the prefix for the renderers and the panel carries the speaker field | doc text vs `:431` + the census's widening leg | subtitles owner / integrator — doc text only, no behaviour change |
+| R4 | Encode-progress has no consumer: the panel wiring needs a background-job slice (worker thread + shared state + tick polling — panel exports block the UI thread), and MCP transport needs a `notifications/progress` mapping. Both are boarded feature work, deliberately not improvised (IA-U11-1) | `src/export.rs:1407ff` contract; zero MCP references | a future panel/transport slice (V12 covers the render-phase extension this wave, not the wiring) |
+| R5 | Figure-library name case-loss: a figure saved as "Styk" is written to `styk.json` and listed/inserted as "styk" — CONFIRMED present at this audit's base (`src/editor.rs:3136` lower-cases the library file name; the slug path `src/figure_ops.rs:965` likewise) | greps above; the defect was first proven by Wave R-line CI round 5 | V1 owns the fix this wave (round-trip fidelity + on-disk migration behaviour); QA closes this row only when V1's CI lands |

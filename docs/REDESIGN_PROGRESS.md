@@ -5018,3 +5018,1097 @@ and the census coordinate contract
 is fixed; their verdicts belong to
 the CI record, not to this section's
 remainders.
+
+### 6.16 Wave V — name fidelity, shell
+i18n, subtitle style controls, proof
+deepening 5 (2026-11-10)
+
+Ordered 2026-11-10 (the standing
+continuous order, re-issued for the
+eighth time at 11:49 +06 and boarded
+ahead so this wave launched the moment
+Wave U closed): "assign 20 agents
+continuous write code if ci gets error
+then fix that". Twenty agents, one
+owner per file, integrator surfaces via
+filed actions (board:
+`~/workspace/wave-v/BOARD.md`; findings:
+`~/workspace/wave-v/findings/`). The
+board's base is the Wave U integration
+HEAD `1c7a70d` (563 × 28, scenes 34,
+MCP 381); `src/i18n.rs` and
+`src/rune_sec/i18n_wire.rs` were frozen
+to this wave's agents, all key work
+arriving via IA. This section was
+written from all nineteen sibling
+findings (v1–v16, v18–v20; v17 is this
+section) and from the CI frame read
+via `gh` at the final check, headless
+transcripts read from the runs'
+downloaded artifacts — never from
+workflow conclusions alone, per the
+42759195547 lesson. Every Wave V status
+below is IMPLEMENTED (in tree,
+uncommitted at write time); Wave V has
+no CI verdict. The Wave U frame, by
+contrast, is closed here, exactly,
+including the round a green conclusion
+would hide.
+
+**The Wave U integration ledger.** Five
+commits on top of `9d7dd0a`, in order:
+(1) `9973ee6` — i18n: the catalogue
+360 → **563 keys × 28** via **F4's IA
+package: the nine Wave U blocks —
+U1 53 `stroke_*`, U2 37 `clips_*`,
+U3 23 `menu_*`, U4 27 `fx_kind_*`,
+U5 21 `audio_*`, U6 6 `frame_*`,
+U7 21 `particles_*`/`segment_*`,
+U8 9 `fx_*`, U9 6 `threed_*` = 203 keys
+— inserted as one run at the tail of
+every table**, genuine translations in
+the eight translated tables, every
+template's slots kept in all 28; F4
+verified each block mechanically
+against its panel pin before inserting
+(all nine match exactly) and applied
+**IA-U4-2** (the two `kind_label`
+call-site replacements in fx_clips.rs)
+in the same slice; the panels wired in
+the `tr()` idiom; count docs at 563.
+(2) `c0fe4e5` — U11's encode-phase
+export-progress core: the encoder's
+own frame count from ffmpeg's
+`-progress` stream, one terminal event,
+the eight `*_with_encode_progress`
+entries, the historical entries
+delegating with `None`; MCP
+deliberately not wired (IA-U11-1).
+(3) `3480d1d` — U12's
+`home-scan-fallback` scene (34th scene,
+layout fact 36) with **IA-U12-1 applied
+in full in the same push**: both
+headless tree loops, SCAN_SET at 16
+required / 0 pending, and the fail-soft
+scan-fallback marker step. (4)
+`d1ea862` — the three proof suites:
+U13's registry undo-census extension,
+U14's populated-project determinism
+A-B-A at scales 1.0 and 2.0, U15's
+cross-feature e2e (with its leg-1
+caveat standing: the light read's
+algorithm re-performed from library
+types, the bin wiring pinned in-crate).
+(5) `1c7a70d` — docs: §6.15 itself,
+F4's integrator correction appended to
+it, and U16's README truth pass 2. The
+integrator's own instruments on the
+committed tree before the push: gate
+**PASS 10/10**, MCP census **381**,
+overflow and subtitle-census
+self-tests **PASS** (F4's verification,
+reproduced independently by V13's
+clean-worktree baseline at `1c7a70d`
+and V20's rehearsal: element keys 980
+with both floors already equal to their
+verified counts, palette 134, icons
+163, scenes 34, layout facts 1..=36).
+
+**The Wave U CI frame — two rounds,
+read at the transcript level.** Round 1
+(on `1c7a70d`): build 42766879504
+**FAILED** and headless 42766902475
+**FAILED**, on a single shared cause —
+**error E0308 at
+`src/rune_sec/fx_clips.rs:452`**, the
+sole `error[` in the build log.
+IA-U4-2's first replacement text passed
+`kind_label(core, …)` — which returns
+`String` — where `str::replace` wants
+`&str`; the neighbouring replaces in
+the same chain borrow correctly, and
+the second IA site (`text(kind_label
+(…))`, which takes `String`) compiled.
+The wave's python-only instruments
+cannot see a Rust type error, so it
+reached CI — the Q7-pattern pins were
+never the issue; this was the applied
+IA text itself, one character short.
+In the build workflow nothing ran past
+the release Build step (no test
+executed). In the headless workflow the
+probe binary never built, so no snaps
+or tree dumps exist for the round: the
+subtitle census transcript reads FAIL
+(1 assertion — snap inputs present),
+the MCP probe FAIL (1 assertion — the
+/health answer, the app absent), the
+Home thumbnail probe UNPROVEN (inputs
+missing), the rect probe unanswered,
+and neither marker file was produced.
+Nothing in round 1 is evidence about
+the app; it is evidence about one
+borrow. The fix is `fbc3644` — one
+character, `&kind_label(...)` — pushed
+by the integrator. Round 2 (on
+`fbc3644`): build 42767519353 **GREEN**
+— 3,981 tests passed across targets,
+zero failures, zero errors in the log;
+headless 42767540386 **GREEN**, and its
+transcripts, read from the downloaded
+artifact, are the round's real verdict:
+**SUBTITLE CENSUS: PASS** (exit 0;
+19 PASS / 0 FAIL; capture scale 2.000
+derived from the dump's own bounds;
+speaker face 3086 px, extent 702 stage
+units against the ≥ 396 gate; lane
+diff 3612 / ink 1163 against floors
+200 / 100) — S2's span gate and T11's
+lane floors, unratified since Wave S
+because their first measurements were
+the misalignment's zeros (§6.15 ¶(3)),
+are **ratified now** on the settled
+tree, at the same numbers the census
+fix's local proof produced on round 1
+of S+T's artifacts. **HOME
+MISSING-AUDIO MARKER: PASS** and **HOME
+SCAN-FALLBACK MARKER: PASS** — the new
+step green on its first real run:
+U12's trimmed-file construction drives
+Home's fallback arm in the real harness
+exactly as its unit pin promised. **MCP
+PROBE: PASS** (exit 0). The overflow
+scan over the run's artifacts, run
+locally on the download: **CLEAN
+(0 hits, scan set complete)** across
+the 16 required trees (37 dumps in the
+artifact). One transcript does not
+close: the legacy Home thumbnail
+probe's control leg trips on this run's
+populated snap — "control home-totals:
+stage-bg share 0.672 over 2464px
+(ceiling 0.06); control trips: the
+strip colour premise does not hold for
+this snap (theme/fixture drift?)" — and
+issues no verdict; it is remainder (3)
+below, and V7's reworked pair gate is
+the rostered follow-up. Net Wave U
+frame: round 1 red on one character in
+an applied IA, round 2 **fully green
+with every transcript read** — build,
+census, both markers, MCP probe,
+overflow. Wave U is verified.
+
+**Figure-library name fidelity (V1).**
+The defect CI round 5 of the Wave R
+line proved is fixed at its root: the
+2D figure library was the only one of
+the app's four libraries that destroyed
+the name at save (a bare `FigureDef`
+has no name field; entries were named
+by file stem). The save now writes the
+house envelope the other three already
+use — the def's JSON plus a stored
+`"name"`, the file still parsing as a
+bare def everywhere — and load prefers
+the stored name, falling back to the
+stem. The consumer audit found the rot
+went further: rename and delete
+resolved the backing file from the
+entry's name, which breaks the moment
+names are exact, so both now resolve
+through a new `library_entry_file`
+(verbatim file first, then the slug),
+rename's same-name settle compares
+stems, and a successful rename syncs
+the stored name before the fs rename so
+a reload can never resurrect the old
+one; a display-collision refusal joins
+the existing stem refusals. Migration
+is stated plainly: nothing is renamed
+or rewritten at load; legacy entries
+keep their stem names until re-saved;
+an older build reading a newer file
+degrades to stem naming, no corruption.
+In-module pins cover the round trip
+(save "Styk" → listed "Styk" → insert
+yields "Styk"); **IA-V1-1** files the
+exact text restoring "Styk" in the
+Wave R undo-census legs the defect once
+forced to "styk".
+
+**Subtitle readouts templated (V2).**
+The subtitle panel's composed readouts
+join the template programme: five
+`{slot}` keys via **IA-V2-1** — the cue
+row label (cue text substituted last,
+so a cue reading `{start}` is never
+re-scanned), the range line (skeleton
+template composing the two word keys,
+the U7 topology precedent), the detail
+title, the scale stepper's value (the
+`frame_duration_value` shape), and the
+style colour line (brace-delimited slot
+names so `{text}` can never match
+inside `{text_hex}`). The extended pin
+passes only after the IA lands (the Q7
+pattern). The shared-file boundary with
+V6 was held textually: V2's hunks are
+the three helpers, the cue-row call
+site, the detail title and exactly two
+readout sites inside `style_block`; no
+control, handler or swatch was touched.
+
+**Home panel wired (V3).** The last
+unwired panel gets the full audit
+first: 19 label strings, 7 composed
+readouts, 16 status sentences (left
+English, board rule), notation and the
+machine-read `format_modified`
+classified with evidence. Landed: 31
+keys via **IA-V3-1** — a `count_label_tr`
+one/many helper in the audio panel's
+shape serving both metadata skeletons,
+the totals footer, the search count and
+the missing-audio segment; the light
+and scan meta-line templates (the scan
+form honestly carries no `{size}` —
+the scan never stats for a length);
+the delete question and reopen label as
+templates with the name substituted
+last. **`missing_audio_segment` was
+not forked** — it remains the single
+shared composition, now resolving
+through the catalogue internally, its
+English byte-identical — so the
+headless marker contracts, which read
+the composed English line and passed
+in Wave U round 2 above, are
+unaffected by the wiring. Two existing-key
+wirings needed no IA (the armed
+"Discard changes?" forms and the
+rename-line confirm, through
+`discard_changes` / `rename`). Two
+actions ride along: **IA-V3-2 is
+compile-blocking** — three old-arity
+call sites in scenes.rs's test module
+(U12's pins) need `&s.core` under the
+new signatures, exact text filed; and
+the buttons-row Rename literal was
+deliberately left for IA-U10-1's site
+list (see V11), so the two slices
+cannot double-wire it.
+
+**Shell chrome audited (V4).** The
+honest result is how small the surface
+is: a scripted census of `src/main.rs`
+(the board's `src/rune_sec/main.rs` is
+the bin root `src/main.rs` — the path
+note is in v4.md) finds 24 production
+literals of which exactly **3 render**
+— the waveform card's title and the two
+splitter help labels — now wired
+through three keys via **IA-V4-1**,
+with a camera-shape pin. `src/shell.rs`
+contains zero rendered strings (store
+file names, JSON field names, serde
+default fns — data, all classified).
+The roster's four named areas were
+located rather than assumed: workspace
+selector, status strip and transport
+chrome live in panel modules owned by
+their own slices, not in chrome; the
+app name and the persisted default
+workspace name are filed as identity /
+persistence data with evidence, not
+wired. Element keys, keyboard-match
+literals and format strings untouched.
+
+**Help overlay wired (V5).** The help
+surface is one file, `help_panel.rs`
+(6 sections, 61 rows), located and
+claimed before any edit. The wiring is
+at the render layer, on the U5
+precedent: the canonical data functions
+keep returning English pairs
+byte-identical — the command palette's
+drift guard and the 61-row census pin
+them — and `help_text_key` resolves a
+canonical string to its catalogue key
+at render. **IA-V5-1 files 109 keys**:
+the header meta template, 6 section
+titles, 6 descriptions, the Drawing
+note, and the row-action families (61
+rows, 60 distinct strings; 35 of 36
+Features labels). Key-cap labels stay
+canonical notation; section branching
+and element keys stay keyed on the
+English names. Two sites were
+identified and deliberately NOT wired
+here because they are U10's WIRE sites
+for existing keys — the panel title
+"Help" (`help`) and the Features label
+"Live MCP control" (`live_mcp_control`)
+— both carried into IA-V11-1's list
+below, the second with V11's
+recommendation against forcing it.
+
+**Subtitle style controls (V6).** The
+audit corrects the board's
+parenthetical: `SubtitleStyle` has
+exactly four fields and **no background
+or opacity field exists** to build a
+control for — `box_color` is the
+backing colour, drawn as outline and
+stamps, and no control was faked for a
+field that is not there. Position and
+scale controls were already complete.
+The real gap was colour reach: both
+colours were settable only to the
+palette's 8 swatches from the panel,
+while MCP accepts any `0xRRGGBB` — a
+colour set over MCP showed in the
+panel's own readout with no swatch
+marked and no way to adjust it. Built,
+in the shell's own channel-stepper
+idiom: RGB channel rows under each
+swatch row stepping one channel by 8
+through the real `set_subtitle_style`
+op — exactly one undo step per
+effective press, nothing spent at a
+clamp bound or on a bad index, no
+panel-side state added — with pins for
+the pure stepper, the off-palette
+round trip (`0x123456` walking onto a
+palette value), persistence through a
+project JSON round trip, and
+construction on both themes. Three
+keys via **IA-V6-1** (`subtitle_red` /
+`_green` / `_blue`); V20 attributes the
+tree's +3 dynamic element-key patterns
+to this slice's steppers.
+
+**Home snap proof (V7).** The
+UI-mission remainder — Home thumbnails
+unit-proven but never snap-proven —
+gets its capture and its gate: the
+`home-missing-audio` scene's snap is
+now taken in the lavapipe step (the
+populated snap existed since Wave 12),
+and the thumbnail probe gains a pair
+gate (`--also-snap` / `--also-tree`,
+wired into the existing probe step)
+that treats the seeded constructions as
+the fidelity experiment they are: among
+the four strips, exactly two must be
+pixel-identical and the others differ
+(the populated set saves one project
+twice and one once; the missing-audio
+project differs only by a non-rendering
+clip), decided on the multiset of
+strips because scan order is
+mtime-sorted and row order is never
+assumed. Non-blank floors are Q16's
+own, the legacy invocation is
+byte-compatible, missing pair inputs
+report UNPROVEN rather than failing,
+and geometry disagreement reports
+UNPROVEN rather than guessing. The
+self-test passes five cases through the
+real `analyse_pair`. No IA filed — the
+snap region is V7's outright; the
+boundary with V14 is stated in both
+findings and the loop side already
+agreed. First real execution is the
+Wave V integration dispatch; remainder
+(3) is the context it runs into.
+
+**Registry subtitle round trip (V8).**
+S18 proved the core level; this proves
+the registry path in a new
+`tests/wave_v_subtitle_registry_e2e.rs`
+(3 tests, every call through
+`mcp::all_tools()`). The VTT leg adds
+three cues out of order (the sorted-
+insert reply indices asserted: 0, 1,
+then 0), sets a non-default style,
+asserts `subtitle_list` byte-equal
+(the uncredited cue's object carries no
+`speaker` key), exports and asserts the
+document itself (timing line, exactly
+two `<v …>` voice tags), imports into a
+fresh core and lands on cue-for-cue
+equality with a byte-identical
+re-export. The style claim is stated
+plainly in the file: a VTT document
+carries cues, not style, so the leg
+asserts the two guarantees that exist —
+style round-trips through the registry
+surface in stored form, and import
+replaces only the cue list (a style set
+beforehand survives). The undo leg
+witnesses depth across adds, the style
+set, the no-op set (R20 parity), the
+export (spends nothing, leaves
+`core.status` untouched) and refusals;
+the SRT leg asserts `speakers_dropped
+== 2` at registry level for the first
+time and the key's absence when zero.
+fps 24.0 explicit on every core; cue
+boundaries on exact half seconds. No
+IAs.
+
+**Bundle determinism (V9).** A-B-A over
+`export_bundle` (images kind) through
+the real registry on U14's populated
+fixture class — bends authored, rain,
+a credited two-line cue, an encoder-
+made media sprite — in a new
+`tests/wave_v_bundle_determinism.rs`
+(2 tests): every reply asserted whole
+(`succeeded == 4`, `failed == 0`), the
+tree asserted to be exactly the 16
+expected members with the credited
+"MARA" literal inside the frame-0003
+SVG before any identity is demanded,
+then byte identity member by member
+with P47/S6-style difference reporting.
+The scaled leg adds the cross-scale
+contract: scaled PNG members are
+1920×1440 against 960×720 and every
+non-PNG member is byte-identical across
+scale classes — T8's PNG-only routing
+proven on the populated fixture at
+registry level. The video kind is
+excluded plainly, on the board's own
+ground: the encoders shell out to an
+external ffmpeg whose presence and
+version a library test cannot assume,
+and the container carries encoder
+metadata, so cross-run byte identity is
+not a property the engine promises
+there; remainder (8) carries it.
+
+**Cross-feature e2e (V10).** A new
+`tests/wave_v_e2e.rs` (6 tests), three
+legs. (1) The Top-position raster
+proof at core level, through
+`render_frame` on the burn-in fixture
+shape with every expectation derived at
+run time from the shared helpers
+(`subtitle_line_center_y` and the stack
+offset rule — never a hardcoded band):
+a single Top cue's cluster at the
+helper line with zero face ink in the
+bottom half; a two-cue stack reading
+away from the top edge in cue order; a
+multiline cue whose narrow first line
+sits in the edge band and wide second
+line one band in — the exact inverse of
+the Bottom pin; and half-open liveness
+on [2, 4) with frame 4 byte-identical
+to the cueless control. (2) The JPEG
+chain measured, never byte-compared:
+encoder-made JPEG in a file named
+`photo.bin` (content decides) →
+`asset_import` → `sprite_add` → scaled
+PNG sequence export, the instanced quad
+located and sized in the decoded frames
+against an unscaled control (coverage
+ratio asserted in 3.2..=4.8). (3) The
+name-fidelity leg, written against
+V1's board contract while V1 ran
+concurrently and saying so in its
+header: on the pre-V1 tree its case
+assertion fails on the defect itself;
+against V1's landed fix it asserts
+save "Styk" → listed "Styk", no "styk"
+→ insert by that name.
+
+**Catalogue hygiene wiring (V11).**
+U10's WIRE list, executed: 10 of its
+12 keys wired at 16 production sites
+across 9 files — `settings` (2 sites),
+`live_mcp_control` (the settings toggle
+row), `figures`, `add_figure`,
+`easing`, `discard_changes` (the
+chrome app-bar site), `rename` (pose
+library, figure library, figure
+inspector), `go_to_start`, `go_to_end`
+(both branches each), `tween_play`,
+`clear_drawing` — all with existing
+keys, English byte-identical, per-panel
+pins in the Q7 idiom, and the element-
+key set digest identical before and
+after (149 pairs). The sites sitting
+in V3's and V5's files were filed, not
+edited, as **IA-V11-1**: the help
+panel's title → the existing `help`
+key; home_panel's buttons-row Rename →
+`rename` (the same literal V3
+deliberately left — the two findings
+agree on the site); plus two same-key
+literals V11 found that U10's ledger
+had not catalogued. The integrator
+reconciles IA-V11-1 against V3's
+landed wiring at the apply pass: V3
+already wired the rename-line confirm
+and the armed discard forms to these
+keys, so what remains of the IA is the
+buttons-row site, the help title, and
+whichever of V11's two extra sites
+V3's pass did not reach. One item is
+recommended against, in writing: the
+help Features list's "Live MCP control"
+label lives in a `(&'static str,
+&'static str)` data table whose tests
+read the literal as data — wiring it is
+a shape change, not a swap, and stays
+with a later slice (remainder (7)).
+
+**Render-phase progress (V12).** U11
+scoped the encode phase only — verified
+in the tree, not just in u11.md — so
+the board's first branch applied and
+the render phase got its own boarded
+type: `RenderProgressEvent` /
+`RenderProgressCallback`, phase-pure
+beside the encode pair so the phases
+can never be conflated, wired into the
+render loops of the two sequence
+families (PNG and JPEG; full, range,
+scaled, range-scaled — eight new
+`*_with_render_progress` entries). The
+one deliberate asymmetry with the
+encode contract is stated in the type's
+doc: sequence export is synchronous, so
+delivery is pinned exactly — one event
+per written frame from the caller's
+thread, the final frame's event IS the
+terminal, a successful export of N
+frames delivers exactly N events, an
+empty project's hooked export fires
+exactly the `(0, 0)` terminal, and
+refusals (invalid scale, inverted
+range) fire nothing and write nothing.
+**IA-V12-1** specifies the panel/MCP
+wiring in IA-U11-1's terms and wires
+nothing — no surface displays progress
+yet, and nothing displays fake
+progress. Named out of scope by
+construction: the ffmpeg funnels'
+temp-PNG loops (they feed the encode
+phase) and GIF/APNG/spritesheet, whose
+render and encode are interleaved in
+single loops — a counter there would be
+whole-export progress mislabelled as a
+phase (remainder (6)).
+
+**Gate/census maintenance (V13).**
+Verification only, no edits — the
+finding, again, is that none were owed:
+on a clean detached worktree at
+`1c7a70d` the gate reads PASS 10/10 and
+the census 16/16 at **381**, both
+floors already equal to their verified
+counts (element keys **980** =
+864 + 116; the ratchet T15 made is the
+count), i18n recounted directly at
+**563 × 28** identical sequences with
+zero value==key, scenes 34, palette
+134, icons 163, State 48 fields /
+22 literals. The mid-wave live recount
+also read 10/10 with no transient, and
+its one delta is Wave V's own: element
+keys **983** (+3 dynamic, V6's
+steppers) — a pending delta, the floor
+staying 980 until the integrator
+recounts on the settled tree (V20's
+ledger carries the attribution and the
+ratchet arithmetic). V13 also records
+HEAD advancing to `fbc3644` during its
+slice without moving any counted
+surface.
+
+**Overflow/headless maintenance
+(V14).** One real repair: the xvfb
+fallback tree loop had drifted to 32
+of the 34 scenes — it never named the
+Wave 7 light pair (`default-light`,
+`settings-open-light`) — so a plain-
+attempt miss on either could never be
+recovered by the fallback whose one job
+is recovering missed dumps, and neither
+tree is in SCAN_SET to flag the
+absence. The fallback list now mirrors
+the plain list exactly, with the reason
+commented in the workflow; the gate's
+coverage contract (the plain loop is
+the contract, the fallback report-only)
+is unchanged, and the three 1280×720
+size-variant probes stay plain-only
+deliberately, as every wave before.
+SCAN_SET verified at 16 required /
+0 pending at base and at final check;
+no Wave V slice registers a scene.
+`overflow_scan.py` gained only the
+per-wave docstring maintenance note.
+The V7 boundary is stated in both
+findings and agreed: V7's scenes were
+already in both loops; its snaps
+produce no dumps; no IA from V6 or V7
+named workflow wiring for V14 to apply.
+
+**MCP docs sync (V15).** No edit to
+docs/MCP.md, and that is the verified
+result: census re-verified at **381**
+(44 + 319 + 9 + 4 + 5, no duplicates),
+the docs' count prose agreeing; IA-
+U11-1 prescribes no description change
+(it is a do-not-wire instruction), and
+`git diff d39fc10..1c7a70d` over the
+MCP sources is empty — U11 touched
+`export.rs` only, so no description
+could have drifted in the Wave U
+integration. The drift sweep attributes
+the rest: 296 rows character-identical,
+85 differing — and the same sweep over
+a pristine `d39fc10` tree yields the
+byte-identical differing set, so all
+85 are the pre-existing condensed form
+(the `shell_*` bulk), standing docs
+form since before Wave T, **zero new
+drift**. If V12 had filed a description
+IA it would have been applied verbatim;
+it filed none (IA-V12-1 is a wiring
+specification).
+
+**README truth pass 3 (V16).** Two
+edits: the shell bullet now states the
+catalogue total Wave U settled (563 UI
+strings per language table, 28
+languages), and the export bullet gains
+the encode-progress paragraph written
+to IA-U11-1's exact scope — core-level
+hook, the encoder's own counts, the
+single finished event closing the video
+encode while the MP4 audio mux can
+still fail after it, and "neither the
+export panel nor the MCP server
+surfaces it" said in the README itself.
+Counts re-verified from the tree rather
+than inherited (census 381; i18n
+563 × 28 by the delimited parse, the
+564 raw tuple count and its
+`status_ready` explanation recorded;
+scenes 34 — the README makes no scene
+claim). The name-fidelity claim was
+deliberately NOT written: v1.md had
+not landed at V16's final check, so
+the README asserts nothing about
+library name case; the claim waits for
+V1 + CI. T14's flags are carried
+forward again (remainder (10)).
+
+**QA_RUNE re-audit (V18).** §17 closed
+in Wave S; this is the full re-audit,
+from a pristine archive snapshot so
+concurrent edits could not contaminate
+counts. QA_RUNE gains a re-audit
+pointer at its header (§§1–5 are the
+2026-11-08 snapshot; §18 is now the
+standing-claims surface), the §4 rows
+4–6 filled (headless assertions are
+routine — 34 dumps per dispatch, facts
+1..=36, SCAN_SET 16; the §3 rect
+question resolved — dumps carry rects
+and a top-level capture `scale`,
+consumed by the overflow scan and the
+subtitle census; the first user-PC
+screenshot review marked DONE
+2026-11-08), a supersession note after
+§17 resolving its in-flight cells with
+verdicts, and §18 itself: the verified
+counts table, the post-§17 surfaces and
+contracts, the CI frame through Wave U
+round 2 (round-2 headless was still in
+flight at V18's filing; this section's
+frame above completes it from the
+artifacts). The one genuinely new
+finding is a counting artefact, filed
+as its R1: structurally the catalogue
+holds **564 distinct keys per table**
+— the stated 563 is the line-wise
+count, and the difference is exactly
+`status_ready`, the catalogue's only
+multi-line tuple, invisible to
+line-wise counters (pre-existing: 360
+vs 361 at the S+T base; F4 recorded the
+observation at integration). No key is
+lost, duplicated or desynchronised;
+every count statement inherits the
+artefact, and the remedy is the
+integrator's (remainder (4)). §18.5
+also files R2 (`help_panel.rs` prose
+still says "54 rows" against its own
+61/36 pins — addressed to the help
+surface's owner), R3 (`subtitles.rs`'s
+module doc still calls the speaker
+prefix a filed IA no renderer draws —
+stale since Wave R), R4 (the progress
+wiring, boarded not built) and R5 (the
+figure-library defect confirmed at the
+audit base, V1's to close).
+
+**PHASE_O table refresh (V19).** S8's
+discharge table (PHASE_O §10; "§2" is
+the p05 method it applies) is
+re-sourced and re-verified first-hand:
+the table now cites headless
+**42765217055** (S+T round 2 on
+`9d7dd0a`), downloaded and rescanned —
+all 36 dumps at 0 non-exempt hits, all
+34 of S8's rows reproducing exactly
+(window + element counts identical),
+both rows added since (subtitles-
+speaker, home-missing-audio) CLEAN, and
+the O-1…O-9 measurements unchanged to
+the digit. **The refresh moves no
+number.** What it adds is the
+disclosure the original discharge
+owed: S8's cited run 42759195547,
+re-downloaded and read first-hand, ends
+`SUBTITLE CENSUS: FAIL (5 assertions)`
+inside its SUCCESS workflow — the
+original table cited a census-red run
+without saying so; its overflow verdict
+was genuinely CLEAN under the then-13-
+tree contract and stands, and §10 now
+says all of this plainly and cites a
+census-clean run (19 PASS / 0 FAIL;
+marker PASS alongside). One provenance
+wrinkle recorded in §10, not hidden:
+the cited artifact satisfies 15 of the
+current contract's 16 required trees —
+it predates `home-scan-fallback`, so a
+rescan under today's SCAN_SET reads
+INCOMPLETE on exactly that tree. At
+V19's final check the Wave U round-1
+run had produced no dumps (the E0308
+round) and round 2 was in flight; the
+citation upgrades to 42767540386 —
+census-clean, 16/16 complete — at the
+next refresh.
+
+**Integration-eve rehearsal (V20).**
+No source ownership; every local
+instrument run, repeatedly, on a moving
+tree, with each number naming the tree
+state it sampled: gate PASS 10/10 three
+times (clean HEAD, mid-wave, final
+tree — check 2 zero keys lost in every
+changed file), MCP census PASS at 381
+on HEAD and on the final tree, overflow
+and subtitle-census self-tests PASS,
+and the thumbnail probe's self-test
+PASS including V7's extended pair cases
+on the final tree. **No instrument
+failed at any point; no real regression
+was found.** The ledger reconciles the
+two element-key extractors honestly
+(the gate's ratcheted method reads 980
+at HEAD and 983 on the final tree; the
+standalone inventory reads 1014 / 1017
+— a constant +34 method offset, not
+drift), attributes the +3 dynamic
+patterns to V6's channel steppers in
+`subtitle_panel.rs` alone, and computes
+the pending i18n arithmetic from the
+findings as filed at its check: +120
+across IA-V2-1/V4-1/V5-1/V6-1, minus
+IA-U10-1's 52 = **631 × 28**, with
+IA-V3-1 then still unfiled. V3 has
+since filed (31 keys), so the
+integrator's projection at this
+section's write time is 563 + 151 − 52
+= **662 × 28** — pending arithmetic,
+labelled as such, until the inserted
+tables are recounted; V13's ledger
+computes the same 631 independently,
+and the two ledgers agree to the key on
+everything both measured.
+
+**Integration ledger — every Integrator
+Action filed across Wave V's findings.**
+(1) **IA-V1-1**: exact replacement text
+for `tests/wave_r_undo_census.rs`
+restoring "Styk" in the legs the defect
+forced to "styk" (+0 keys). (2)
+**IA-V2-1**: 5 `subtitle_*` template
+keys. (3) **IA-V3-1**: 31 `home_*` keys
+(templates flagged per key in v3.md);
+(4) **IA-V3-2**: compile-blocking —
+three `&s.core` call-site updates in
+scenes.rs's test module, exact text in
+v3.md; the tree does not compile
+against V3's new signatures until they
+land. (5) **IA-V4-1**: 3 chrome keys.
+(6) **IA-V5-1**: 109 `help_*` keys (one
+template). (7) **IA-V6-1**: 3
+`subtitle_red/green/blue` keys. Items
+(2)–(7) total **151 new keys**. (8)
+**IA-V11-1**: wiring only, all keys
+already in the catalogue — the help
+title → `help`, home_panel's
+buttons-row Rename → `rename`, plus
+V11's two extra same-key sites,
+reconciled against V3's landed wiring
+at the apply pass (see V11's
+paragraph); its one negative
+recommendation (the Features-list
+"Live MCP control" literal) is NOT
+applied. (9) **IA-V12-1**: no insertion
+— the render/encode progress wiring
+specification in IA-U11-1's terms
+(panel background-job shape; MCP
+`notifications/progress` transport),
+recorded below as remainder (6). (10)
+**IA-U10-1** (carried from Wave U,
+deferred to this wave by the board):
+Part 1 removes the 52 REMOVE keys ×28
+with every companion edit U10
+enumerated (SHELL_KEYS 31→25, NEW_KEYS
+12→4 with its value assertions,
+MISSION_KEYS 18→7, the DOPESHEET_KEYS
+const/loop, the named value assertions,
+count-doc updates) — **its companions
+must land in the same push as the
+removals or the i18n tests go red by
+design**; Part 2's 12 WIRE sites were
+V11's slice (landed in tree except
+IA-V11-1's collisions, item (8)); the
+7 RESERVED keys stay untouched. No
+actions were filed by V7, V8, V9, V10,
+V13, V14, V15, V16, V18, V19 or V20.
+
+**Verification — awaiting CI.** Wave
+V's counts are V13's and V20's,
+verified on the clean integration HEAD
+and again on the live tree, not taken
+from siblings' claims: gate PASS 10/10,
+census 381 (44 + 319 + 9 + 4 + 5),
+element keys 980 settled at `1c7a70d`
+and **983 in the Wave V tree** (+3
+dynamic, V6's steppers; the floor stays
+980 until the integrator recounts on
+the settled tree and ratchets — it
+passes as-is, 983 ≥ 980, and must not
+be lowered), palette 134, icons 163,
+scenes 34, SCAN_SET 16 required /
+0 pending, i18n **563 × 28** in tree
+becoming a projected **662 × 28** when
+the 151 IA keys land and IA-U10-1's 52
+removals are applied (pending
+arithmetic; not verified from the tree
+and not a floor — and see remainder
+(4): the structural count runs one
+higher than the line-wise figure at
+every step of that arithmetic). CI —
+the Wave V integration push's Build,
+Test & Binary plus a headless dispatch,
+transcripts read — is the proof of
+everything above, including the first
+execution of every extended pin, of
+V7's pair gate against real snaps, and
+of V14's repaired fallback loop.
+
+**Honest remainders.** (1) The standing
+user decisions stand exactly as §6.15
+(as corrected) left them —
+white-on-accent contrast (3.14:1), the
+panel splitter, File-menu Save As, the
+two disagreeing "New project" results,
+`tab_visits_controls` OFF, project-swap
+undo, the skew channel, the whole-
+figure pose transform, MCP
+`write_recovery`, the waveform
+badge/call, S1's seven i18n
+value-vs-label discrepancies (neither
+side changed; U10's audit confirmed
+zero `tr()` consumers for the six keys
+and they stand RESERVED), the
+subtitle-stack cap/wrap — and this wave
+touched none of them. (2) GIF import
+stays undecided (the funnel refuses it
+deliberately); a panel export-scale
+control remains unbuilt by design; the
+bundle's JPEG member stays 1.0, so
+whole-bundle scaling is a follow-up if
+the user wants it. (3) **The Home
+thumbnail probe's control premise trips
+on current snaps**: on Wave U round 2's
+artifact the legacy probe reads the
+home-totals control strip at 0.672
+stage-bg share against its 0.06 ceiling
+and issues no verdict — whether the
+strip moved, the theme drifted, or the
+premise was always fixture-specific is
+not established by any run yet. V7's
+pair gate (in tree, self-test green)
+inherits Q16's floors and that control
+for its missing-audio leg, so its first
+real run — the Wave V integration
+dispatch — is where this premise is
+answered; until that transcript reads
+PASS with the pair sections present,
+Home thumbnails are unit-proven and
+snap-captured but not snap-proven.
+(4) **The i18n count artefact (V18's
+R1)**: the stated counts (563 now, 662
+projected) are line-wise; the
+structural count is one higher at every
+step (564 / 663) because `status_ready`
+is a multi-line tuple. No key is lost
+or desynchronised. The integrator
+settles it one way or the other at the
+insertion pass — one-line reformat ×28
+or restated counts — and every count
+statement (`src/i18n.rs:13`,
+`i18n_wire.rs`, this document, MEMORY)
+should move together. (5) Doc-prose
+staleness filed by V18, neither fixed
+by its owner nor this wave's code:
+`help_panel.rs`'s module prose says
+"54 rows" against its own 61/36 pins
+(R2 — the help surface's next slice;
+V5 wired the render layer and did not
+rewrite the prose), and `subtitles.rs`'s
+module doc still describes the speaker
+prefix as an undrawn filed IA (R3 —
+stale since Wave R landed
+`subtitle_display_lines`). (6) Progress
+remains core-only by design: U11's
+encode contract and V12's render
+contract are landed and pinned, and no
+surface reports either — the panel
+background-job wiring and the MCP
+`notifications/progress` transport are
+boarded specifications (IA-U11-1,
+IA-V12-1), not built work; the ffmpeg
+funnels' temp-PNG render loops and the
+interleaved GIF/APNG/spritesheet loops
+have no phase-pure progress by
+construction, and audio-mux progress
+does not exist. (7) The help Features
+list's "Live MCP control" label stays
+English-canonical in its data table
+(V11's recommendation, V5's
+concurrence): wiring it is a data-shape
+change with test consequences, owed to
+a rostered slice, not the integration
+pass. The settings-popover toggle row
+of the same words IS wired (V11). (8)
+Bundle determinism is proven for the
+images kind only; the video kind's
+cross-run byte identity is not a
+property the engine promises (external
+ffmpeg, container metadata) and stays
+unlegged unless a future slice legs it
+on looser terms with the reasoning
+stated. (9) English residue by design:
+status sentences in every wired panel
+(incl. Home's 16 and the clips panel's
+2), the export class-C status/recap
+sentences (machine-read, standing
+exclusion), the open-recent not-found
+sentence, the waveform strip's health
+caption, key-cap notation and shortcut
+hints, the app name, and the serialised
+vocabularies everywhere. (10) T14's
+flags, carried by U16 and V16
+unchanged: no LICENSE/COPYING file in
+the repo root, the README's
+build-from-source framing, and the deep
+feature prose never line-audited. (11)
+docs/MCP.md's 85 condensed rows stand
+as the catalogue's standing form (V15
+re-attributed them: zero new drift) — a
+full-verbatim docs slice is a possible
+future wave, not drift. (12) §6.15
+remainders closed here: the subtitle
+census's coordinate contract (fixed on
+the S+T line; its floors ratified in
+Wave U round 2, above); the S+T build's
+owed round 2 (GREEN, 42765201236 /
+42765217055); IA-U12-1's one-push
+pairing (landed in `3480d1d`, its marker
+PASS in round 2); IA-U4-2's call sites
+(landed — and their one-character
+defect is round 1's whole story, above);
+U10's outstanding audit (filed, and its
+WIRE half executed by V11; its REMOVE
+half is IA-U10-1 at this wave's
+integration); U11's unboarded
+follow-ups (the render phase is V12;
+the panel/transport wiring stays
+boarded, remainder (6)); and the scan-
+fallback line's headless proof (scene
+in `3480d1d`, marker PASS in round 2).
+And sound remains user-verified only.
+
+**Integrator's note (F5, Wave V
+integration).** The filed integrator
+surfaces landed in one pass. Catalogue:
+the five Wave V IA blocks (IA-V2-1,
+IA-V3-1, IA-V4-1, IA-V5-1, IA-V6-1) added
+**151 keys** in roster order to all 28
+tables — genuine translations in BN /
+ES / DE / FR / IT / PT_BR / RU /
+ZH_HANS, English placeholders in the
+other 19 (ES419 included), every
+`{slot}` kept in every table — and
+IA-U10-1 Part 1 removed the **52** dead
+keys (1,456 lines), with every companion
+edit (NEW_KEYS 12→4, MISSION_KEYS 18→7,
+the DOPESHEET_KEYS const/loop and the
+`dopesheet_keys_resolve_through_tr`
+lines, the figures_layers / onion_skin
+value assertions): **563 + 151 − 52 =
+662 × 28** by the project's line-count
+convention (the `status_ready` tuple
+disclosure stands, unrenumbered). One
+recorded deviation: SHELL_KEYS went
+31 → 24, not U10's 31 → 25 — its §8
+lists `onion_skin`'s SHELL_KEYS
+membership as a reference, and with the
+key removed from the tables, keeping it
+listed would leave
+`shell_key_coverage` reporting it
+missing. The 7 RESERVED keys are
+untouched. IA-V1-1 and IA-V1-2 applied
+verbatim (the census's "Styk" legs and
+the three figlib suites' listing
+assertions; file-path/slug assertions
+unchanged). IA-V3-2 applied (the three
+`&s.core` call-arity fixes in
+scenes.rs's pins). IA-V11-1 applied
+reconciled against V3's landed wiring:
+the help-panel title now resolves
+through `help`, and the project-row
+buttons' "Rename" through `rename`;
+two filed sites were skipped as
+already wired by V3 (the rename-line
+confirm through `rename`, the open-row
+armed prompt through
+`discard_changes`), and the help
+feature-list "Live MCP control" stays
+unwired per V11's negative
+recommendation (a `&'static str` data
+table). Element keys recounted on the
+final tree with the gate's extractor:
+**983**, agreeing with V13/V20 —
+KEY_TOTAL_FLOOR ratcheted 980 → 983.
+Count docs updated (i18n.rs header,
+i18n_wire.rs header, README languages
+bullet): 662. Status: IMPLEMENTED
+until CI.
