@@ -9929,3 +9929,6 @@ chain half at (3) above); the
 SpriteLoop GAP list W10 reconciled
 is now exhausted except what user
 briefs still own.
+
+
+**Wave Y CI close (2026-11-10):** closed GREEN in round 7 on `a37f2aa` (build 42798005496 — 4,248 tests passed, 0 failed; headless 42798031914 SUCCESS with every transcript verified: SUBTITLE CENSUS PASS, THUMBNAIL PROBE PASS, MISSING-AUDIO + SCAN-FALLBACK markers PASS, MCP PROBE PASS, and the artifact overflow scan CLEAN — 0 hits, scan set complete, the second consecutive CLEAN dispatch). Rounds 1–6 failed only in test targets plus one real semantics fix: round 6's `InstanceKey::sample()` sentinel preservation (the dopesheet "(follows Scale)" readout), completed in round 7 by `base_key` materialising the sampled scale_y on write — readouts keep the follow sentinel, stored keys freeze the effective value, follow re-enters only via the explicit toggle. The PHASE_O §10 citation upgrade (owed to Wave Z's Z12) stands released by dispatch 42792705307 and confirmed by 42798031914.
