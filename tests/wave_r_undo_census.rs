@@ -160,14 +160,21 @@ fn padded_samples() -> Vec<f32> {
 }
 
 /// The canonical 1x1 RGBA PNG.
-const PNG_1PX: &[u8] = &[
-    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
-    0, 0, 31, 21, 196, 137, 0, 0, 0, 10, 73, 68, 65, 84, 120, 156, 98, 0, 1, 0, 0, 5, 0, 1, 13,
-    10, 45, 180, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
-];
-
 fn write_png(path: &str) {
-    std::fs::write(path, PNG_1PX).expect("write temp png");
+    // A real encoder-made 1x1 PNG (the wave_r_e2e idiom).
+    // The hand-rolled byte constant this replaced carried a
+    // bad IDAT CRC: it passed while asset import checked
+    // magic only, and Wave R's decode-checked funnel (R9)
+    // rightly refuses it (CI 42761122064).
+    let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]));
+    let mut buf = Vec::new();
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(
+            &mut std::io::Cursor::new(&mut buf),
+            image::ImageFormat::Png,
+        )
+        .expect("encode census PNG fixture");
+    std::fs::write(path, buf).expect("write temp png");
 }
 
 // ---------------------------------------------------------------------
