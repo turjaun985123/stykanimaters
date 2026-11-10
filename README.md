@@ -96,7 +96,7 @@ present and fall back to a folder-based flow when neither exists.
   (parent, fixed length, relative rest angle, head flag, IK bend
   side, per-node styles and media); a pose is a root position plus
   one relative angle per node, plus optional per-node **bends**
-  (curved segments, rendered through an arc midpoint); a project
+  (curved segments, rendered as a four-piece arc); a project
   is figures + frames + fps + stage size + camera keys, graph
   channels, FX clips, audio clips, sprites/texts, weather and
   subtitles (timed cues with an optional per-cue speaker
@@ -112,7 +112,19 @@ present and fall back to a folder-based flow when neither exists.
   clamped angle, so segment lengths stay exact — and the
   humanoid preset ships with anatomical limits. Stored poses
   are never rewritten: a limit bites only when a solver or a
-  channel produces the angle.
+  channel produces the angle. A **setup mode** in the figure
+  inspector turns the stage into a rigging surface: every
+  figure draws at its rest pose and stage drags drive the same
+  FK/IK solvers against the rest angles, the write-back
+  clamped through each node's joint limits. *Set rest from
+  current pose* adopts the pose at the current frame as the
+  figure's new rest pose — with rebase (the default), every
+  authored angle (frame poses, the frames of clips authored
+  on the figure's own rig, and its angle graph channels)
+  shifts by the per-node rest delta, so the animation keeps
+  its content against the new rig; chosen absolutely, only
+  the rest angles change and the timeline is untouched. The
+  same op is an MCP tool (`set_rest_pose`).
 - **Editor UI** — a Rune shell (`src/main.rs` +
   `src/stage_view.rs` + `src/chrome_view.rs`, declared as
   modules of the binary; the library stays UI-free). What it
@@ -148,8 +160,10 @@ present and fall back to a folder-based flow when neither exists.
   override of the project easing), frame copy/paste, inbetween,
   block shift, range reverse, loop ranges, motion-path display
   with path smoothing, onion skin 1–3 in both directions, and a
-  **graph engine** (Hermite channels for root X/Y, joint angles
-  and segment lengths, with shortest-path angle wrap,
+  **graph engine** (Hermite channels for root X/Y, joint angles,
+  segment lengths and per-node bends — a bend channel is keyed
+  and edited in the graph panel like any other, and the stage,
+  the rasterizer and SVG follow it — with shortest-path angle wrap,
   Catmull-Rom auto-tangents, tangent presets — Smooth, EaseIn,
   EaseOut, EaseInOut, Linear — with preview curves, time-mirror
   and value-scale channel transforms, and a multi-channel
@@ -166,10 +180,15 @@ present and fall back to a folder-based flow when neither exists.
   override and styles (taper, caps, gradients, opacity), shape
   segments (lines, circles, regular polygons 3–6 sides), sprite
   and text segments (built-in 3×5 bitmap font for text) — an
-  image on a segment follows its bend arc (split at the arc
-  midpoint, each half sampling its own half of the image) on
-  stage, in the rasterizer and in SVG exports, while text stays
-  on the straight chord — figure
+  image on a segment follows its bend arc, subdivided into
+  strips laid along the arc (two at gentle bends, up to eight
+  at strong ones), each strip sampling its own slice of the
+  image, on stage, in the rasterizer and in SVG exports, while
+  text stays on the straight chord — and an attached image
+  carries a local transform (offset along and across the
+  segment, scale, rotation, mirror flip), edited with steppers
+  in the segment inspector or set through the MCP attach
+  tools — figure
   presets (humanoid, quadruped, mini), and a local figure library
   (`./library/*.json` plus built-ins). Saved figures store their
   exact display name inside the library file — the filename stays
@@ -251,7 +270,20 @@ present and fall back to a folder-based flow when neither exists.
     keys, reordered in draw order, and navigated from its own
     dopesheet lane.
     Image assets import from PNG or JPEG files, detected by
-    content rather than by file name.
+    content rather than by file name. A **layered set** imports
+    too: a SpriteLoop package folder (`spriteloop.import.json`
+    plus one cropped image per part, as the official
+    Krita/Photoshop exporters write it) or a plain folder of
+    PNG/JPEG images. Every part is validated before anything
+    changes, so one corrupt part refuses the whole import;
+    parts matched by name to a node's segment dress it as
+    segment media, and every unmatched or invisible part
+    becomes a free sprite — no part is dropped. (A part's
+    opacity rides its sprite; on an attached part it has no
+    segment-media home yet and is counted in the import report
+    instead of being stored.) The import is one undo step,
+    from the command palette or the `import_layered_set` MCP
+    tool.
   - *Export:* `.piv` v2/v3/v4/v5, `.stk`, `.nodes`, `.stknds`,
     plus PNG sequence, GIF, MP4, WebM, APNG, JPEG sequence, SVG
     and spritesheets. MP4/WebM can also be exported for a frame
@@ -263,11 +295,11 @@ present and fall back to a folder-based flow when neither exists.
     raster exports (PNG sequence, GIF,
     MP4, WebM, APNG, JPEG sequence and spritesheets) also
     accept an optional output scale — a true re-render at
-    the scaled size, not a resample. PNG sequences and
-    spritesheets also have a transparent-alpha variant in the
-    library and over MCP: the background fill is skipped and
-    edges carry premultiplied coverage alpha, at any output
-    scale. The export bundles
+    the scaled size, not a resample. PNG sequences,
+    spritesheets and APNG exports also have a transparent-alpha
+    variant in the library and over MCP: the background fill is
+    skipped and edges carry premultiplied coverage alpha, at
+    any output scale. The export bundles
     (the whole timeline in every format, in one call) accept
     a scale as well: it scales only the bundle's PNG sequence
     member, every other member is unaffected, and an invalid
@@ -311,7 +343,7 @@ present and fall back to a folder-based flow when neither exists.
   (`src/projects.rs`), a recovery snapshot and
   session-continuity helpers (`src/shell.rs`), native open/save
   dialogs, save/load as JSON (`project.styk.json`), and
-  **28 languages** (the original's 27 + Bengali; 678 UI
+  **28 languages** (the original's 27 + Bengali; 692 UI
   strings in each language's table) in `src/i18n.rs`.
   These library features survived the Rune
   migration untouched, and the Home panel and settings
@@ -321,7 +353,7 @@ present and fall back to a folder-based flow when neither exists.
 ## Drive it from an AI agent (MCP)
 
 The `mcp_server` binary speaks MCP (JSON-RPC 2.0 over stdio,
-protocol `2024-11-05`) and exposes **390 tools**: project/figure/
+protocol `2024-11-05`) and exposes **392 tools**: project/figure/
 pose editing, camera (with rotation), graph keys and tangent
 presets, FX clip management and FX presets, weather (including
 storm), audio, drawing (including polygon and star shapes
@@ -329,9 +361,10 @@ and stroke simplification),
 3D sessions, movieclips, animation states and clip
 retargeting, joint limits, sprite draw order and enriched
 sprite keys,
-per-frame bends, pose mirroring, graph tangent smoothing,
+per-frame bends and bend channels, pose mirroring, rest-pose
+(setup) editing, graph tangent smoothing,
 import/export in every supported format (including MP4/WebM
-frame-range formats), and
+frame-range formats and layered-set imports), and
 rendering — including `render_frame_base64`, so an agent can see
 the frame it just made, and `render_contact_sheet`. Full tool catalogue and the client
 configuration snippet live in [docs/MCP.md](docs/MCP.md).

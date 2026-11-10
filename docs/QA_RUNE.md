@@ -1275,3 +1275,52 @@ dispatch's scan reads CLEAN again; every
 O-1…O-9 measurement re-measured on the new
 dumps reproduces exactly (fifth consecutive
 dispatch).
+
+### 19.9 Wave Y closing frame — aligned (Wave Z, Z18)
+
+§19.8 left one blocker standing: the sprite-panel
+overflow family, open until a dispatch scans
+CLEAN. That dispatch is Wave Y's closing frame,
+verified from the artifacts and logs first-hand:
+Build, Test & Binary `42798005496` and Headless
+Rune probe `42798031914`, both **SUCCESS** on
+`a37f2aa` (the Wave Y closing HEAD; the round
+history — six test-side fix rounds, green at
+round 7 — is §6.19's and the close commit's
+record, not re-derived here). Build totals
+summed from the run's own log: **4,248 passed,
+0 failed** (56 `test result:` lines). The
+headless artifact holds 224 files, 37 tree
+dumps; its transcripts read: subtitle census
+**PASS** (19 PASS assertions, 0 FAIL), both
+Home markers **PASS** (missing-audio,
+scan-fallback), MCP probe **PASS** (exit 0),
+and the Home thumbnail probe **PASS** in full —
+the Y10 geometry leg holds (thumbnail band
+112×83/84 across the four strips, spreads
+within tolerance 1), the populated pairwise
+ink-coverage distances read 0 / 51 / 48 against
+the floor of 12, the missing-audio thumbnail
+reads 0 from the singleton row and 48 from the
+pair, and the legacy legs stand at W7's numbers
+(control shares 0.008 / 0.004; rows 0.333 /
+0.337 / 0.339; ink 115 / 115 / 59). The
+overflow scan over the artifact reads **CLEAN
+(0 hits, scan set complete)** — the second
+consecutive CLEAN dispatch, the first being
+round 3's headless `42792705307`. §19.8's
+blocker is therefore closed on evidence: the
+Draw-order row still renders — `sprite-z-row` /
+`sprite-z-back` / `sprite-z-front` are present
+in `tree-default.json` — and Y14's wrap repair
+holds in the geometry (`sprite-z-front` sits
+on the wrapped second line, right edge 1194.5,
+against the +14.0 pt breach §19.8 recorded).
+This frame is the one Z12's PHASE_O §10
+citation upgrade takes, under the condition
+§19.8 restated — the first CLEAN-scanning
+dispatch with these transcripts beside it;
+§17's row, which closes on §10's evidence, is
+unaffected from this side. §19.6's remaining
+rows stand as their own waves' records left
+them.

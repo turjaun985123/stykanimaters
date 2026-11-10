@@ -9932,3 +9932,1377 @@ briefs still own.
 
 
 **Wave Y CI close (2026-11-10):** closed GREEN in round 7 on `a37f2aa` (build 42798005496 — 4,248 tests passed, 0 failed; headless 42798031914 SUCCESS with every transcript verified: SUBTITLE CENSUS PASS, THUMBNAIL PROBE PASS, MISSING-AUDIO + SCAN-FALLBACK markers PASS, MCP PROBE PASS, and the artifact overflow scan CLEAN — 0 hits, scan set complete, the second consecutive CLEAN dispatch). Rounds 1–6 failed only in test targets plus one real semantics fix: round 6's `InstanceKey::sample()` sentinel preservation (the dopesheet "(follows Scale)" readout), completed in round 7 by `base_key` materialising the sampled scale_y on write — readouts keep the follow sentinel, stored keys freeze the effective value, follow re-enters only via the explicit toggle. The PHASE_O §10 citation upgrade (owed to Wave Z's Z12) stands released by dispatch 42792705307 and confirmed by 42798031914.
+
+### 6.20 Wave Z — closing the
+half-open edges: bend-channel
+media, the state-row scene,
+sprite dragging, bundle alpha;
+the Wave Y frame closed
+(2026-11-10)
+
+Ordered 2026-11-10 (the standing
+continuous order; the board was
+written while Wave Y's CI loop
+ran, so this wave launched the
+moment Wave Y closed): twenty
+agents, one owner per file,
+integrator surfaces via filed
+actions (board:
+`~/workspace/wave-z/BOARD.md`;
+findings:
+`~/workspace/wave-z/findings/`).
+The board's base is the Wave Y
+closing HEAD `5031700` (MCP 392,
+i18n 692 × 28 as then counted —
+**corrected to 693 × 28 by Z13
+below**, element keys 1017,
+palette 135, scenes 34,
+SCAN_SET 18 required / 0
+pending); `src/i18n.rs` and
+`src/rune_sec/i18n_wire.rs` were
+frozen to this wave's agents,
+all key work arriving via IA.
+This section was written from
+all nineteen sibling findings
+(z1–z19; z20 is this section —
+Z13's arrived last, in the
+record's final minutes, and its
+i18n correction below is
+carried in full) and from the
+CI frame assembled by Z19 and
+re-verified first-hand via `gh`,
+downloaded artifacts and the
+python instruments — never from
+workflow conclusions alone, per
+the 42759195547 lesson. Every Wave Z status
+below is IMPLEMENTED (in tree,
+uncommitted at write time);
+Wave Z has no CI verdict. The
+Wave Y frame, by contrast, is
+closed here, exactly — both
+workflows green in round 7,
+overflow CLEAN twice running.
+
+**The Wave Y integration
+ledger.** Five commits on top
+of `d44098f`, in order: (1)
+`63211e7` — core: Y1's P-7 bend
+channel (`ChannelTarget::Bend`,
+render-only rows seeded from
+`bends_at`) and Y7's P-10 setup
+pose (`set_rest_from_pose`,
+Rebase / Absolute). (2)
+`a26156d` — Y3's P-8 media
+transform (flat serde-defaulted
+`offset` / `scale` /
+`angle_offset` / `flip` on
+`SegmentMedia::Image`, composed
+in the one funnel), Y5's P-9
+layered import core (new
+`src/layered_import.rs`,
+refuse-before-any-write), Y9's
+P-11 strip warp (K strips over
+`bend_arc_point`, K = 2
+bit-identical to X4), Y13's
+alpha APNG family. (3)
+`e202293` — MCP 390 → **392**:
+Y6's `import_layered_set`,
+IA-Y7-1's `set_rest_pose`,
+IA-Y2-1's bend graph target,
+IA-Y13-1's APNG `alpha` arm.
+(4) `feb5826` — panels: Y2's
+bend plumbing + 4-piece arc,
+Y8's setup mode, Y11's state
+offset/speed steppers, Y12's
+limit presets, Y14's sprite
+enrichment surface + IA-Y17-1's
+Draw-order wrap repair. (5)
+`ca9dc89` — tests/docs/probes:
+the undo-census legs for both
+new tools, gate/probe upkeep,
+the records. Between the slices
+the finisher (F8) applied every
+filed IA and measured the
+finished tree: **MCP 392, i18n
+692 × 28, element keys 1017
+zero lost, palette 135, scenes
+34, SCAN_SET 18/0**; gate PASS
+10/10 on the git tree.
+
+**The Wave Y CI frame — seven
+rounds, every verdict read from
+logs or artifacts (Z19's
+assembly, anchors re-verified
+first-hand by Z12, Z18 and this
+section).** Round 1 (`ca9dc89`):
+build 42789303086 FAILED on a
+single **E0382** in
+`src/layered_import.rs` (the
+apply loop moved `part.asset`,
+then borrowed `part`); headless
+42789337805 FAILED at its build
+step — its census / thumbnail /
+MCP failure lines were proven
+missing-input consequences (no
+binary, no dumps), not defects.
+Fixed in `c239d83`. Round 2:
+build 42791998179 FAILED in the
+**bin target only** — **E0599**
+(`image_transform_sanitised`
+never implemented; Y4's panel
+assumed a Y3 API) + **E0503**
+(`selected_figure` read while
+`&mut s.core` was borrowed);
+headless 42792034293 the same
+missing-input pattern. Fixed in
+`95e4a45` (the panel sanitises
+inline, mirroring the funnel;
+the figure read hoisted). Round
+3: build 42792663877 FAILED in
+the **lib TEST target** — 9
+errors (duplicate `image_items`
+test helper, the `json` helper's
+missing `?Sized`, a match-by-
+value pin); **headless
+42792705307 SUCCESS with every
+transcript verified: SUBTITLE
+CENSUS PASS, HOME THUMBNAIL
+PROBE PASS (incl. Y10's geometry
+leg — band 112×83/84, spreads
+within tolerance 1, pair
+distances 0 / 51 / 48), both
+Home markers PASS, MCP PROBE
+PASS — and the artifact overflow
+scan CLEAN (0 hits, scan set
+complete): Y14's wrap repair
+VERIFIED, the first CLEAN scan
+since the Wave X regression,
+releasing the PHASE_O §10
+citation Z12 takes below.**
+Fixed in `3f75e8b`. Round 4:
+build 42793326988 FAILED on
+exactly **1 of 1,755** lib tests
+— the media-transform pin's
+exact corners vs the funnel's
+f32 dust (59.999996 / 50.000008
+vs 60.0 / 50.0); headless
+42793362928 SUCCESS. Fixed in
+`1dcb085` (tolerance compare).
+Round 5: build 42795203136
+FAILED on **3 tests** (3,978
+passed summed) — two stale
+X4-era stage pins (2 flat / 8
+gradient pieces expected vs
+P-7's deliberate 4 / 16 at the
+quarter points) and one REAL
+semantics defect: the dopesheet
+enrichment line lost its
+"(follows Scale)" suffix because
+`InstanceKey::sample()` resolved
+`scale_y` to a number, erasing
+the sentinel stored-key readouts
+keep; headless 42795236749
+SUCCESS. Round 6 (`3fde76d`:
+`sample()` keeps the sentinel
+when both endpoints follow; the
+arc pins re-derived): build
+42796321211 FAILED on **2 tests**
+(3,979 passed summed) — the
+write-side half of the same
+thread: key authoring between
+enriched keys now received the
+sentinel (0.0) where the stored
+key must carry the materialised
+effective value (1.0); headless
+42796352469 SUCCESS. Round 7
+(`a37f2aa`: `base_key`
+materialises the sampled
+`scale_y` on write): build
+42798005496 **SUCCESS — 4,248
+passed, 0 failed**, summed from
+the run's own log over its 56
+test-result lines (re-summed
+independently by Z18, Z19 and
+this section); headless
+42798031914 **SUCCESS** with the
+full transcript set PASS and the
+artifact overflow scan **CLEAN —
+the second consecutive CLEAN
+dispatch**. The frame's only
+product-code fix commits after
+integration are the r6/r7
+sentinel pair; every other fix
+is test-side or compile repair.
+Wave Y is VERIFIED on both
+workflows. The docs-close commit
+`5031700` (this record's §6.19
+close note, docs only) pushed
+with build 42798924312 and
+headless 42798957551 **still in
+flight at this section's write
+time**; no product behaviour
+rides on that round, and its
+verdicts belong to the next
+record, not this one.
+
+**Wave Z, agent by agent** (from
+their findings; every status
+IMPLEMENTED until the Wave Z
+integration CI):
+
+**Z1 — bend-channel media
+routing.** §6.19 remainder (2)
+closed on its media edge: the
+one consumer that bypassed the
+channelled evaluation was the
+funnel's bends row (`media.rs`
+took `bends_at` directly, under
+a pre-P-7 comment that was no
+longer true). One hunk in
+`media_items` routes the row
+through the `ChannelResult`
+the funnel already computes —
+Y2's consumer idiom verbatim —
+so stage, raster and SVG follow
+bend channels together with
+zero consumer edits (the funnel
+is the one stream); the
+no-channels path is `bends_at`
+byte-for-byte. Four pins: a
+channel alone bends media with
+no frame bends anywhere, a
+channel keyed 0.0 overrides a
+frame bend (override, never
+additive), the channel value
+drives Y9's strip count, and a
+non-bend channel leaves the
+stream identical. Text still
+rides the chord (X4's rule,
+unchanged). No IA, no keys, no
+MCP change.
+
+**Z2 — state-row headless scene
+(IA-Y17-2 discharged).** New
+scene `states-populated`
+(registry index 34; 35 scenes):
+clips-populated's exact state
+plus ONE state key authored on
+figure 0 through the real op
+(`EditorCore::set_state_key`,
+clip 1 at frame 0, in force at
+the parked playhead) — no direct
+`states` write. Layout fact 37
+records `clip-state-row-0` +
+`clip-state-clear-0` inside the
+states section. Both headless
+loops dump it, and SCAN_SET
+names `tree-states-populated.
+json` **required from the
+start** — the set is now **19
+required / 0 pending**, the
+pending side empty by design.
+Scene + loops + SCAN_SET landed
+as one change (the S2 pattern);
+no IA owed. Its proof is owed
+by Wave Z's first dispatch: the
+tree must be PRESENT (absence
+reads INCOMPLETE, never clean)
+and judged under rules 1–2.
+
+**Z3 — stage sprite dragging.**
+X5's remainder built, on X5's
+own pick order (draw → camera →
+joint → sprite → stroke — the
+drag inherits the pick, so a
+joint under a sprite still wins
+the gesture; no priority was
+re-decided). The gesture splits
+like `begin_drag` / `drag_to`:
+the grab records a `SpriteDrag`
+in a `thread_local` (the
+subtitle lane's precedent) with
+the pre-drag key list; moves
+write the panel's `base_key`
+shifted by the pointer DELTA
+(the sprite never jumps to the
+cursor) live, with no snapshot;
+a clean release restores the
+pre-drag list and commits the
+final key through
+`set_sprite_key_full` — exactly
+**one undo step per drag**,
+enrichment verbatim (a
+follow-`scale` base materialises
+its `scale_y` on write, the
+Wave Y r7 behaviour, pinned); a
+cancel restores byte-for-byte
+at zero undo cost; a click or a
+returned excursion spends
+nothing; identity loss mid-
+gesture abandons. Seven pins.
+x/y only — rotation/scale stay
+panel/MCP routes; the
+right-press path still does not
+pick sprites (X5's remainder
+stands).
+
+**Z4 — setup-mode numeric rest
+steppers.** §6.19 remainder (6)
+closed: the Setup section gains
+per-node rest-angle steppers in
+`inspector_figure.rs` (one file,
++343/−1) — the house stepper
+idiom at the segment panel's 5°
+step, write-back through the
+same helper the setup drags use
+(`norm_deg` then X6's
+`clamp_angle`), so a numeric
+edit and a drag leave the rig in
+the same state. One press = one
+snapshot = one undo step; a
+press the clamp makes a no-op
+is silent (no write, no status,
+no step); stored frame poses
+are never touched (pinned
+byte-identical). Every node
+takes a row, the root included
+(its rest angle orients the
+rest stance — not X6's root
+limit refusal, which is about
+SOLVED angles). Six pins. No
+i18n IA (node names are project
+data; the steppers add zero
+catalogue strings) and no MCP
+tool (rest editing already
+rides the panel surfaces).
+Caveat on the record: the rows
+mount only in setup mode and no
+scene turns it on, so they
+appear in no headless dump —
+overflow exposure nil on
+current scenes, by the ring
+row's scan-proven anatomy.
+
+**Z5 — layered-import opacity
+home (§6.19 (8) closed).** The
+audit verdict: the field
+composes CLEANLY — segment
+media have exactly ONE alpha
+composition point (the funnel's
+segment-image arm: figure ×
+carrier style), so a third
+factor multiplied there reaches
+stage, raster, SVG and stage
+sprites together, and no
+surface has its own path to
+conflict with. Built in Y3's
+discipline: `SegmentMedia::
+Image` gains `opacity: f32`,
+serde-defaulted to 1.0 and
+skipped at 1.0 — pre-opacity
+files load fully opaque and an
+all-opaque project serialises
+byte-identically (the wave12
+pin stands verbatim). The
+funnel sanitises at composition
+(non-finite reads as 1.0; stored
+values never rewritten). The
+attach surface gains parity:
+`MediaTransformArgs.opacity`
+(validated 0..=1 up front, a
+refusal spends no snapshot) on
+both attach tools, and
+`segment_media_json` reports
+`"opacity"` so no read hides
+writable state. Layered import
+now STORES the attached part's
+opacity, and the report field
+is renamed for honesty —
+`attached_opacity_dropped` →
+**`attached_opacity_stored`**
+(a deliberate surface change,
+IA-Z5-3): Y5's counted remainder
+closes; nothing is counted-and-
+lost any more. An 81-site
+mechanical constructor sweep
+(Y3's method; the post-sweep
+checker reads 83 blocks with
+opacity / 16 `..` patterns / 0
+unhandled) plus five pins,
+including the triple product
+0.5 × 0.5 × 0.5 = 0.125 and the
+importer storing 0.5 end to
+end. Two IAs ride: **IA-Z5-1 is
+COMPILE-REQUIRED** (the layered
+tool's reply follows the rename
+in `mcp_layered_tools.rs` — the
+tree does not compile until it
+lands), IA-Z5-2 the registry +
+docs mirror for the attach
+schemas and node-media shapes
+(census stays 392). Stated
+remainder: NO panel opacity
+control — a stored opacity
+survives transform edits via
+the `..` write-back but cannot
+be viewed or changed in the
+inspector; that surface is a
+future seat, not faked here.
+
+**Z6 — bundle alpha contract.**
+Designed first, then built, in
+`src/mcp_io.rs` only: the
+`export_bundle` tool gains an
+optional `alpha` boolean (the
+`render` tool's parsing idiom;
+the census does not grow). In
+kind `images`, exactly the two
+members whose formats carry
+per-pixel alpha honour it —
+`png_sequence` (through the
+(scale × alpha) matrix, bundle
+progress translator threaded)
+and `spritesheet` (the unscaled
+alpha entry; T8's no-scale rule
+stands) — while `jpeg_sequence`,
+`svg` and both video members are
+written by exactly today's
+opaque calls, byte-identical;
+`alpha: true` on kind `video`
+is accepted, recorded, and
+changes no byte. The manifest
+is the reply: absent/false →
+byte-identical to today;
+true → a top-level `"alpha":
+true` plus a per-member
+`"alpha"` boolean (true only
+where the member was actually
+written with alpha — a JPEG
+member's `false` is stated,
+never silent). No manifest file
+is written; panel bundles are
+untouched and stay opaque (the
+panel alpha toggle remains the
+standing user decision). Five
+pins. IA-Z6-1 (the docs row)
+was applied verbatim by Z15;
+IA-Z6-2 is this paragraph.
+
+**Z7 — chain-spanning media:
+DESIGN ONLY, as boarded.** The
+deliverable is the design in
+z7.md; no product code changed.
+First, a correction to the
+board's shorthand: Y9's
+"spine-generic builder" is not
+a named function — the strip
+emission is INLINE in
+`media_items`, spine-generic in
+structure (it consumes only
+spine, half-height, end corners,
+flip, alpha, asset); a chain
+build starts by extracting it.
+The recommended span model:
+option A — `span_next:
+Option<usize>` on the existing
+`SegmentMedia::Image` variant,
+serde-defaulted and skipped
+when `None` (a non-spanning
+image serialises byte-identically
+to today), authored on the
+PROXIMAL node, validity derived
+never trusted (a stale span
+degrades to today's single-
+segment picture, never to a
+missing one). The two bends
+compose as concatenated arc
+samplings with the shared joint
+once; strips tile u by
+ARC-POSITION fraction so the
+joint sits at L1/(L1+L2) of the
+source; the joint edge keeps
+segment 1's width vector
+(option (i); the rotated-width
+quality follow-up is named, not
+taken). Conflict rule:
+authoring refuses over a node
+already carrying an image;
+rendering degrades span-wins.
+Migration is additive-only —
+no version bump exists to ride
+and none is recommended. The
+build is priced as one L-sized
+slice in six steps. **It does
+not start until the user
+answers the design's nine
+questions** (chain length,
+conflict rule, fit, elbow
+width, transform frame, fade,
+text, the kink-vs-straight use
+case, panel affordance) — each
+with the design's default
+stated, so the user can accept
+by exception.
+
+**Z8 — panel bundle progress
+job.** The panel bundle was the
+last synchronous export (W1's
+findings recorded it as "the
+panel's remaining blocking
+press"; X11 left the wiring to
+a panel slice — this one). Both
+panel bundles now run on W1's
+background-job mechanism under
+X11's core contract, all in
+`export_panel.rs`: a press
+spawns a worker over a cloned
+Project; the tracker is
+allocated from the members'
+totals BEFORE the first member
+runs (images `[frames.len(); 4]`,
+video `[sampled_frame_total; 2]`
+— the MCP handler's exact
+construction); members run
+through the same hooked entries
+the ops call, at the ops' own
+destinations; tracker events
+write into a THIRD slot on the
+job (the bundle slot, kept apart
+from the two phase slots exactly
+as the phases are kept apart);
+the readout shows one bundle
+line (`xc-progress-bundle` —
+the slice's one new element key,
+zero lost). The finish writes
+`bundle_recap` to status AND
+recap together, byte-identical
+to the synchronous handler's last
+word — no class-C sentence was
+reworded anywhere (the standing
+exclusion held by construction).
+A worker that never reports
+fails EVERY member in the recap
+("Exported nothing…") — the
+honest summary, pinned. No
+`State` field was needed (the
+slot lives in `ExportJob`), so
+no literal sweep; main.rs
+untouched. The panel alpha
+question is not touched (the
+worker calls the plain entries;
+Z6 owns the contract question).
+Eight new pins, workers only —
+no pin runs a real export (the
+W1 discipline). **IA-Z8-1**: one
+catalogue key,
+`export_bundle_progress`
+("Exporting bundle {done} of
+{total} frames") — until the
+integrator inserts it (×28),
+the wire falls back to the key
+text (the Q7 pattern) and the
+extended catalogue pin says so.
+Stated remainders: no cancel
+for a running bundle (no
+contract offers one; no fake
+button), and no per-member
+readout lines (the combined
+count is X11's design — per-
+member truth lives in the
+recap, as on the MCP side).
+
+**Z9 — library state round-trip
+audit.** One question, three
+library families, per-field
+verdicts — and exactly ONE
+in-scope non-preservation, a
+format boundary rather than a
+drop: **joint limits are
+PRESERVED verbatim everywhere
+they are stored** (2D figure
+library — NodeDef fields ride
+the def's JSON; project library
+— the whole Project, in BOTH
+def copies, each figure's and
+each clip's embedded one;
+recovery snapshots by the same
+mechanism), **pose libraries
+correctly carry neither field**
+and provably do not interfere
+(over-limit angles save and
+load bit-exact — limits bind
+solving, not data — and a pose
+apply leaves the target's
+states and limits untouched),
+and **figure-library STATES are
+not stored at all**: the payload
+is the def only, and a key's
+`clip` index names a clip in
+the SAVING project, which the
+library does not carry — in
+another project the same index
+would be dangling or, worse,
+silently wrong against a
+different clip. Carrying clips
+is the §6.7-class format change
+already declined for referenced
+PNGs, so the seat reported it
+rather than forcing it (the
+board's escape rule). No product
+code changed; the build is four
+files of pins (+284/−0) making
+every verdict above — including
+"an inserted figure starts
+stateless" — a conscious,
+pinned behaviour a future
+format change must move
+deliberately.
+
+**Z10 — limit preset sweep
+audit. REPORT; nothing built.**
+The seat's rule was build-only-
+if-exact, and the mapping is
+not exact on any axis: the
+preset words appear in NO node
+name anywhere (humanoid names
+the elbow-joint segments
+"forearm L/R" and the knee
+segments "shin L/R", applying
+ranges by INDEX); names denote
+segments while limits constrain
+the joint at the segment's BASE,
+so even the best case is an
+inference; the constructors
+disagree on vocabulary
+("arm L" merged segments with
+no elbow at all, quadruped
+"hind lower" with no honest
+anatomical word); and the
+population the sweep exists for
+carries purely mechanical names
+(Pivot "segment {id}", Stick
+Nodes "rounded-segment 12",
+editor "segment {ni}") — a
+sweep over those matches zero
+nodes and reporting success
+would be the partial-and-quiet
+outcome the seat forbids.
+Structural matching was checked
+too and is also a guess
+(quadruped hind lowers satisfy
+the chain shape AND carry the
+"elbow" bend sign). IA-Z10-1 is
+deliberately UNISSUED — the
+numbering gap is the decision,
+on the record. The exact
+precondition for a future
+sweep is role METADATA (a
+serde-defaulted joint-role
+field written by the
+constructors), a model change
+beyond this seat; per-node
+preset application (Y12) stands
+as the honest route meanwhile.
+
+**Z11 — bend-channel polish
+audit.** Surface-by-surface
+against Angle/Length: labels,
+selector, authoring, every
+generic graph edit, timeline
+marks, MCP (IA-Y2-1) and
+evaluation were verified AT
+parity by reading, not assumed.
+Five gaps were proven and
+built. **G1:** the graph
+readouts formatted radian bend
+values as `{:.1}` — a 0.04 rad
+bend printed "0.0", invisible;
+bend now formats `"{v:.2} rad"`
+in the header, value line and
+stat range (every other target
+byte-identical). **G2:** Reduce
+DESTROYED bend channels — the
+0.5 tolerance is half a DEGREE
+in angle units but half a
+RADIAN (≈71% of the max bend)
+on a bend channel, dropping
+essentially every interior key;
+bend now reduces at
+`REDUCE_TOLERANCE.to_radians()`.
+**G3:** bake silently DROPPED
+bend channels — `bake_graph_
+channels` took only `.poses`
+from the evaluation though
+bends have a frame home; the
+evaluated bend rows are now
+written (figures no bend
+channel targets keep their
+tables byte-identical, pinned),
+so a bend channel's motion
+survives clearing the channels,
+as the status always claimed.
+**G4:** the segment inspector's
+docs still asserted P-7's false
+premise ("no graph channel can
+override a bend") at three
+sites — corrected, docs only
+(the steppers deliberately keep
+working on the STORED bend; the
+channelled number's honest
+surface is the Graph panel).
+**G5:** the graph empty state
+always advised "Key angle" —
+for a Bend target it now names
+"Key bend" (Root/Length honestly
+name MCP `graph_key`). Eight
+pins, no existing pin edited,
+zero keys added or lost.
+Equal-absence items were
+reported, NOT built (dopesheet
+marks no channel of any target;
+the keyframe-tools section is
+Angle-only by its own docs;
+`auto_fit`'s generic fit for
+bend is correct — a fixed ±0.7
+fit would clip raw-stored
+bends). **IA-Z11-1**
+(comment-only): the MCP reduce
+tool's "matches the panel"
+comment is stale for Bend after
+G2. One remainder flagged for
+the board, not improvised:
+Bend(0) channels can be authored
+(selector + MCP) and are inert
+at render — a refusal would
+break `key_bend`'s mirror of
+`key_graph_angle`'s shape.
+
+**Z12 — citations: the §10
+upgrade TAKEN.** The condition
+Y15 withheld on is discharged
+and verified first-hand in this
+pass: the measurer was
+calibrated against the previous
+citation's artifact
+(42774207670 — all 37 per-tree
+counts and every O-1…O-9 edge
+reproduce) before any number
+was trusted; the closing
+artifact (42798031914) scans
+**CLEAN** under the current
+script; `sprite-z-front` ends
+at **1194.5** on both CLEAN
+artifacts (was 1426.0, +14.0 pt,
+on the Wave X frame) — Y14's
+repair proven at artifact
+level, not just in code. §10
+now cites the Wave Y closing
+dispatch: 22 per-tree counts
+updated (all upward — the Wave
+X+Y panel surface the cited run
+predates), `tree-default.json`'s
+diff exactly **21 keys added,
+none lost**, O-1…O-9 unchanged
+(sixth consecutive dispatch),
+the clips + sprites carriers'
+SCAN_SET flags corrected to
+required (the contract stood at
+18/0 on that frame). The first
+CLEAN dispatch was round 3's
+42792705307; per X15's precedent
+the citation names the closing
+one, and the two artifacts agree
+on all 37 dumps, so the choice
+moves no number. **The §10
+citation debt is closed** — the
+first citation since Wave X
+with no withheld condition.
+IA-Z12-1 (the QA_RUNE §19
+pointer) is discharged by
+Z18's §19.9, below.
+
+**Z13 — gate/census
+maintenance.** The baseline was
+isolated properly: a detached
+worktree of `5031700`, never the
+shared tree (the X16/Y16
+method). Every board expectation
+verified exactly on the clean
+tree — gate **PASS 10/10**,
+keys **1017** (889 static + 128
+dynamic, 61 files, zero lost),
+State 49/22, scenes 34, MCP
+**392** with doc sync exact,
+palette 135, SCAN_SET 18/0, all
+three script self-tests PASS —
+and the two floors ratcheted on
+those self-verified counts, with
+ledger comments in the X16/Y16
+style: **`KEY_TOTAL_FLOOR` 995
+→ 1017, `MCP_SURFACE_FLOOR` 390
+→ 392** (the edited script
+re-run in the worktree passes
+with both floors met exactly).
+One genuine catch, the wave's
+only count correction: **the
+settled i18n count is 693 × 28,
+not 692.** A trailing-comma-
+tolerant structural parse reads
+693 entries in each of the 28
+tables (identical sequences,
+keys unique, zero EN
+value==key); the 692 figure is
+an undercount by exactly the
+`status_ready` key, whose tuple
+is the file's only one formatted
+across multiple lines with the
+trailing comma INSIDE the
+parens — every single-line pair
+parser silently misses it (this
+seat's first two parsers did;
+§6.18's and §6.19's "structural
+679 vs line-count 678" artefact
+was this same tuple, read from
+the other side). The tables
+themselves are complete and
+correct; only the count PROSE
+is stale, and it lives in the
+two FROZEN files — hence
+**IA-Z13-1**: the integrator
+corrects `src/i18n.rs`'s header
+("exactly the same 692 keys" →
+693) and `i18n_wire.rs:6`
+("× 692" → 693); no table
+content changes, and all prose
+citing 692 ×28 for the settled
+surface (the §6.19 record
+included) should be read as
+693. Z16's hygiene partition
+(§ below) was built on its own
+bounded parse of 692 and covers
+those 692 keys; `status_ready`
+itself is a live status-bar key
+whose absence from the
+partition is this same parser
+artefact, recorded here rather
+than silently renumbered in
+another seat's paragraph.
+Wave Z's own growth is NOT
+floored by this seat — it is
+the finisher's recount on the
+integrated tree, per the
+standing pattern.
+
+**Z14 — overflow/headless
+maintenance.** No edits — the
+seat's product is the
+independent verification that
+Z2's promotion landed in
+exactly the prescribed shape:
+entry required from the start
+with proving text, both loops
+appended in mirror position,
+header + counts prose extended,
+NO pending entry added. The
+battery, run at base and again
+after the promotion: self-test
+all checks passed both times;
+`--scan-set` 18/0 → **19/0**;
+per-loop cross-check stricter
+than the script's own — scenes
+35, both loops 35 and set-equal
+to the registry and each other,
+produced set **38 dumps**; and
+the contract behaviour proven
+against a pre-promotion artifact
+(the closing frame's copy scans
+0 hits with exactly one MISSING
+line — the states tree —
+verdict INCOMPLETE, exit 1: a
+required tree absent is never
+silently clean, and no other
+tree regressed). Boundary
+stated for the record: Z12 owns
+citations, Z14 owns the
+instrument and the set; Z2's
+edits landed inside Z14's files
+under Z2's own brief, and this
+seat's role for them is
+verification, not authorship.
+Interim mid-wave gate failures
+observed in this seat's window
+(check 9 against the mid-splice
+registry) are the moving-tree
+artefact, not scan-set matters.
+
+**Z15 — MCP docs sync.** The
+escaped-pipe-aware sweep against
+the settled census (392, zero
+missing / phantom / misplaced
+after the fixes; description
+screen flagged zero rows) found
+and fixed five real drifts in
+`docs/MCP.md`, one of them
+security-relevant: **the live-
+MCP default was stated
+backwards** — the doc said the
+endpoint "defaults to on" /
+"normally hosts from launch";
+ground truth (`src/shell.rs`,
+the W4 rule, the shipped help
+copy) is OFF by default,
+explicit-enable only. Also:
+`get_clipboard_state` was
+catalogued as a built-in (45
+rows under a "(44)" header) —
+it is a registry tool, moved
+verbatim to its census
+neighbour; the HTTP status
+table lacked **403** (the
+live transport's Host/Origin
+DNS-rebinding refusal); the
+error-codes table's header was
+destroyed and its **-32700**
+row lost — both restored from
+the doc's own Protocol section
+and the census; three splice
+fragments repaired (joins and
+capitalisation only). IA-Z6-1
+applied verbatim. One IA
+produced: **IA-Z15-1** — a stale
+comment at
+`src/rune_sec/help_panel.rs:306`
+claims `live_mcp` "defaults to
+`true`", contradicting the code;
+comment-only, owed to the
+integrator / that file's owner.
+Recorded remainder: the sweep
+ran against the base census
+plus the findings filed by run
+time; if a late seat adds a
+tool or an argument, its docs
+row rides its own IA and the
+integrator re-runs this sweep
+on the integrated tree.
+
+**Z16 — i18n usage hygiene.**
+The U10 pattern over 692 × 28,
+and the headline is that the
+catalogue is CLEAN: **zero keys
+proposed for removal, zero
+needing wiring.** The full
+partition, machine-checked:
+**531 live-direct** (a literal
+inside a production `tr(` span,
+span-matched — including all
+twelve keys U10 filed as WIRE,
+every one now wired), **154
+live-dynamic** across five named
+resolver mechanisms (7 workspace
+keys via `Workspace::i18n_key()`,
+4 menu titles via the indexed
+`MENU_LABEL_KEYS`, 27 FX kind
+labels via the name→key match,
+8 Home count templates via
+`count_label_tr`, 108 help texts
+via the canonical-English
+`help_text_key` lookup), **7
+reserved** (six are S1's standing
+user-decision discrepancies —
+none has any `tr()` consumer,
+refreshed audit — plus `fps`,
+the documented Phase E literal),
+**0 wire, 0 remove**. U10's 52
+removed keys have not crept
+back (parse-verified); zero
+`value == key` cells and zero
+`{slot}` mismatches across all
+28 × 692 entries. The removal
+IA list (IA-Z16-1…n) is empty
+DELIBERATELY: deleting any of
+the 161 non-span keys would
+delete a key a resolver reads
+by name, index or canonical
+string — the exact failure the
+no-grep-absence-alone rule
+exists to prevent. The catalogue
+stays as it is and the
+integrator has NO i18n work
+from this seat. (Count note:
+this seat's bounded parse read
+692; Z13's tolerant parse reads
+693 — the `status_ready`
+artefact, carried in Z13's
+paragraph; the hygiene verdict
+is unaffected, and IA-Z13-1
+corrects the prose.) The post-T
+English-placeholder translation
+backlog is a translation matter,
+not a usage defect — every such
+key is wired or resolver-fed.
+
+**Z17 — README truth pass 7.**
+Eight edits to `README.md`
+(+51/−18), every claim sourced
+from its Y-finding, re-checked
+against the landed tree, and
+claimed on Wave Y's CLOSED CI
+frame (round 7) — not on the
+findings' word alone (the pass-6
+discipline). Two stale counts
+corrected: **390 → 392 tools**,
+**678 → 692 UI strings**. New
+claims landed: bend channels
+(panel-keyed; stage / raster /
+SVG follow; the arc at four
+pieces), bend channels over MCP
+(IA-Y2-1 discharged in F8 —
+grep-verified, so §6.19
+remainder (2)'s MCP edge does
+not carry forward as owed),
+media transforms, the strip
+warp (two strips at gentle
+bends, up to eight at strong),
+layered import (including the
+honest opacity limit, stated in
+the README itself), setup pose
++ `set_rest_pose`, and alpha
+APNG — claimed for the library
+and MCP only, no panel claim
+made or implied. Flags carried,
+re-checked, none edited: F1
+(CI-only framing), F2 (**no
+LICENSE file** — the claim
+rests on Cargo.toml's
+`GPL-3.0-or-later` alone; still
+the user's call), F3, F4, F9
+(the class-C range sentences —
+standing exclusion), F10 (the
+absent panel alpha toggle, now
+covering three formats).
+Deliberately NOT claimed, each
+tied to its Wave Z seat: bend-
+channel media routing (Z1),
+chain-spanning media (Z7,
+design-only), layered-import
+opacity storage (Z5), bundle
+alpha (Z6), setup rest steppers
+(Z4) — pass 8 revisits each
+against its seat's CI verdict,
+never its findings alone.
+
+**Z18 — QA_RUNE alignment.**
+One appended subsection,
+**§19.9** (supersede-don't-
+rewrite; no earlier text
+touched; +49 lines): the Wave Y
+closing frame aligned in QA's
+idiom, every figure re-derived
+first-hand — build totals
+summed from the run's own log
+(4,248 / 0), every headless
+transcript read from the
+downloaded artifact (census
+PASS at 19 assertions, both
+Home markers PASS, thumbnail
+probe PASS with Y10's geometry
+leg and distances 0 / 51 / 48,
+MCP probe PASS), and the
+overflow scan CLEAN as the
+second consecutive. §19.8's
+blocker is closed on GEOMETRY,
+not just the verdict: the
+sprite row still renders in
+`tree-default.json` (it was not
+hidden to pass) and
+`sprite-z-front` sits on the
+wrapped second line at right
+edge 1194.5, against the
++14.0 pt breach Y15 measured.
+§19.9 names this frame as the
+basis for Z12's §10 upgrade
+(IA-Z12-1 discharged) and
+leaves §19.6's remaining rows
+to their own waves' records.
+(Relaunch note, for the honest
+count: the first Z18 agent died
+at startup on a rate limit and
+produced nothing; this slice
+started fresh.)
+
+**Z19 — rehearsal support.**
+The complete Wave Y CI frame
+assembled from run records:
+every round's build + headless
+IDs, totals summed from
+`test result:` lines (r4 1,754/1,
+r5 3,978/3, r6 3,979/2, r7
+**4,248/0** over 56 lines),
+transcripts quoted from logs
+and artifacts, and rounds 4–6's
+artifacts downloaded fresh and
+re-scanned (0 hits each). The
+classification the ledger above
+uses is this seat's: rounds 1–3
+compile-only (no test target
+ever executed), r4 test-side,
+r5–r6 the one semantics thread
+plus stale pins, r1–r2 headless
+failures proven missing-input
+from the logs. One method note
+the next record-keeper needs:
+the CURRENT scanner reads Wave
+Y artifacts INCOMPLETE (1
+required tree missing) — the
+states tree entered SCAN_SET
+only with Wave Z and cannot
+exist in Wave Y dumps; the
+comparable figure across
+scanner versions is the hit
+count, **0 in every Wave Y
+dispatch that produced
+artifacts (rounds 3–7)**.
+
+**Z20 — this section** (§6.20
+record + integration-eve
+rehearsal, below).
+
+**Integration-eve rehearsal**
+(on the clean `git archive
+5031700` tree — the shared tree
+carries this wave's uncommitted
+slices, so nothing was counted
+there for the settled baseline;
+Z16's and Z17's independent
+runs agree). Settled counts
+versus rehearsal: MCP **392** —
+census exit 0, all PASS (44
+builtin + 330 registry + 9 io +
+4 subtitle_io + 5 subtitle),
+gate check 9 doc-sync exact;
+i18n **693 × 28** — Z13's
+tolerant structural parse (693
+entries per table; the 692
+figures elsewhere, Z16's
+partition and the frozen
+headers included, are the
+single-line-parser count that
+misses the multi-line
+`status_ready` tuple — Z13's
+paragraph above carries the
+method; IA-Z13-1 corrects the
+prose); element keys
+**1017** by the gate's method,
+zero lost per F8's integration
+check 2 on the git tree; palette
+**135** (gate check 10 parity);
+scenes **34** at base (35 on the
+live tree with Z2's scene);
+SCAN_SET **18 required / 0
+pending** at base (19/0 on the
+live tree after Z2's promotion,
+Z14-verified). Script self-tests
+on the archived tree: subtitle
+census PASS, thumbnail probe
+PASS (incl. Y10's geometry
+fixtures), overflow scan
+SELF-TEST all checks passed.
+Failures and anomalies,
+classified: **(a) Pending-IA
+(expected mid-wave state; none
+is a regression).** The Wave Z
+integration pass owes:
+**IA-Z5-1 (COMPILE-REQUIRED** —
+the layered tool's reply field
+follows Z5's report rename; the
+tree does not compile until it
+lands), IA-Z5-2 (the attach
+schemas' + node-media shapes'
+registry/docs mirror), IA-Z8-1
+(the `export_bundle_progress`
+catalogue key, ×28 — the
+catalogue is measured again at
+integration, never by
+arithmetic), IA-Z11-1 and
+IA-Z15-1 (stale comments, both
+comment-only, no behaviour
+depends on either), and
+IA-Z13-1 (the 693 count prose
+in the two frozen headers —
+comment-only likewise). Z13's
+floor ratchets themselves are
+DONE in-tree (995 → 1017,
+390 → 392, worktree-verified),
+not owed. And the integrator
+re-runs Z15's docs sweep on the
+integrated tree if any late
+seat moves the surface.
+Discharged inside the wave, for
+the record: IA-Z6-1 (by Z15),
+IA-Z12-1 (by Z18), IA-Y17-2
+(by Z2). Until the
+integration pass lands, the
+rehearsed Wave Z tree does not
+compile — the green python
+instruments are not a compile
+verdict, exactly as §6.18 and
+§6.19 said of their eves.
+**(b) Regression (none open).**
+The one regression standing at
+§6.19's rehearsal — Wave X's
+sprite Draw-order overflow
+family — is CLOSED by this
+frame: Y14's repair verified in
+dispatches 42792705307 and
+42798031914 (CLEAN twice, the
+row present and wrapped, Z18's
+geometry), and Z12's §10
+citation now stands on the
+closing dispatch. No Wave Z
+audit found a new regression:
+Z9 proved pin-coverage gaps,
+not behaviour loss; Z10 built
+nothing; Z14's contract check
+isolated the pre-promotion
+delta to exactly Z2's new tree.
+**(c) Method artefacts (two).**
+Gate check 2 on an archive tree
+(no `.git`) cannot evaluate its
+diff and reports 9/10; on the
+git tree the same gate passed
+10/10 at Wave Y integration
+(F8) and in four mid-wave runs
+reported by Z1, Z3, Z6 and Z14
+over the shared tree. Not a
+tree failure. And the current
+scanner's INCOMPLETE on Wave Y
+artifacts (Z19's annex): the
+states tree postdates those
+dumps; the hit count (0) is the
+comparable figure. No other
+instrument failure on the
+rehearsed tree.
+
+**Remainders.** (1) **The Wave Z
+integration CI + its first
+headless dispatch.** Everything
+above is IMPLEMENTED until that
+CI; the dispatch must produce
+**38 dumps** with
+`tree-states-populated.json`
+among them, and the debrief scan
+over that artifact must read
+19/19 required present with its
+hit verdict stated from the scan
+output itself — never a
+workflow-log grep. If the state
+row overflows its card, the
+repair belongs to the clips
+panel's owner — no exemption, no
+threshold move (the §6.19 (1)
+discipline). (2) **The filed
+IAs + three build remainders.**
+The integration pass lands
+IA-Z5-1 (compile-required),
+IA-Z5-2, IA-Z8-1, IA-Z11-1,
+IA-Z13-1 and IA-Z15-1 as
+itemised in the rehearsal.
+Riding with them: Z5's opacity
+has NO panel control (stored
+and MCP-writable, not
+inspector-visible — a future
+seat); Z8's bundles have no
+cancel path (none exists in the
+contracts; none faked); Z11's
+Bend(0) channels are authorable
+and inert at render (a refusal
+is a board call, not an audit
+fix), and its equal-absence
+list (dopesheet channel marks,
+keyframe-tools scope) is a
+board call for ALL channel
+targets, not a bend defect.
+(3) **The docs-close round**
+(5031700: build 42798924312,
+headless 42798957551) was in
+flight at this record's write
+time; its verdicts — docs only,
+no product behaviour — are
+recorded by the next record,
+not asserted here. (4)
+**Chain-spanning media** (Z7):
+the design is complete and the
+seam verified; the build awaits
+the user's answers to the
+design's nine questions (Q1–Q9
+in z7.md, defaults stated).
+Nothing is improvised meanwhile.
+(5) **Figure-library states**
+(Z9): an inserted figure starts
+stateless, now pinned as
+deliberate; preserving states
+requires the library to carry
+the clips the keys index (or a
+remap rule) — a format change
+in the §6.7 class, awaiting a
+user/integrator brief. (6)
+**The limit preset sweep**
+(Z10): no honest sweep exists
+without role metadata; a
+serde-defaulted joint-role
+field on `NodeDef` is the exact
+precondition — a model decision
+for the user/integrator, not
+built. Per-node presets (Y12)
+stand. (7) **The panel alpha
+toggle** remains the standing
+user decision, unbuilt; bundle
+alpha is now designed and built
+MCP-side (Z6) with panel bundles
+deliberately untouched, and Z6
+also flags pre-existing drift
+for the docs seat: the `render`
+tool's SCHEMA `alpha`
+description still omits APNG
+although its description
+sentence (Y13) includes it.
+(8) **IA-Z15-1** — the stale
+`live_mcp` "defaults to `true`"
+comment at help_panel.rs:306:
+comment-only, owed to the
+integrator / file owner; the
+behaviour and the docs (Z15)
+are already correct. (9) All
+standing user decisions from
+§6.19's list stand untouched by
+this wave: accent contrast,
+panel splitter, File-menu Save
+As, the two-"New project"
+results, `tab_visits_controls`
+OFF, project-swap undo, skew,
+whole-figure pose transform,
+MCP write_recovery, waveform
+badge, GIF import, panel
+export-scale control,
+subtitle-stack cap/wrap, S1's
+seven i18n discrepancies (six
+surviving keys — Z16's audit
+changes none of them), the
+export class-C sentences
+(machine-read), serialised
+vocabularies in English, the
+Settings-card Esc / menu-open
+non-Esc key leak (PHASE_O §9)
+and the figure-inspector
+stale-selection copy (PHASE_O
+§4) pending a product ruling,
+the panel alpha toggle, and the
+absent LICENSE file (Z17's F2 —
+a flag, never an edit). Sound
+remains user-verified only.
+The SpriteLoop GAP list stays
+exhausted except what user
+briefs still own — chain-
+spanning media (4) is now the
+largest of those, fully designed
+and priced.

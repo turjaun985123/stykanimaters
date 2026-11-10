@@ -471,11 +471,12 @@ discharged (Wave S, S8) — refreshed against a
 newer dispatch (Wave V, V19), upgraded to
 the first 16/16-complete dispatch (Wave W,
 W12), and upgraded again to the Wave W
-integration dispatch (Wave X, X15); the
-Wave X integration dispatch was checked in
-full and not taken (Wave Y, Y15 — its scan
-reads NOT CLEAN; see the upgrade notes
-below).** Original source:
+integration dispatch (Wave X, X15), and
+upgraded again to the Wave Y closing
+dispatch (Wave Z, Z12); the Wave X
+integration dispatch was checked in full and
+not taken (Wave Y, Y15 — its scan reads NOT
+CLEAN; see the upgrade notes below).** Original source:
 **Headless Rune probe run `42759195547`**,
 completed **SUCCESS** on
 `59cb0bec36b80648c9f9fe0dfd7d30cd6266d5c3`
@@ -543,7 +544,7 @@ dispatch, and the table gains the one row the
 refresh notes owed, `tree-home-scan-fallback.json`,
 required and CLEAN.
 
-Current source: **Headless Rune probe run
+Previous source: **Headless Rune probe run
 `42774207670`**, completed **SUCCESS** on
 `dccddbb7d76dc038ea34622d101c6e632d69fa61`
 (`dccddbb`, the Wave W integrated tree),
@@ -563,7 +564,40 @@ the Wave V round-2 artifact `42771786953`, so
 the move predates Wave W and is stable across
 both dispatches). Every O-1…O-9 measurement
 reproduces exactly — the fourth consecutive
-dispatch to do so. Per §2's output shape each
+dispatch to do so.
+
+Current source: **Headless Rune probe run
+`42798031914`**, completed **SUCCESS** on
+`a37f2aa03368e9272e10692449f901e662e4dfb5`
+(`a37f2aa`, the Wave Y integrated tree at its
+CI close; the build beside it, `42798005496`,
+completed **SUCCESS** with test totals summed
+from its own log at **4,248 passed, 0
+failed**), artifact `headless-probe-output`
+(224 files, 37 `tree-*.json` dumps). Its scan
+reads `OVERFLOW SCAN: CLEAN (0 hits, scan set
+complete)` — the contract now standing at 18
+required trees (the Wave X clips carrier and
+the Wave Y sprites carrier promoted since
+the last citation) — its
+`subtitle-census.txt` reads
+`SUBTITLE CENSUS: PASS` (19 PASS, 0 FAIL),
+both Home markers read `PASS`, its Home
+thumbnail probe reads
+`HOME THUMBNAIL PROBE: PASS` (pairwise
+ink-coverage distances 0 / 51 / 48; the band
+geometry leg within tolerance at 112×83/84),
+and its live-MCP probe reads
+`MCP PROBE: PASS` — all read from the
+artifact itself, not from the workflow
+conclusion. Every figure below was
+re-measured in these dumps: 15 of the 37
+counts reproduce exactly; 22 moved, all
+upward (the Wave X+Y panel surface; the
+upgrade notes carry the list). Every
+O-1…O-9 measurement reproduces exactly —
+the sixth consecutive dispatch to do so.
+Per §2's output shape each
 scene's hit list is empty, so the table records
 the verdict per scene:
 
@@ -571,38 +605,38 @@ the verdict per scene:
 |---|---|---|---|---|---|
 | tree-audio-open.json | 1440×900 | 462 | required | 0 | CLEAN |
 | tree-build-open.json | 1440×900 | 376 | — | 0 | CLEAN |
-| tree-clips-populated.json | 1440×900 | 1224 | — | 0 | CLEAN |
-| tree-default-1280.json | 1280×720 | 1161 | — | 0 | CLEAN |
-| tree-default-light-1280.json | 1280×720 | 1161 | — | 0 | CLEAN |
-| tree-default-light.json | 1440×900 | 1161 | — | 0 | CLEAN |
-| tree-default.json | 1440×900 | 1161 | required | 0 | CLEAN |
-| tree-dopesheet-keys.json | 1440×900 | 1238 | — | 0 | CLEAN |
+| tree-clips-populated.json | 1440×900 | 1287 | required | 0 | CLEAN |
+| tree-default-1280.json | 1280×720 | 1215 | — | 0 | CLEAN |
+| tree-default-light-1280.json | 1280×720 | 1215 | — | 0 | CLEAN |
+| tree-default-light.json | 1440×900 | 1215 | — | 0 | CLEAN |
+| tree-default.json | 1440×900 | 1215 | required | 0 | CLEAN |
+| tree-dopesheet-keys.json | 1440×900 | 1292 | — | 0 | CLEAN |
 | tree-draw-open.json | 1440×900 | 461 | required | 0 | CLEAN |
 | tree-effects-open.json | 1440×900 | 562 | required | 0 | CLEAN |
 | tree-export-open.json | 1440×900 | 408 | — | 0 | CLEAN |
-| tree-frame-3.json | 1440×900 | 1161 | — | 0 | CLEAN |
+| tree-frame-3.json | 1440×900 | 1215 | — | 0 | CLEAN |
 | tree-fx-selected.json | 1440×900 | 643 | required | 0 | CLEAN |
 | tree-fx-split-mid.json | 1440×900 | 698 | required | 0 | CLEAN |
-| tree-graph-duplicates.json | 1440×900 | 446 | required | 0 | CLEAN |
-| tree-graph-open.json | 1440×900 | 407 | — | 0 | CLEAN |
+| tree-graph-duplicates.json | 1440×900 | 448 | required | 0 | CLEAN |
+| tree-graph-open.json | 1440×900 | 409 | — | 0 | CLEAN |
 | tree-home-populated.json | 1440×900 | 375 | — | 0 | CLEAN |
 | tree-home.json | 1440×900 | 291 | — | 0 | CLEAN |
 | tree-home-missing-audio.json | 1440×900 | 334 | required | 0 | CLEAN |
 | tree-home-scan-fallback.json | 1440×900 | 333 | required | 0 | CLEAN |
-| tree-library-populated.json | 1440×900 | 1160 | — | 0 | CLEAN |
-| tree-loop-range.json | 1440×900 | 1196 | required | 0 | CLEAN |
-| tree-menu-open.json | 1440×900 | 1169 | — | 0 | CLEAN |
-| tree-palette-open.json | 1440×900 | 1225 | required | 0 | CLEAN |
-| tree-playing.json | 1440×900 | 1161 | — | 0 | CLEAN |
-| tree-selected.json | 1440×900 | 1334 | — | 0 | CLEAN |
-| tree-settings-open-error.json | 1440×900 | 1326 | — | 0 | CLEAN |
-| tree-settings-open-light.json | 1440×900 | 1325 | — | 0 | CLEAN |
-| tree-settings-open.json | 1440×900 | 1325 | — | 0 | CLEAN |
-| tree-sprites-populated.json | 1440×900 | 1174 | — | 0 | CLEAN |
+| tree-library-populated.json | 1440×900 | 1214 | — | 0 | CLEAN |
+| tree-loop-range.json | 1440×900 | 1250 | required | 0 | CLEAN |
+| tree-menu-open.json | 1440×900 | 1223 | — | 0 | CLEAN |
+| tree-palette-open.json | 1440×900 | 1279 | required | 0 | CLEAN |
+| tree-playing.json | 1440×900 | 1215 | — | 0 | CLEAN |
+| tree-selected.json | 1440×900 | 1409 | — | 0 | CLEAN |
+| tree-settings-open-error.json | 1440×900 | 1380 | — | 0 | CLEAN |
+| tree-settings-open-light.json | 1440×900 | 1379 | — | 0 | CLEAN |
+| tree-settings-open.json | 1440×900 | 1379 | — | 0 | CLEAN |
+| tree-sprites-populated.json | 1440×900 | 1262 | required | 0 | CLEAN |
 | tree-strokes-populated.json | 1440×900 | 514 | — | 0 | CLEAN |
-| tree-subtitles-populated.json | 1440×900 | 1169 | required | 0 | CLEAN |
-| tree-subtitles-speaker.json | 1440×900 | 1169 | required | 0 | CLEAN |
-| tree-subtitles-top.json | 1440×900 | 1169 | required | 0 | CLEAN |
+| tree-subtitles-populated.json | 1440×900 | 1223 | required | 0 | CLEAN |
+| tree-subtitles-speaker.json | 1440×900 | 1223 | required | 0 | CLEAN |
+| tree-subtitles-top.json | 1440×900 | 1223 | required | 0 | CLEAN |
 | tree-three-d-1280.json | 1280×720 | 433 | — | 0 | CLEAN |
 | tree-three-d-stage.json | 1440×900 | 433 | required | 0 | CLEAN |
 | tree-three-d.json | 1440×900 | 433 | required | 0 | CLEAN |
@@ -810,6 +844,76 @@ paid — a wrap or a narrower anatomy — and the
 citation upgrades to the first later dispatch
 whose scan reads CLEAN with these transcripts
 beside it.
+
+**Upgrade notes (Wave Z, Z12).** Y15's
+condition is discharged. Y14's `flex_wrap`
+repair of the sprite Draw-order row landed in
+Wave Y, and the first later dispatch whose
+scan reads CLEAN is Headless Rune probe run
+`42792705307` (Wave Y round 3, on `95e4a45`) —
+verified first-hand in this pass: its scan
+reads `OVERFLOW SCAN: CLEAN (0 hits, scan set
+complete)` and its census, thumbnail probe
+and MCP probe transcripts all read PASS. Per
+X15's precedent the citation takes the newer
+dispatch as the standing source: the Wave Y
+closing dispatch `42798031914`, above, whose
+per-tree counts are identical to
+`42792705307`'s on all 37 dumps. The defect
+itself, closed: `sprite-z-front`, which ended
+at 1426.0 (+14.0 pt [content+card]) on the
+Wave X frame, ends at **1194.5** on both
+CLEAN dispatches, and the z-row's subtree
+ends at 1412.0 — a wrapped `flex_wrap` row
+filling its card, the anatomy every repaired
+row in this table carries. What verified on
+the closing artifact, read first-hand: scan
+CLEAN under the contract as it now stands —
+18 required trees, the Wave X clips carrier
+(`tree-clips-populated.json`) and the Wave Y
+sprites carrier (`tree-sprites-populated.json`)
+promoted since the last citation, both rows'
+SCAN_SET flags updated in the table;
+`SUBTITLE CENSUS: PASS` (19 PASS, 0 FAIL);
+both Home markers `PASS`; the thumbnail
+probe PASS live again (pairwise distances
+0 / 51 / 48 against the floor of 12; legacy
+legs at control shares 0.008 / 0.004, rows
+0.333/0.337/0.339, ink 115/115/59; the band
+geometry leg spreads within tolerance 1 at
+112×83/84); `MCP PROBE: PASS`. The build
+beside it, `42798005496` on the same commit,
+completed **SUCCESS**, its test totals summed
+from its own log at **4,248 passed, 0
+failed**. The measurer was calibrated before
+any number was trusted (X15's discipline):
+run against the previous citation's artifact
+(`42774207670`, downloaded fresh), all 37
+per-tree counts and every O-1…O-9 subtree
+right edge reproduce the table exactly, so
+the movements below are the new artifact's
+facts. Per-tree counts moved in 22 trees, all
+upward — Wave X+Y panel surface the cited
+run predates: the default family
+(default, default-1280, default-light,
+default-light-1280, frame-3, playing)
+1161 → 1215; the subtitles family
+1169 → 1223; the settings family 1325 → 1379
+(error tree 1326 → 1380); dopesheet-keys,
+library-populated, loop-range, menu-open and
+palette-open +54 each; clips-populated
+1224 → 1287; selected 1334 → 1409;
+sprites-populated 1174 → 1262; the graph
+pair +2 each. The other 15 reproduce. The
+`tree-default.json` key diff against the
+previously cited artifact is exactly 21 keys
+added, none lost — the sprite edit rows
+(z / flip / follow / opacity / pivot /
+scale-y) and `fig-setup-mode`. Every
+O-1…O-9 measurement reproduces exactly —
+the **sixth** consecutive dispatch to do so —
+so the per-item table's measured column
+stands unchanged.
 
 **CI, stated once and exactly.** The last completed
 master CI run before Wave R was on `0b75051`
