@@ -186,7 +186,7 @@ jobs:
           probe() { rm -rf ./projects; HOME="$(mktemp -d)" timeout "$@"; }
           mkdir -p headless-out
           missing=0
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error subtitles-populated subtitles-top subtitles-speaker home-missing-audio home-scan-fallback; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error subtitles-populated subtitles-top subtitles-speaker home-missing-audio home-scan-fallback states-populated; do
             probe 60 "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
               > "headless-out/tree-$scene.log" 2>&1
             echo $? > "headless-out/tree-$scene.exit"
@@ -244,7 +244,7 @@ jobs:
           # absent without a word. The plain loop remains
           # the coverage contract (gate check 8); this list
           # is its recovery set, not a subset by design.
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error subtitles-populated subtitles-top subtitles-speaker home-missing-audio home-scan-fallback; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error subtitles-populated subtitles-top subtitles-speaker home-missing-audio home-scan-fallback states-populated; do
             if [ ! -f "headless-out/tree-$scene.json" ]; then
               probe 60 xvfb-run -a "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
                 > "headless-out/tree-$scene-xvfb.log" 2>&1

@@ -10,7 +10,7 @@
 //! The language set mirrors the original app's locale packs
 //! (`src/locales/packs/` in StykAnimate-App: 27 packs) plus Bengali,
 //! which the port added for its user — 28 languages in total.
-//! Every table carries exactly the same 692 keys.
+//! Every table carries exactly the same 693 keys.
 //!
 //! Translation approach: established animation terms are used where
 //! a language has them (French "pelure d'oignon", Polish "skórka
@@ -571,6 +571,7 @@ static EN: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exporting {name}…"),
     ("export_render_progress", "Rendering {done} of {total} frames"),
+    ("export_bundle_progress", "Exporting bundle {done} of {total} frames"),
     ("export_encode_progress", "Encoding {done} of {total} frames"),
     ("export_encode_finished", "Encode finished"),
     // Audio panel (Wave T, IA-T2-1)
@@ -1311,6 +1312,7 @@ static BN: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "{name} এক্সপোর্ট করা হচ্ছে…"),
     ("export_render_progress", "{total}টি ফ্রেমের {done}টি রেন্ডার করা হচ্ছে"),
+    ("export_bundle_progress", "{total}টি ফ্রেমের {done}টি বান্ডল রপ্তানি করা হচ্ছে"),
     ("export_encode_progress", "{total}টি ফ্রেমের {done}টি এনকোড করা হচ্ছে"),
     ("export_encode_finished", "এনকোড শেষ"),
     // Audio panel (Wave T, IA-T2-1)
@@ -2051,6 +2053,7 @@ static ES: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exportando {name}…"),
     ("export_render_progress", "Renderizando {done} de {total} fotogramas"),
+    ("export_bundle_progress", "Exportando paquete: {done} de {total} fotogramas"),
     ("export_encode_progress", "Codificando {done} de {total} fotogramas"),
     ("export_encode_finished", "Codificación terminada"),
     // Audio panel (Wave T, IA-T2-1)
@@ -2791,6 +2794,7 @@ static AR: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exporting {name}…"),
     ("export_render_progress", "Rendering {done} of {total} frames"),
+    ("export_bundle_progress", "جارٍ تصدير الحزمة {done} من {total} إطار"),
     ("export_encode_progress", "Encoding {done} of {total} frames"),
     ("export_encode_finished", "Encode finished"),
     // Audio panel (Wave T, IA-T2-1)
@@ -3531,6 +3535,7 @@ static CS: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exporting {name}…"),
     ("export_render_progress", "Rendering {done} of {total} frames"),
+    ("export_bundle_progress", "Exportuje se balíček {done} z {total} snímků"),
     ("export_encode_progress", "Encoding {done} of {total} frames"),
     ("export_encode_finished", "Encode finished"),
     // Audio panel (Wave T, IA-T2-1)
@@ -4271,6 +4276,7 @@ static DA: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exporting {name}…"),
     ("export_render_progress", "Rendering {done} of {total} frames"),
+    ("export_bundle_progress", "Eksporterer bundt {done} af {total} billeder"),
     ("export_encode_progress", "Encoding {done} of {total} frames"),
     ("export_encode_finished", "Encode finished"),
     // Audio panel (Wave T, IA-T2-1)
@@ -5011,6 +5017,7 @@ static DE: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "{name} wird exportiert…"),
     ("export_render_progress", "Rendern: Frame {done} von {total}"),
+    ("export_bundle_progress", "Bundle wird exportiert: {done} von {total} Frames"),
     ("export_encode_progress", "Kodieren: Frame {done} von {total}"),
     ("export_encode_finished", "Kodierung abgeschlossen"),
     // Audio panel (Wave T, IA-T2-1)
@@ -5751,6 +5758,7 @@ static EL: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exporting {name}…"),
     ("export_render_progress", "Rendering {done} of {total} frames"),
+    ("export_bundle_progress", "Εξαγωγή πακέτου {done} από {total} καρέ"),
     ("export_encode_progress", "Encoding {done} of {total} frames"),
     ("export_encode_finished", "Encode finished"),
     // Audio panel (Wave T, IA-T2-1)
@@ -6491,6 +6499,7 @@ static ES419: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exporting {name}…"),
     ("export_render_progress", "Rendering {done} of {total} frames"),
+    ("export_bundle_progress", "Exportando paquete: {done} de {total} fotogramas"),
     ("export_encode_progress", "Encoding {done} of {total} frames"),
     ("export_encode_finished", "Encode finished"),
     // Audio panel (Wave T, IA-T2-1)
@@ -7231,6 +7240,7 @@ static FI: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exporting {name}…"),
     ("export_render_progress", "Rendering {done} of {total} frames"),
+    ("export_bundle_progress", "Viedään pakettia {done}/{total} ruutua"),
     ("export_encode_progress", "Encoding {done} of {total} frames"),
     ("export_encode_finished", "Encode finished"),
     // Audio panel (Wave T, IA-T2-1)
@@ -7971,6 +7981,7 @@ static FR: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exportation de {name}…"),
     ("export_render_progress", "Rendu de l'image {done} sur {total}"),
+    ("export_bundle_progress", "Exportation du lot : {done} sur {total} images"),
     ("export_encode_progress", "Encodage de l'image {done} sur {total}"),
     ("export_encode_finished", "Encodage terminé"),
     // Audio panel (Wave T, IA-T2-1)
@@ -8711,6 +8722,7 @@ static HE: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exporting {name}…"),
     ("export_render_progress", "Rendering {done} of {total} frames"),
+    ("export_bundle_progress", "מייצא חבילה {done} מתוך {total} פריימים"),
     ("export_encode_progress", "Encoding {done} of {total} frames"),
     ("export_encode_finished", "Encode finished"),
     // Audio panel (Wave T, IA-T2-1)
@@ -9451,6 +9463,7 @@ static HR: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exporting {name}…"),
     ("export_render_progress", "Rendering {done} of {total} frames"),
+    ("export_bundle_progress", "Izvoz paketa {done} od {total} sličica"),
     ("export_encode_progress", "Encoding {done} of {total} frames"),
     ("export_encode_finished", "Encode finished"),
     // Audio panel (Wave T, IA-T2-1)
@@ -10191,6 +10204,7 @@ static HU: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exporting {name}…"),
     ("export_render_progress", "Rendering {done} of {total} frames"),
+    ("export_bundle_progress", "Csomag exportálása: {done}/{total} képkocka"),
     ("export_encode_progress", "Encoding {done} of {total} frames"),
     ("export_encode_finished", "Encode finished"),
     // Audio panel (Wave T, IA-T2-1)
@@ -10931,6 +10945,7 @@ static ID: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exporting {name}…"),
     ("export_render_progress", "Rendering {done} of {total} frames"),
+    ("export_bundle_progress", "Mengekspor bundel {done} dari {total} bingkai"),
     ("export_encode_progress", "Encoding {done} of {total} frames"),
     ("export_encode_finished", "Encode finished"),
     // Audio panel (Wave T, IA-T2-1)
@@ -11671,6 +11686,7 @@ static IT: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Esportazione di {name}…"),
     ("export_render_progress", "Rendering del fotogramma {done} di {total}"),
+    ("export_bundle_progress", "Esportazione del pacchetto: {done} di {total} fotogrammi"),
     ("export_encode_progress", "Codifica del fotogramma {done} di {total}"),
     ("export_encode_finished", "Codifica completata"),
     // Audio panel (Wave T, IA-T2-1)
@@ -12411,6 +12427,7 @@ static KK: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exporting {name}…"),
     ("export_render_progress", "Rendering {done} of {total} frames"),
+    ("export_bundle_progress", "Жинақ экспортталуда: {done} / {total} кадр"),
     ("export_encode_progress", "Encoding {done} of {total} frames"),
     ("export_encode_finished", "Encode finished"),
     // Audio panel (Wave T, IA-T2-1)
@@ -13151,6 +13168,7 @@ static NB: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exporting {name}…"),
     ("export_render_progress", "Rendering {done} of {total} frames"),
+    ("export_bundle_progress", "Eksporterer pakke {done} av {total} bilder"),
     ("export_encode_progress", "Encoding {done} of {total} frames"),
     ("export_encode_finished", "Encode finished"),
     // Audio panel (Wave T, IA-T2-1)
@@ -13891,6 +13909,7 @@ static NL: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exporting {name}…"),
     ("export_render_progress", "Rendering {done} of {total} frames"),
+    ("export_bundle_progress", "Bundel exporteren: {done} van {total} frames"),
     ("export_encode_progress", "Encoding {done} of {total} frames"),
     ("export_encode_finished", "Encode finished"),
     // Audio panel (Wave T, IA-T2-1)
@@ -14631,6 +14650,7 @@ static PL: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exporting {name}…"),
     ("export_render_progress", "Rendering {done} of {total} frames"),
+    ("export_bundle_progress", "Eksportowanie pakietu {done} z {total} klatek"),
     ("export_encode_progress", "Encoding {done} of {total} frames"),
     ("export_encode_finished", "Encode finished"),
     // Audio panel (Wave T, IA-T2-1)
@@ -15371,6 +15391,7 @@ static PT_BR: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exportando {name}…"),
     ("export_render_progress", "Renderizando {done} de {total} quadros"),
+    ("export_bundle_progress", "Exportando pacote: {done} de {total} quadros"),
     ("export_encode_progress", "Codificando {done} de {total} quadros"),
     ("export_encode_finished", "Codificação concluída"),
     // Audio panel (Wave T, IA-T2-1)
@@ -16111,6 +16132,7 @@ static RO: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exporting {name}…"),
     ("export_render_progress", "Rendering {done} of {total} frames"),
+    ("export_bundle_progress", "Se exportă pachetul {done} din {total} cadre"),
     ("export_encode_progress", "Encoding {done} of {total} frames"),
     ("export_encode_finished", "Encode finished"),
     // Audio panel (Wave T, IA-T2-1)
@@ -16851,6 +16873,7 @@ static RU: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Экспорт {name}…"),
     ("export_render_progress", "Рендеринг кадра {done} из {total}"),
+    ("export_bundle_progress", "Экспорт пакета: {done} из {total} кадров"),
     ("export_encode_progress", "Кодирование кадра {done} из {total}"),
     ("export_encode_finished", "Кодирование завершено"),
     // Audio panel (Wave T, IA-T2-1)
@@ -17591,6 +17614,7 @@ static SL: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exporting {name}…"),
     ("export_render_progress", "Rendering {done} of {total} frames"),
+    ("export_bundle_progress", "Izvažanje paketa {done} od {total} sličic"),
     ("export_encode_progress", "Encoding {done} of {total} frames"),
     ("export_encode_finished", "Encode finished"),
     // Audio panel (Wave T, IA-T2-1)
@@ -18331,6 +18355,7 @@ static TR: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exporting {name}…"),
     ("export_render_progress", "Rendering {done} of {total} frames"),
+    ("export_bundle_progress", "Paket dışa aktarılıyor: {done}/{total} kare"),
     ("export_encode_progress", "Encoding {done} of {total} frames"),
     ("export_encode_finished", "Encode finished"),
     // Audio panel (Wave T, IA-T2-1)
@@ -19071,6 +19096,7 @@ static UK: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exporting {name}…"),
     ("export_render_progress", "Rendering {done} of {total} frames"),
+    ("export_bundle_progress", "Експорт пакета: {done} з {total} кадрів"),
     ("export_encode_progress", "Encoding {done} of {total} frames"),
     ("export_encode_finished", "Encode finished"),
     // Audio panel (Wave T, IA-T2-1)
@@ -19811,6 +19837,7 @@ static VI: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "Exporting {name}…"),
     ("export_render_progress", "Rendering {done} of {total} frames"),
+    ("export_bundle_progress", "Đang xuất gói {done} trên {total} khung hình"),
     ("export_encode_progress", "Encoding {done} of {total} frames"),
     ("export_encode_finished", "Encode finished"),
     // Audio panel (Wave T, IA-T2-1)
@@ -20551,6 +20578,7 @@ static ZH_HANS: &[(&str, &str)] = &[
     // Export progress readout (Wave W, IA-W1-1)
     ("export_progress_working", "正在导出 {name}…"),
     ("export_render_progress", "渲染中：{done} / {total} 帧"),
+    ("export_bundle_progress", "正在导出资源包 {done}/{total} 帧"),
     ("export_encode_progress", "编码中：{done} / {total} 帧"),
     ("export_encode_finished", "编码完成"),
     // Audio panel (Wave T, IA-T2-1)

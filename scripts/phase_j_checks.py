@@ -819,7 +819,16 @@ def entry_field(chunk: str) -> str | None:
 # Wave X integration). Tuple-carried keys remain outside
 # this counter (F6's artefact, above). Floor raised
 # 984 -> 995 so Wave Y starts from the integrated truth.
-KEY_TOTAL_FLOOR = 995
+# Wave Z ratchet (Z13's baseline recount, 2026-11-10):
+# on the clean Wave Y closing HEAD (5031700, detached
+# git worktree) this counter reads 1017 total (889
+# static + 128 dynamic, 61 files) — the 995 floor plus
+# Wave Y's counted growth of 22 (zero lost proven by
+# check 2 at Wave Y integration and again on this
+# baseline). Tuple-carried keys remain outside this
+# counter (F6's artefact, above). Floor raised
+# 995 -> 1017 so Wave Z starts from the integrated truth.
+KEY_TOTAL_FLOOR = 1017
 
 
 def inventory_counts() -> tuple[int, int, int, int]:
@@ -2268,7 +2277,15 @@ def _mcp_builtins() -> tuple[list[str], list[str]]:
 # sprite_set_asset / sprite_reorder splice) + 9 io +
 # 4 subtitle io + 5 subtitle tools, doc sync exact.
 # Floor raised 381 -> 390.
-MCP_SURFACE_FLOOR = 390
+# Wave Z ratchet (Z13's baseline recount, 2026-11-10):
+# on the clean Wave Y closing HEAD (5031700, detached
+# git worktree) the surface reads 392 = 44 built-ins +
+# 330 registry (328 + import_layered_set + set_rest_pose,
+# Wave Y's two additions) + 9 io + 4 subtitle io + 5
+# subtitle tools, doc sync exact (check 9 here and
+# scripts/mcp_census.py both PASS on that baseline).
+# Floor raised 390 -> 392.
+MCP_SURFACE_FLOOR = 392
 
 
 def check_mcp_surface() -> tuple[bool, list[str]]:

@@ -536,6 +536,27 @@ standing in the workflow at this pass, not
 re-applied. No other Wave X finding names
 workflow wiring in this region.
 
+Wave Z maintenance (Z2): IA-Y17-2 is
+discharged. The `states-populated` scene
+lands in scenes.rs -- clips-populated's
+state plus one state key on figure 0,
+authored through EditorCore::set_state_key
+(frame 0, the second clip), so the key is
+in force at the parked playhead -- both
+tree loops in headless.yml dump its tree
+in the same change, and its SCAN_SET
+entry is required from the start, on the
+S2 terms the Wave Y note above prescribed;
+the pending side stays empty by design.
+The scan set now has 19 entries, all
+required; `scenes()` lists 35 names, and
+the harness produces 38 tree dumps. The
+new tree is the state-row form's only
+carrier: clip-state-row-0 and
+clip-state-clear-0 ride the populated
+clips panel's states section (rules 1-2
+judge it, as with clips-populated).
+
 Checks considered and NOT added (they would
 false-positive or judge what rects cannot show):
 
@@ -640,7 +661,10 @@ SCROLL_SEGMENTS = {"timeline"}
 # trees (Wave Y) joined on the same terms again -- both were
 # already produced by both loops, and Y17 verified the Wave X
 # surfaces they carry in the Wave X closing artifact before
-# naming them.
+# naming them. The states-populated tree (Wave Z) joined on
+# the same terms again -- IA-Y17-2's scene, its dumps in both
+# workflow loops and this entry landed in one change (the S2
+# pattern), and the pending side stayed empty.
 SCAN_SET = [
     ("tree-default.json", "required",
      "O-5 keyframe rows + O-6 wx-kind segments (P2); O-8 playback "
@@ -695,6 +719,11 @@ SCAN_SET = [
      "Sprites panel populated rows + edit area and the Wave X "
      "dopesheet sprite lane (dope-sprite-row-*, rule 4) over two "
      "keyed instances; the lane's only carrier tree (Wave Y, Y17)"),
+    ("tree-states-populated.json", "required",
+     "clips panel populated with a state key planted on the "
+     "selected figure: the states section's state-row form "
+     "(clip-state-row-0 + clip-state-clear-0, rules 1-2); the "
+     "row form's only carrier tree (Wave Z, IA-Y17-2)"),
 ]
 
 

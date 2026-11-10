@@ -301,10 +301,11 @@
 //! the open editor window (the framing is
 //! `src/live_mcp.rs`' own module docs). The Live MCP
 //! control row is improved in place rather than
-//! duplicated: it now states that live control is on
-//! by default and started at launch
-//! (`LayoutPrefs.live_mcp` defaults to `true` in
-//! `src/shell.rs`, and the settings census records
+//! duplicated: it now states that live control is off
+//! by default and must be enabled explicitly
+//! (`LayoutPrefs.live_mcp` defaults to `false` in
+//! `src/shell.rs` — the W4 explicit-enable rule — and
+//! the settings census records
 //! the bridge starting at launch when the preference
 //! is on), and it carries the security truth in the
 //! bridge's own terms — no password, any program on
