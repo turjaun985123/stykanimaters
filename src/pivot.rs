@@ -3203,7 +3203,8 @@ mod tests {
         }
         let entry = payload
             .windows(magic.len())
-            .positions(|w| w == magic)
+            .enumerate()
+            .filter_map(|(pos, w)| (w == magic).then_some(pos))
             .find(|&pos| {
                 pos >= 24
                     && payload[pos - 24..pos - 8] == anchor[..]

@@ -8014,6 +8014,7 @@ mod range_export_tests {
     use super::{
         drain_ffmpeg_progress, export_apng, export_apng_range, export_gif, export_gif_range,
         export_jpeg_sequence, export_jpeg_sequence_range,
+        export_jpeg_sequence_with_render_progress,
         export_jpeg_sequence_range_scaled_with_render_progress,
         export_jpeg_sequence_scaled_with_render_progress, export_mp4, export_mp4_range,
         export_mp4_range_scaled, export_mp4_range_scaled_with_progress,
