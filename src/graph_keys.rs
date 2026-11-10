@@ -2883,6 +2883,19 @@ mod mcp_graph_tool_tests {
         core
     }
 
+    // Wave AB (AB11): the sibling module's own copy of
+    // `core_with_bend_zero` (same shape as in `mod tests`,
+    // per this module's standing helper rule).
+    fn core_with_bend_zero() -> EditorCore {
+        let mut core = core_with_channels();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Bend(0),
+            keys: vec![Key::flat(0.0, 0.3)],
+        });
+        core
+    }
+
     /// Two DUPLICATE (figure 0, RootX) channels told apart
     /// by their keys — twin 0 holds values 100/140, twin 1
     /// holds a single key 42 — plus an empty RootY channel.

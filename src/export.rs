@@ -8245,8 +8245,9 @@ mod range_export_tests {
         export_webm_range_scaled, export_webm_range_scaled_with_progress,
         export_webm_range_with_progress, export_webm_scaled, export_webm_scaled_with_progress,
         export_webm_scaled_with_encode_progress, export_webm_with_progress,
-        parse_ffmpeg_progress_frame, render_frame, sampled_frame_total, BundleProgress,
-        BundleProgressEvent, EncodeProgressEvent, Mp4ExportOutcome, RenderProgressEvent,
+        parse_ffmpeg_progress_frame, render_frame, sampled_frame_total, bundle_member_totals,
+        BundleKind, BundleProgress, BundleProgressEvent, EncodeProgressEvent,
+        Mp4ExportOutcome, RenderProgressEvent,
     };
     use crate::model::{AudioClip, Project};
     use image::AnimationDecoder as _;
