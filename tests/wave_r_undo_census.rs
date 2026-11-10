@@ -5,11 +5,11 @@
 //! MUTATING MCP tool spends exactly ONE undo step (one
 //! `EditorCore::snapshot` on its path); read-only tools spend
 //! none; refusals spend none. This suite extends the sample to
-//! the ENTIRE surface — all 381 tools, classified by handler
+//! the ENTIRE surface — all 390 tools, classified by handler
 //! behaviour (static call-path trace + handler reads), not by
 //! name:
 //!
-//!   MUTATING (202)   — a leg per tool below: fresh demo core,
+//!   MUTATING (209)   — a leg per tool below: fresh demo core,
 //!                      invoke the handler through
 //!                      `mcp::all_tools()`, assert the result
 //!                      is Ok and the undo depth moves by
@@ -27,7 +27,7 @@
 //!                      ~/workspace/wave-r/findings/r7.md.
 //!                      `figure_set_color` is the member P41
 //!                      flagged (F1) and Q18 declared.
-//!   NON-MUTATING (158) — read-only (51), session/runtime
+//!   NON-MUTATING (160) — read-only (53), session/runtime
 //!                      state (47), library/file state (20),
 //!                      project swaps (4, standing exclusion),
 //!                      the undo/redo tools themselves (2) and
@@ -313,6 +313,44 @@ fn s_two_clips(core: &mut EditorCore) {
 fn s_clip_session(core: &mut EditorCore) {
     s_clip(core);
     must(core, "clip_enter", json!({ "index": 0 }));
+}
+
+// Wave X (X3) state setups: a pool clip exists and the
+// figure's link state is pinned either way — the assign /
+// unlink handlers report already-linked / already-unlinked
+// as success no-ops, so these setups end in the named state
+// whether or not clip_create linked the figure itself.
+fn s_state_key(core: &mut EditorCore) {
+    s_clip(core);
+    must(core, "figure_set_state", json!({ "figure": 0, "frame": 2, "clip": 0 }));
+}
+
+fn s_linked_clip(core: &mut EditorCore) {
+    s_clip(core);
+    must(core, "figure_assign_clip", json!({ "figure": 0, "clip": 0 }));
+}
+
+fn s_unlinked_clip(core: &mut EditorCore) {
+    s_clip(core);
+    must(core, "figure_unlink_clip", json!({ "figure": 0 }));
+}
+
+// Wave X (X5) sprite setups: a sprite plus a SECOND asset
+// (set_asset needs somewhere real to point), and two
+// sprites (reorder needs somewhere real to move).
+fn s_sprite_two_assets(core: &mut EditorCore) {
+    s_sprite(core);
+    write_png(&tmp_path("wave_r_census_asset2.png"));
+    must(
+        core,
+        "asset_import",
+        json!({ "path": tmp_path("wave_r_census_asset2.png") }),
+    );
+}
+
+fn s_two_sprites(core: &mut EditorCore) {
+    s_sprite(core);
+    must(core, "sprite_add", json!({ "asset": 0 }));
 }
 
 fn s_camera_key(core: &mut EditorCore) {
@@ -657,6 +695,13 @@ fn a_legs() -> Vec<Leg> {
         Leg { name: "clip_insert_figure", group: "misc", setup: s_clip, args: |_| json!({ "index": 0 }) },
         Leg { name: "clip_add_frame", group: "misc", setup: s_clip_session, args: |_| json!({}) },
         Leg { name: "clip_delete_frame", group: "misc", setup: s_clip_session, args: |_| json!({}) },
+        // Wave X (X3): animation-state tools — the ranged
+        // create, the base-link pair and the state-key pair.
+        Leg { name: "clip_create_range", group: "misc", setup: s_none, args: |_| json!({ "figure": 0, "start": 0, "end": 2 }) },
+        Leg { name: "figure_assign_clip", group: "misc", setup: s_unlinked_clip, args: |_| json!({ "figure": 0, "clip": 0 }) },
+        Leg { name: "figure_unlink_clip", group: "misc", setup: s_linked_clip, args: |_| json!({ "figure": 0 }) },
+        Leg { name: "figure_set_state", group: "misc", setup: s_clip, args: |_| json!({ "figure": 0, "frame": 2, "clip": 0 }) },
+        Leg { name: "figure_clear_state", group: "misc", setup: s_state_key, args: |_| json!({ "figure": 0, "frame": 2 }) },
         Leg { name: "asset_import", group: "misc", setup: s_png_file, args: |_| json!({ "path": tmp_path("wave_r_census_asset.png") }) },
         Leg { name: "asset_rename", group: "misc", setup: s_asset, args: |_| json!({ "index": 0, "name": "hero" }) },
         Leg { name: "asset_remove", group: "misc", setup: s_asset, args: |_| json!({ "index": 0 }) },
@@ -670,6 +715,9 @@ fn a_legs() -> Vec<Leg> {
         Leg { name: "sprite_delete_key", group: "misc", setup: s_sprite, args: |_| json!({ "sprite": 0, "frame": 0 }) },
         Leg { name: "sprite_move_key", group: "misc", setup: s_sprite, args: |_| json!({ "sprite": 0, "from_frame": 0, "to_frame": 2 }) },
         Leg { name: "sprite_delete_key_at", group: "misc", setup: s_sprite_key3, args: |_| json!({ "sprite": 0, "frame": 3 }) },
+        // Wave X (X5): the sprite small-win pair.
+        Leg { name: "sprite_set_asset", group: "misc", setup: s_sprite_two_assets, args: |_| json!({ "sprite": 0, "asset": 1 }) },
+        Leg { name: "sprite_reorder", group: "misc", setup: s_two_sprites, args: |_| json!({ "sprite": 0, "to": 1 }) },
         // ---- fig3 bakes, libraries, subtitles ----
         Leg { name: "fig3_bake", group: "misc", setup: s_fig3, args: |_| json!({}) },
         Leg { name: "fig3_bake_animation", group: "misc", setup: |c| { s_fig3(c); must(c, "fig3_rotate", json!({ "axis": 0, "degrees": 25 })); must(c, "fig3_mark_b", json!({})); must(c, "fig3_rotate", json!({ "axis": 0, "degrees": -10 })); }, args: |_| json!({ "frames": 3 }) },
@@ -891,6 +939,8 @@ fn read_legs() -> Vec<Leg> {
         Leg { name: "get_pose", group: "read", setup: s_none, args: |_| json!({ "figure": 0, "frame": 0 }) },
         Leg { name: "fx_list", group: "read", setup: s_none, args: |_| json!({}) },
         Leg { name: "clip_list", group: "read", setup: s_none, args: |_| json!({}) },
+        Leg { name: "figure_list_states", group: "read", setup: s_none, args: |_| json!({ "figure": 0 }) },
+        Leg { name: "clip_compatible", group: "read", setup: s_clip, args: |_| json!({ "figure": 0, "clip": 0 }) },
         Leg { name: "get_keyframes", group: "read", setup: s_none, args: |_| json!({ "figure": 0 }) },
         Leg { name: "list_frames", group: "read", setup: s_none, args: |_| json!({}) },
         Leg { name: "particle_list_events", group: "read", setup: s_none, args: |_| json!({}) },
@@ -1157,6 +1207,7 @@ const NON_MUTATING: &[(&str, &str)] = &[
     ("audio_list_clips", "read"),
     ("audio_mixdown", "library/file"),
     ("clear_loop_range", "session"),
+    ("clip_compatible", "read"),
     ("clip_enter", "session"),
     ("clip_exit", "session"),
     ("clip_get_node_media", "read"),
@@ -1198,6 +1249,7 @@ const NON_MUTATING: &[(&str, &str)] = &[
     ("fig3_set_rotation", "session"),
     ("figure_library_cycle", "session"),
     ("figure_library_list", "read"),
+    ("figure_list_states", "read"),
     ("figure_library_rename", "library/file"),
     ("figure_library_save", "library/file"),
     ("figure_toggle_solo", "session"),
@@ -1340,11 +1392,11 @@ fn census_covers_every_tool_exactly_once() {
 
     assert_eq!(
         mutating.len(),
-        202,
-        "202 mutating tools (legs may repeat a tool with different args)"
+        209,
+        "209 mutating tools (legs may repeat a tool with different args)"
     );
     assert_eq!(exceptions.len(), 21, "21 declared exceptions");
-    assert_eq!(non_mutating.len(), 158, "158 non-mutating tools");
+    assert_eq!(non_mutating.len(), 160, "160 non-mutating tools");
     assert!(
         mutating.is_disjoint(&exceptions),
         "a tool is both mutating and exception"
