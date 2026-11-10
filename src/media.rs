@@ -4624,7 +4624,7 @@ mod tests {
             .expect("attach succeeds");
         let out = tool_clip_get_node_media(&mut core, &json!({ "clip": 0, "node": 1 }))
             .expect("read succeeds");
-        assert_eq!(out["media"], json!({ "kind": "image", "asset": 0, "offset": [0.0, 0.0], "scale": 1.0, "angle_offset": 0.0, "flip": false }));
+        assert_eq!(out["media"], json!({ "kind": "image", "asset": 0, "offset": [0.0, 0.0], "scale": 1.0, "angle_offset": 0.0, "flip": false, "opacity": 1.0 }));
         let out = tool_clip_get_node_media(&mut core, &json!({ "clip": 0, "node": 2 }))
             .expect("read succeeds");
         assert_eq!(
@@ -4652,7 +4652,7 @@ mod tests {
         let out = tool_clip_clear_node_media(&mut core, &json!({ "clip": 0, "node": 1 }))
             .expect("clear succeeds");
         assert_eq!(out["cleared"].as_bool(), Some(true));
-        assert_eq!(out["media"], json!({ "kind": "image", "asset": 0, "offset": [0.0, 0.0], "scale": 1.0, "angle_offset": 0.0, "flip": false }));
+        assert_eq!(out["media"], json!({ "kind": "image", "asset": 0, "offset": [0.0, 0.0], "scale": 1.0, "angle_offset": 0.0, "flip": false, "opacity": 1.0 }));
         assert_eq!(core.project.clips[0].def.nodes[1].media, None);
         assert_eq!(core.undo_depth(), undo_before + 1, "one undo step");
         // Text clears the same way.
