@@ -525,6 +525,8 @@ fn convert(fig: &RawFigure) -> (FigureDef, u32) {
 
     let mut nodes: Vec<NodeDef> = Vec::with_capacity(n + 1);
     nodes.push(NodeDef {
+        min_angle: None,
+        max_angle: None,
         style: crate::model::NodeStyle::default(),
         media: None,
         name: "origin".into(),
@@ -552,6 +554,8 @@ fn convert(fig: &RawFigure) -> (FigureDef, u32) {
             _ => Shape::Line,
         };
         nodes.push(NodeDef {
+        min_angle: None,
+        max_angle: None,
         style: crate::model::NodeStyle {
             // The gradient end colour is a real grammar field
             // (use_gradient + gradient_color, version >= 176)
@@ -580,6 +584,29 @@ fn convert(fig: &RawFigure) -> (FigureDef, u32) {
             ik_end: false,
             shape,
         });
+    }
+    // IK end-effectors, derived (Wave X, P-4 rider): the grammar
+    // carries no ik_end field, so import derives it — every chain
+    // leaf (a node no other node parents to) becomes an end
+    // effector, restoring the hands/feet a Stick Nodes figure
+    // would otherwise lose and have to re-rig by hand. The
+    // synthetic origin (index 0) is never an end. Drag dispatch
+    // still requires a grandparent before it solves IK
+    // (editor.rs), so a depth-1 leaf's flag is inert: it aims
+    // exactly as before. Heads and tails are leaves too and the
+    // grammar carries nothing that distinguishes them from
+    // hands/feet, so they derive ends as well. `bend` stays 1.0:
+    // no grammar field and no derivable signal.
+    let mut has_child = vec![false; nodes.len()];
+    for node in &nodes {
+        if let Some(p) = node.parent {
+            has_child[p] = true;
+        }
+    }
+    for (i, node) in nodes.iter_mut().enumerate() {
+        if i > 0 && !has_child[i] {
+            node.ik_end = true;
+        }
     }
     (FigureDef { nodes }, fig.color)
 }
@@ -816,8 +843,12 @@ pub(crate) fn nodes_preorder(def: &FigureDef) -> Vec<usize> {
 /// * **Media** (sprites/text on segments): `.nodes` node
 ///   kinds are purely geometric — there are no image/text
 ///   kinds and no side tables — so media is dropped.
-/// * Head/IK flags and bend direction have no fields in
-///   the grammar and are dropped. Ellipses read back as
+/// * The head flag and bend direction have no fields in
+///   the grammar and are dropped. ik_end has no field
+///   either and is not stored — but import derives it for
+///   chain leaves (see `convert`), so the round trip loses
+///   it only on a non-leaf node whose flag was set by hand.
+///   Ellipses read back as
 ///   circles (there is no ellipse in the model; kind 5
 ///   writes as kind 2), and a 4-sided polygon writes as
 ///   kind 7 with 4 vertices.
@@ -916,6 +947,7 @@ pub fn import_nodes(data: &[u8]) -> Result<Project, String> {
             def,
             hidden: false,
             clip: None,
+            states: Vec::new(),
         }],
         frames: vec![Frame {
             poses: vec![pose],
@@ -1104,6 +1136,8 @@ mod tests {
         shape: Shape,
     ) -> NodeDef {
         NodeDef {
+            min_angle: None,
+            max_angle: None,
             name: "n".into(),
             parent,
             length,
@@ -1245,8 +1279,12 @@ mod tests {
     /// rather than skipped: the raw root's length reads back 0
     /// and its colour None (the colour returns as the header /
     /// instance colour instead), origin-parented nodes re-parent
-    /// to the root, and head / IK-end flags and bend direction
-    /// are dropped (no grammar fields). The gradient end colour
+    /// to the root, and the head flag and bend direction are
+    /// dropped (no grammar fields). ik_end has no grammar field
+    /// either, but import derives it for chain leaves (Wave X,
+    /// P-4 rider), so it is asserted against that derived rule
+    /// on the re-imported figure rather than against the source
+    /// def. The gradient end colour
     /// is not a loss: it is compared for every non-root node
     /// (the root's is dropped with its colour), and taper, cap
     /// and opacity are asserted back at their defaults (no
@@ -1257,6 +1295,15 @@ mod tests {
     /// descendant's evaluated position by design.
     fn check_roundtrip_fields(def: &FigureDef, back: &FigureDef, check_geometry: bool) {
         assert_eq!(back.nodes.len(), def.nodes.len(), "node count");
+        // The importer's derived ik_end rule, recomputed on the
+        // re-imported figure itself: a node is an end iff no
+        // other node parents to it (chain leaf), origin aside.
+        let mut back_has_child = vec![false; back.nodes.len()];
+        for nd in &back.nodes {
+            if let Some(p) = nd.parent {
+                back_has_child[p] = true;
+            }
+        }
         let order = nodes_preorder(def);
         let pa = evaluate(def, &def.rest_pose([100.0, 100.0]));
         let pb = evaluate(back, &back.rest_pose([100.0, 100.0]));
@@ -1276,7 +1323,11 @@ mod tests {
             );
             assert_eq!(a.shape, b.shape, "node {k} shape");
             assert!(!b.head, "node {k}: head flag has no grammar field");
-            assert!(!b.ik_end, "node {k}: ik_end flag has no grammar field");
+            assert_eq!(
+                b.ik_end,
+                !back_has_child[j + 1],
+                "node {k}: ik_end is derived on import (chain leaves), not stored"
+            );
             assert_eq!(b.bend, 1.0, "node {k}: bend direction has no grammar field");
             assert_eq!(b.style.taper, 1.0, "node {k}: taper has no grammar field");
             assert_eq!(
@@ -1385,9 +1436,35 @@ mod tests {
             );
         }
         assert!(!back.nodes[3].head, "the head flag is dropped");
+        // ik_end is not stored, but import derives it for chain
+        // leaves (Wave X, P-4 rider — this pin asserted the drop
+        // until then): the four feet are leaves, so they come
+        // back as end effectors.
         for k in [5, 7, 9, 11] {
-            assert!(!back.nodes[k].ik_end, "ik_end on node {k} is dropped");
+            assert!(back.nodes[k].ik_end, "ik_end on node {k} is derived (chain leaf)");
         }
+        // The head and the tail are chain leaves too, and the
+        // grammar carries nothing that distinguishes them from
+        // feet, so they derive ends as well — on the record.
+        for k in [3, 12] {
+            assert!(back.nodes[k].ik_end, "ik_end on leaf node {k} is derived");
+        }
+    }
+
+    #[test]
+    fn import_derives_ik_ends_for_chain_leaves() {
+        // Wave X, P-4 rider: the derivation, asserted as an
+        // exact set on a branched figure. Storage order is
+        // preorder under the collapsed parent map ([1,2,4,5,3,6]
+        // for this def), so in the re-imported figure the
+        // internal nodes are 1 (anchor) and 2 (the fork), the
+        // leaves are 3, 4, 5, 6 — including depth-1 leaves
+        // parented straight to the anchor, whose flag is inert
+        // (drag dispatch still requires a grandparent).
+        let bytes = export_nodes_figure(&branched_def(), "Branch");
+        let (back, _color) = import_nodes_figure(&bytes).unwrap();
+        let ends: Vec<bool> = back.nodes.iter().map(|n| n.ik_end).collect();
+        assert_eq!(ends, vec![false, false, false, true, true, true, true]);
     }
 
     #[test]

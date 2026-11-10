@@ -86,6 +86,21 @@
 //!   and `media_items` both already tolerate it).
 //!   `remove_sprite` is the op that deletes the
 //!   instance itself.
+//! * Wave X (X5, SpriteLoop GAP P-3) adds the two
+//!   instance-level writes the small-wins pack named:
+//!   `set_sprite_asset` re-points an instance at
+//!   another asset WITHOUT touching its keys (the
+//!   delete + re-key workaround was the friction), and
+//!   `reorder_sprite` moves an instance to a new
+//!   position in the table — draw order IS vec order
+//!   (`media_items` composites in table order, the
+//!   stage paints in table order), so position is the
+//!   z-order and no other field needs to exist. Both
+//!   follow the family's rules above, plus the
+//!   validated-no-op rule `sprite_move_key` set in
+//!   Wave P: naming the asset/position the instance
+//!   already has changes nothing and spends no
+//!   snapshot.
 //!
 //! Integrator wiring: declare `pub mod sprite_ops;` in
 //! `lib.rs` (alphabetical: after `pub mod shell;`,
@@ -129,6 +144,15 @@ impl EditorCore {
                 y: centre[1],
                 scale: 1.0,
                 angle: 0.0,
+                // The P-6 enrichment at its defaults: opaque,
+                // unflipped, centred pivot, scale_y following
+                // scale (Wave X, X9).
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
             }],
         });
         let index = self.project.sprites.len() - 1;
@@ -159,6 +183,13 @@ impl EditorCore {
     /// to the project's last frame. One undo step;
     /// refusals (no such sprite, or a non-finite value)
     /// only set the status.
+    ///
+    /// The P-6 enrichment fields are NOT this op's to
+    /// write: a replaced key keeps its opacity, flips,
+    /// scale_y and pivot (a panel stepper press must not
+    /// wipe an imported sprite's flips), and a fresh key
+    /// takes their defaults. `set_sprite_key_full` is the
+    /// write that sets them.
     pub fn set_sprite_key(
         &mut self,
         index: usize,
@@ -177,13 +208,68 @@ impl EditorCore {
             return;
         }
         let frame = self.sprite_clamp_frame(frame);
+        let prev = self.project.sprites[index]
+            .keys
+            .iter()
+            .find(|k| k.frame == frame as f32);
         let key = InstanceKey {
             frame: frame as f32,
             x,
             y,
             scale,
             angle,
+            opacity: prev.map_or(1.0, |k| k.opacity),
+            flip_x: prev.is_some_and(|k| k.flip_x),
+            flip_y: prev.is_some_and(|k| k.flip_y),
+            scale_y: prev.map_or(0.0, |k| k.scale_y),
+            pivot_x: prev.map_or(0.5, |k| k.pivot_x),
+            pivot_y: prev.map_or(0.5, |k| k.pivot_y),
         };
+        self.write_sprite_key(index, key);
+    }
+
+    /// Write a COMPLETE key (all eleven fields, Wave X P-6)
+    /// for sprite `index` at `frame` — the enrichment write
+    /// behind the MCP `sprite_set_key` handler's optional
+    /// opacity / flip / scale_y / pivot arguments. The
+    /// stored frame is `frame` (clamped to the project's
+    /// last frame, the family's rule); `key.frame` is
+    /// ignored in favour of it. Replace/insert, the status
+    /// and the one-undo-step discipline are
+    /// `set_sprite_key`'s own; refusals (no such sprite, or
+    /// a non-finite value in any numeric field) only set
+    /// the status.
+    pub fn set_sprite_key_full(&mut self, index: usize, frame: usize, key: InstanceKey) {
+        if self.project.sprites.get(index).is_none() {
+            self.status = format!("Sprite key failed: no sprite {}.", index + 1);
+            return;
+        }
+        let values = [
+            key.x,
+            key.y,
+            key.scale,
+            key.angle,
+            key.opacity,
+            key.scale_y,
+            key.pivot_x,
+            key.pivot_y,
+        ];
+        if !values.iter().all(|v| v.is_finite()) {
+            self.status = "Sprite key failed: values must be finite.".into();
+            return;
+        }
+        let frame = self.sprite_clamp_frame(frame);
+        let key = InstanceKey {
+            frame: frame as f32,
+            ..key
+        };
+        self.write_sprite_key(index, key);
+    }
+
+    /// The shared tail of the two key writes: snapshot
+    /// once, replace the key at `key.frame` or insert it at
+    /// its sorted position, and set the success status.
+    fn write_sprite_key(&mut self, index: usize, key: InstanceKey) {
         self.snapshot();
         let keys = &mut self.project.sprites[index].keys;
         match keys.iter().position(|k| k.frame == key.frame) {
@@ -193,7 +279,11 @@ impl EditorCore {
                 keys.insert(pos, key);
             }
         }
-        self.status = format!("Sprite {} key set at frame {}.", index + 1, frame + 1);
+        self.status = format!(
+            "Sprite {} key set at frame {}.",
+            index + 1,
+            key.frame as usize + 1
+        );
     }
 
     /// Delete sprite `index`'s key at `frame`. Unlike the
@@ -243,6 +333,86 @@ impl EditorCore {
             "Sprite {} key at frame {} deleted.",
             index + 1,
             frame + 1
+        );
+    }
+
+    /// Re-point sprite `index` at asset `asset`,
+    /// keeping every one of its transform keys verbatim
+    /// (Wave X, X5 — SpriteLoop GAP P-3: a wrong image
+    /// used to mean delete the instance and re-key
+    /// everything). Only the `asset` field changes; the
+    /// instance's position in the table (its z-order)
+    /// is likewise untouched. One undo step; refusals
+    /// (no such sprite, no such asset) only set the
+    /// status, and naming the asset the instance
+    /// already uses is a validated no-op that spends
+    /// no snapshot (the `sprite_move_key` discipline).
+    pub fn set_sprite_asset(&mut self, index: usize, asset: usize) {
+        if self.project.sprites.get(index).is_none() {
+            self.status = format!("Sprite asset failed: no sprite {}.", index + 1);
+            return;
+        }
+        if self.project.assets.get(asset).is_none() {
+            self.status = format!("Sprite asset failed: no asset {}.", asset + 1);
+            return;
+        }
+        if self.project.sprites[index].asset == asset {
+            self.status = format!(
+                "Sprite {} already uses asset {}.",
+                index + 1,
+                asset + 1
+            );
+            return;
+        }
+        self.snapshot();
+        self.project.sprites[index].asset = asset;
+        self.status = format!(
+            "Sprite {} now uses asset {}.",
+            index + 1,
+            asset + 1
+        );
+    }
+
+    /// Move sprite `index` to position `to` in the
+    /// instance table (Wave X, X5 — SpriteLoop GAP
+    /// P-3's z-reorder: draw order is vec order, so
+    /// this IS the z-order write). The instances
+    /// between the two positions shift by one, keeping
+    /// their relative order; the moved instance keeps
+    /// its asset and keys verbatim. One undo step;
+    /// refusals (no such sprite, no such position)
+    /// only set the status, and naming the position
+    /// the instance already holds is a validated no-op
+    /// that spends no snapshot.
+    pub fn reorder_sprite(&mut self, index: usize, to: usize) {
+        let n = self.project.sprites.len();
+        if index >= n {
+            self.status = format!("Sprite reorder failed: no sprite {}.", index + 1);
+            return;
+        }
+        if to >= n {
+            self.status = format!(
+                "Sprite reorder failed: no position {} (project has {} sprite instance(s)).",
+                to + 1,
+                n
+            );
+            return;
+        }
+        if index == to {
+            self.status = format!(
+                "Sprite {} is already at position {}.",
+                index + 1,
+                to + 1
+            );
+            return;
+        }
+        self.snapshot();
+        let inst = self.project.sprites.remove(index);
+        self.project.sprites.insert(to, inst);
+        self.status = format!(
+            "Sprite moved from position {} to position {}.",
+            index + 1,
+            to + 1
         );
     }
 
@@ -299,6 +469,26 @@ mod tests {
             y,
             scale,
             angle,
+            opacity: 1.0,
+            flip_x: false,
+            flip_y: false,
+            scale_y: 0.0,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
+        }
+    }
+
+    /// A key carrying the P-6 enrichment, for the write /
+    /// preservation pins.
+    fn enriched_key(frame: f32) -> InstanceKey {
+        InstanceKey {
+            opacity: 0.5,
+            flip_x: true,
+            flip_y: false,
+            scale_y: 0.25,
+            pivot_x: 0.25,
+            pivot_y: 0.75,
+            ..key(frame, 10.0, 20.0, 2.0, 30.0)
         }
     }
 
@@ -588,6 +778,118 @@ mod tests {
     }
 
     #[test]
+    fn set_sprite_asset_repoints_and_keeps_every_key() {
+        let mut core = core_with(
+            2,
+            vec![sprite(
+                0,
+                vec![
+                    key(0.0, 100.0, 100.0, 1.0, 0.0),
+                    key(4.0, 300.0, 200.0, 3.0, 90.0),
+                ],
+            )],
+        );
+        let edits = core.edits_since_autosave();
+        core.set_sprite_asset(0, 1);
+        let inst = &core.project.sprites[0];
+        assert_eq!(inst.asset, 1);
+        assert_eq!(inst.keys.len(), 2, "the keys are the point of the op");
+        assert_eq!(
+            (inst.keys[1].x, inst.keys[1].y, inst.keys[1].scale, inst.keys[1].angle),
+            (300.0, 200.0, 3.0, 90.0),
+            "the last key travels verbatim"
+        );
+        assert_eq!(core.status, "Sprite 1 now uses asset 2.");
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        core.undo();
+        assert_eq!(core.project.sprites[0].asset, 0, "one undo restores the asset");
+    }
+
+    #[test]
+    fn set_sprite_asset_refusals_and_no_op_spend_no_snapshot() {
+        let mut core = core_with(1, vec![sprite(0, vec![key(0.0, 0.0, 0.0, 1.0, 0.0)])]);
+        let before = project_json(&core);
+        let edits = core.edits_since_autosave();
+        core.set_sprite_asset(2, 0);
+        assert_eq!(core.status, "Sprite asset failed: no sprite 3.");
+        core.set_sprite_asset(0, 4);
+        assert_eq!(core.status, "Sprite asset failed: no asset 5.");
+        // Naming the asset already in use is a validated
+        // no-op, not an undo step.
+        core.set_sprite_asset(0, 0);
+        assert_eq!(core.status, "Sprite 1 already uses asset 1.");
+        assert_eq!(project_json(&core), before, "nothing was written");
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot spent");
+    }
+
+    #[test]
+    fn reorder_sprite_moves_the_instance_and_shifts_the_rest() {
+        let mut core = core_with(
+            1,
+            vec![
+                sprite(0, vec![key(0.0, 10.0, 0.0, 1.0, 0.0)]),
+                sprite(0, vec![key(0.0, 20.0, 0.0, 1.0, 0.0)]),
+                sprite(0, vec![key(0.0, 30.0, 0.0, 1.0, 0.0)]),
+            ],
+        );
+        let edits = core.edits_since_autosave();
+        // Bottom to top (position 0 -> 2): draw order is
+        // vec order, so the moved instance now paints last.
+        core.reorder_sprite(0, 2);
+        let xs: Vec<f32> = core
+            .project
+            .sprites
+            .iter()
+            .map(|s| s.keys[0].x)
+            .collect();
+        assert_eq!(xs, vec![20.0, 30.0, 10.0], "the rest keep their relative order");
+        assert_eq!(core.status, "Sprite moved from position 1 to position 3.");
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        // Top back to the middle.
+        core.reorder_sprite(2, 1);
+        let xs: Vec<f32> = core
+            .project
+            .sprites
+            .iter()
+            .map(|s| s.keys[0].x)
+            .collect();
+        assert_eq!(xs, vec![20.0, 10.0, 30.0]);
+        core.undo();
+        core.undo();
+        let xs: Vec<f32> = core
+            .project
+            .sprites
+            .iter()
+            .map(|s| s.keys[0].x)
+            .collect();
+        assert_eq!(xs, vec![10.0, 20.0, 30.0], "two undos restore the order");
+    }
+
+    #[test]
+    fn reorder_sprite_refusals_and_no_op_spend_no_snapshot() {
+        let mut core = core_with(
+            1,
+            vec![
+                sprite(0, vec![key(0.0, 10.0, 0.0, 1.0, 0.0)]),
+                sprite(0, vec![key(0.0, 20.0, 0.0, 1.0, 0.0)]),
+            ],
+        );
+        let before = project_json(&core);
+        let edits = core.edits_since_autosave();
+        core.reorder_sprite(5, 0);
+        assert_eq!(core.status, "Sprite reorder failed: no sprite 6.");
+        core.reorder_sprite(0, 2);
+        assert_eq!(
+            core.status,
+            "Sprite reorder failed: no position 3 (project has 2 sprite instance(s))."
+        );
+        core.reorder_sprite(1, 1);
+        assert_eq!(core.status, "Sprite 2 is already at position 2.");
+        assert_eq!(project_json(&core), before, "nothing was written");
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot spent");
+    }
+
+    #[test]
     fn sampling_helpers_are_read_only() {
         let core = core_with(1, vec![sprite(0, vec![key(0.0, 1.0, 1.0, 1.0, 0.0)])]);
         let status = core.status.clone();
@@ -595,5 +897,60 @@ mod tests {
         let _ = core.sprite_key_at(0, 0);
         assert_eq!(core.status, status, "reads never touch the status line");
         assert_eq!(core.undo_depth(), 0, "reads never snapshot");
+    }
+
+    #[test]
+    fn set_sprite_key_preserves_the_replaced_keys_enrichment() {
+        // Wave X (P-6): the transform write steps x/y/scale/
+        // angle only — an imported sprite's flips, opacity,
+        // scale_y and pivot survive a replace untouched.
+        let mut core = core_with(1, vec![sprite(0, vec![enriched_key(0.0)])]);
+        core.set_sprite_key(0, 0, 99.0, 88.0, 3.0, 45.0);
+        let k = core.sprite_key_at(0, 0).expect("key still at frame 0");
+        assert_eq!((k.x, k.y, k.scale, k.angle), (99.0, 88.0, 3.0, 45.0));
+        assert_eq!(k.opacity, 0.5, "opacity preserved");
+        assert!(k.flip_x && !k.flip_y, "flips preserved");
+        assert_eq!(k.scale_y, 0.25, "scale_y preserved");
+        assert_eq!((k.pivot_x, k.pivot_y), (0.25, 0.75), "pivot preserved");
+        // A fresh insert (no key at the frame) authors the
+        // defaults instead.
+        core.set_sprite_key(0, 1, 1.0, 2.0, 1.0, 0.0);
+        let fresh = core.sprite_key_at(0, 1).expect("inserted key");
+        assert_eq!(fresh.opacity, 1.0);
+        assert!(!fresh.flip_x && !fresh.flip_y);
+        assert_eq!(fresh.scale_y, 0.0, "follow-scale default");
+        assert_eq!((fresh.pivot_x, fresh.pivot_y), (0.5, 0.5));
+    }
+
+    #[test]
+    fn set_sprite_key_full_writes_every_field_in_one_undo_step() {
+        let mut core = core_with(1, vec![sprite(0, vec![key(0.0, 0.0, 0.0, 1.0, 0.0)])]);
+        core.set_sprite_key_full(0, 0, enriched_key(0.0));
+        assert_eq!(core.undo_depth(), 1, "one snapshot for the whole key");
+        let k = core.sprite_key_at(0, 0).expect("key at frame 0");
+        assert_eq!((k.x, k.y, k.scale, k.angle), (10.0, 20.0, 2.0, 30.0));
+        assert_eq!(k.opacity, 0.5);
+        assert!(k.flip_x && !k.flip_y);
+        assert_eq!(k.scale_y, 0.25);
+        assert_eq!((k.pivot_x, k.pivot_y), (0.25, 0.75));
+        assert_eq!(core.status, "Sprite 1 key set at frame 1.");
+        core.undo();
+        let back = core.sprite_key_at(0, 0).expect("original key restored");
+        assert_eq!(back.opacity, 1.0, "one undo restores the plain key");
+        assert_eq!(back.scale_y, 0.0);
+    }
+
+    #[test]
+    fn set_sprite_key_full_refusals_spend_no_snapshot() {
+        let mut core = core_with(1, vec![sprite(0, vec![key(0.0, 0.0, 0.0, 1.0, 0.0)])]);
+        core.set_sprite_key_full(9, 0, enriched_key(0.0));
+        assert_eq!(core.status, "Sprite key failed: no sprite 10.");
+        let mut bad = enriched_key(0.0);
+        bad.opacity = f32::NAN;
+        core.set_sprite_key_full(0, 0, bad);
+        assert_eq!(core.status, "Sprite key failed: values must be finite.");
+        assert_eq!(core.undo_depth(), 0, "refusals never snapshot");
+        let k = core.sprite_key_at(0, 0).expect("original key untouched");
+        assert_eq!(k.opacity, 1.0);
     }
 }

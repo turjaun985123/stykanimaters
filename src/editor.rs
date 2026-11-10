@@ -199,6 +199,52 @@ fn clip_target_after_swap(target: Option<usize>, a: usize, b: usize) -> Option<u
     })
 }
 
+/// Retarget guard (Wave X, P-1 step 2): may `clip` play on
+/// `fig`? Clips were the one reuse path with no rig check —
+/// `apply_clips` clones clip frame poses into the figure's
+/// pose row unchecked, and `model::evaluate` indexes
+/// `pose.angles[i]` directly, so a clip authored for a
+/// different-sized rig corrupts the row and panics the next
+/// render. The guard follows the pose paths' definition
+/// (copy pose / pose apply refuse on angle-count mismatch):
+/// the clip's def must carry exactly as many nodes as the
+/// figure's def, and every frame pose in the clip must carry
+/// exactly that many angles — a clip whose frames do not fit
+/// its own def (hand-edited, mid-repair) is not retargetable
+/// anywhere. An empty clip with a matching def passes: there
+/// is nothing to misfit, and playback skips empty clips.
+pub fn clip_compatible(
+    fig: &crate::model::FigureInstance,
+    clip: &crate::model::ClipDef,
+) -> bool {
+    let n = fig.def.nodes.len();
+    clip.def.nodes.len() == n
+        && clip.frames.iter().all(|p| p.angles.len() == n)
+}
+
+/// Remap a figure's state keys after clip `deleted` is
+/// removed, mirroring `clip_target_after_delete` per key:
+/// keys naming the deleted clip are dropped (their state is
+/// gone with the clip), keys after it shift down by one.
+fn state_keys_after_delete(states: &mut Vec<crate::model::StateKey>, deleted: usize) {
+    states.retain(|k| k.clip != deleted);
+    for k in states.iter_mut() {
+        if k.clip > deleted {
+            k.clip -= 1;
+        }
+    }
+}
+
+/// Remap a figure's state keys after clips `a` and `b` trade
+/// places, mirroring `clip_target_after_swap` per key.
+fn state_keys_after_swap(states: &mut Vec<crate::model::StateKey>, a: usize, b: usize) {
+    for k in states.iter_mut() {
+        if let Some(clip) = clip_target_after_swap(Some(k.clip), a, b) {
+            k.clip = clip;
+        }
+    }
+}
+
 impl EditorCore {
     pub fn new() -> Self {
         EditorCore {
@@ -807,6 +853,8 @@ impl EditorCore {
         self.snapshot();
         let ni = self.project.figures[fi].def.nodes.len();
         self.project.figures[fi].def.nodes.push(NodeDef {
+            min_angle: None,
+            max_angle: None,
             name: format!("segment {ni}"),
             parent: Some(parent),
             length: 36.0,
@@ -2948,7 +2996,17 @@ impl EditorCore {
     }
 
     pub fn export_v5_file(&mut self) {
-        let bytes = crate::pivot::export_piv_v5(&self.project);
+        // Wave X (X7, IA-X7-1): v5 export can refuse (an
+        // undecodable image asset) — the refusal lands in
+        // the op's existing failure voice and no file is
+        // written.
+        let bytes = match crate::pivot::export_piv_v5(&self.project) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.status = format!("v5 export failed: {e}");
+                return;
+            }
+        };
         let dir = PathBuf::from("out");
         let _ = std::fs::create_dir_all(&dir);
         match std::fs::write(dir.join("animation-v5.piv"), &bytes) {
@@ -4656,6 +4714,266 @@ impl EditorCore {
         Some(ci)
     }
 
+    /// Create a clip from figure `fi`'s poses over the
+    /// half-open frame range `[start, end)` only — the ranged
+    /// sibling of `create_clip_from_figure` (Wave X, P-1
+    /// step 2), for building a walk cycle out of frames 5–12
+    /// without baking the whole timeline. The pose fallback
+    /// chain threads from frame 0, so a frame inside the
+    /// range that lacks the figure's pose falls back to the
+    /// pose just before it (the whole-timeline op's rule),
+    /// not to the rest pose. The new clip is fitted and the
+    /// figure linked to it, exactly like the whole-timeline
+    /// op; it is named "{figure} clip {start+1}-{end}" so a
+    /// ranged clip is distinguishable in the clip list from
+    /// the whole-timeline "{figure} clip". One snapshot;
+    /// `None` (with a status) when the figure is invalid, the
+    /// project has no frames, or the range is empty or
+    /// outside the timeline.
+    pub fn create_clip_from_figure_range(
+        &mut self,
+        fi: usize,
+        start: usize,
+        end: usize,
+    ) -> Option<usize> {
+        if fi >= self.project.figures.len() {
+            self.status = format!("No figure {} to make a clip from.", fi + 1);
+            return None;
+        }
+        if self.project.frames.is_empty() {
+            self.status = "No frames to build a movieclip from.".into();
+            return None;
+        }
+        if start >= end || end > self.project.frames.len() {
+            self.status = format!(
+                "No frames in range {}-{} to build a movieclip from.",
+                start + 1,
+                end
+            );
+            return None;
+        }
+        self.snapshot();
+        let (name, def) = {
+            let fig = &self.project.figures[fi];
+            (
+                format!("{} clip {}-{}", fig.name, start + 1, end),
+                fig.def.clone(),
+            )
+        };
+        let mut fallback =
+            def.rest_pose([self.project.stage[0] / 2.0, self.project.stage[1] / 2.0]);
+        let mut frames: Vec<crate::model::Pose> = Vec::with_capacity(end - start);
+        for (i, frame) in self.project.frames.iter().enumerate() {
+            let pose = frame.poses.get(fi).cloned().unwrap_or_else(|| fallback.clone());
+            fallback = pose.clone();
+            if i >= start && i < end {
+                frames.push(pose);
+            }
+        }
+        self.project.clips.push(crate::model::ClipDef {
+            name: name.clone(),
+            def,
+            frames,
+            loop_mode: crate::model::ClipLoop::Loop,
+        });
+        let ci = self.project.clips.len() - 1;
+        for f in 0..self.project.clips[ci].frames.len() {
+            self.clip_fit_frame(ci, f);
+        }
+        self.project.figures[fi].clip = Some(ci);
+        self.status = format!("{name} created; figure {} now loops it.", fi + 1);
+        Some(ci)
+    }
+
+    // ---- Wave X (P-1 step 2): clip linking + state authoring ----
+    //
+    // The ops below are the parameterised linking surface the
+    // hard-coded paths above never exposed: assigning an
+    // existing clip to an existing figure (guarded by
+    // `clip_compatible`), unlinking, and authoring the
+    // animation-state keys X1's resolution reads. Every
+    // mutating op is exactly one snapshot; refusals snapshot
+    // nothing, in the clip family's established pattern.
+
+    /// May clip `ci` be assigned to figure `fi`? The
+    /// index-level form of [`clip_compatible`]; false when
+    /// either index is out of range.
+    pub fn clip_compatible(&self, fi: usize, ci: usize) -> bool {
+        let (Some(fig), Some(clip)) = (
+            self.project.figures.get(fi),
+            self.project.clips.get(ci),
+        ) else {
+            return false;
+        };
+        clip_compatible(fig, clip)
+    }
+
+    /// The refusal status for an assignment the rig guard
+    /// turned away, in the copy-pose sentence's shape. Two
+    /// cases: the rigs differ in size, or the clip's frames
+    /// do not fit the clip's own rig.
+    fn clip_guard_status(&self, fi: usize, ci: usize) -> String {
+        let fig = &self.project.figures[fi];
+        let clip = &self.project.clips[ci];
+        if clip.def.nodes.len() != fig.def.nodes.len() {
+            format!(
+                "clip {} ({}) is built for {} segments but figure {} has {} — clips only play on figures with the same rig size.",
+                ci + 1,
+                clip.name,
+                clip.def.nodes.len(),
+                fi + 1,
+                fig.def.nodes.len()
+            )
+        } else {
+            format!(
+                "clip {} ({}) has a frame that does not fit its own {}-segment rig — repair or re-make the clip first.",
+                ci + 1,
+                clip.name,
+                clip.def.nodes.len()
+            )
+        }
+    }
+
+    /// Assign existing clip `ci` to existing figure `fi` —
+    /// the link `make_clip_from_figure` and
+    /// `insert_clip_figure` set implicitly, as a guarded op
+    /// of its own. The retarget guard refuses a clip whose
+    /// rig does not match the figure's (no snapshot, status
+    /// explains). Assigning the clip already linked is a
+    /// no-op (false, no status churn — the `rename_clip`
+    /// precedent). One snapshot on success. Note the link
+    /// governs only when no state key is active on the
+    /// figure (see `FigureInstance::states`): before the
+    /// first key, and whenever the figure has no keys, this
+    /// is the clip that plays.
+    pub fn assign_clip_to_figure(&mut self, fi: usize, ci: usize) -> bool {
+        if fi >= self.project.figures.len() {
+            self.status = format!("No figure {} to assign a clip to.", fi + 1);
+            return false;
+        }
+        if ci >= self.project.clips.len() {
+            self.status = "No such clip.".into();
+            return false;
+        }
+        if self.project.figures[fi].clip == Some(ci) {
+            return false;
+        }
+        if !self.clip_compatible(fi, ci) {
+            self.status = format!("Assign clip failed: {}", self.clip_guard_status(fi, ci));
+            return false;
+        }
+        self.snapshot();
+        self.project.figures[fi].clip = Some(ci);
+        let name = self.project.clips[ci].name.clone();
+        self.status = format!("Figure {} now loops clip {} ({name}).", fi + 1, ci + 1);
+        true
+    }
+
+    /// Unlink figure `fi` from its movieclip: the inverse
+    /// `make_clip_from_figure` never had. The figure falls
+    /// back to its timeline poses — unless it carries state
+    /// keys, which are a separate authoring surface and are
+    /// NOT cleared here (the status says they still apply).
+    /// Unlinking an unlinked figure is a no-op. One snapshot
+    /// on success.
+    pub fn unlink_figure(&mut self, fi: usize) -> bool {
+        let Some(fig) = self.project.figures.get(fi) else {
+            self.status = format!("No figure {} to unlink.", fi + 1);
+            return false;
+        };
+        let Some(ci) = fig.clip else {
+            return false;
+        };
+        let has_states = !fig.states.is_empty();
+        let name = self
+            .project
+            .clips
+            .get(ci)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| format!("clip {}", ci + 1));
+        self.snapshot();
+        self.project.figures[fi].clip = None;
+        self.status = if has_states {
+            format!(
+                "Figure {} unlinked from clip {} ({name}); its state keys still apply.",
+                fi + 1,
+                ci + 1
+            )
+        } else {
+            format!(
+                "Figure {} unlinked from clip {} ({name}); it uses its timeline poses again.",
+                fi + 1,
+                ci + 1
+            )
+        };
+        true
+    }
+
+    /// Author (or replace) figure `fi`'s animation-state key
+    /// at `key.frame`: from that timeline frame the figure
+    /// plays `key.clip`, starting `key.offset` frames in, at
+    /// `key.speed`× (resolution: X1's `active_state_key` /
+    /// `state_local_time`). A key already sitting at that
+    /// frame is replaced, and the vec is kept sorted by
+    /// frame. The clip must pass the same rig guard as
+    /// assignment — a state key is just a scheduled
+    /// assignment — and a non-finite speed is refused at
+    /// authoring (playback sanitises corrupt speeds at read;
+    /// this op does not write one). One snapshot on success.
+    pub fn set_state_key(&mut self, fi: usize, key: crate::model::StateKey) -> bool {
+        if fi >= self.project.figures.len() {
+            self.status = format!("No figure {} to set a state key on.", fi + 1);
+            return false;
+        }
+        if key.clip >= self.project.clips.len() {
+            self.status = "No such clip.".into();
+            return false;
+        }
+        if !key.speed.is_finite() {
+            self.status = "Set state key failed: speed must be finite.".into();
+            return false;
+        }
+        if !self.clip_compatible(fi, key.clip) {
+            self.status = format!(
+                "Set state key failed: {}",
+                self.clip_guard_status(fi, key.clip)
+            );
+            return false;
+        }
+        self.snapshot();
+        let fig = &mut self.project.figures[fi];
+        fig.states.retain(|k| k.frame != key.frame);
+        fig.states.push(key);
+        fig.states.sort_by_key(|k| k.frame);
+        let name = self.project.clips[key.clip].name.clone();
+        self.status = format!(
+            "Figure {} state at frame {}: clip {} ({name}).",
+            fi + 1,
+            key.frame + 1,
+            key.clip + 1
+        );
+        true
+    }
+
+    /// Remove figure `fi`'s state key at timeline frame
+    /// `frame` (0-based, the stored key frame). Refuses —
+    /// no snapshot — when the figure has no key there. One
+    /// snapshot on success.
+    pub fn remove_state_key(&mut self, fi: usize, frame: usize) -> bool {
+        let Some(fig) = self.project.figures.get(fi) else {
+            self.status = format!("No figure {} to remove a state key from.", fi + 1);
+            return false;
+        };
+        if !fig.states.iter().any(|k| k.frame == frame) {
+            self.status = format!("Figure {} has no state key at frame {}.", fi + 1, frame + 1);
+            return false;
+        }
+        self.snapshot();
+        self.project.figures[fi].states.retain(|k| k.frame != frame);
+        self.status = format!("Figure {} state key at frame {} removed.", fi + 1, frame + 1);
+        true
+    }
+
     /// Wave 10: cycle a clip's loop mode — Loop → PingPong →
     /// Once → Loop — as one undo step. `model::poses_at` honours
     /// the mode when a figure plays the clip back.
@@ -4809,6 +5127,10 @@ impl EditorCore {
         self.project.clips.remove(clip_idx);
         for fig in &mut self.project.figures {
             fig.clip = clip_target_after_delete(fig.clip, clip_idx);
+            // Wave X (X2): state keys track their clips through
+            // the same mapping — a key left pointing past the
+            // gap would name the wrong clip, not a dangling one.
+            state_keys_after_delete(&mut fig.states, clip_idx);
         }
         if let Some(session) = self.clip_edit.clone() {
             self.clip_edit = clip_target_after_delete(Some(session.clip), clip_idx)
@@ -4842,6 +5164,8 @@ impl EditorCore {
         self.project.clips.swap(clip_idx, other);
         for fig in &mut self.project.figures {
             fig.clip = clip_target_after_swap(fig.clip, clip_idx, other);
+            // Wave X (X2): state keys follow the swap too.
+            state_keys_after_swap(&mut fig.states, clip_idx, other);
         }
         if let Some(session) = self.clip_edit.clone() {
             if let Some(clip) = clip_target_after_swap(Some(session.clip), clip_idx, other) {
@@ -5308,6 +5632,8 @@ impl EditorCore {
             .iter()
             .zip(baked.iter().zip(rel.iter()))
             .map(|(n3, (bn, &rest_angle))| NodeDef {
+                min_angle: None,
+                max_angle: None,
                 name: n3.name.clone(),
                 parent: n3.parent,
                 length: bn.length,
@@ -9165,6 +9491,262 @@ mod tests {
         core.exit_clip(); // a second exit is a harmless no-op
         assert!(core.clip_edit.is_none());
     }
+
+    // ---- Wave X (P-1 step 2): linking + state authoring ----
+
+    #[test]
+    fn wave_x_clip_compatible_predicate() {
+        let core = EditorCore::new();
+        let fig = core.project.figures[0].clone();
+        let n = fig.def.nodes.len();
+        let good = crate::model::ClipDef {
+            name: "ok".into(),
+            def: fig.def.clone(),
+            frames: vec![fig.def.rest_pose([0.0, 0.0])],
+            loop_mode: crate::model::ClipLoop::Loop,
+        };
+        assert!(clip_compatible(&fig, &good));
+        // A clip built for a different rig (quadruped: 13
+        // nodes vs the humanoid's 11) is not retargetable.
+        let quad = FigureDef::quadruped();
+        assert_ne!(quad.nodes.len(), n);
+        let foreign = crate::model::ClipDef {
+            name: "dog".into(),
+            def: quad.clone(),
+            frames: vec![quad.rest_pose([0.0, 0.0])],
+            loop_mode: crate::model::ClipLoop::Loop,
+        };
+        assert!(!clip_compatible(&fig, &foreign));
+        // Matching defs but a frame that does not fit its own
+        // rig: still refused — playback would misfit the row.
+        let mut broken = good.clone();
+        broken.frames[0].angles.truncate(3);
+        assert!(!clip_compatible(&fig, &broken));
+        // An empty clip with a matching def passes: nothing
+        // to misfit, and playback skips empty clips.
+        let mut empty = good.clone();
+        empty.frames.clear();
+        assert!(clip_compatible(&fig, &empty));
+    }
+
+    #[test]
+    fn wave_x_assign_clip_respects_the_rig_guard() {
+        let mut core = EditorCore::new();
+        let ci = core.create_clip_from_figure(0).expect("clip created");
+        // A quadruped figure cannot take the humanoid clip.
+        core.project
+            .add_figure_with(FigureDef::quadruped(), "Dog", 0xA0A0A0, [120.0, 120.0]);
+        let dog = core.project.figures.len() - 1;
+        let depth = core.undo_depth();
+        assert!(!core.assign_clip_to_figure(dog, ci));
+        assert!(core.status.contains("same rig size"), "status: {}", core.status);
+        assert_eq!(core.project.figures[dog].clip, None);
+        assert_eq!(core.undo_depth(), depth, "a refusal snapshots nothing");
+        // Bad indices refuse with the family wordings.
+        assert!(!core.assign_clip_to_figure(0, 99));
+        assert_eq!(core.status, "No such clip.");
+        assert!(!core.assign_clip_to_figure(99, ci));
+        assert!(core.status.contains("No figure 100"), "status: {}", core.status);
+        assert_eq!(core.undo_depth(), depth);
+        // The index-level predicate agrees with the op.
+        assert!(core.clip_compatible(0, ci));
+        assert!(!core.clip_compatible(dog, ci));
+        assert!(!core.clip_compatible(0, 99));
+        // A good assign is exactly one undo step; re-assigning
+        // the same clip is a no-op; undo detaches again.
+        assert!(core.unlink_figure(0));
+        let depth = core.undo_depth();
+        assert!(core.assign_clip_to_figure(0, ci));
+        assert_eq!(core.undo_depth(), depth + 1);
+        assert_eq!(core.project.figures[0].clip, Some(ci));
+        assert!(core.status.contains("now loops clip"), "status: {}", core.status);
+        assert!(!core.assign_clip_to_figure(0, ci));
+        assert_eq!(core.undo_depth(), depth + 1);
+        core.undo();
+        assert_eq!(core.project.figures[0].clip, None);
+    }
+
+    #[test]
+    fn wave_x_unlink_figure_round_trip() {
+        let mut core = EditorCore::new();
+        let ci = core.create_clip_from_figure(0).expect("clip created");
+        let depth = core.undo_depth();
+        assert!(core.unlink_figure(0));
+        assert_eq!(core.undo_depth(), depth + 1);
+        assert_eq!(core.project.figures[0].clip, None);
+        assert!(core.status.contains("timeline poses"), "status: {}", core.status);
+        // A second unlink is a no-op; a bad figure refuses.
+        assert!(!core.unlink_figure(0));
+        assert_eq!(core.undo_depth(), depth + 1);
+        assert!(!core.unlink_figure(42));
+        assert!(core.status.contains("No figure 43"), "status: {}", core.status);
+        // Undo re-links.
+        core.undo();
+        assert_eq!(core.project.figures[0].clip, Some(ci));
+        // With state keys authored, unlink leaves them in
+        // force and the status says so.
+        assert!(core.set_state_key(
+            0,
+            crate::model::StateKey { frame: 1, clip: ci, offset: 0, speed: 1.0 },
+        ));
+        assert!(core.unlink_figure(0));
+        assert_eq!(core.project.figures[0].clip, None);
+        assert_eq!(core.project.figures[0].states.len(), 1);
+        assert!(core.status.contains("state keys still apply"), "status: {}", core.status);
+    }
+
+    #[test]
+    fn wave_x_state_key_authoring() {
+        let mut core = EditorCore::new();
+        let ci_a = core.create_clip_from_figure(0).expect("clip created");
+        let ci_b = core.duplicate_clip(ci_a).expect("clip duplicated");
+        let key = crate::model::StateKey { frame: 2, clip: ci_b, offset: 1, speed: 2.0 };
+        let depth = core.undo_depth();
+        assert!(core.set_state_key(0, key));
+        assert_eq!(core.undo_depth(), depth + 1);
+        assert_eq!(core.project.figures[0].states, vec![key]);
+        assert!(core.status.contains("state at frame 3"), "status: {}", core.status);
+        // Authoring an earlier frame keeps the vec sorted.
+        let first = crate::model::StateKey { frame: 0, clip: ci_a, offset: 0, speed: 1.0 };
+        assert!(core.set_state_key(0, first));
+        assert_eq!(core.project.figures[0].states, vec![first, key]);
+        // Re-setting the same frame replaces, never stacks.
+        let replaced = crate::model::StateKey { frame: 2, clip: ci_a, offset: 0, speed: 1.0 };
+        assert!(core.set_state_key(0, replaced));
+        assert_eq!(core.project.figures[0].states, vec![first, replaced]);
+        // Refusals snapshot nothing: bad clip, bad figure,
+        // rig mismatch, non-finite speed.
+        core.project
+            .add_figure_with(FigureDef::quadruped(), "Dog", 0xA0A0A0, [120.0, 120.0]);
+        let dog = core.project.figures.len() - 1;
+        let depth = core.undo_depth();
+        assert!(!core.set_state_key(0, crate::model::StateKey { clip: 99, ..key }));
+        assert_eq!(core.status, "No such clip.");
+        assert!(!core.set_state_key(99, key));
+        assert!(!core.set_state_key(dog, key));
+        assert!(core.status.contains("same rig size"), "status: {}", core.status);
+        assert!(!core.set_state_key(
+            0,
+            crate::model::StateKey { speed: f32::NAN, ..key },
+        ));
+        assert!(core.status.contains("speed must be finite"), "status: {}", core.status);
+        assert_eq!(core.undo_depth(), depth);
+        // Removal: one step, then the repeat refusal.
+        assert!(core.remove_state_key(0, 2));
+        assert_eq!(core.undo_depth(), depth + 1);
+        assert_eq!(core.project.figures[0].states, vec![first]);
+        assert!(!core.remove_state_key(0, 2));
+        assert!(core.status.contains("no state key at frame 3"), "status: {}", core.status);
+        assert_eq!(core.undo_depth(), depth + 1);
+        core.undo();
+        assert_eq!(core.project.figures[0].states, vec![first, replaced]);
+    }
+
+    #[test]
+    fn wave_x_state_key_switches_the_evaluated_pose() {
+        let mut core = EditorCore::new();
+        let ci_a = core.create_clip_from_figure(0).expect("clip created");
+        let ci_b = core.duplicate_clip(ci_a).expect("clip duplicated");
+        for p in &mut core.project.clips[ci_b].frames {
+            p.root = [100.0, 100.0];
+        }
+        assert!(core.set_state_key(
+            0,
+            crate::model::StateKey { frame: 2, clip: ci_b, offset: 0, speed: 1.0 },
+        ));
+        // Before the key the legacy link plays (the demo
+        // timeline's own roots, baked into clip A); at the
+        // key frame the state clip takes over.
+        assert_eq!(core.positions_f(0.0, 0)[0], [480.0, 470.0]);
+        assert_eq!(core.positions_f(1.0, 0)[0], [494.0, 470.0]);
+        assert_eq!(core.positions_f(2.0, 0)[0], [100.0, 100.0]);
+        assert_eq!(core.positions_f(4.0, 0)[0], [100.0, 100.0]);
+    }
+
+    #[test]
+    fn wave_x_create_clip_from_figure_range() {
+        let mut core = EditorCore::new();
+        let total = core.project.frames.len();
+        assert_eq!(total, 5, "the demo timeline's shape");
+        // Refusals first: empty, inverted, out-of-timeline
+        // and bad-figure ranges snapshot nothing.
+        let depth = core.undo_depth();
+        assert!(core.create_clip_from_figure_range(0, 2, 2).is_none());
+        assert!(core.create_clip_from_figure_range(0, 3, 2).is_none());
+        assert!(core.create_clip_from_figure_range(0, 0, total + 1).is_none());
+        assert!(core.status.contains("No frames in range"), "status: {}", core.status);
+        assert!(core.create_clip_from_figure_range(99, 0, 1).is_none());
+        assert!(core.status.contains("No figure 100"), "status: {}", core.status);
+        assert_eq!(core.undo_depth(), depth);
+        assert!(core.project.clips.is_empty());
+        // [1, 3) bakes exactly timeline frames 1 and 2.
+        let ci = core.create_clip_from_figure_range(0, 1, 3).expect("ranged clip created");
+        assert_eq!(core.undo_depth(), depth + 1);
+        assert_eq!(core.project.clips[ci].name, "Styk clip 2-3");
+        assert_eq!(core.project.clips[ci].frames.len(), 2);
+        for (k, src) in core.project.frames[1..3].iter().enumerate() {
+            assert_eq!(core.project.clips[ci].frames[k].angles, src.poses[0].angles);
+            assert_eq!(core.project.clips[ci].frames[k].root, src.poses[0].root);
+        }
+        assert_eq!(core.project.figures[0].clip, Some(ci));
+        assert!(core.clip_compatible(0, ci));
+        // One undo removes both the clip and the link.
+        core.undo();
+        assert!(core.project.clips.is_empty());
+        assert_eq!(core.project.figures[0].clip, None);
+    }
+
+    #[test]
+    fn wave_x_delete_and_move_clip_remap_state_keys() {
+        let mut core = EditorCore::new();
+        let ci_a = core.create_clip_from_figure(0).expect("clip created");
+        let ci_b = core.duplicate_clip(ci_a).expect("first duplicate");
+        let ci_c = core.duplicate_clip(ci_b).expect("second duplicate");
+        let name_b = core.project.clips[ci_b].name.clone();
+        let name_c = core.project.clips[ci_c].name.clone();
+        assert!(core.set_state_key(
+            0,
+            crate::model::StateKey { frame: 0, clip: ci_c, offset: 0, speed: 1.0 },
+        ));
+        assert!(core.set_state_key(
+            0,
+            crate::model::StateKey { frame: 2, clip: ci_b, offset: 0, speed: 1.0 },
+        ));
+        let keyed_name = |core: &EditorCore, frame: usize| {
+            let key = core.project.figures[0]
+                .states
+                .iter()
+                .find(|k| k.frame == frame)
+                .expect("key present");
+            core.project.clips[key.clip].name.clone()
+        };
+        // Deleting a clip BEFORE the keyed ones shifts the
+        // keys down; they still name the same clips.
+        assert!(core.delete_clip(ci_a));
+        assert_eq!(keyed_name(&core, 0), name_c);
+        assert_eq!(keyed_name(&core, 2), name_b);
+        // Deleting a keyed clip removes its key; the other
+        // key shifts and still names its clip.
+        let doomed = core.project.figures[0]
+            .states
+            .iter()
+            .find(|k| k.frame == 2)
+            .map(|k| k.clip)
+            .expect("key present");
+        assert!(core.delete_clip(doomed));
+        assert_eq!(core.project.figures[0].states.len(), 1);
+        assert_eq!(keyed_name(&core, 0), name_c);
+        // A swap exchanges the keys' clip indices.
+        let ci_d = core.duplicate_clip(0).expect("third duplicate");
+        let name_d = core.project.clips[ci_d].name.clone();
+        assert!(core.set_state_key(
+            0,
+            crate::model::StateKey { frame: 4, clip: ci_d, offset: 0, speed: 1.0 },
+        ));
+        assert!(core.move_clip(0, false));
+        assert_eq!(keyed_name(&core, 0), name_c);
+        assert_eq!(keyed_name(&core, 4), name_d);
+    }
 }
 
 #[cfg(test)]
@@ -10290,6 +10872,7 @@ mod wave14_camera_tests {
             def: def.clone(),
             hidden: false,
             clip: None,
+            states: Vec::new(),
             locked: false,
             opacity: 1.0,
         };
@@ -10402,6 +10985,8 @@ mod wave14_camera_tests {
             color: 0xFFFFFF,
             def: FigureDef {
                 nodes: vec![NodeDef {
+                    min_angle: None,
+                    max_angle: None,
                     name: "origin".into(),
                     parent: None,
                     length: 0.0,
@@ -10418,6 +11003,7 @@ mod wave14_camera_tests {
             },
             hidden: false,
             clip: None,
+            states: Vec::new(),
             locked: false,
             opacity: 1.0,
         }];

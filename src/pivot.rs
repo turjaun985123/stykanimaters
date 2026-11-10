@@ -243,6 +243,8 @@ fn parse_figure(r: &mut Reader, version4: bool) -> Result<(FigureDef, String, Ve
         }
     };
     let mut nodes = vec![NodeDef {
+        min_angle: None,
+        max_angle: None,
         style: crate::model::NodeStyle::default(),
         media: None,
         name: "origin".into(),
@@ -267,6 +269,8 @@ fn parse_figure(r: &mut Reader, version4: bool) -> Result<(FigureDef, String, Ve
             _ => Shape::Line,
         };
         nodes.push(NodeDef {
+        min_angle: None,
+        max_angle: None,
         style: crate::model::NodeStyle::default(),
         media: None,
             name: format!("segment {}", seg.id),
@@ -925,6 +929,7 @@ fn assemble(
             def,
             hidden: false,
             clip: None,
+            states: Vec::new(),
         });
     }
     let slot_to_figure: Vec<usize> = (0..figures.len()).collect();
@@ -1372,6 +1377,8 @@ fn parse_figure_v5(r: &mut Reader) -> Result<(FigType, Vec<f32>), String> {
         abs_of_id.insert(seg.id, rad_to_deg(seg.angle_rad));
     }
     let mut nodes = vec![NodeDef {
+        min_angle: None,
+        max_angle: None,
         style: crate::model::NodeStyle::default(),
         media: None,
         name: "origin".into(),
@@ -1420,6 +1427,8 @@ fn parse_figure_v5(r: &mut Reader) -> Result<(FigType, Vec<f32>), String> {
             None
         };
         nodes.push(NodeDef {
+        min_angle: None,
+        max_angle: None,
         style: crate::model::NodeStyle::default(),
         media,
             name: format!("segment {}", seg.id),
@@ -1681,6 +1690,7 @@ fn import_v5(r: &mut Reader) -> Result<Project, String> {
             def,
             hidden: false,
             clip: None,
+            states: Vec::new(),
         });
     }
     let mut last_poses: Vec<Pose> = figures
@@ -2066,6 +2076,44 @@ fn png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
     Some((w, h))
 }
 
+/// The v5 image-table payload for one asset: PNG bytes plus the
+/// real pixel size the anchors are computed from (Wave X, P-4r).
+/// The table is a PNG container, but assets store their original
+/// bytes (`model::ImageAsset` — media.rs decodes by content), so
+/// a JPEG asset must not be embedded raw. A PNG blob with a sane
+/// IHDR passes through verbatim with its IHDR size; any other
+/// decodable blob is transcoded to PNG and reports its decoded
+/// size. Bytes that do not decode at all (including a PNG header
+/// with a zero dimension) refuse the export with a named error
+/// instead of landing in the file behind unit anchors.
+fn piv_image_payload(
+    asset: usize,
+    blob: &[u8],
+    name: &str,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    if let Some((w, h)) = png_dimensions(blob) {
+        if w > 0 && h > 0 {
+            return Ok((blob.to_vec(), w, h));
+        }
+    }
+    let img = image::load_from_memory(blob).map_err(|e| {
+        format!(
+            "Pivot v5 export refused: image asset {asset} ('{name}') \
+             is not a decodable image (PNG, JPEG or GIF): {e}"
+        )
+    })?;
+    let (w, h) = (img.width(), img.height());
+    let mut png = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|e| {
+            format!(
+                "Pivot v5 export refused: image asset {asset} ('{name}') \
+                 could not be transcoded to PNG: {e}"
+            )
+        })?;
+    Ok((png, w, h))
+}
+
 /// Export the project as a version 5 `.piv` file, zlib-compressed
 /// (the form StykAnimate itself writes). Writer grammar:
 /// `codecs/piv_full_writer.py` (tables) and `codecs/piv_document.py`
@@ -2096,7 +2144,12 @@ fn png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
 /// * **Image side tables** for figures containing image segments
 ///   (`SegmentMedia::Image`): one table entry per distinct
 ///   referenced asset, holding the asset's PNG bytes verbatim
-///   behind an absolute end offset. The anchor segment is the
+///   behind an absolute end offset. Assets are stored as their
+///   original bytes, so a non-PNG asset (a JPEG, say) is first
+///   transcoded to PNG and its anchors come from the decoded
+///   size; an asset that does not decode at all refuses the
+///   export with a named error (Wave X, P-4r — this is why the
+///   export returns a `Result`). The anchor segment is the
 ///   image's horizontal centreline in pixel space, which is
 ///   exactly how `media.rs` renders image segments (the image's
 ///   width spans the segment, centred on it). Figures with image
@@ -2125,7 +2178,7 @@ fn png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
 ///   glyph count) exports as a plain segment instead; glyphs are
 ///   keyed by UTF-16 code unit, so an astral character gets a
 ///   '?' glyph per surrogate half where the renderer draws one.
-pub fn export_piv_v5(project: &Project) -> Vec<u8> {
+pub fn export_piv_v5(project: &Project) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     out.push(5u8); // version
     out.extend_from_slice(&(project.stage[0] as u32).to_le_bytes());
@@ -2155,7 +2208,7 @@ pub fn export_piv_v5(project: &Project) -> Vec<u8> {
         .collect();
     let mut fig_has_media: Vec<bool> = Vec::with_capacity(project.figures.len());
     for (i, fig) in project.figures.iter().enumerate() {
-        fig_has_media.push(write_figure_v5(&mut out, fig, &project.assets, &record_bends[i]));
+        fig_has_media.push(write_figure_v5(&mut out, fig, &project.assets, &record_bends[i])?);
     }
     // Keyframes.
     out.extend_from_slice(&(project.frames.len() as u32).to_le_bytes());
@@ -2232,7 +2285,7 @@ pub fn export_piv_v5(project: &Project) -> Vec<u8> {
     encoder
         .write_all(&out)
         .expect("zlib encode into memory cannot fail");
-    encoder.finish().expect("zlib finish into memory cannot fail")
+    Ok(encoder.finish().expect("zlib finish into memory cannot fail"))
 }
 
 /// Font name written into exported text entries. The format
@@ -2441,7 +2494,9 @@ fn write_text_entry(out: &mut Vec<u8>, content: &str) {
 /// (image-table index, 0, 0), and the figure's image side table
 /// follows the bend count, per the grammar: a u16 entry count,
 /// then per entry four i32 anchors, a u64 **absolute** end offset
-/// (into the whole payload), and the asset's PNG bytes verbatim.
+/// (into the whole payload), and the entry's PNG payload (the
+/// asset's own bytes if PNG, a transcode otherwise — see
+/// [`piv_image_payload`], which can refuse the export).
 /// Text segments are written as primitive 5 with the extra triple
 /// (text-table index, 0, 0), and the figure's text side table
 /// follows the image table: a u16 entry count, then one entry per
@@ -2453,7 +2508,7 @@ fn write_figure_v5(
     fig: &FigureInstance,
     assets: &[ImageAsset],
     rest_bends: &[f32],
-) -> bool {
+) -> Result<bool, String> {
     let def = &fig.def;
     let name = &fig.name;
     // The figure's image table: distinct referenced assets in
@@ -2474,6 +2529,14 @@ fn write_figure_v5(
                 });
             }
         }
+    }
+    // The table payloads, prepared before anything for this
+    // figure is written: PNG bytes + real pixel size per entry,
+    // transcoding non-PNG assets (see `piv_image_payload`). An
+    // undecodable asset refuses the whole export here.
+    let mut payloads: Vec<(Vec<u8>, u32, u32)> = Vec::with_capacity(table.len());
+    for &asset in &table {
+        payloads.push(piv_image_payload(asset, &assets[asset].png, &assets[asset].name)?);
     }
     // The figure's text table: distinct content strings in
     // first-reference order (the format stores no size, so
@@ -2548,18 +2611,15 @@ fn write_figure_v5(
         out.extend_from_slice(&idx.to_le_bytes());
         out.extend_from_slice(&v.to_le_bytes());
     }
-    if !table.is_empty() {
-        out.extend_from_slice(&(table.len() as u16).to_le_bytes());
-        for &asset in &table {
-            let blob = &assets[asset].png;
+    if !payloads.is_empty() {
+        out.extend_from_slice(&(payloads.len() as u16).to_le_bytes());
+        for (blob, w, h) in &payloads {
             // Anchors: the image's horizontal centreline in pixel
             // space (media.rs maps the image's width onto the
-            // segment, centred). Non-PNG assets have no known
-            // pixel size; a unit anchor keeps the scale finite.
-            let (ax, ay, bx, by) = match png_dimensions(blob) {
-                Some((w, h)) if w > 0 && h > 0 => (0i32, (h / 2) as i32, w as i32, (h / 2) as i32),
-                _ => (0i32, 0, 1, 0),
-            };
+            // segment, centred). The size is the payload's real
+            // pixel size — for a transcoded asset, its decoded
+            // size — never a unit fallback.
+            let (ax, ay, bx, by) = (0i32, (h / 2) as i32, *w as i32, (h / 2) as i32);
             // The end offset is absolute (whole payload) and
             // points just past the blob: anchors (16) + this u64
             // field (8) + the blob itself.
@@ -2582,7 +2642,7 @@ fn write_figure_v5(
     let name_bytes = name.as_bytes();
     out.push(name_bytes.len().min(255) as u8);
     out.extend_from_slice(&name_bytes[..name_bytes.len().min(255)]);
-    !table.is_empty() || !text_table.is_empty()
+    Ok(!table.is_empty() || !text_table.is_empty())
 }
 
 #[cfg(test)]
@@ -2815,7 +2875,7 @@ mod tests {
             zoom: 1.5,
             angle: 0.0,
         });
-        let bytes = export_piv_v5(&project);
+        let bytes = export_piv_v5(&project).unwrap();
         // The export is zlib-wrapped, like the files StykAnimate
         // writes: the first payload byte (version 5) must not be
         // visible in the raw stream.
@@ -2863,6 +2923,15 @@ mod tests {
         let mut buf = Vec::new();
         image::DynamicImage::ImageRgba8(img)
             .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        buf
+    }
+
+    fn test_jpeg(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(w, h, image::Rgb([200, 30, 0]));
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Jpeg)
             .unwrap();
         buf
     }
@@ -3026,7 +3095,7 @@ mod tests {
     #[test]
     fn v5_export_per_frame_lengths_from_graph_channels() {
         let project = media_project();
-        let payload = inflate_export(&export_piv_v5(&project));
+        let payload = inflate_export(&export_piv_v5(&project).unwrap());
         let frames = walk_v5_export(&payload);
         assert_eq!(frames.len(), 5);
         // Frame 0: the channel value equals the def length (46),
@@ -3061,7 +3130,7 @@ mod tests {
     #[test]
     fn v5_export_image_side_table_and_media_roundtrip() {
         let project = media_project();
-        let bytes = export_piv_v5(&project);
+        let bytes = export_piv_v5(&project).unwrap();
         let payload = inflate_export(&bytes);
         // The asset's PNG bytes are embedded verbatim.
         let png = &project.assets[0].png;
@@ -3103,6 +3172,61 @@ mod tests {
     }
 
     #[test]
+    fn v5_export_transcodes_jpeg_assets_to_png() {
+        // Wave X, P-4r: assets store original bytes, so a JPEG
+        // asset is a real case (JPEG import, Wave R). The v5
+        // image table is a PNG container: the asset must arrive
+        // transcoded, with anchors from its real size — never
+        // raw behind unit anchors.
+        let mut project = media_project();
+        project.assets[0].png = test_jpeg(6, 3);
+        let jpeg = project.assets[0].png.clone();
+        let bytes = export_piv_v5(&project).unwrap();
+        let payload = inflate_export(&bytes);
+        // The generic walker still lands exactly at payload end:
+        // the end offsets are computed over the transcoded bytes.
+        walk_v5_export(&payload);
+        // The raw JPEG blob appears nowhere in the document.
+        assert!(
+            !payload.windows(jpeg.len()).any(|w| w == jpeg.as_slice()),
+            "raw JPEG must not be embedded in the image table"
+        );
+        // The table entry: anchors (16 bytes) + u64 end offset
+        // + payload. Find the payload's PNG by its magic, then
+        // check what precedes it: the anchors must be the real
+        // centreline (0, h/2, w, h/2) = (0, 1, 6, 1) for a 6x3
+        // image, and the PNG must carry the JPEG's real size.
+        let magic: &[u8] = b"\x89PNG\r\n\x1a\n";
+        let mut anchor = Vec::new();
+        for v in [0i32, 1, 6, 1] {
+            anchor.extend_from_slice(&v.to_le_bytes());
+        }
+        let entry = payload
+            .windows(magic.len())
+            .positions(|w| w == magic)
+            .find(|&pos| {
+                pos >= 24
+                    && payload[pos - 24..pos - 8] == anchor[..]
+                    && png_dimensions(&payload[pos..]) == Some((6, 3))
+            });
+        assert!(
+            entry.is_some(),
+            "a PNG entry with real-centreline anchors and the JPEG's 6x3 size must be written"
+        );
+    }
+
+    #[test]
+    fn v5_export_refuses_undecodable_assets() {
+        // Wave X, P-4r: bytes that decode as nothing refuse the
+        // export with a named error — no file, no unit anchors.
+        let mut project = media_project();
+        project.assets[0].png = b"not an image at all".to_vec();
+        let err = export_piv_v5(&project).unwrap_err();
+        assert!(err.contains("refused"), "{err}");
+        assert!(err.contains("'dot'"), "the refusal names the asset: {err}");
+    }
+
+    #[test]
     fn v5_export_text_side_table_structure() {
         // Byte-level structural assertions on an exported text
         // table, per the documented layout (piv_side_tables.py):
@@ -3113,7 +3237,7 @@ mod tests {
             content: "A B~".into(),
             size: 25.0,
         });
-        let bytes = export_piv_v5(&project);
+        let bytes = export_piv_v5(&project).unwrap();
         let payload = inflate_export(&bytes);
         // The generic walker still lands exactly at payload end.
         walk_v5_export(&payload);
@@ -3242,7 +3366,7 @@ mod tests {
             content: wide,
             size: 25.0,
         });
-        let bytes = export_piv_v5(&project);
+        let bytes = export_piv_v5(&project).unwrap();
         let payload = inflate_export(&bytes);
         walk_v5_export(&payload); // exact-EOF walk still holds
         let back = import_piv(&bytes).unwrap();
@@ -3281,7 +3405,7 @@ mod tests {
         // Guard: a plain project still writes len_flag 0 / no
         // media byte on every object (the wave-3 subset).
         let project = Project::new_demo();
-        let payload = inflate_export(&export_piv_v5(&project));
+        let payload = inflate_export(&export_piv_v5(&project).unwrap());
         let frames = walk_v5_export(&payload);
         assert!(frames
             .iter()
@@ -3387,7 +3511,7 @@ mod tests {
 
         // Export: record block = frame 0's bends; frame 0 stores
         // no array (it equals the record), frame 1 stores its own.
-        let bytes = export_piv_v5(&project);
+        let bytes = export_piv_v5(&project).unwrap();
         std::fs::write("/tmp/styk-export-v5-bent.piv", &bytes).unwrap();
         let payload = inflate_export(&bytes);
         let record = walk_v5_record_bends(&payload);
@@ -3418,7 +3542,7 @@ mod tests {
         // (decode_piv_bytes): image asset bytes/anchors, per-frame
         // length arrays, and bend absence are asserted there.
         let project = media_project();
-        std::fs::write("/tmp/styk-export-v5-media.piv", export_piv_v5(&project)).unwrap();
+        std::fs::write("/tmp/styk-export-v5-media.piv", export_piv_v5(&project).unwrap()).unwrap();
         std::fs::write("/tmp/styk-asset.png", &project.assets[0].png).unwrap();
     }
 
@@ -3563,7 +3687,7 @@ mod tests {
             (export_piv_v2(&project), 2u8),
             (export_piv_v3(&project), 3),
             (export_piv_v4(&project), 4),
-            (export_piv_v5(&project), 5),
+            (export_piv_v5(&project).unwrap(), 5),
         ] {
             let probe = probe_piv(&bytes).unwrap_or_else(|e| panic!("v{version}: {e}"));
             assert_eq!(probe.version, version, "v{version} version");
@@ -3600,7 +3724,7 @@ mod tests {
     #[test]
     fn write_v5_fixture_for_cross_check() {
         let project = Project::new_demo();
-        std::fs::write("/tmp/styk-export-v5.piv", export_piv_v5(&project)).unwrap();
+        std::fs::write("/tmp/styk-export-v5.piv", export_piv_v5(&project).unwrap()).unwrap();
     }
 
     #[test]

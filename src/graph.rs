@@ -706,8 +706,10 @@ pub fn channel_mut<'a>(
 /// Evaluate every channel at `frame_f` on top of the project's own
 /// animation: start from `project.poses_at(frame_f)`, then override
 /// root, angle and length components per channel. Length results
-/// are clamped to a minimum of 1.0. See the module docs for the
-/// full contract.
+/// are clamped to a minimum of 1.0. Angle results are clamped to
+/// the target node's joint limits (`NodeDef::clamp_angle`); a node
+/// without limits receives the channel value unmodified. See the
+/// module docs for the full contract.
 pub fn apply_channels(project: &Project, channels: &[Channel], frame_f: f32) -> ChannelResult {
     let mut poses = project.poses_at(frame_f);
     let mut defs: Vec<FigureDef> = project.figures.iter().map(|f| f.def.clone()).collect();
@@ -727,7 +729,17 @@ pub fn apply_channels(project: &Project, channels: &[Channel], frame_f: f32) -> 
             ChannelTarget::Angle(n) => {
                 if let Some(p) = poses.get_mut(ch.figure) {
                     if let Some(a) = p.angles.get_mut(n) {
-                        *a = v;
+                        // Joint limits (Wave X, P-4): a channel
+                        // may not solve a joint past its def's
+                        // limits. `clamp_angle` returns the raw
+                        // value for an unlimited node, so an
+                        // unlimited channel keeps its exact
+                        // (never re-wrapped) value, as before.
+                        *a = defs
+                            .get(ch.figure)
+                            .and_then(|d| d.nodes.get(n))
+                            .map(|node| node.clamp_angle(v))
+                            .unwrap_or(v);
                     }
                 }
             }
@@ -882,6 +894,35 @@ mod tests {
             project.figures[0].def.nodes[1].length,
             FigureDef::humanoid().nodes[1].length
         ));
+    }
+
+    #[test]
+    fn apply_channels_respects_joint_limits() {
+        // Wave X (P-4): the demo figure is the humanoid, whose
+        // constructor presets limit the elbows (nodes 4/6) to
+        // [-10, 160] and the knees (nodes 8/10) to [-160, 10].
+        let project = Project::new_demo();
+        let channels = vec![
+            channel(ChannelTarget::Angle(4), vec![Key::flat(0.0, 170.0)]),
+            channel(ChannelTarget::Angle(8), vec![Key::flat(0.0, 45.0)]),
+            channel(ChannelTarget::Angle(3), vec![Key::flat(0.0, 350.0)]),
+        ];
+        let out = apply_channels(&project, &channels, 0.0);
+        assert!(
+            approx(out.poses[0].angles[4], 160.0),
+            "elbow clamped to its preset max, got {}",
+            out.poses[0].angles[4]
+        );
+        assert!(
+            approx(out.poses[0].angles[8], 10.0),
+            "knee clamped to its preset max, got {}",
+            out.poses[0].angles[8]
+        );
+        assert!(
+            approx(out.poses[0].angles[3], 350.0),
+            "unlimited node keeps the raw (un-re-wrapped) channel value, got {}",
+            out.poses[0].angles[3]
+        );
     }
 
     #[test]

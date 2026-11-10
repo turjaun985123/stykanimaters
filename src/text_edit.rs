@@ -275,7 +275,7 @@ pub fn add_text_instance(
         content: content.to_string(),
         size: size.clamp(TEXT_SIZE_MIN, TEXT_SIZE_MAX),
         color,
-        keys: vec![InstanceKey { frame, x, y, scale: 1.0, angle: 0.0 }],
+        keys: vec![InstanceKey { frame, x, y, scale: 1.0, angle: 0.0, opacity: 1.0, flip_x: false, flip_y: false, scale_y: 0.0, pivot_x: 0.5, pivot_y: 0.5 }],
     });
     let index = core.project.texts.len() - 1;
     core.status = format!("Text {} added.", index + 1);
@@ -1554,6 +1554,12 @@ mod tests {
                     y: 20.0,
                     scale: 1.0,
                     angle: 0.0,
+                    opacity: 1.0,
+                    flip_x: false,
+                    flip_y: false,
+                    scale_y: 0.0,
+                    pivot_x: 0.5,
+                    pivot_y: 0.5,
                 })
                 .collect(),
         });

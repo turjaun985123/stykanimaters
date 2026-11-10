@@ -644,6 +644,12 @@ mod tests {
             y: 0.0,
             scale: 1.0,
             angle: 0.0,
+            opacity: 1.0,
+            flip_x: false,
+            flip_y: false,
+            scale_y: 0.0,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
         }
     }
 
@@ -990,6 +996,7 @@ mod tests {
             locked: false,
             opacity: 1.0,
             clip: None,
+            states: Vec::new(),
         }];
         let pose = |x: f32| crate::model::Pose { root: [x, 0.0], angles: vec![0.0] };
         core.project.frames = vec![
@@ -1257,6 +1264,7 @@ mod tests {
                 locked: false,
                 opacity: 1.0,
                 clip: None,
+                states: Vec::new(),
             },
             FigureInstance {
                 name: "Clipper".into(),
@@ -1266,6 +1274,7 @@ mod tests {
                 locked: false,
                 opacity: 1.0,
                 clip: Some(0),
+                states: Vec::new(),
             },
         ];
         core.project.clips = vec![ClipDef {

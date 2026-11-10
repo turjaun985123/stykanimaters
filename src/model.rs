@@ -153,6 +153,83 @@ pub struct NodeDef {
     pub style: NodeStyle,
     #[serde(default)]
     pub media: Option<SegmentMedia>,
+    /// Joint limits on this node's RELATIVE angle (degrees, the
+    /// `Pose::angles` quantity): the segment may not be solved
+    /// outside the arc from `min_angle` to `max_angle`. `None`
+    /// on a side leaves that side open; both `None` = no limit
+    /// (the historical behaviour, and what every pre-limit
+    /// project file deserialises to). Enforced where angles are
+    /// SOLVED — [`aim_node`], [`apply_ik`] and graph Angle
+    /// channels — never by rewriting stored poses. See
+    /// [`NodeDef::clamp_angle`] for the exact arc semantics.
+    #[serde(default)]
+    pub min_angle: Option<f32>,
+    #[serde(default)]
+    pub max_angle: Option<f32>,
+}
+
+impl NodeDef {
+    /// Clamp a relative joint angle (degrees) to this node's
+    /// joint limits.
+    ///
+    /// With no limits the angle is returned UNCHANGED — not
+    /// even normalised — so an unlimited joint behaves exactly
+    /// as it did before limits existed, on every surface.
+    ///
+    /// With at least one bound set the angle is first
+    /// normalised to (−180, 180], then:
+    ///
+    /// * both bounds, `min <= max`: a plain clamp to
+    ///   `[min, max]` (`min == max` pins the joint);
+    /// * both bounds, `min > max`: the allowed set is the
+    ///   wrap arc `[min, 180] ∪ (−180, max]` — the arc that
+    ///   runs clockwise from `min` through ±180 to `max` —
+    ///   and a value in the forbidden arc takes the NEARER
+    ///   endpoint;
+    /// * a single bound clamps only its own side of the
+    ///   normalised circle.
+    pub fn clamp_angle(&self, angle: f32) -> f32 {
+        if !self.has_limits() {
+            return angle;
+        }
+        let v = norm_deg(angle);
+        match (self.min_angle, self.max_angle) {
+            (Some(lo), Some(hi)) => {
+                let (lo, hi) = (norm_deg(lo), norm_deg(hi));
+                if lo <= hi {
+                    v.clamp(lo, hi)
+                } else if v >= lo || v <= hi {
+                    v
+                } else if (v - hi) <= (lo - v) {
+                    hi
+                } else {
+                    lo
+                }
+            }
+            (Some(lo), None) => {
+                let lo = norm_deg(lo);
+                if v < lo {
+                    lo
+                } else {
+                    v
+                }
+            }
+            (None, Some(hi)) => {
+                let hi = norm_deg(hi);
+                if v > hi {
+                    hi
+                } else {
+                    v
+                }
+            }
+            (None, None) => unreachable!("guarded by has_limits above"),
+        }
+    }
+
+    /// True when this node carries any joint limit.
+    pub fn has_limits(&self) -> bool {
+        self.min_angle.is_some() || self.max_angle.is_some()
+    }
 }
 
 fn default_thickness() -> f32 {
@@ -184,6 +261,8 @@ impl FigureDef {
     /// The classic Pivot-style humanoid, root at the hips.
     pub fn humanoid() -> Self {
         let n = |name: &str, parent: Option<usize>, length: f32, rest: f32| NodeDef {
+            min_angle: None,
+            max_angle: None,
             name: name.into(),
             parent,
             length,
@@ -218,6 +297,25 @@ impl FigureDef {
         for i in [4, 6, 8, 10] {
             nodes[i].ik_end = true;
         }
+        // One-way joint presets (Wave X, P-4): elbows flex
+        // one way, knees the other, and neither hyperextends.
+        // In this model's relative angles, IK flexion lands
+        // the forearm at POSITIVE angles and the shin at
+        // NEGATIVE ones on both sides (the bend signs above
+        // produce exactly that), so: elbows travel
+        // [-10, +160], knees [-160, +10]. The 10° grace past
+        // straight keeps this constructor's own rest pose
+        // (forearm splay ±4°, shin splay ±5°) inside its
+        // limits. Only the solvers and graph channels enforce
+        // these — stored poses are never rewritten.
+        for i in [4, 6] {
+            nodes[i].min_angle = Some(-10.0);
+            nodes[i].max_angle = Some(160.0);
+        }
+        for i in [8, 10] {
+            nodes[i].min_angle = Some(-160.0);
+            nodes[i].max_angle = Some(10.0);
+        }
         FigureDef { nodes }
     }
 
@@ -225,6 +323,8 @@ impl FigureDef {
     /// of the spine, head at the front. Side view, facing right.
     pub fn quadruped() -> Self {
         let n = |name: &str, parent: Option<usize>, length: f32, rest: f32| NodeDef {
+            min_angle: None,
+            max_angle: None,
             name: name.into(),
             parent,
             length,
@@ -266,6 +366,8 @@ impl FigureDef {
     /// and feet aim with FK instead of IK.
     pub fn simple() -> Self {
         let n = |name: &str, parent: Option<usize>, length: f32, rest: f32| NodeDef {
+            min_angle: None,
+            max_angle: None,
             name: name.into(),
             parent,
             length,
@@ -383,8 +485,6 @@ pub fn apply_ik(def: &FigureDef, pose: &mut Pose, end: usize, target: V2) -> boo
     let a_off = cos_a.acos() * 360.0 / TAU;
     let bend = def.nodes[end].bend;
     let mid_abs = base_ang + bend * a_off;
-    let mid_pos = add(a, scale(dir(mid_abs), l1));
-    let end_abs = angle_of(sub(target, mid_pos));
 
     let abs = absolute_angles(def, pose);
     let parent_abs = |idx: usize, abs: &[f32]| -> f32 {
@@ -393,10 +493,23 @@ pub fn apply_ik(def: &FigureDef, pose: &mut Pose, end: usize, target: V2) -> boo
             Some(p) => abs[p],
         }
     };
-    pose.angles[mid] = norm_deg(mid_abs - parent_abs(mid, &abs));
+    // Joint limits (Wave X, P-4): the mid joint's solved
+    // relative angle is clamped FIRST, and the mid position
+    // the end solve aims from is recomputed from the clamped
+    // angle, so a limited mid never leaves the chain in a
+    // state `evaluate` would draw differently — segment
+    // lengths hold exactly, the end just lands where the
+    // clamped chain can reach. With no limits on the mid,
+    // `clamp_angle` returns the historical relative angle
+    // and `dir` of the recomputed absolute is the original
+    // `mid_abs` direction: the unlimited solve is unchanged.
+    let mid_rel = def.nodes[mid].clamp_angle(norm_deg(mid_abs - parent_abs(mid, &abs)));
+    pose.angles[mid] = mid_rel;
+    let mid_pos = add(a, scale(dir(parent_abs(mid, &abs) + mid_rel), l1));
+    let end_abs = angle_of(sub(target, mid_pos));
     // Recompute absolutes after the mid write before setting the end.
     let abs2 = absolute_angles(def, pose);
-    pose.angles[end] = norm_deg(end_abs - abs2[mid]);
+    pose.angles[end] = def.nodes[end].clamp_angle(norm_deg(end_abs - abs2[mid]));
     true
 }
 
@@ -411,7 +524,11 @@ pub fn aim_node(def: &FigureDef, pose: &mut Pose, node: usize, target: V2) -> bo
     let abs = absolute_angles(def, pose);
     let want_abs = angle_of(sub(target, positions[parent]));
     // abs[parent] is the parent segment's absolute angle (0 for the root).
-    pose.angles[node] = norm_deg(want_abs - abs[parent]);
+    // Joint limits (Wave X, P-4): the solved relative angle is
+    // clamped to the node's limits; an unlimited node gets the
+    // historical value back unchanged from `clamp_angle`.
+    pose.angles[node] =
+        def.nodes[node].clamp_angle(norm_deg(want_abs - abs[parent]));
     true
 }
 
@@ -426,6 +543,15 @@ pub struct FigureInstance {
     /// `Project::clips[clip]` looping, not from the timeline frames.
     #[serde(default)]
     pub clip: Option<usize>,
+    /// Animation-state keys (Wave X, P-1): when a key is in force
+    /// at the current timeline frame it picks the clip and the
+    /// local playback time (see `StateKey`), so one figure can
+    /// switch clips — idle → walk → attack — across a scene.
+    /// Before the first key, and whenever the vec is empty,
+    /// `clip` governs exactly as before. Projects saved before
+    /// this field existed deserialize with no keys.
+    #[serde(default)]
+    pub states: Vec<StateKey>,
     /// Locked figures cannot be selected or posed in the editor.
     #[serde(default)]
     pub locked: bool,
@@ -466,6 +592,70 @@ pub fn clip_frame_index(mode: ClipLoop, frame: usize, len: usize) -> usize {
         }
         ClipLoop::Once => frame.min(len - 1),
     }
+}
+
+/// One animation-state key on a figure instance's own timeline
+/// (Wave X, P-1): at timeline frame `frame` the figure switches
+/// to clip `clip`, starting `offset` frames into the clip and
+/// playing it back at `speed`× the timeline rate.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StateKey {
+    /// Timeline frame at which this state takes over.
+    pub frame: usize,
+    /// Index into `Project::clips`.
+    pub clip: usize,
+    /// Frames into the clip at which playback starts when the
+    /// state begins. Keys written before this field existed, or
+    /// authored without it, start at the clip's first frame.
+    #[serde(default)]
+    pub offset: usize,
+    /// Playback rate multiplier on the clip's clock (1.0 = the
+    /// timeline rate). Sanitised at read in `state_local_time`.
+    #[serde(default = "default_state_speed")]
+    pub speed: f32,
+}
+
+fn default_state_speed() -> f32 {
+    1.0
+}
+
+/// The state key in force on `inst` at timeline time `f`: the key
+/// with the greatest `frame` that is not past `f` — a key takes
+/// over AT its frame. Keys need not be stored sorted; ties on
+/// `frame` resolve to the later key in the vec, so authoring
+/// order is the override order. `None` when the figure has no
+/// keys or `f` precedes the first key.
+pub fn active_state_key(inst: &FigureInstance, f: f32) -> Option<&StateKey> {
+    let mut best: Option<&StateKey> = None;
+    for key in &inst.states {
+        if (key.frame as f32) <= f {
+            let better = match best {
+                None => true,
+                Some(b) => key.frame >= b.frame,
+            };
+            if better {
+                best = Some(key);
+            }
+        }
+    }
+    best
+}
+
+/// Local clip time for `key` at timeline time `f`:
+/// `(f − key.frame) · speed + key.offset`, with the elapsed part
+/// clamped at 0. The speed is sanitised at read — a non-finite
+/// or non-positive speed plays at 1.0, and a finite speed is
+/// capped at 1e6 — so a hand-edited or corrupt project can never
+/// push the local time into NaN/∞ territory (which would NaN
+/// the tween lerp in `apply_clips`).
+pub fn state_local_time(key: &StateKey, f: f32) -> f32 {
+    let speed = if key.speed.is_finite() && key.speed > 0.0 {
+        key.speed.min(1.0e6)
+    } else {
+        1.0
+    };
+    let elapsed = (f - key.frame as f32).max(0.0);
+    elapsed * speed + key.offset as f32
 }
 
 /// A movieclip: a self-contained looping animation of one figure.
@@ -653,7 +843,22 @@ pub struct ParticleEvent {
 
 /// A timed VFX clip (see `vfx.rs`) anchored to one figure's node.
 
+fn default_key_opacity() -> f32 {
+    1.0
+}
+
+fn default_key_pivot() -> f32 {
+    0.5
+}
+
 /// One keyframed transform for a sprite/text instance.
+///
+/// The enrichment fields (Wave X, P-6) ride on every key with
+/// serde defaults that reproduce the pre-enrichment behaviour
+/// exactly, so a project file written before they existed loads
+/// unchanged: opacity 1, no flips, the pivot at the image centre
+/// (where the passes always anchored), and `scale_y` 0.0 — the
+/// follow-`scale` value defined by [`InstanceKey::eff_scale_y`].
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct InstanceKey {
     pub frame: f32,
@@ -661,6 +866,30 @@ pub struct InstanceKey {
     pub y: f32,
     pub scale: f32,
     pub angle: f32,
+    /// Key alpha (Stick Nodes' per-record style opacity).
+    /// Evaluation clamps it to 0..=1.
+    #[serde(default = "default_key_opacity")]
+    pub opacity: f32,
+    /// Mirror the image around the pivot on the x axis (the
+    /// format's flipX flag; a negative scale is never stored —
+    /// `scale` keeps the magnitude, the flip rides here).
+    #[serde(default)]
+    pub flip_x: bool,
+    /// Mirror around the pivot on the y axis (flipY).
+    #[serde(default)]
+    pub flip_y: bool,
+    /// Second-axis scale (the format's scaleY magnitude).
+    /// 0.0 means the axis follows `scale` — the only value a
+    /// pre-enrichment file can imply; see `eff_scale_y`.
+    #[serde(default)]
+    pub scale_y: f32,
+    /// Anchor point, image-relative (0.5 = centre, where every
+    /// pass anchored before the field existed). The key's
+    /// position is where this point of the image sits.
+    #[serde(default = "default_key_pivot")]
+    pub pivot_x: f32,
+    #[serde(default = "default_key_pivot")]
+    pub pivot_y: f32,
 }
 
 /// A free-floating image (from Project.assets) placed on the stage
@@ -682,7 +911,32 @@ pub struct TextInstance {
 }
 
 impl InstanceKey {
+    /// The second-axis scale in effect: the stored `scale_y`
+    /// when it is a positive value, else `scale` (a stored 0.0 —
+    /// every pre-enrichment key — means the axis follows the
+    /// uniform scale; a NaN stored value falls back the same
+    /// way, since NaN is not > 0.0).
+    pub fn eff_scale_y(&self) -> f32 {
+        if self.scale_y > 0.0 {
+            self.scale_y
+        } else {
+            self.scale
+        }
+    }
+
     /// Linear interpolation of a key list at `frame_f` (clamped).
+    ///
+    /// Opacity, `scale_y` and the pivot interpolate linearly
+    /// like position/scale/angle — `scale_y` interpolating the
+    /// EFFECTIVE values (`eff_scale_y` per endpoint), so a
+    /// segment between a follow-`scale` key and an explicit one
+    /// still sweeps the axis the passes will draw; read a
+    /// sampled key's `scale_y` through `eff_scale_y`, as every
+    /// consumer does. The flips are discrete: a segment yields
+    /// its start key's flips, switching to the end key's exactly
+    /// at t = 1 — the frame the continuous fields arrive there.
+    /// Clamped samples (before the first / after the last key)
+    /// return the stored key verbatim, as they always have.
     pub fn sample(keys: &[InstanceKey], frame_f: f32) -> Option<InstanceKey> {
         if keys.is_empty() {
             return None;
@@ -698,12 +952,24 @@ impl InstanceKey {
                 } else {
                     0.0
                 };
+                let (ay, by) = (a.eff_scale_y(), b.eff_scale_y());
+                let (flip_x, flip_y) = if t >= 1.0 {
+                    (b.flip_x, b.flip_y)
+                } else {
+                    (a.flip_x, a.flip_y)
+                };
                 return Some(InstanceKey {
                     frame: frame_f,
                     x: a.x + (b.x - a.x) * t,
                     y: a.y + (b.y - a.y) * t,
                     scale: a.scale + (b.scale - a.scale) * t,
                     angle: a.angle + (b.angle - a.angle) * t,
+                    opacity: a.opacity + (b.opacity - a.opacity) * t,
+                    flip_x,
+                    flip_y,
+                    scale_y: ay + (by - ay) * t,
+                    pivot_x: a.pivot_x + (b.pivot_x - a.pivot_x) * t,
+                    pivot_y: a.pivot_y + (b.pivot_y - a.pivot_y) * t,
                 });
             }
         }
@@ -856,6 +1122,7 @@ impl Project {
             def: def.clone(),
             hidden: false,
             clip: None,
+            states: Vec::new(),
         }];
         let center = [480.0, 470.0];
         let mut frames = Vec::new();
@@ -975,19 +1242,28 @@ impl Project {
     }
 
     /// Replace the poses of movieclip instances with their looping
-    /// clip poses at frame time `f`.
+    /// clip poses at frame time `f`. A state key in force on the
+    /// instance (Wave X, P-1) picks the clip and the local time;
+    /// without one, the instance's `clip` governs at local time
+    /// `f` — the original phase-locked behaviour.
     fn apply_clips(&self, poses: &mut [Pose], f: f32) {
         for (fi, inst) in self.figures.iter().enumerate() {
-            let Some(ci) = inst.clip else { continue };
+            let (ci, local) = match active_state_key(inst, f) {
+                Some(key) => (key.clip, state_local_time(key, f)),
+                None => match inst.clip {
+                    Some(ci) => (ci, f),
+                    None => continue,
+                },
+            };
             let Some(clip) = self.clips.get(ci) else { continue };
             if clip.frames.is_empty() || fi >= poses.len() {
                 continue;
             }
             let n = clip.frames.len();
-            let base = f.floor() as usize;
+            let base = local.floor() as usize;
             let idx = clip_frame_index(clip.loop_mode, base, n);
             poses[fi] = if self.tween_playback && n > 1 {
-                let t = self.easing.apply(f - f.floor());
+                let t = self.easing.apply(local - local.floor());
                 let next = clip_frame_index(clip.loop_mode, base + 1, n);
                 clip.frames[idx].lerp(&clip.frames[next], t)
             } else {
@@ -1126,6 +1402,7 @@ impl Project {
             def,
             hidden: false,
             clip: None,
+            states: Vec::new(),
         });
         for frame in &mut self.frames {
             frame.poses.push(pose.clone());
@@ -1304,6 +1581,211 @@ mod tests {
         assert!((dist(pos[7], pos[8]) - 42.0).abs() < 0.05);
         assert!((dist(pos[0], pos[7]) - 44.0).abs() < 0.05);
     }
+
+    /// A limit-less node def for the clamp pins: the
+    /// `simple()` constructor's root, reparented freely by
+    /// the tests (only its limit fields are read).
+    fn unpinned_node() -> NodeDef {
+        FigureDef::simple().nodes.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn clamp_angle_without_limits_returns_the_input_unchanged() {
+        // Wave X (P-4): the unlimited path must not even
+        // normalise — every historical surface (solvers,
+        // graph channels) keeps its exact values.
+        let node = unpinned_node();
+        assert!(!node.has_limits());
+        assert_eq!(node.clamp_angle(350.0), 350.0);
+        assert_eq!(node.clamp_angle(-190.0), -190.0);
+        assert_eq!(node.clamp_angle(45.0), 45.0);
+    }
+
+    #[test]
+    fn clamp_angle_both_bounds_wrap_arc_and_single_sides() {
+        let mut node = unpinned_node();
+        node.min_angle = Some(-10.0);
+        node.max_angle = Some(160.0);
+        assert_eq!(node.clamp_angle(90.0), 90.0, "inside passes through");
+        assert_eq!(node.clamp_angle(170.0), 160.0, "above max clamps down");
+        assert_eq!(node.clamp_angle(-45.0), -10.0, "below min clamps up");
+        // Unnormalised input is normalised first: 200° is -160°.
+        assert_eq!(node.clamp_angle(200.0), -10.0);
+        // min == max pins the joint.
+        node.min_angle = Some(45.0);
+        node.max_angle = Some(45.0);
+        assert_eq!(node.clamp_angle(0.0), 45.0);
+        assert_eq!(node.clamp_angle(120.0), 45.0);
+        // Wrap arc (min > max): the allowed set runs clockwise
+        // from min through ±180 to max; a forbidden value takes
+        // the NEARER endpoint (a tie takes max, by the `<=`).
+        node.min_angle = Some(170.0);
+        node.max_angle = Some(-170.0);
+        assert_eq!(node.clamp_angle(175.0), 175.0, "inside the wrap arc");
+        assert_eq!(node.clamp_angle(-175.0), -175.0, "inside the wrap arc");
+        assert_eq!(node.clamp_angle(90.0), 170.0, "nearer min");
+        assert_eq!(node.clamp_angle(-90.0), -170.0, "nearer max");
+        assert_eq!(node.clamp_angle(0.0), -170.0, "exact tie takes max");
+        // Single bounds clamp only their own side.
+        node.min_angle = Some(30.0);
+        node.max_angle = None;
+        assert_eq!(node.clamp_angle(0.0), 30.0);
+        assert_eq!(node.clamp_angle(90.0), 90.0);
+        node.min_angle = None;
+        node.max_angle = Some(-30.0);
+        assert_eq!(node.clamp_angle(0.0), -30.0);
+        assert_eq!(node.clamp_angle(-90.0), -90.0);
+    }
+
+    #[test]
+    fn node_def_without_limit_fields_deserialises_unlimited() {
+        // Project files written before joint limits existed
+        // carry no min/max keys at all; both must read None.
+        let node: NodeDef = serde_json::from_value(serde_json::json!({
+            "name": "n",
+            "parent": null,
+            "length": 10.0,
+            "rest_angle": 0.0,
+            "head": false,
+            "bend": 1.0,
+        }))
+        .unwrap();
+        assert_eq!(node.min_angle, None);
+        assert_eq!(node.max_angle, None);
+        // And a limited def round-trips its limits exactly.
+        let def = FigureDef::humanoid();
+        let text = serde_json::to_string(&def).unwrap();
+        let back: FigureDef = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.nodes[4].min_angle, Some(-10.0));
+        assert_eq!(back.nodes[4].max_angle, Some(160.0));
+        assert_eq!(back.nodes[8].min_angle, Some(-160.0));
+        assert_eq!(back.nodes[8].max_angle, Some(10.0));
+    }
+
+    #[test]
+    fn humanoid_joint_presets_are_one_way_and_hold_the_rest_pose() {
+        let def = FigureDef::humanoid();
+        for i in [4, 6] {
+            assert_eq!(def.nodes[i].min_angle, Some(-10.0), "elbow {i} min");
+            assert_eq!(def.nodes[i].max_angle, Some(160.0), "elbow {i} max");
+        }
+        for i in [8, 10] {
+            assert_eq!(def.nodes[i].min_angle, Some(-160.0), "knee {i} min");
+            assert_eq!(def.nodes[i].max_angle, Some(10.0), "knee {i} max");
+        }
+        for (i, node) in def.nodes.iter().enumerate() {
+            if ![4, 6, 8, 10].contains(&i) {
+                assert!(!node.has_limits(), "node {i} stays unlimited");
+            }
+            // The rest pose must sit inside its own limits —
+            // a preset the figure itself violates would fight
+            // every solve back toward the bounds.
+            assert_eq!(
+                node.clamp_angle(node.rest_angle),
+                node.rest_angle,
+                "rest angle of node {i} inside its limits"
+            );
+        }
+    }
+
+    #[test]
+    fn aim_node_respects_joint_limits() {
+        let limited = |min: f32, max: f32| NodeDef {
+            min_angle: Some(min),
+            max_angle: Some(max),
+            name: "limb".into(),
+            parent: Some(0),
+            length: 40.0,
+            rest_angle: 0.0,
+            head: false,
+            bend: 1.0,
+            thickness: 5.0,
+            color: None,
+            ik_end: false,
+            shape: Shape::Line,
+            style: NodeStyle::default(),
+            media: None,
+        };
+        let def = FigureDef {
+            nodes: vec![
+                NodeDef {
+                    min_angle: None,
+                    max_angle: None,
+                    name: "root".into(),
+                    parent: None,
+                    length: 0.0,
+                    rest_angle: 0.0,
+                    head: false,
+                    bend: 1.0,
+                    thickness: 5.0,
+                    color: None,
+                    ik_end: false,
+                    shape: Shape::Line,
+                    style: NodeStyle::default(),
+                    media: None,
+                },
+                limited(-30.0, 30.0),
+            ],
+        };
+        let mut pose = def.rest_pose([0.0, 0.0]);
+        // Aiming straight up asks for a 180° relative angle;
+        // the joint stops at its +30° limit.
+        assert!(aim_node(&def, &mut pose, 1, [0.0, -40.0]));
+        assert!((pose.angles[1] - 30.0).abs() < 0.01, "got {}", pose.angles[1]);
+        // Aiming left asks for -90°; the joint stops at -30°.
+        assert!(aim_node(&def, &mut pose, 1, [-40.0, 0.0]));
+        assert!((pose.angles[1] + 30.0).abs() < 0.01, "got {}", pose.angles[1]);
+        // Inside the limits the aim is exact: straight down is 0°.
+        assert!(aim_node(&def, &mut pose, 1, [0.0, 40.0]));
+        assert!(pose.angles[1].abs() < 0.01, "got {}", pose.angles[1]);
+    }
+
+    #[test]
+    fn apply_ik_respects_joint_limits_and_keeps_lengths() {
+        // A two-bone chain pointing straight down at rest.
+        // The unconstrained solve for a target beside the
+        // base folds the mid to ≈+130° and the end to
+        // ≈-170°; the limits below cut both, and the chain
+        // must stay coherent (lengths exact) afterwards.
+        let node = |name: &str, parent: Option<usize>, min: Option<f32>, max: Option<f32>| NodeDef {
+            min_angle: min,
+            max_angle: max,
+            name: name.into(),
+            parent,
+            length: 40.0,
+            rest_angle: 0.0,
+            head: false,
+            bend: 1.0,
+            thickness: 5.0,
+            color: None,
+            ik_end: false,
+            shape: Shape::Line,
+            style: NodeStyle::default(),
+            media: None,
+        };
+        let def = FigureDef {
+            nodes: vec![
+                node("root", None, None, None),
+                node("mid", Some(0), None, Some(100.0)),
+                node("end", Some(1), Some(-90.0), None),
+            ],
+        };
+        let mut pose = def.rest_pose([0.0, 0.0]);
+        assert!(apply_ik(&def, &mut pose, 2, [5.0, 5.0]));
+        assert!(
+            (pose.angles[1] - 100.0).abs() < 0.01,
+            "mid clamped to its max, got {}",
+            pose.angles[1]
+        );
+        assert!(
+            (pose.angles[2] + 90.0).abs() < 0.01,
+            "end clamped to its min, got {}",
+            pose.angles[2]
+        );
+        let pos = evaluate(&def, &pose);
+        assert!((dist(pos[0], pos[1]) - 40.0).abs() < 0.05, "mid length holds");
+        assert!((dist(pos[1], pos[2]) - 40.0).abs() < 0.05, "end length holds");
+    }
 }
 
 #[cfg(test)]
@@ -1373,6 +1855,165 @@ mod clip_loop_tests {
         project.clips[0].loop_mode = ClipLoop::Once;
         let roots: Vec<f32> = (0..5).map(|f| project.poses_at(f as f32)[0].root[0]).collect();
         assert_eq!(roots, vec![10.0, 20.0, 30.0, 30.0, 30.0]);
+    }
+}
+
+// ---- Wave X (P-1) animation states ----
+//
+// Separate module on purpose: exact-name imports only, never a
+// glob. Pins the StateKey contract: a figure with state keys
+// switches clips across its timeline; a figure without them is
+// the legacy phase-locked movieclip, byte for byte.
+#[cfg(test)]
+mod state_key_tests {
+    use super::{
+        active_state_key, state_local_time, ClipDef, ClipLoop, FigureInstance, Project, StateKey,
+    };
+
+    fn key(frame: usize, clip: usize) -> StateKey {
+        StateKey { frame, clip, offset: 0, speed: 1.0 }
+    }
+
+    fn inst_with(states: Vec<StateKey>) -> FigureInstance {
+        let mut inst = Project::new_demo().figures[0].clone();
+        inst.states = states;
+        inst
+    }
+
+    fn clip_with_roots(project: &Project, name: &str, roots: &[f32]) -> ClipDef {
+        let def = project.figures[0].def.clone();
+        ClipDef {
+            name: name.to_string(),
+            def: def.clone(),
+            frames: roots.iter().map(|x| def.rest_pose([*x, 0.0])).collect(),
+            loop_mode: ClipLoop::Loop,
+        }
+    }
+
+    /// The demo timeline has 5 frames (0..=4); poses_at clamps to it.
+    fn roots(project: &Project) -> Vec<f32> {
+        (0..5).map(|f| project.poses_at(f as f32)[0].root[0]).collect()
+    }
+
+    #[test]
+    fn state_key_json_without_offset_and_speed_defaults() {
+        let key: StateKey = serde_json::from_str(r#"{"frame": 2, "clip": 1}"#)
+            .expect("a key without offset/speed must still parse");
+        assert_eq!(key.offset, 0);
+        assert_eq!(key.speed, 1.0);
+        let full = StateKey { frame: 3, clip: 0, offset: 2, speed: 1.5 };
+        let json = serde_json::to_string(&full).expect("key serializes");
+        assert_eq!(serde_json::from_str::<StateKey>(&json).expect("key re-parses"), full);
+    }
+
+    #[test]
+    fn figure_instance_json_without_states_loads_with_no_keys() {
+        let mut project = Project::new_demo();
+        project.figures[0].clip = Some(0);
+        let inst = project.figures[0].clone();
+        let mut value = serde_json::to_value(&inst).expect("instance serializes");
+        value.as_object_mut().expect("instance is an object").remove("states");
+        let loaded: FigureInstance =
+            serde_json::from_value(value).expect("pre-state instance JSON must still parse");
+        assert!(loaded.states.is_empty(), "missing states field defaults to no keys");
+        assert_eq!(loaded.clip, Some(0));
+    }
+
+    #[test]
+    fn active_state_key_picks_the_latest_key_not_past_f() {
+        // Deliberately unsorted: resolution must not depend on
+        // storage order.
+        let inst = inst_with(vec![key(5, 1), key(2, 0)]);
+        let at = |f: f32| active_state_key(&inst, f).map(|k| k.clip);
+        assert_eq!(at(0.0), None);
+        assert_eq!(at(1.99), None);
+        assert_eq!(at(2.0), Some(0), "a key takes over AT its frame");
+        assert_eq!(at(4.99), Some(0));
+        assert_eq!(at(5.0), Some(1));
+        assert_eq!(at(100.0), Some(1));
+        // Equal frames: the later vec entry wins (authoring order
+        // is the override order).
+        let tied = inst_with(vec![key(3, 0), key(3, 1)]);
+        assert_eq!(active_state_key(&tied, 3.0).map(|k| k.clip), Some(1));
+        // No keys at all: never a state.
+        assert_eq!(active_state_key(&inst_with(vec![]), 3.0), None);
+    }
+
+    #[test]
+    fn state_local_time_applies_offset_then_speed() {
+        let k = StateKey { frame: 2, clip: 0, offset: 3, speed: 2.0 };
+        assert_eq!(state_local_time(&k, 2.0), 3.0, "at the key frame only the offset counts");
+        assert_eq!(state_local_time(&k, 3.0), 5.0);
+        assert_eq!(state_local_time(&k, 4.5), 8.0);
+        let slow = StateKey { frame: 2, clip: 0, offset: 3, speed: 0.5 };
+        assert_eq!(state_local_time(&slow, 6.0), 5.0);
+        // Before the key frame the elapsed part clamps at 0.
+        assert_eq!(state_local_time(&k, 1.0), 3.0);
+    }
+
+    #[test]
+    fn state_local_time_sanitises_corrupt_speeds() {
+        let at = |speed: f32| {
+            state_local_time(&StateKey { frame: 2, clip: 0, offset: 0, speed }, 4.0)
+        };
+        assert_eq!(at(0.0), 2.0, "zero speed plays at 1.0");
+        assert_eq!(at(-2.0), 2.0, "no reverse playback: negative plays at 1.0");
+        assert_eq!(at(f32::NAN), 2.0);
+        assert_eq!(at(f32::INFINITY), 2.0);
+        let huge = state_local_time(&StateKey { frame: 2, clip: 0, offset: 0, speed: 1.0e30 }, 3.0);
+        assert_eq!(huge, 1.0e6, "finite speeds are capped at 1e6");
+        assert!(huge.is_finite());
+    }
+
+    #[test]
+    fn poses_at_switches_clips_at_state_keys() {
+        let mut project = Project::new_demo();
+        project.clips.push(clip_with_roots(&project, "idle", &[10.0, 20.0, 30.0]));
+        project.clips.push(clip_with_roots(&project, "run", &[100.0, 200.0]));
+        project.figures[0].states = vec![key(0, 0), key(3, 1)];
+        assert_eq!(roots(&project), vec![10.0, 20.0, 30.0, 100.0, 200.0]);
+    }
+
+    #[test]
+    fn poses_at_state_offset_and_speed_reclock_the_clip() {
+        let mut project = Project::new_demo();
+        project.clips.push(clip_with_roots(&project, "spin", &[10.0, 20.0, 30.0, 40.0]));
+        project.figures[0].states =
+            vec![StateKey { frame: 0, clip: 0, offset: 1, speed: 2.0 }];
+        // Local times 1, 3, 5, 7, 9 over a 4-frame loop → 1, 3, 1, 3, 1.
+        assert_eq!(roots(&project), vec![20.0, 40.0, 20.0, 40.0, 20.0]);
+    }
+
+    #[test]
+    fn poses_at_before_the_first_key_falls_back_to_the_legacy_clip() {
+        let mut project = Project::new_demo();
+        project.clips.push(clip_with_roots(&project, "legacy", &[7.0, 8.0]));
+        project.clips.push(clip_with_roots(&project, "state", &[100.0]));
+        project.figures[0].clip = Some(0);
+        project.figures[0].states = vec![key(3, 1)];
+        assert_eq!(roots(&project), vec![7.0, 8.0, 7.0, 100.0, 100.0]);
+    }
+
+    #[test]
+    fn poses_at_dangling_state_clip_keeps_the_timeline_pose() {
+        let mut project = Project::new_demo();
+        project.figures[0].states = vec![key(0, 9)];
+        // Clip 9 does not exist: the figure is skipped, exactly as
+        // a dangling legacy `clip` is, and the demo timeline's own
+        // poses stand.
+        assert_eq!(roots(&project), vec![480.0, 494.0, 508.0, 494.0, 480.0]);
+    }
+
+    #[test]
+    fn poses_at_tween_follows_the_state_clock() {
+        let mut project = Project::new_demo();
+        project.tween_playback = true;
+        project.clips.push(clip_with_roots(&project, "glide", &[0.0, 100.0]));
+        project.figures[0].states =
+            vec![StateKey { frame: 0, clip: 0, offset: 0, speed: 2.0 }];
+        // f = 0.25 at speed 2 is local 0.5: halfway between the
+        // clip's two frames.
+        assert_eq!(project.poses_at(0.25)[0].root[0], 50.0);
     }
 }
 
@@ -1842,6 +2483,12 @@ mod mcp_roundtrip_wave11_tests {
                 y: 60.0,
                 scale: 1.5,
                 angle: 10.0,
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
             }],
         });
         project.texts.push(TextInstance {
@@ -1854,6 +2501,12 @@ mod mcp_roundtrip_wave11_tests {
                 y: 80.0,
                 scale: 1.0,
                 angle: 0.0,
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
             }],
         });
         project
@@ -2177,6 +2830,12 @@ mod wave12_c4_serde_pins {
                     y: 20.0,
                     scale: 1.5,
                     angle: 30.0,
+                    opacity: 1.0,
+                    flip_x: false,
+                    flip_y: false,
+                    scale_y: 0.0,
+                    pivot_x: 0.5,
+                    pivot_y: 0.5,
                 }],
             },
             SpriteInstance {
@@ -2188,6 +2847,12 @@ mod wave12_c4_serde_pins {
                         y: 0.0,
                         scale: 1.0,
                         angle: 0.0,
+                        opacity: 1.0,
+                        flip_x: false,
+                        flip_y: false,
+                        scale_y: 0.0,
+                        pivot_x: 0.5,
+                        pivot_y: 0.5,
                     },
                     InstanceKey {
                         frame: 9.0,
@@ -2195,6 +2860,12 @@ mod wave12_c4_serde_pins {
                         y: 60.0,
                         scale: 2.0,
                         angle: -45.0,
+                        opacity: 1.0,
+                        flip_x: false,
+                        flip_y: false,
+                        scale_y: 0.0,
+                        pivot_x: 0.5,
+                        pivot_y: 0.5,
                     },
                 ],
             },
@@ -2280,7 +2951,19 @@ mod wave13_c6_sprite_text_pins {
     use super::*;
 
     fn key(frame: f32, x: f32, y: f32, scale: f32, angle: f32) -> InstanceKey {
-        InstanceKey { frame, x, y, scale, angle }
+        InstanceKey {
+            frame,
+            x,
+            y,
+            scale,
+            angle,
+            opacity: 1.0,
+            flip_x: false,
+            flip_y: false,
+            scale_y: 0.0,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
+        }
     }
 
     /// Field-by-field key comparison (InstanceKey has no
@@ -2616,5 +3299,119 @@ mod wave13_c6_sprite_text_pins {
         assert_key(&InstanceKey::sample(&keys, 5.0).unwrap(), 5.0, 60.0, 25.0, 1.5, 30.0);
         // Past the fractional last key: last key verbatim.
         assert_key(&InstanceKey::sample(&keys, 8.0).unwrap(), 7.5, 110.0, 50.0, 2.0, 60.0);
+    }
+}
+
+#[cfg(test)]
+mod wave_x_p6_key_enrichment {
+    //! Wave X (P-6): the enriched `InstanceKey` fields — serde
+    //! defaults reproducing the pre-enrichment behaviour, the
+    //! `eff_scale_y` follow-`scale` rule, and `sample`'s
+    //! treatment of the new fields (continuous for opacity /
+    //! effective scale_y / pivot, discrete for the flips).
+    use super::*;
+
+    fn bare_key(frame: f32) -> InstanceKey {
+        InstanceKey {
+            frame,
+            x: 0.0,
+            y: 0.0,
+            scale: 2.0,
+            angle: 0.0,
+            opacity: 1.0,
+            flip_x: false,
+            flip_y: false,
+            scale_y: 0.0,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
+        }
+    }
+
+    #[test]
+    fn key_without_enrichment_fields_loads_with_todays_behaviour() {
+        // A pre-enrichment key as an old project file stores it:
+        // only the original five fields on the wire.
+        let k: InstanceKey = serde_json::from_str(
+            r#"{"frame": 3.0, "x": 10.0, "y": 20.0, "scale": 1.5, "angle": 30.0}"#,
+        )
+        .expect("legacy key parses");
+        assert_eq!(k.opacity, 1.0);
+        assert!(!k.flip_x && !k.flip_y);
+        assert_eq!(k.scale_y, 0.0, "stored form keeps the follow-scale 0.0");
+        assert_eq!(k.eff_scale_y(), 1.5, "the axis follows scale");
+        assert_eq!((k.pivot_x, k.pivot_y), (0.5, 0.5), "centre anchor");
+    }
+
+    #[test]
+    fn eff_scale_y_prefers_an_explicit_positive_value() {
+        let mut k = bare_key(0.0);
+        assert_eq!(k.eff_scale_y(), 2.0, "0.0 follows scale");
+        k.scale_y = 0.25;
+        assert_eq!(k.eff_scale_y(), 0.25, "explicit value wins");
+        k.scale_y = -1.0;
+        assert_eq!(k.eff_scale_y(), 2.0, "non-positive falls back");
+        k.scale_y = f32::NAN;
+        assert_eq!(k.eff_scale_y(), 2.0, "NaN falls back");
+    }
+
+    #[test]
+    fn sample_interpolates_enrichment_and_steps_the_flips() {
+        let a = InstanceKey {
+            opacity: 0.0,
+            flip_x: true,
+            scale_y: 0.0, // follows a.scale = 2.0
+            pivot_x: 0.0,
+            pivot_y: 1.0,
+            ..bare_key(0.0)
+        };
+        let b = InstanceKey {
+            opacity: 1.0,
+            flip_y: true,
+            scale_y: 4.0,
+            pivot_x: 1.0,
+            pivot_y: 0.0,
+            ..bare_key(10.0)
+        };
+        let mid = InstanceKey::sample(&[a, b], 5.0).expect("mid-segment sample");
+        assert_eq!(mid.opacity, 0.5, "opacity lerps");
+        assert_eq!(
+            mid.scale_y, 3.0,
+            "scale_y lerps the effective endpoints (2.0 -> 4.0)"
+        );
+        assert_eq!((mid.pivot_x, mid.pivot_y), (0.5, 0.5), "pivot lerps");
+        assert!(
+            mid.flip_x && !mid.flip_y,
+            "mid-segment flips are the start key's"
+        );
+        let end = InstanceKey::sample(&[a, b], 10.0).expect("segment end sample");
+        assert!(
+            !end.flip_x && end.flip_y,
+            "at t = 1 the flips are the end key's"
+        );
+        assert_eq!(end.opacity, 1.0);
+        // Clamped samples return the stored key verbatim,
+        // follow-scale 0.0 and all (the wave-13 C6 asymmetry).
+        let clamped = InstanceKey::sample(&[a, b], -1.0).expect("clamped sample");
+        assert_eq!(clamped.scale_y, 0.0, "stored form, not materialised");
+        assert_eq!(clamped.eff_scale_y(), 2.0);
+    }
+
+    #[test]
+    fn enriched_key_round_trips_through_json() {
+        let k = InstanceKey {
+            opacity: 0.25,
+            flip_x: true,
+            flip_y: true,
+            scale_y: 0.75,
+            pivot_x: 0.25,
+            pivot_y: 0.75,
+            ..bare_key(4.0)
+        };
+        let json = serde_json::to_string(&k).expect("key serialises");
+        let back: InstanceKey = serde_json::from_str(&json).expect("key parses back");
+        assert_eq!(back.opacity, 0.25);
+        assert!(back.flip_x && back.flip_y);
+        assert_eq!(back.scale_y, 0.75);
+        assert_eq!((back.pivot_x, back.pivot_y), (0.25, 0.75));
     }
 }

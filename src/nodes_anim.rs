@@ -537,6 +537,8 @@ fn convert_fallback(scan: &FigureScan) -> (FigureDef, u32) {
     }
     let mut nodes: Vec<NodeDef> = Vec::with_capacity(n + 1);
     nodes.push(NodeDef {
+        min_angle: None,
+        max_angle: None,
         style: crate::model::NodeStyle::default(),
         media: None,
         name: "origin".into(),
@@ -564,6 +566,8 @@ fn convert_fallback(scan: &FigureScan) -> (FigureDef, u32) {
             _ => Shape::Line,
         };
         nodes.push(NodeDef {
+            min_angle: None,
+            max_angle: None,
             style: crate::model::NodeStyle::default(),
             media: None,
             name: format!("{} {}", scan_kind_name(node.kind), node.id),
@@ -803,9 +807,18 @@ struct RawInstance {
     y: f32,
     color: u32,
     poses: Vec<PoseRec>,
+    /// The style block's opacity (v >= 220; 1.0 before).
+    /// Modelled only on sprite keys (Wave X, P-6) — figures
+    /// carry their own opacity and movieclips have no key.
+    opacity: f32,
     // Sprite instances (type 2/3) only; defaults elsewhere.
     scale_x: f32,
+    scale_y: f32,
     rotation: f32,
+    flip_x: bool,
+    flip_y: bool,
+    pivot_x: f32,
+    pivot_y: f32,
     group_frame: i32,
 }
 
@@ -878,10 +891,14 @@ struct RawClip {
     frames: Vec<RawFrame>,
 }
 
-/// The instance style block (`readStyle`): consumed, not modelled.
-fn read_style(r: &mut Reader, v: i32, b: i32) -> Result<(), String> {
+/// The instance style block (`readStyle`): consumed, not
+/// modelled — except its opacity (v >= 220), which is returned:
+/// sprite keys carry it (Wave X, P-6). 1.0 before v220, where
+/// the block has no opacity field.
+fn read_style(r: &mut Reader, v: i32, b: i32) -> Result<f32, String> {
+    let mut opacity = 1.0f32;
     if v >= 220 {
-        r.f32()?; // opacity
+        opacity = r.f32()?; // opacity
         r.f32()?; // blur
     }
     if b >= 16 {
@@ -927,7 +944,7 @@ fn read_style(r: &mut Reader, v: i32, b: i32) -> Result<(), String> {
         r.i32()?; // dropShadowAngle
         r.f32()?; // dropShadowBlur
     }
-    Ok(())
+    Ok(opacity)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -974,11 +991,13 @@ fn read_instance(
     if ty == 0 {
         scale = r.f32()?;
     }
-    read_style(r, v, b)?;
+    let opacity = read_style(r, v, b)?;
     let (mut x, mut y, mut color) = (0.0f32, 0.0f32, 0xFFFFFFu32);
     let mut poses: Vec<PoseRec> = Vec::new();
     // Sprite-instance fields (type 2/3); defaults for other types.
     let (mut scale_x, mut rotation, mut group_frame) = (1.0f32, 0.0f32, 0i32);
+    let (mut scale_y, mut flip_x, mut flip_y) = (1.0f32, false, false);
+    let (mut pivot_x, mut pivot_y) = (0.5f32, 0.5f32);
     match ty {
         0 => {
             x = r.f32()?;
@@ -1058,21 +1077,20 @@ fn read_instance(
             r.f32()?; // scaleXYRatio (editor value; not used by the
                        // original adapter either)
             scale_x = r.f32()?;
-            r.f32()?; // scaleY: only |scaleX| is modelled (§17 of
-                      // the spec); the adapter likewise keeps the
-                      // |scaleY/scaleX| ratio as metadata only
+            scale_y = r.f32()?; // scaleY (modelled on the key since
+                                // Wave X, P-6 — §17's discard is over)
             if b >= 110 {
                 for _ in 0..8 {
                     r.f32()?; // corner distortion Tl/Tr/Bl/Br
                 }
             }
-            r.f32()?; // pivotX (not modelled; the adapter retains
-            r.f32()?; // pivotY  pivots as metadata too)
+            pivot_x = r.f32()?; // pivotX (modelled on the key, P-6)
+            pivot_y = r.f32()?; // pivotY
             x = r.f32()?;
             y = r.f32()?;
             rotation = r.f32()?;
-            r.flag()?; // flipX (not modelled, §17)
-            r.flag()?; // flipY (not modelled, §17)
+            flip_x = r.flag()?; // flipX (modelled on the key, P-6)
+            flip_y = r.flag()?; // flipY
             r.flag()?; // persistent
             if b >= 78 {
                 r.i8()?; // tweenMode
@@ -1101,8 +1119,14 @@ fn read_instance(
         y,
         color,
         poses,
+        opacity,
         scale_x,
+        scale_y,
         rotation,
+        flip_x,
+        flip_y,
+        pivot_x,
+        pivot_y,
         group_frame,
     })
 }
@@ -2076,6 +2100,16 @@ fn build_instance_tracks(
                 y: ky,
                 scale: inst.scale_x.abs(),
                 angle: inst.rotation,
+                // The P-6 enrichment (Wave X): fields the
+                // importer used to read and discard. Magnitudes
+                // for the scales, as with `scale` — the flips
+                // ride their own flags.
+                opacity: inst.opacity,
+                flip_x: inst.flip_x,
+                flip_y: inst.flip_y,
+                scale_y: inst.scale_y.abs(),
+                pivot_x: inst.pivot_x,
+                pivot_y: inst.pivot_y,
             };
             let track_key = (inst.ty, inst.id);
             match sprite_tracks.get(&track_key) {
@@ -2107,6 +2141,15 @@ fn build_instance_tracks(
                 y: centre[1],
                 scale: text.scale,
                 angle: text.rotation,
+                // Text keys share the struct; the enrichment
+                // fields stay at their defaults (the text
+                // record's own fields are a separate site).
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
             };
             match text_tracks.get(&text.id) {
                 Some(&ti) => {
@@ -2335,6 +2378,7 @@ fn build_timeline(
             def: s.def,
             hidden: false,
             clip: s.clip,
+            states: Vec::new(),
         })
         .collect();
     (figures_out, frames)
@@ -2897,9 +2941,11 @@ fn write_main_settings(w: &mut BeWriter, bg: u32, duration: f32, fps: f32) {
 }
 
 /// Instance style block at 431/117 (field order per
-/// `read_style`), all filters at their neutral defaults.
-fn write_style(w: &mut BeWriter) {
-    w.f32(1.0); // opacity
+/// `read_style`), all filters at their neutral defaults;
+/// the opacity is the caller's (sprite keys carry theirs,
+/// Wave X P-6; figure instances pass 1.0, as before).
+fn write_style(w: &mut BeWriter, opacity: f32) {
+    w.f32(opacity); // opacity
     w.f32(0.0); // blur
     w.flag(false); // motionBlur
     w.flag(false); // omnidirectionalBlur
@@ -3058,6 +3104,10 @@ fn sprite_key_for_frame(track: &SpriteInstance, frame: usize) -> Option<Instance
             && k.y.is_finite()
             && k.scale.is_finite()
             && k.angle.is_finite()
+            && k.opacity.is_finite()
+            && k.scale_y.is_finite()
+            && k.pivot_x.is_finite()
+            && k.pivot_y.is_finite()
     })
 }
 
@@ -3143,8 +3193,9 @@ fn sprite_export_plan(project: &Project) -> SpriteExportPlan {
 
 /// Sprite library image body at 431/117 (field order per
 /// `read_sprite_image_body`). Exported images are always RGBA;
-/// the pivot is the centre, which is where the model anchors
-/// sprite images.
+/// the LIBRARY pivot is written centred because the importer
+/// does not retain library pivots — the per-key anchor rides
+/// on the instance records (`write_sprite_instance`).
 fn write_sprite_image_body(w: &mut BeWriter, img: &ExportSpriteImage) {
     w.flag(true); // hasAlpha (pixels are RGBA)
     w.flag(false); // flag1
@@ -3161,29 +3212,32 @@ fn write_sprite_image_body(w: &mut BeWriter, img: &ExportSpriteImage) {
 
 /// One type-2 (sprite image) instance record at 431/117
 /// (field order per `read_instance`'s sprite branch), carrying
-/// one model key: position and rotation verbatim, uniform
-/// scale `|key.scale|` on both axes (the model stores no
-/// second axis — the importer likewise keeps only |scaleX|),
-/// and every unmodelled field at its neutral default.
+/// one model key: position and rotation verbatim; scaleX
+/// `|key.scale|` and scaleY the key's effective second axis
+/// (`eff_scale_y` — a follow-`scale` key writes its uniform
+/// value, as before); the key's pivot and flips written back
+/// (Wave X, P-6 — the fields the importer used to discard);
+/// the style block carries the key's opacity; every still-
+/// unmodelled field at its neutral default.
 fn write_sprite_instance(w: &mut BeWriter, library_index: usize, id: i32, key: &InstanceKey) {
     w.i32(2); // instance type: sprite image
     w.i32(library_index as i32); // asset index
     w.i32(id); // instance id (importer track key)
-    write_style(w);
+    write_style(w, key.opacity);
     w.flag(false); // useParentFilters
-    w.f32(1.0); // scaleXYRatio (uniform scale: no second axis)
+    w.f32(1.0); // scaleXYRatio (editor value; the reader ignores it)
     w.f32(key.scale.abs()); // scaleX
-    w.f32(key.scale.abs()); // scaleY
+    w.f32(key.eff_scale_y().abs()); // scaleY
     for _ in 0..8 {
         w.f32(0.0); // corner distortions (build >= 110)
     }
-    w.f32(0.5); // pivotX (centre anchor, as the model)
-    w.f32(0.5); // pivotY
+    w.f32(key.pivot_x); // pivotX (the key's anchor)
+    w.f32(key.pivot_y); // pivotY
     w.f32(key.x);
     w.f32(key.y);
     w.f32(key.angle); // rotation
-    w.flag(false); // flipX (not modelled)
-    w.flag(false); // flipY (not modelled)
+    w.flag(key.flip_x); // flipX
+    w.flag(key.flip_y); // flipY
     w.flag(false); // persistent
     w.i8(0); // tweenMode (build >= 78)
     w.flag(true); // visibleInOnionSkin (build >= 15)
@@ -3216,9 +3270,12 @@ fn write_sprite_instance(w: &mut BeWriter, library_index: usize, id: i32, key: &
 /// reimport therefore restores the model tracks — asset and
 /// keys — but not the native detail the importer already
 /// collapsed: group instances return as plain image instances
-/// of their resolved member, and flips, the second scale axis,
-/// pivots, corner distortions and smart-stretch parameters
-/// have no model source and are written at neutral defaults.
+/// of their resolved member, and corner distortions and
+/// smart-stretch parameters have no model source and are
+/// written at neutral defaults (flips, the second scale
+/// axis, pivots and style opacity DO have a model source
+/// since Wave X (P-6) — the keys carry them and
+/// `write_sprite_instance` writes them back).
 /// Keys the whole-frame grammar cannot address (fractional,
 /// out-of-timeline or non-finite) and assets it cannot hold
 /// (undecodable or over its size limits) are omitted — the
@@ -3331,7 +3388,7 @@ pub fn export_nodes_animation(project: &Project) -> Vec<u8> {
             w.i32(fi as i32); // asset index
             w.i32(fi as i32 + 1); // stable instance id (slot key)
             w.f32(1.0); // instance scale
-            write_style(&mut w);
+            write_style(&mut w, 1.0);
             w.f32(pose.root[0]);
             w.f32(pose.root[1]);
             w.color(fig.color);
@@ -3457,7 +3514,13 @@ mod tests {
     /// Instance style block at 431/117 (79 bytes of defaults),
     /// field order per `readStyle`.
     fn style_431_117(b: &mut B) {
-        b.f32(1.0); // opacity
+        style_431_117_with_opacity(b, 1.0);
+    }
+
+    /// `style_431_117` with a caller-chosen opacity (the one
+    /// style field the model retains, Wave X P-6).
+    fn style_431_117_with_opacity(b: &mut B, opacity: f32) {
+        b.f32(opacity); // opacity
         b.f32(0.0); // blur
         b.flag(false); // motionBlur
         b.flag(false); // omnidirectionalBlur
@@ -3839,6 +3902,124 @@ mod tests {
         if let Some(gf) = group_frame {
             b.i32(gf); // groupFrame (type 3 only)
         }
+    }
+
+    /// Sprite instance record at 431/117 carrying the P-6
+    /// enrichment: a non-default style opacity, a non-centre
+    /// pivot and the flip flags set — the fields the importer
+    /// used to read and discard.
+    #[allow(clippy::too_many_arguments)]
+    fn sprite_instance_enriched_431_117(
+        b: &mut B,
+        asset: i32,
+        id: i32,
+        scale_x: f32,
+        scale_y: f32,
+        x: f32,
+        y: f32,
+        rotation: f32,
+        opacity: f32,
+        flip_x: bool,
+        flip_y: bool,
+        pivot_x: f32,
+        pivot_y: f32,
+    ) {
+        b.i32(2); // type: sprite image
+        b.i32(asset);
+        b.i32(id);
+        style_431_117_with_opacity(b, opacity);
+        b.flag(false); // useParentFilters
+        b.f32(1.0); // scaleXYRatio
+        b.f32(scale_x);
+        b.f32(scale_y);
+        for _ in 0..8 {
+            b.f32(0.0); // corner distortions (build >= 110)
+        }
+        b.f32(pivot_x);
+        b.f32(pivot_y);
+        b.f32(x);
+        b.f32(y);
+        b.f32(rotation);
+        b.flag(flip_x);
+        b.flag(flip_y);
+        b.flag(false); // persistent
+        b.i8(0); // tweenMode (build >= 78)
+        b.flag(true); // visibleInOnionSkin (build >= 15)
+        b.i32(0); // lockState
+        b.i32(0); // smartStretchState
+    }
+
+    /// A `.stknds` project at 431/117 whose single frame holds
+    /// one enriched sprite instance: image "Px" (2x1), id 7,
+    /// scale (2.0, 0.5), at (400, 300), opacity 0.5, flipX set,
+    /// pivot (0.25, 0.75).
+    fn hand_packed_project_with_enriched_sprite() -> Vec<u8> {
+        let mut b = B::default();
+        b.i32(431); // version
+        b.i32(117); // build (v >= 401)
+        b.string("Proj E");
+        project_header_431_117(&mut b);
+        b.i32(0); // figure count
+        b.i32(0); // sound count (v >= 160)
+        b.i32(1); // sprite library count (v >= 400)
+        b.raw(&[0]); // image
+        b.string("Px");
+        sprite_image_body_431_117(&mut b, false, 2, 1, &[255, 0, 0, 0, 0, 255]);
+        b.i32(0); // clip count (v >= 300)
+        b.i32(1); // frame count
+        main_settings_431_117(&mut b);
+        b.i32(1); // instance count
+        sprite_instance_enriched_431_117(
+            &mut b, 0, 7, 2.0, 0.5, 400.0, 300.0, 0.0, 0.5, true, false, 0.25, 0.75,
+        );
+        b.i32(0); // joins count
+        b.i32(0); // text count
+        camera_431_117(&mut b);
+        trailer_431_117(&mut b);
+        b.v
+    }
+
+    /// Wave X (P-6): the four .stknds sprite-key losses GAP
+    /// documented — flipX/flipY, scaleY, pivotX/pivotY and the
+    /// style opacity — are modelled on `InstanceKey` now: the
+    /// enriched record imports with every field on its key,
+    /// and the exporter writes them back, so a re-imported
+    /// export carries the identical key.
+    #[test]
+    fn stknds_enriched_sprite_key_imports_and_roundtrips() {
+        let project = import_nodes_animation(&hand_packed_project_with_enriched_sprite())
+            .expect("enriched project imports");
+        assert_eq!(project.sprites.len(), 1);
+        assert_eq!(project.sprites[0].keys.len(), 1);
+        let k = &project.sprites[0].keys[0];
+        key_eq(k, 0.0, 400.0, 300.0, 2.0, 0.0);
+        assert!((k.scale_y - 0.5).abs() < 0.01, "key scale_y {}", k.scale_y);
+        assert!((k.opacity - 0.5).abs() < 0.01, "key opacity {}", k.opacity);
+        assert!(k.flip_x, "flipX retained");
+        assert!(!k.flip_y, "flipY retained (unset)");
+        assert!(
+            (k.pivot_x - 0.25).abs() < 0.01 && (k.pivot_y - 0.75).abs() < 0.01,
+            "key pivot ({}, {})",
+            k.pivot_x,
+            k.pivot_y
+        );
+        // And back out: the exported file re-imports with the
+        // identical enriched key — the round trip is closed.
+        let back = import_nodes_animation(&export_nodes_animation(&project))
+            .expect("exported project re-imports");
+        assert_eq!(back.sprites.len(), 1);
+        assert_eq!(back.sprites[0].keys.len(), 1);
+        let k2 = &back.sprites[0].keys[0];
+        key_eq(k2, 0.0, 400.0, 300.0, 2.0, 0.0);
+        assert!((k2.scale_y - 0.5).abs() < 0.01, "round-tripped scale_y {}", k2.scale_y);
+        assert!((k2.opacity - 0.5).abs() < 0.01, "round-tripped opacity {}", k2.opacity);
+        assert!(k2.flip_x && !k2.flip_y, "round-tripped flips");
+        assert!(
+            (k2.pivot_x - 0.25).abs() < 0.01 && (k2.pivot_y - 0.75).abs() < 0.01,
+            "round-tripped pivot ({}, {})",
+            k2.pivot_x,
+            k2.pivot_y
+        );
     }
 
     /// `hand_packed_clip` plus a sprite: the library holds one 2x2
@@ -4267,6 +4448,12 @@ mod tests {
             y: 2.0,
             scale: 1.0,
             angle: 0.0,
+            opacity: 1.0,
+            flip_x: false,
+            flip_y: false,
+            scale_y: 0.0,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
         });
         project.sprites[0].keys.push(InstanceKey {
             frame: 9.0,
@@ -4274,6 +4461,12 @@ mod tests {
             y: 4.0,
             scale: 1.0,
             angle: 0.0,
+            opacity: 1.0,
+            flip_x: false,
+            flip_y: false,
+            scale_y: 0.0,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
         });
         let back = import_nodes_animation(&export_nodes_animation(&project))
             .expect("exported project re-imports");
@@ -4319,7 +4512,13 @@ mod tests {
                 },
             ],
             scale_x: 1.0,
+            opacity: 1.0,
+            scale_y: 1.0,
             rotation: 0.0,
+            flip_x: false,
+            flip_y: false,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
             group_frame: 0,
         };
         let sprite_inst = || RawInstance {
@@ -4332,7 +4531,13 @@ mod tests {
             color: 0xFFFFFF,
             poses: Vec::new(),
             scale_x: 2.0,
+            opacity: 1.0,
+            scale_y: 2.0,
             rotation: 30.0,
+            flip_x: false,
+            flip_y: false,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
             group_frame: 0,
         };
         let frame = |instances: Vec<RawInstance>| RawFrame {
@@ -4487,7 +4692,13 @@ mod tests {
                 },
             ],
             scale_x: 1.0,
+            opacity: 1.0,
+            scale_y: 1.0,
             rotation: 0.0,
+            flip_x: false,
+            flip_y: false,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
             group_frame: 0,
         }
     }
@@ -4598,7 +4809,13 @@ mod tests {
             color: 0xFFFFFF,
             poses: Vec::new(),
             scale_x: 1.0,
+            opacity: 1.0,
+            scale_y: 1.0,
             rotation: 0.0,
+            flip_x: false,
+            flip_y: false,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
             group_frame: 0,
         };
         // Figure child pinned to a sprite parent: the handle-0
