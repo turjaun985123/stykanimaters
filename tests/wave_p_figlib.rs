@@ -212,7 +212,11 @@ fn library_names(mcp: &mut Dispatch) -> Vec<String> {
 
 /// Seed one saved library entry through MCP (the
 /// Focused file's recipe): add a figure, then
-/// `figure_library_save`. Returns the entry's stem.
+/// `figure_library_save`. Returns the entry's name —
+/// since Wave V (V1) the library stores the figure's
+/// name inside its file, so the entry is listed under
+/// the figure's exact name. (Its FILE is still the
+/// slug: spaces to dashes, lowercased.)
 fn seed_saved_entry(mcp: &mut Dispatch, figure_name: &str) -> String {
     let added = mcp.call_ok(
         "add_figure",
@@ -222,12 +226,11 @@ fn seed_saved_entry(mcp: &mut Dispatch, figure_name: &str) -> String {
         .as_u64()
         .unwrap_or_else(|| panic!("add_figure reply carries no figure index: {added}"));
     mcp.call_ok("figure_library_save", json!({ "figure": figure }));
-    let stem = figure_name.replace(' ', "-").to_lowercase();
     assert!(
-        library_names(mcp).iter().any(|n| n == &stem),
-        "figure_library_save left no entry named '{stem}'"
+        library_names(mcp).iter().any(|n| n == figure_name),
+        "figure_library_save left no entry named '{figure_name}'"
     );
-    stem
+    figure_name.to_string()
 }
 
 fn undo_depth(mcp: &mut Dispatch) -> u64 {

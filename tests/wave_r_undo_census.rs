@@ -673,10 +673,10 @@ fn a_legs() -> Vec<Leg> {
         // ---- fig3 bakes, libraries, subtitles ----
         Leg { name: "fig3_bake", group: "misc", setup: s_fig3, args: |_| json!({}) },
         Leg { name: "fig3_bake_animation", group: "misc", setup: |c| { s_fig3(c); must(c, "fig3_rotate", json!({ "axis": 0, "degrees": 25 })); must(c, "fig3_mark_b", json!({})); must(c, "fig3_rotate", json!({ "axis": 0, "degrees": -10 })); }, args: |_| json!({ "frames": 3 }) },
-        // The library names disk entries by file stem, and
-        // the save writes the figure's name lower-cased —
-        // the saved "Styk" figure is listed as "styk".
-        Leg { name: "figure_library_insert", group: "misc", setup: s_figlib_save, args: |_| json!({ "name": "styk" }) },
+        // The library stores the figure's name inside its
+        // file (Wave V, V1): the saved "Styk" figure is
+        // listed under its exact name, "Styk".
+        Leg { name: "figure_library_insert", group: "misc", setup: s_figlib_save, args: |_| json!({ "name": "Styk" }) },
         Leg { name: "pose_library_apply", group: "misc", setup: s_pose_save, args: |_| json!({ "name": "wave-r-census-apply", "figure": 0, "frame": 1 }) },
         Leg { name: "subtitle_add", group: "misc", setup: s_none, args: |_| json!({ "start_frame": 0, "end_frame": 48, "text": "Hello census" }) },
         Leg { name: "subtitle_update", group: "misc", setup: s_cue, args: |_| json!({ "index": 0, "start_frame": 0, "end_frame": 24, "text": "Updated" }) },
@@ -1005,10 +1005,10 @@ fn census_figure_library_rename_spends_no_step() {
         .as_array()
         .and_then(|es| {
             es.iter()
-                .position(|e| e["name"] == json!("styk"))
+                .position(|e| e["name"] == json!("Styk"))
                 .map(|p| p as i64)
         })
-        .expect("the saved Styk entry is listed (as 'styk', its file stem)");
+        .expect("the saved Styk entry is listed (under its exact stored name)");
     let before = core.undo_depth();
     must(
         &mut core,

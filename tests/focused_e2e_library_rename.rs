@@ -41,7 +41,9 @@
 //! `add_figure` (a figure with a known name) followed by
 //! `figure_library_save` (the panel Save's tool: writes
 //! `./library/<stem>.json` and reloads the library, so the
-//! entry appears under the figure name's slug). The one
+//! entry appears under the figure's exact name — stored
+//! inside the file since Wave V (V1); the file keeps the
+//! slug). The one
 //! fixture that is NOT an MCP call is the scratch
 //! directory itself, and it is forced by the subsystem's
 //! shape: the library folder is `./library` relative to
@@ -279,9 +281,10 @@ fn entry_index(mcp: &mut Dispatch, name: &str) -> u64 {
 /// Seed one saved library entry, purely through MCP: add
 /// a figure called `figure_name`, then save it to the
 /// library with `figure_library_save`. Returns the entry
-/// name the library knows it by — the figure name's slug
-/// (the save path's stem: spaces to dashes, lowercased),
-/// which is also its file stem.
+/// name the library knows it by — the figure's exact
+/// name, stored inside the file at save time (Wave V,
+/// V1). The FILE stem is still the save path's slug
+/// (spaces to dashes, lowercased).
 fn seed_saved_entry(mcp: &mut Dispatch, figure_name: &str) -> String {
     let added = mcp.call_ok(
         "add_figure",
@@ -291,17 +294,16 @@ fn seed_saved_entry(mcp: &mut Dispatch, figure_name: &str) -> String {
         .as_u64()
         .unwrap_or_else(|| panic!("add_figure reply carries no figure index: {added}"));
     mcp.call_ok("figure_library_save", json!({ "figure": figure }));
-    let stem = figure_name.replace(' ', "-").to_lowercase();
     // The save is only real once the listing shows it.
     let names: Vec<String> = library_entries(mcp)
         .into_iter()
         .map(|(_, n)| n)
         .collect();
     assert!(
-        names.iter().any(|n| n == &stem),
-        "figure_library_save left no entry named '{stem}' in {names:?}"
+        names.iter().any(|n| n == figure_name),
+        "figure_library_save left no entry named '{figure_name}' in {names:?}"
     );
-    stem
+    figure_name.to_string()
 }
 
 /// One rename call, addressed both ways (see the module
@@ -387,8 +389,8 @@ fn rename_happy_path_renames_entry_and_file_via_mcp_only() {
 
     // Seed one saved entry through MCP; it lands after
     // the built-ins, backed by ./library/alpha.json.
-    let stem = seed_saved_entry(&mut mcp, "Alpha");
-    let slot = entry_index(&mut mcp, &stem);
+    let name = seed_saved_entry(&mut mcp, "Alpha");
+    let slot = entry_index(&mut mcp, &name);
     let old_file = library_dir(&dir).join("alpha.json");
     assert!(
         old_file.exists(),
@@ -400,7 +402,7 @@ fn rename_happy_path_renames_entry_and_file_via_mcp_only() {
     // ("Alpha Prime" -> "alpha-prime", the save slug).
     let outcome = mcp.call(
         "figure_library_rename",
-        rename_args(slot, &stem, "Alpha Prime"),
+        rename_args(slot, &name, "Alpha Prime"),
     );
     assert!(
         !outcome.is_error,
@@ -414,7 +416,7 @@ fn rename_happy_path_renames_entry_and_file_via_mcp_only() {
     let after = library_entries(&mut mcp);
     assert_eq!(after.len(), entering.len() + 1, "no entry added or lost: {after:?}");
     assert!(
-        !after.iter().any(|(_, n)| n == &stem),
+        !after.iter().any(|(_, n)| n == &name),
         "the old name is gone from the listing: {after:?}"
     );
     assert_eq!(
@@ -524,7 +526,7 @@ fn rename_refusals_are_iserror_results_and_change_nothing() {
         after, before,
         "refused renames changed the library listing"
     );
-    for stem in [&alpha, &beta] {
+    for stem in ["alpha", "beta"] {
         assert!(
             library_dir(&dir).join(format!("{stem}.json")).exists(),
             "the seeded file for '{stem}' is still in place"
@@ -553,14 +555,14 @@ fn rename_spends_no_undo_step_and_undo_does_not_revert_it() {
     let _cwd = CwdGuard::enter(&dir);
     let mut mcp = Dispatch::new();
 
-    let stem = seed_saved_entry(&mut mcp, "Alpha");
-    let slot = entry_index(&mut mcp, &stem);
+    let name = seed_saved_entry(&mut mcp, "Alpha");
+    let slot = entry_index(&mut mcp, &name);
 
     // The rename itself spends no undo step.
     let depth_before = undo_depth(&mut mcp);
     let outcome = mcp.call(
         "figure_library_rename",
-        rename_args(slot, &stem, "Alpha Prime"),
+        rename_args(slot, &name, "Alpha Prime"),
     );
     assert!(
         !outcome.is_error,
@@ -605,7 +607,7 @@ fn rename_spends_no_undo_step_and_undo_does_not_revert_it() {
         "undo must not revert the library rename: {after:?}"
     );
     assert!(
-        !after.iter().any(|(_, n)| n == &stem),
+        !after.iter().any(|(_, n)| n == &name),
         "the old entry name did not come back: {after:?}"
     );
     assert!(

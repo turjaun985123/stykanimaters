@@ -242,8 +242,56 @@ impl EditorCore {
         crate::projects::list_project_files(&dir)
     }
 
+    /// The on-disk text of a saved library file: the figure
+    /// definition's own JSON plus a top-level `"name"` field
+    /// holding the figure's name verbatim. The name rides
+    /// INSIDE the file — the pattern the pose library
+    /// (`./library/poses`) and the 3D library
+    /// (`./library3d`) already use — because the file's
+    /// NAME is a slug (spaces→`-`, lowercased) and cannot
+    /// carry the display name: a figure saved as "Styk"
+    /// used to come back listed and inserted as "styk"
+    /// (Wave V, V1). The extra field is invisible to the
+    /// definition reader: `FigureDef` ignores unknown
+    /// fields, so the file still parses as a bare
+    /// definition everywhere it did before, and an older
+    /// build reading a newer file simply names it by its
+    /// stem, exactly as it always did.
+    fn library_file_text(def: &FigureDef, name: &str) -> Result<String, serde_json::Error> {
+        let mut value = serde_json::to_value(def)?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "name".to_string(),
+                serde_json::Value::String(name.to_string()),
+            );
+        }
+        serde_json::to_string_pretty(&value)
+    }
+
+    /// The display name stored inside a library file's
+    /// text (see [`Self::library_file_text`]), or `None`
+    /// when the file carries none — every file written
+    /// before the stored name existed, or a hand-written
+    /// definition. An empty stored name counts as none:
+    /// it could never be displayed or addressed usefully.
+    fn library_stored_name(text: &str) -> Option<String> {
+        let value: serde_json::Value = serde_json::from_str(text).ok()?;
+        value
+            .get("name")?
+            .as_str()
+            .filter(|n| !n.is_empty())
+            .map(|n| n.to_string())
+    }
+
     /// The local figure library: JSON figure definitions from
     /// `./library/`, plus three built-ins so it is never empty.
+    /// A saved entry's display name is the name stored
+    /// inside its file (see [`Self::library_file_text`]);
+    /// files written before the stored name existed carry
+    /// none and are named by their file stem, as they
+    /// always were — an existing library loads with the
+    /// names its user already sees, nothing renamed,
+    /// moved or rewritten.
     fn load_library() -> Vec<(String, FigureDef)> {
         let mut lib: Vec<(String, FigureDef)> = vec![
             ("Built-in: Humanoid".into(), FigureDef::humanoid()),
@@ -262,10 +310,11 @@ impl EditorCore {
             for f in files {
                 if let Ok(text) = std::fs::read_to_string(&f) {
                     if let Ok(def) = serde_json::from_str::<FigureDef>(&text) {
-                        let name = f
-                            .file_stem()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| "Figure".into());
+                        let name = Self::library_stored_name(&text).unwrap_or_else(|| {
+                            f.file_stem()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| "Figure".into())
+                        });
                         lib.push((name, def));
                     }
                 }
@@ -3128,6 +3177,15 @@ impl EditorCore {
         };
     }
 
+    /// Save the selected figure's definition into
+    /// `./library` and reload the library. The FILE keeps
+    /// the historical slug name (spaces→`-`, lowercased),
+    /// so existing libraries and the rename op's stem
+    /// arithmetic are untouched; the figure's exact name
+    /// is stored inside the file (see
+    /// [`Self::library_file_text`]) and becomes the
+    /// entry's display name on load — the name now
+    /// round-trips exactly (Wave V, V1).
     pub fn save_figure_to_library(&mut self) {
         let fig = &self.project.figures[self.selected_figure];
         let dir = std::env::current_dir()
@@ -3135,7 +3193,9 @@ impl EditorCore {
             .join("library");
         let file = dir.join(format!("{}.json", fig.name.replace(' ', "-").to_lowercase()));
         let result = std::fs::create_dir_all(&dir)
-            .and_then(|_| serde_json::to_string_pretty(&fig.def).map_err(std::io::Error::other))
+            .and_then(|_| {
+                Self::library_file_text(&fig.def, &fig.name).map_err(std::io::Error::other)
+            })
             .and_then(|text| std::fs::write(&file, text));
         match result {
             Ok(()) => {
@@ -7528,6 +7588,82 @@ mod tests {
             dir.join(crate::fig3d::library_file_name("Humanoid3")),
         );
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn library_file_text_stores_the_name_verbatim() {
+        // Wave V (V1): the saved file carries the figure's
+        // exact name in a top-level "name" field, and still
+        // parses as a bare FigureDef — the stored name is
+        // an extra field the definition reader ignores.
+        let def = FigureDef::simple();
+        let text = EditorCore::library_file_text(&def, "Styk The Great")
+            .expect("serialise the library file");
+        assert_eq!(
+            EditorCore::library_stored_name(&text).as_deref(),
+            Some("Styk The Great")
+        );
+        let back: FigureDef =
+            serde_json::from_str(&text).expect("the file still parses as a bare FigureDef");
+        assert_eq!(back.nodes.len(), def.nodes.len());
+    }
+
+    #[test]
+    fn library_stored_name_absent_empty_or_mistyped_reads_as_none() {
+        // The fallback contract load_library relies on for
+        // every pre-stored-name file: no field, an empty
+        // field, a mistyped field, or unparseable text all
+        // read as "no stored name" — the stem names it.
+        let bare = serde_json::to_string(&FigureDef::simple()).expect("serialise a bare def");
+        assert_eq!(EditorCore::library_stored_name(&bare), None);
+        assert_eq!(EditorCore::library_stored_name("{\"name\": \"\"}"), None);
+        assert_eq!(EditorCore::library_stored_name("{\"name\": 3}"), None);
+        assert_eq!(EditorCore::library_stored_name("not json"), None);
+    }
+
+    #[test]
+    fn figure_library_round_trips_the_exact_name() {
+        // Wave V (V1), the fig3 library test's pattern
+        // (write into the real ./library, clean up after):
+        // the demo figure is "Styk"; its file is the slug
+        // styk.json, but the reloaded entry — and a figure
+        // inserted from it — carry the exact name.
+        let mut core = EditorCore::new();
+        assert_eq!(core.project.figures[core.selected_figure].name, "Styk");
+        core.save_figure_to_library();
+        let dir = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("library");
+        let file = dir.join("styk.json");
+        // Capture everything before asserting, so the
+        // cleanup below runs whatever the outcome.
+        let status = core.status.clone();
+        let listed = core.library.iter().any(|(n, _)| n == "Styk");
+        let stored = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|t| EditorCore::library_stored_name(&t));
+        let idx = core.library.iter().position(|(n, _)| n == "Styk");
+        let mut inserted_name = None;
+        if let Some(idx) = idx {
+            core.library_index = idx;
+            let before = core.project.figures.len();
+            core.insert_library_figure();
+            inserted_name = core.project.figures.get(before).map(|f| f.name.clone());
+        }
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&dir);
+        assert_eq!(status, "Saved Styk to the library.");
+        assert!(listed, "the entry is listed as 'Styk', not its stem");
+        assert_eq!(
+            stored.as_deref(),
+            Some("Styk"),
+            "the name is stored in the file"
+        );
+        assert_eq!(
+            inserted_name.as_deref(),
+            Some("Styk"),
+            "the inserted figure takes the exact name"
+        );
     }
 
     #[test]

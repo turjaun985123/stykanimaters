@@ -572,28 +572,30 @@ fn project_and_library_lifecycle_over_mcp() {
     let entries = lib["entries"].as_array().expect("entries array");
     let partner = entries
         .iter()
-        .find(|e| e["name"] == "lifecycle-partner")
-        .expect("the saved entry is listed by its file stem (the format's rule)");
+        .find(|e| e["name"] == "Lifecycle Partner")
+        .expect("the saved entry is listed under the figure's exact name (stored in the file, Wave V V1)");
     assert_eq!(partner["nodes"], 11, "the def's node count is stored");
 
     // Insert it into a fresh project: the def (and so the
     // node count) survives the round trip. Two format truths
     // ride along, asserted rather than papered over: the
-    // figure's NAME becomes the entry's stem name, and its
-    // colour is the palette colour for the slot — the
-    // library stores FigureDef only, never the instance
+    // figure's NAME round-trips exactly (stored inside the
+    // library file since Wave V, V1 — it used to come back
+    // as the entry's stem name), and its colour is the
+    // palette colour for the slot — the library stores
+    // FigureDef only, never the instance
     // colour (0x3366CC here is NOT preserved, by format
     // design, exactly as in the GUI).
     mcp.call_ok("new_project", json!({ "name": "Library Host" }));
     let inserted = mcp.call_ok(
         "figure_library_insert",
-        json!({ "name": "lifecycle-partner" }),
+        json!({ "name": "Lifecycle Partner" }),
     );
     assert_eq!(inserted["ok"], true);
     let figures = mcp.call_ok("list_figures", json!({}));
     let figs = figures["figures"].as_array().expect("figures array");
     assert_eq!(figs.len(), 2, "the host project gained the library figure");
-    assert_eq!(figs[1]["name"], "lifecycle-partner");
+    assert_eq!(figs[1]["name"], "Lifecycle Partner");
     assert_eq!(figs[1]["nodes"], 11, "the inserted def kept its 11 nodes");
     assert_ne!(
         figs[1]["color"], 0x3366CC,

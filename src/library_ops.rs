@@ -27,7 +27,7 @@
 //! follows the same contract for the pose library.
 //! Nothing here calls `snapshot` or `mark_dirty`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
@@ -49,16 +49,88 @@ pub fn is_builtin(name: &str) -> bool {
     name.starts_with(LIBRARY_BUILTIN_PREFIX)
 }
 
-/// The backing file of a saved library entry:
-/// `./library/<name>.json`. Exact by construction —
-/// `load_library` names entries from file stems, so the
-/// stem→file step is the precise inverse. Only
-/// meaningful for saved entries; built-ins have no file.
-pub fn library_file_for(name: &str) -> PathBuf {
+/// The directory saved library entries live in:
+/// `./library` under the process current directory —
+/// the folder `load_library` reads and
+/// `save_figure_to_library` writes.
+fn library_dir() -> PathBuf {
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("library")
-        .join(format!("{name}.json"))
+}
+
+/// The backing file of the library entry whose STEM is
+/// `name`: `./library/<name>.json` — the stem→file
+/// step. Only meaningful for saved entries; built-ins
+/// have no file. Since Wave V (V1) an entry's DISPLAY
+/// name is stored inside its file and need not equal
+/// its stem ("Styk" lives in `styk.json`); resolving a
+/// display name to its file is [`library_entry_file`]'s
+/// job, not this function's.
+pub fn library_file_for(name: &str) -> PathBuf {
+    library_dir().join(format!("{name}.json"))
+}
+
+/// Resolve a saved entry's DISPLAY name to the file
+/// that backs it. An entry's file is the one it was
+/// saved or renamed under, whose stem is the slug of
+/// the name at that moment — and since Wave V (V1) the
+/// display name is stored inside the file, the two can
+/// differ. Resolution: the verbatim file
+/// (`<name>.json`) when it exists — every entry whose
+/// name IS its stem (all libraries written before the
+/// stored name existed, and any hand-placed file)
+/// resolves exactly as it always did; otherwise the
+/// slug's file (`<sanitize_stem(name)>.json`), where a
+/// stored-name entry lives. When neither exists the
+/// slug path is returned, so a caller's fs operation
+/// fails against the canonical location with the
+/// honest error.
+pub fn library_entry_file(name: &str) -> PathBuf {
+    library_entry_file_in(&library_dir(), name)
+}
+
+/// [`library_entry_file`] against an explicit
+/// directory — the `*_in` test seam the pose library's
+/// `fop_*_in` helpers (figure_ops.rs) set the pattern
+/// for.
+pub fn library_entry_file_in(dir: &Path, name: &str) -> PathBuf {
+    let verbatim = dir.join(format!("{name}.json"));
+    if verbatim.exists() {
+        return verbatim;
+    }
+    dir.join(format!("{}.json", sanitize_stem(name)))
+}
+
+/// Best-effort: rewrite the display name stored inside
+/// the library file at `path` to `name` (the stored
+/// name is `save_figure_to_library`'s — see
+/// `EditorCore::library_file_text`). A rename moves a
+/// file whose stored name still says the OLD name;
+/// without this the next load would resurrect it.
+/// Best-effort by design: the rename op never parses
+/// its backing files (it only moves them), so a file
+/// that does not parse as a JSON object is left
+/// byte-identical and the rename proceeds. Every file
+/// the app itself writes parses, so in practice the
+/// stored name always follows the rename.
+fn sync_library_stored_name(path: &Path, name: &str) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(mut value) = serde_json::from_str::<Value>(&text) else {
+        return;
+    };
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    if obj.get("name").and_then(Value::as_str) == Some(name) {
+        return;
+    }
+    obj.insert("name".to_string(), Value::String(name.to_string()));
+    if let Ok(text) = serde_json::to_string_pretty(&value) {
+        let _ = std::fs::write(path, text);
+    }
 }
 
 /// Sanitise typed rename text into a library file stem:
@@ -101,9 +173,26 @@ impl EditorCore {
     /// The entry keeps its slot, so `library_index`
     /// needs no clamp.
     ///
+    /// Wave V (V1): the entry's DISPLAY name need not be
+    /// its file's stem any more (the name is stored
+    /// inside the file), so the backing file is resolved
+    /// through [`library_entry_file`] and "already has
+    /// that name" compares stems — renaming "Styk" to
+    /// "Styk" settles, as renaming "alpha" to "Alpha"
+    /// always did. The entry still TAKES the sanitised
+    /// stem (the rename contract is unchanged), and the
+    /// name stored inside the file is first synced to
+    /// that stem (best-effort, see
+    /// [`sync_library_stored_name`]), so a reload can
+    /// never resurrect the pre-rename name. If the fs
+    /// rename then fails, the entry keeps its old name
+    /// in-session; the synced stored name is the only
+    /// trace, and it names the file by the stem the user
+    /// asked for.
+    ///
     /// Returns whether the rename session is settled:
     /// `true` when the caller should close (renamed,
-    /// the sanitised name already IS the entry's name,
+    /// the sanitised name already IS the entry's stem,
     /// or `i` is a stale out-of-range slot — a silent
     /// no-op, as in the library delete); `false` when
     /// the user should keep editing, with the reason on
@@ -129,7 +218,17 @@ impl EditorCore {
             self.status = "Type a new name for the library figure first.".to_string();
             return false;
         }
-        if new_stem == old {
+        // The entry's backing file, resolved through the
+        // stored-name rule: the display name need not be
+        // the file's stem. The same-name settle compares
+        // STEMS — the entry already sits under the stem
+        // the typed name sanitises to.
+        let old_path = library_entry_file(&old);
+        let old_stem = old_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| sanitize_stem(&old));
+        if new_stem == old_stem {
             self.status = format!("\"{old}\" already has that name.");
             return true;
         }
@@ -137,13 +236,25 @@ impl EditorCore {
             self.status = format!("A library figure named \"{new_stem}\" already exists.");
             return false;
         }
-        let old_path = library_file_for(&old);
+        // A different entry already DISPLAYS the typed
+        // name (possible since display names left the
+        // stems): refuse with the same sentence, quoting
+        // the name the user actually typed.
+        let new_display = raw_new.trim();
+        if name_taken(self, new_display, i) {
+            self.status = format!("A library figure named \"{new_display}\" already exists.");
+            return false;
+        }
         let new_path = library_file_for(&new_stem);
-        if new_path.exists() {
+        if new_path != old_path && new_path.exists() {
             self.status =
                 format!("A file named \"{new_stem}.json\" already exists in the library folder.");
             return false;
         }
+        // Every refusal is behind us: sync the name
+        // stored inside the file to the stem the entry
+        // is about to take, then move the file.
+        sync_library_stored_name(&old_path, &new_stem);
         match std::fs::rename(&old_path, &new_path) {
             Ok(()) => {
                 self.library[i].0 = new_stem.clone();
@@ -265,6 +376,98 @@ mod tests {
         assert_eq!(p.file_name().unwrap(), "my-hero.json");
         assert_eq!(p.parent().unwrap().file_name().unwrap(), "library");
         assert_eq!(library_file_for("a.b").file_name().unwrap(), "a.b.json");
+    }
+
+    /// A scratch dir under the OS temp dir for the
+    /// resolution/sync pins (the `*_in` seam exists so
+    /// these never touch the process CWD's `./library`).
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "stykanimate-v1-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the scratch dir");
+        dir
+    }
+
+    #[test]
+    fn entry_file_resolution_prefers_the_verbatim_file() {
+        // An entry whose name IS its stem (every library
+        // written before the stored name existed, and any
+        // hand-placed file) resolves to <name>.json even
+        // when the slug's file also exists.
+        let dir = scratch_dir("verbatim");
+        std::fs::write(dir.join("Foo Bar.json"), "{}").expect("plant the verbatim file");
+        std::fs::write(dir.join("foo-bar.json"), "{}").expect("plant the slug file");
+        let got = library_entry_file_in(&dir, "Foo Bar");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(got, dir.join("Foo Bar.json"));
+    }
+
+    #[test]
+    fn entry_file_resolution_falls_to_the_slug() {
+        // A stored-name entry ("Styk" in styk.json) has
+        // no verbatim file: the slug's file backs it.
+        let dir = scratch_dir("slug");
+        std::fs::write(dir.join("styk.json"), "{}").expect("plant the slug file");
+        let got = library_entry_file_in(&dir, "Styk");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(got, dir.join("styk.json"));
+    }
+
+    #[test]
+    fn entry_file_resolution_defaults_to_the_slug_path() {
+        // Neither file exists: the slug path is returned
+        // so the caller's fs operation fails there with
+        // the honest error.
+        let dir = scratch_dir("missing");
+        let got = library_entry_file_in(&dir, "Ghost Figure");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(got, dir.join("ghost-figure.json"));
+    }
+
+    #[test]
+    fn sync_library_stored_name_rewrites_and_preserves() {
+        let dir = scratch_dir("sync");
+        let path = dir.join("styk.json");
+        std::fs::write(
+            &path,
+            "{\"name\": \"Styk\", \"nodes\": []}",
+        )
+        .expect("plant a stored-name file");
+        sync_library_stored_name(&path, "styk-renamed");
+        let text = std::fs::read_to_string(&path).expect("read it back");
+        let value: Value = serde_json::from_str(&text).expect("still JSON");
+        assert_eq!(value["name"], json!("styk-renamed"));
+        assert_eq!(value["nodes"], json!([]), "the definition rides along untouched");
+        // An unparseable file is left byte-identical —
+        // the rename op never parses its backing files.
+        let bad = dir.join("bad.json");
+        std::fs::write(&bad, b"this is not json").expect("plant an unparseable file");
+        sync_library_stored_name(&bad, "anything");
+        let bytes = std::fs::read(&bad).expect("read the unparseable file back");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(bytes, b"this is not json");
+    }
+
+    #[test]
+    fn rename_to_own_display_name_settles_for_stored_name_entries() {
+        // Wave V (V1): a stored-name entry ("Styk", file
+        // styk.json) renamed to its own display name
+        // settles on the stem comparison — before the
+        // fix this hunted for a `Styk.json` that does not
+        // exist and failed the fs rename. The settle
+        // precedes every fs step, so no files are needed.
+        let mut core = EditorCore::default();
+        core.library = vec![("Styk".to_string(), crate::model::FigureDef::simple())];
+        assert!(core.rename_library_entry(0, "Styk"));
+        assert!(
+            core.status.contains("already has that name"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.library[0].0, "Styk", "the entry is unchanged");
     }
 
     #[test]

@@ -1666,8 +1666,10 @@ pub fn tool_get_node(core: &mut EditorCore, args: &Value) -> Result<Value, Strin
 /// index and name, with the session's current library index.
 /// Note the format truth: the library stores FigureDef only —
 /// an entry's colour is NOT stored (insert assigns a palette
-/// colour), and entries are named by their file stem.
-/// Read-only. Wave 11 (B1/D8), integrator-authored.
+/// colour). An entry's name is the figure name stored
+/// inside its file at save time (Wave V, V1); files saved
+/// before the stored name existed are named by their file
+/// stem. Read-only. Wave 11 (B1/D8), integrator-authored.
 pub fn tool_figure_library_list(
     core: &mut EditorCore,
     _args: &Value,
