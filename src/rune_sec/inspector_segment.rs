@@ -1361,6 +1361,7 @@ fn resolve_image_media(
             angle_offset,
             flip,
             opacity,
+            ..
         }) => Some((
             fi,
             ni,
