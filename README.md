@@ -219,9 +219,13 @@ present and fall back to a folder-based flow when neither exists.
     and spritesheets. MP4/WebM can also be exported for a frame
     range (video-only), and APNG/JPEG sequence exports take a
     frame range too. The raster exports (PNG sequence, GIF,
-    MP4, WebM, APNG and spritesheets) also accept an optional
-    output scale — a true re-render at the scaled size, not a
-    resample.
+    MP4, WebM, APNG, JPEG sequence and spritesheets) also
+    accept an optional output scale — a true re-render at
+    the scaled size, not a resample. The export bundles
+    (the whole timeline in every format, in one call) accept
+    a scale as well: it scales only the bundle's PNG sequence
+    member, every other member is unaffected, and an invalid
+    scale refuses the call before anything is written.
   - *Subtitles:* cues import and export as SRT and WebVTT;
     speaker credits ride WebVTT voice tags (SRT has no speaker
     syntax, and an SRT export reports how many credits it

@@ -4090,3 +4090,931 @@ census extended over Wave S's two MCP
 behaviour changes (T13); the README's
 staleness (T14). And sound remains
 user-verified only.
+
+### 6.15 Wave U — i18n completion 2, the encode-progress contract, proof deepening 4 (2026-11-10)
+
+Ordered 2026-11-10 (11:37 +06) as a
+re-issue of the standing continuous
+order — the seventh time the user has
+issued it: "assign 20 agents continuous
+write code if ci gets error then fix
+that". Twenty agents, one owner per
+file, integrator surfaces via filed
+actions (board:
+`~/workspace/wave-u/BOARD.md`; findings:
+`~/workspace/wave-u/findings/`). The
+board's base is the S+T integration HEAD
+`d39fc10` (360 × 28, scenes 33, MCP
+381); `src/i18n.rs` and
+`src/rune_sec/i18n_wire.rs` were frozen
+to this wave's agents, all key work
+arriving via IA. This section was
+written from eighteen sibling findings
+(u1–u9, u11–u19; u20 is this section) —
+**u10.md was not filed at the final
+check and U10 is recorded as
+outstanding below, not summarised** —
+and from the CI frame read via `gh` at
+that same check. Every Wave U status
+below is IMPLEMENTED (in tree,
+uncommitted at write time); Wave U has
+no CI verdict. The S+T frame, by
+contrast, is stated once, exactly, here
+— including the parts a green workflow
+conclusion would hide.
+
+**The S+T integration ledger.** Six
+commits on top of `7f9bce5`, in order:
+(1) `6f0b737` — i18n: the catalogue
+152 → 360 keys × 28 across the two
+waves (S1's export gaps, the S14/F2
+`threed_*` block, and **F3's IA package:
+Wave T's six panel blocks — T1 35,
+T2 33, T3 24, T4 22, T5 28, T20 16 =
+158 keys — inserted as one package**,
+genuine translations in the eight
+translated tables, 11 template keys
+keeping their slots in every table);
+the panels wired in the `tr()` idiom;
+**IA-T2-2** (the menus.rs call-site fix
+for T2's `mute_toggle_parts` signature —
+compile-blocking since Wave T, now
+landed); count docs at 360. (2)
+`00d1e05` — the scale matrix completed:
+scaled GIF/APNG/spritesheet (S4) and
+MP4/WebM (S5) entries with 1.0
+byte-identical delegation; JPEG-sequence
+scale + range sibling (T7), leaving
+`svg` the only no-scale format, by
+nature; `export_bundle`'s scale
+validated before any write (T8); SRT
+export counting dropped speaker credits
+(S9); the svg subtitle helpers unified
+(IA-S20-1). (3) `ecde74f` — Home: the
+missing-audio marker on the light-read
+meta line (S7) and on the scan-fallback
+line from the scan's own verified count
+(T6; `None` = unknown, never health);
+the headless scenes `subtitles-speaker`
+(S2) and `home-missing-audio` (T12);
+S13's close-flush × recovery-gate
+composition pin. (4) `50144d7` —
+instruments: the gate floor ratcheted
+to the verified 980 element keys (T15);
+SCAN_SET at 15 required / 0 pending with
+both new scene trees dumped by both
+headless loops and the fail-soft
+marker-text grep step (S16/T16,
+IA-T12-1); the subtitle census's lane
+speaker pixel leg (T11). (5) `ae69e07`
+— proof suites: Wave S's raster A-B-A
+determinism, cross-feature e2e, JPEG
+parity, scaled burn-in and speaker
+rendering proofs; Wave T's SVG
+determinism combos, the MCP render e2e
+through the real registry, the
+undo-census extension for Wave S's two
+MCP behaviour changes, and the scaled
+GIF/APNG/sheet e2e with decoded burn-in.
+(6) `d39fc10` — docs: PHASE_O §10's scan
+table from run 42759195547's real
+artifacts and QA_RUNE §17's closure row
+(S8/F2); §6.13 + §6.14; docs/MCP.md's
+render and export_bundle rows
+source-verbatim (S19/T18); T14's README
+truth pass. The integrator's own
+instruments on the committed tree: gate
+**PASS 10/10** and the subtitle-census
+self-test **PASS** (U17's clean-worktree
+recount at `d39fc10` independently
+agrees: census 381, element keys 980,
+i18n 360 × 28 identical sequences,
+scenes 33, layout facts 1..=35).
+
+**Round 6 closes the Wave R census
+chain.** The six build rounds on the
+pre-S tree, each failure test-side,
+none in product code: round 1
+(42759195059, on `59cb0be`) FAILED on a
+bin-test compile error (a `dedup()` on
+an array in the subtitle palette pin;
+fixed `85898b4`); round 2 (42759845639,
+on `85898b4`) FAILED on one lib test
+(R20's `1e999` literal, which serde_json
+refuses itself; fixed `14bd9b3`); round 3
+(42760562852, on `14bd9b3`) FAILED on
+one integration test (the round-trip
+suite's non-vacuity marker missing its
+`audio/` prefix; lib and bin green;
+fixed `1d724a2`); round 4 (42761122064,
+on `1d724a2`) FAILED on five census
+tests (R7's hand-rolled PNG fixture's
+bad IDAT CRC, rightly refused by R9's
+decode-checked import; fixed `e0eea5a`,
+encoder-made fixture); round 5
+(42761838001, on `e0eea5a`) FAILED on
+four census tests (the audio_split leg's
+stale args, an absolute-depth witness
+after a step-spending setup, figlib legs
+hardcoding 'Styk' where the library's
+file-stem name is 'styk', and parallel
+races over the CWD-relative stores;
+fixed `7f9bce5`, the suite serialised);
+**round 6 (42762884625, on `7f9bce5`):
+GREEN** — workflow conclusion success,
+the chain closed.
+
+**The S+T CI frame — read at the
+transcript level, per the 42759195547
+lesson.** Build round 1 on the
+integrated tree (42764333258, on
+`d39fc10`) **FAILED**: exactly one
+compile error, E0308 at
+`src/rune_sec/home_panel.rs:4440` — a
+delete-confirm test seeds the panel's
+metadata cache with the pre-S7 4-tuple,
+but S7 widened the cache value with the
+missing-audio count as its fifth
+element; the lib target and every other
+suite were unaffected, and no test ran
+in that target. The fix is `b2f948f`
+(the fixture's project has no audio, so
+the fifth element is 0, the true count)
+— **committed locally but ahead of
+origin by one at this writing: no
+round-2 run exists yet, and the S+T
+build is not CI-green until one passes.**
+Headless (42764348922, on `d39fc10`,
+dispatched): workflow conclusion
+**success** — and, exactly as in
+42759195547, the conclusion alone would
+have lied. The subtitle census
+transcript (`subtitle-census.exit` = 1)
+reads **FAIL — 10 assertions**: the
+stage rect disagrees across the seeded
+and default tree dumps (drift 40.0 —
+heights 464 vs 504); every pixel leg
+reads zero (both anchor-flip band
+changes, both band text faces, the
+credited face, the speaker span at 0
+units against the ≥ 396 gate, the
+credited-vs-uncredited band difference,
+and T11's two lane pixel floors at
+diff 0 / ink 0). The cause is the one
+T11 recorded and U18 re-measured on this
+run's artifacts: the snaps are 2880×1800
+(2×) against 1440×900-point tree
+geometry, so bands read at point rows
+find nothing, compounded by the 40 pt
+seeded-vs-default stage drift. What
+passed in the same transcript is real:
+all four snaps share one size, the
+seeded bottom band differs from the
+no-cue default (1736 ≥ 200), the
+inter-band stage is pixel-identical
+across both pairs, and **the lane rect
+gate passes** (both dumps' blocks at
+(336, 780, 166, 18), drift 0.0). The
+marker transcript reads verbatim
+**"HOME MISSING-AUDIO MARKER: PASS"** —
+T12's scene and T16's grep step proven
+end to end on their first real run: the
+tree's `home-proj-meta-0` text ends with
+"· 1 audio clip missing". The MCP probe
+passes; the overflow scan over the run's
+real artifacts is **CLEAN (0 hits, scan
+set complete)** across all 15 required
+trees (U18's run of the scanner over
+the downloaded artifacts). Net S+T
+frame: headless workflow green,
+**census transcript red**, marker green,
+build red on one test literal with its
+fix unpushed. Nothing beyond that is
+called shipped.
+
+**Stroke inspector fully wired (U1).**
+The last label-only panel gets the full
+pass: 53 `stroke_*` keys — 31 plain
+labels, 16 composed readouts as `{slot}`
+templates, 6 plain readout fragments
+(summary clauses, the shared `Off`
+word) — at 51 literal `tr` sites (two
+sites select among keys). Six helpers
+gained `&EditorCore` (the T2 precedent;
+grep-verified no caller outside the
+file). One judgement call is recorded,
+not hidden: the scatter press's status
+sentence embeds the wired formatter's
+`Off`, because forking the formatter to
+keep one status hermetically English
+would diverge the vocabulary; the
+two-line hermetic fix is named in u1.md
+if wanted. IA-U1-1 files the 53 keys
+(413 × 28 from this block alone);
+element keys 26 static, zero lost.
+
+**Clips panel fully wired (U2).** 37
+`clips_*` keys — 29 plain labels + 8
+templates (header count, row detail,
+span and usage shapes, all four session
+label shapes) — at 41 sites, labels and
+readouts in one pass per the brief. The
+three readout helpers gained
+`&EditorCore` in place: grep proved no
+external callers, so unlike T2's mute
+helper no cross-file IA is owed. The
+panel's two status sentences stay
+English (board rule); clip and figure
+names flow through slots as data.
+IA-U2-1 files the block (397 × 28
+alone); element keys 25, set-identical.
+
+**Menus wired (U3).** All 23 menu
+labels — 4 bar triggers, 19 dropdown
+items — resolve through the catalogue,
+after a machine-read check done before
+wiring (no code parses any of the 23;
+other sections' identical strings are
+their own literals, and the help panel
+matches its own section data, never a
+string the menu passes). The mute pair
+is the slice's point: IA-T2-2's
+signature work is **not disturbed** —
+`mute_item_parts` still threads the core
+to `mute_toggle_parts` for the glyph —
+and its label now resolves through `tr`
+under its own `menu_mute_clip` /
+`menu_unmute_clip` keys, T2's exclusion
+of the menus' own mute labels lifted by
+the board because U3 owns the file.
+Excluded: recent-project names (user
+data), shortcut hints (chord notation),
+and the open-recent not-found status
+sentence — pinned verbatim and mirroring
+the MCP file tools' identical error, so
+translating only the menu's copy would
+split the surfaces. IA-U3-1 files the
+23 keys (383 × 28 alone).
+
+**FX display names wired (U4).**
+`fx_browser::kind_label` is core-aware:
+the 27 known kinds resolve through
+`fx_kind_*` keys, English byte-identical
+to the pre-wiring humaniser. Every call
+site in the tree was audited first — no
+site parses, persists or serialises a
+display name — and the old humaniser
+survives as `kind_label_english`: the
+filter's canonical English search alias
+(the filter now matches the localised
+label AND the English one) and the
+fallback for names outside the 27-kind
+vocabulary. The serialised vocabulary is
+untouched (`fx_edit.rs` diff clean; the
+27 `kind_name` values set-equal to the
+table's). **IA-U4-2 is the wave's one
+compile-blocking action**: kind_label's
+new arity leaves exactly two old-arity
+call sites, both in U8's fx_clips.rs,
+with exact replacement text in u4.md —
+the tree does not compile against the
+new signature until the integrator (or
+U8's landed file) carries both forms.
+IA-U4-1 files the 27 keys.
+
+**Audio readouts templated (U5).** T2's
+filed remainder closes: 21 `audio_*`
+keys convert every composed readout —
+gain suffix/value, target lines,
+readout base + duration + muted
+segments, the row-label skeleton, the
+frame-count pair, the summary pair, and
+the health vocabulary (three plain words
++ two `{word}` wrappers via a new
+resolver). One signature was deliberately
+NOT changed: `health_word` has a second
+consumer, `waveform_view::clip_health_
+caption`, with no core in scope, so the
+panel resolves through the catalogue and
+a pin asserts catalogue English ==
+`health_word` for all three states —
+the two vocabularies cannot drift
+silently, and the waveform strip's
+caption stays English until a
+waveform_view slice wires it, stated
+plainly. `effects_settings_line()` stays
+excluded as class-C copy; the English
+summary's non-singularised "1 clips" is
+preserved byte-identically (a locale's
+template may pluralise its own grammar).
+IA-U5-1 files the 21 keys.
+
+**Frame-ops readouts templated (U6).**
+T3's one filed remainder — the dynamic
+readouts — closes with 6 template keys:
+`Sel`/`Loop` in single and range forms
+(four keys, shapes differ), the duration
+value (`{value}×`, the two-decimal
+number still formatted by the one
+helper), and the Insert count composed
+inline in the audio header-count idiom.
+`format_duration` gained `&EditorCore`
+(the T1 helper precedent; no caller
+outside the file). Status sentences and
+notation (the `—` empty marker, `×0.5` /
+`×2`, stepper glyphs) stay as classified.
+IA-U6-1 files the 6 keys (366 × 28
+alone); element keys 41 occurrences /
+25 distinct, multiset identical.
+
+**Particles + segment readouts
+templated (U7).** T20's and T4's
+remainders close together: 21 keys —
+10 `particles_*` (row label, anchor
+summary/detail in their free/figure/
+node shapes, detail title and fused
+summary, pad position, the
+`{count} event(s)` header meta) and 11
+`segment_*` (the topology line composed
+phrase-level from a line template plus
+parent/root/child part keys, the bend
+readout, and `media_label`'s five slot
+states — including a stale-index
+"Sprite: asset {n} (missing)" state the
+code has and T4's findings had not
+itemised). `shape_label`'s values stay
+English per the board's standing
+exclusion (model vocabulary); the
+serialised particle kind names reach
+the detail title only through the
+`{kind}` slot, as data. IA-U7-1 files
+both sub-blocks (381 × 28 alone).
+
+**FX-clips readouts templated (U8).**
+T5's exclusions close: 9 `fx_*` template
+keys — window, readout + hidden suffix,
+the lane count in two full templates
+(word order and agreement inside one
+string per form, not stem + suffix),
+the row anchor, the inspector title /
+summary / seed lines. Kind strings enter
+only as `{kind}` slot values (the
+serialised name in the title, U4's
+display name in the readout); angle and
+length slots take pre-formatted `{:.0}`
+values, the rounding staying in code.
+The pre-existing readout content tests
+now double as the templates' composition
+pins (the T1 precedent). IA-U8-1 files
+the 9 keys (369 × 28 alone); U8's gate
+run on the mid-wave tree read PASS
+10/10, its file's key check included.
+
+**3D readouts templated (U9).** S14's
+remainder was exactly three readout
+functions, and all three are wired with
+6 `threed_*` keys: the no-session line,
+the session summary template with the
+pose-B state word keyed separately
+(`marked` / `not marked`, translated as
+a unit and substituted into the `{state}`
+slot rather than baked into two
+near-duplicate templates), the joint
+position line, and the camera readout.
+No signature changed — all three already
+took `&EditorCore`; S14's 34 label keys
+and 49 sites are byte-untouched (49 →
+55 `threed_*` sites in total). The
+52-character English camera-line pin
+still pins the English extreme, which is
+the locale the headless probes render.
+IA-U9-1 files the 6 keys (366 × 28
+alone).
+
+**Catalogue hygiene audit (U10) —
+OUTSTANDING.** No findings were filed
+by the final check (U17's check,
+earlier in the wave, records the same
+absence), so the dead-key ledger — the
+keys with zero `tr()` call sites,
+`export_centre` the known example,
+accounting for dynamically constructed
+keys before calling any key dead — and
+its IA-U10-1 wire-or-remove text are
+not in hand. Nothing is recorded here
+in its place: the audit, its per-key
+recommendations, and any catalogue
+removals it would cause remain owed,
+and the integration arithmetic below
+excludes it.
+
+**Encode-phase progress: the contract
+boarded, the core hook landed (U11).**
+The audit's headline is plain: **the
+Rune line at this base has no
+export-progress plumbing at all** — no
+callback, channel, event or shared state
+anywhere in the crate — so there was
+nothing to extend. What landed, in
+`src/export.rs` only, is the minimal
+phase-aware core hook: a public
+`EncodeProgressEvent { encoded_frames,
+total_frames, finished }` + callback
+type beside the entries; eight new
+`*_with_encode_progress` entries beside
+the eight untouched existing ones (which
+pass `None` and run the historical
+ffmpeg invocation byte-for-byte); and a
+whole-life drainer thread inside the one
+process runner both encode funnels
+share, reading ffmpeg's `-progress
+pipe:1` stream. The contract, recorded
+on the type: the count is the encoder's
+own output-frame count (only `frame=`
+lines are parsed — never `fps`,
+`out_time_*` or stderr), so render and
+encode phases cannot be conflated; the
+total is the sampled frame count the
+entries already return; intermediate
+events are unfinished, strictly
+increasing, clamped, with counts
+unpinned (wall-clock business); exactly
+one terminal event fires, after ffmpeg
+exits successfully AND the stream drains
+to EOF; a panicking observer loses one
+event and can neither fail the export
+nor kill the drainer (the pipe-fill
+deadlock the whole-life read exists to
+prevent). **`finished` closes the video
+encode only** — an MP4's separate audio
+mux runs afterwards and can still fail
+the export, and no surface may present
+`finished` as success. Five pins cover
+the parser, the drain discipline, both
+funnels' real encodes, and the
+no-terminal-event failure path.
+**IA-U11-1 wires nothing in this wave,
+by specification**: the MCP handler
+type is a bare fn pointer with no
+progress token and no notification sink
+on either transport, so a reply field
+written after the encode would be fake
+progress — the future transport slice's
+mapping onto MCP `notifications/
+progress` is fixed by the contract and
+recorded in u11.md; the panel's wiring
+is likewise specified only as a
+background job over a cloned project
+(a synchronous callback updates state
+the blocked UI thread cannot paint until
+the call returns). No tool description
+changed; census stays 381.
+
+**Scan-fallback headless proof (U12).**
+Constructible after all — the
+divergence T12's remainder named is a
+content-level disagreement between
+Home's two readers, and a real saved
+file produces it once hand-trimmed:
+the scan full-parses through `Project`'s
+serde defaults (every field defaulted,
+expressly so hand-trimmed files still
+load), while the light read hard-requires
+the top-level `figures`/`frames` keys
+present and arrays. A file with its
+`frames` key removed therefore yields a
+scan summary (and T6's `Some(count)`)
+while its light read returns `None` on
+every read — the fallback arm taken
+deterministically, no cache primed, no
+panel state seeded. The scene
+`home-scan-fallback` (34th, appended
+last) seeds exactly as its sibling does
+(real save op + recents follow-up, one
+planted missing-file clip) and then
+trims the saved file's `frames` key in
+place; fact 36 is its text fact (the
+fallback line's discriminator against
+fact 35: no size segment, a defaulted
+frame count of 0), and a unit pin proves
+the row through both readers, the
+composed line byte-equal to `meta_line`.
+**IA-U12-1 was filed after U18's final
+check**, so the pairing is the
+integrator's to land: both tree loops +
+`tree-home-scan-fallback.json` as
+SCAN_SET's 16th required entry + the
+marker grep step (which also asserts
+the "· 0 frames ·" discriminator) in
+ONE push with the scene already in tree
+— U12's own gate run reads 9/10 with
+exactly check 8 failing on the
+registered-but-unlooped scene, the
+expected transient (the S2/S16, T12/T16
+precedent).
+
+**Undo-census extension for Wave T
+(U13).** The audit finds exactly two
+MCP-surface behaviour changes in Wave T
+(T13's discipline applied to its own
+wave): `render`'s jpeg scale routing
+(T7) and `export_bundle`'s
+refuse-before-any-write validation (T8).
+Seven registry-level legs pin both:
+the full and ranged scaled JPEG renders
+at 0 steps with exact reply key sets
+and decoded dims; the scale refusals
+(0, −2.5, the 1e300 f32-overflow) at
+0 steps with the target directory never
+created and `check_export_scale`'s
+sentence asserted verbatim in the tool's
+voice; the valid 2.0 bundle scaling
+only its PNG member (dims doubled,
+jpeg/svg/spritesheet members
+byte-identical); absent == explicit 1.0
+whole-tree; invalid scales refusing
+both bundle kinds before any write; and
+the string scale refusing in the
+helpers' voice — the case that silently
+rendered at 1.0 before Wave T. No
+success-path video-bundle leg, stated
+plainly: it would make the suite depend
+on ffmpeg in CI; the video kind is
+legged on the refusal path, which is
+pure validation.
+
+**Raster determinism on the full
+project (U14).** Three A-B-A legs put
+the whole population through the raster
+funnel at once on the intact
+`new_demo` project (five authored
+frames, 960×720, frame 2): figures,
+weather (rain 40, wind 30), a credited
+two-line cue, a media sprite — at 1.0,
+at 2.0 through the scaled funnel (B =
+the speaker renamed, exercising the
+composed prefix, not just geometry), and
+the two public entries pinned against
+each other at 1.0. Stated plainly in
+u14.md: the demo ships NO bend data, so
+the fixture authors it onto frame 2
+(0.35 rad on every non-root node) — the
+suite proves the bend machinery on
+authored data, nothing about the demo
+itself; four removal witnesses (bends,
+weather, sprites, speaker) prove each
+class actually reaches the rasterizer
+before identity is demanded of it. The
+source audit found no nondeterminism
+evidence (no map iteration, no RNG but
+the seeded `prand` hash, no wall clock,
+no decode cache); FX clips and graph
+channels are absent from the fixture and
+outside the suite's claim.
+
+**Cross-feature e2e, four legs (U15).**
+(1) Scan-vs-light-read missing-audio
+parity over five on-disk fixtures —
+mixed (present + missing + muted-missing:
+the muted clip is the drift witness),
+healthy, silent, keyless (the `audio`
+key removed by JSON surgery), and a
+broken file both readers refuse — counts
+agreeing everywhere, failure verdicts
+included. The reachability limit is
+stated openly in the suite header:
+`read_metadata_counts` lives in the
+binary's home_panel (`rune_sec` is not
+in the library), so the leg performs its
+exact computation from library types;
+the bin-side wiring is pinned by
+home_panel's in-crate tests. (2) The
+scaled JPEG sequence carries the speaker
+burn-in, decoded and measured (S11's
+geometry; the credited extent ≥ 2× the
+uncredited control). (3) Bundle refusal
+atomicity through the real registry —
+four invalid scales, directory never
+created, undo depth 0, scratch dir empty
+after all four. (4) JPEG-sequence 1.0
+byte identity on the subtitled fixture,
+non-vacuous (frame 1 decodes with face
+ink present). No IAs; the scan cache's
+freshness contract is not exercised, by
+design (leg 1 scans each state once —
+the parity question).
+
+**README truth pass 2 (U16).** One
+edit: the export bullet now claims what
+T14 deliberately left unclaimed as
+in-flight — JPEG sequence joins the
+scale list, and the bundle sentence
+lands in the docs row's exact scope
+(PNG sequence member only, other members
+unaffected, invalid scale refuses before
+anything is written). The settled counts
+were re-verified against the tree
+rather than inherited: census 381;
+i18n 360 × 28 with identical sequences
+(a naive first parse reported 361/29 —
+a test-fixture `static PARTIAL` artifact;
+the delimited parse is the count of
+record); scenes 33; 27 FX kinds by name;
+5 weather kinds. T14's four flags are
+carried forward unchanged (below), none
+silently resolved.
+
+**Gate/census maintenance (U17).** No
+script edits — the finding, again, is
+that none were owed: on a clean detached
+worktree at `d39fc10` the gate reads
+PASS 10/10 and the census 16/16, and
+both floors already equal their verified
+counts (`KEY_TOTAL_FLOOR` 980 =
+864 static + 116 dynamic with zero loss
+vs HEAD; `MCP_SURFACE_FLOOR` 381), so
+there was no ratchet to make and none
+was manufactured. The mid-wave live
+recount also read 10/10 with no
+transient — Wave U wiring touches no
+gate-counted surface until the IA
+blocks enter the frozen catalogue.
+U17's pending arithmetic was partial by
+timing (only U6's and U9's blocks filed
+at its final run); the full pending
+total is reconciled in the ledger below.
+Recorded in u17.md: HEAD advanced to
+`b2f948f` during its slice (the
+integrator's S+T round-2 fix) without
+changing any counted surface.
+
+**Overflow/headless maintenance (U18).**
+No edits to either owned file:
+IA-U12-1 had not been filed at U18's
+final check (it landed after), and the
+brief's rule is to change nothing
+without it — SCAN_SET stands at 15
+required / 0 pending with its self-test
+green and the workflow valid YAML.
+U18's second job is the one this
+section's S+T frame rests on: it
+polled the dispatched headless run to
+completion, downloaded the artifacts,
+and read the transcripts directly —
+census FAIL (10 assertions, quoted
+verbatim in u18.md), the marker PASS,
+and its own run of the overflow scanner
+over the run's real trees: CLEAN,
+0 hits, scan set complete. Its remainder
+is filed, not fixed: the census step's
+coordinate/scale contract (2880×1800
+snaps vs point-space tree rects, plus
+the 40 pt seeded/default stage drift)
+belongs to `subtitle_census.py`/scenes
+territory, which no Wave U slice owns —
+until a rostered owner fixes it, every
+pixel leg reads zero and the step keeps
+failing soft behind a green workflow.
+
+**MCP docs sync (U19).** No edit to
+docs/MCP.md, and that is the verified
+result: IA-U11-1 had not been filed at
+U19's final check (it landed after,
+specifying no description change), and
+the in-tree evidence agreed — zero diff
+across `src/mcp*.rs` / `src/shell_tools*.rs`
+in the Wave U tree. The drift sweep
+lifts all 381 source descriptions
+against their catalogue rows: Wave T's
+two changes (the only MCP description
+changes across Waves T and U) are
+script-verified character-identical to
+their rows, including T8's
+refuse-before-write sentence in the
+`export_bundle` row. The sweep also
+counts what is NOT drift: 86 of 381
+rows stand in pre-existing condensed
+form (the `shell_*` family the bulk),
+predating both waves, with no IA
+prescribing replacement — left
+untouched, named here as a possible
+future full-verbatim docs slice. Census
+stays 381; check 9 doc-sync passes.
+
+**Integration ledger — every Integrator
+Action filed across Wave U's findings.**
+(1) **IA-U1-1**: 53 `stroke_*` keys
+(16 templates). (2) **IA-U2-1**: 37
+`clips_*` keys (8 templates). (3)
+**IA-U3-1**: 23 `menu_*` keys (no
+templates). (4) **IA-U4-1**: 27
+`fx_kind_*` keys (no templates); (5)
+**IA-U4-2**: the two exact `kind_label`
+call-site replacements in fx_clips.rs
+(U8's file — discharged by the
+integrator if U8's landed file does not
+already carry the new-arity forms; the
+tree does not compile until one side
+lands them). (6) **IA-U5-1**: 21
+`audio_*` readout keys (12 templates).
+(7) **IA-U6-1**: 6 `frame_*` template
+keys. (8) **IA-U7-1**: 21 keys
+(10 `particles_*` + 11 `segment_*`,
+templates flagged per key in u7.md).
+(9) **IA-U8-1**: 9 `fx_*` template keys,
+inserted after the IA-T5-1 block. (10)
+**IA-U9-1**: 6 `threed_*` keys
+(3 templates + the two state words +
+the no-session line). Items (1)–(4) and
+(6)–(10) total **203 keys**; with all
+nine blocks the catalogue becomes
+**563 × 28** — pending arithmetic,
+labelled as such wherever it appears,
+until the inserted tables are recounted
+(U10's unknown removals, if it ever
+files, would subtract). The count docs
+move to the settled total in the same
+pass, per the standing integration step.
+Until the blocks land, every wired
+panel's pin is red by the Q7 pattern —
+expected. (11) **IA-U11-1**: no
+insertion — the encode-progress wiring
+specification (MCP: do not wire, no
+description change, U19 owes nothing;
+panel: background-job shape only),
+recorded above. (12) **IA-U12-1** (the
+integrator applies, U18's half having
+closed before it filed): both headless
+tree loops + the SCAN_SET entry +
+the marker grep step + the prose
+recount, in ONE push with U12's scene.
+No actions were filed by U13, U14, U15,
+U16, U17, U18 or U19.
+
+**Verification — awaiting CI.** Wave
+U's counts are U17's, verified on a
+clean worktree at `d39fc10` and again
+on the live tree, not taken from
+siblings' claims: gate PASS 10/10,
+census 381 (44 + 319 + 9 + 4 + 5),
+element keys 980, palette 134, icons
+163, i18n **360 × 28** in tree becoming
+**563 × 28** when the nine IA blocks
+land (pending arithmetic; not verified
+from the tree and not a floor). Scenes
+stand at **34** in tree with U12's
+`home-scan-fallback` — and the gate's
+check 8 reads it as registered but in
+no tree loop until IA-U12-1 lands, the
+one known red in the unintegrated tree,
+by design. SCAN_SET stands at 15
+required / 0 pending (16 once
+IA-U12-1 lands). CI — the Wave U
+integration push's Build, Test & Binary
+plus a headless dispatch, transcripts
+read — is the proof of everything
+above, including U11's encode pins
+(which need ffmpeg in CI, as their
+sibling suites already assume) and the
+first execution of every extended pin.
+
+**Honest remainders.** (1) The standing
+user decisions stand exactly as §6.14
+left them — white-on-accent contrast
+(3.14:1), the panel splitter, File-menu
+Save As, the two disagreeing "New
+project" results, `tab_visits_controls`
+OFF, project-swap undo, the skew
+channel, the whole-figure pose
+transform, MCP `write_recovery`, the
+waveform badge/call, S1's seven i18n
+value-vs-label discrepancies (the
+export "Loop range" button and the
+PNG/GIF/MP4/.stk format labels among
+them — neither side changed), the
+subtitle-stack cap/wrap — and this wave
+touched none of them. (2) **The S+T
+build is not yet CI-green**: round 1
+failed on one stale test literal and
+its fix `b2f948f` stands committed but
+unpushed at this writing (ahead of
+origin by one); round 2 is owed before
+anything on that tree is called
+verified. (3) **The subtitle census's
+coordinate contract is unfixed and now
+twice-proven**: snaps at 2× against
+point-space tree rects, plus the 40 pt
+seeded/default stage drift, fail 10
+assertions on the settled S+T tree
+exactly as they silently did on
+42759195547; S2's stage span gate and
+T11's lane pixel floors therefore
+remain **unratified** — their first real
+measurements are zeros produced by the
+misalignment, not by the app — and the
+fix needs a rostered owner for
+`scripts/subtitle_census.py` (and
+possibly the scenes/probe side) before
+the floors can be ratified or honestly
+re-derived. The workflow stays green
+throughout because the step is
+fail-soft; read the transcript, never
+the conclusion. (4) IA-U12-1's pairing
+must land in one push with U12's scene
+or headless and the gate go red by
+design (remainder of record until the
+integration push). (5) IA-U4-2's two
+call sites: the tree does not compile
+against the new `kind_label` until they
+land. (6) U10's hygiene audit is
+outstanding; `export_centre` still has
+no call site, and any other dead keys
+remain unledgered until it files. (7)
+U11's follow-ups are specifications,
+not work: the panel background-job
+wiring and the MCP `notifications/
+progress` transport slice are unboarded;
+render-phase and audio-mux progress are
+out of the contract's scope by design;
+hooked encodes fail on a pre-1.0 ffmpeg
+(the probe-vs-retry decision was
+explicitly not taken). (8) English
+residue by design: the export class-C
+status/recap sentences (machine-read,
+standing exclusion), status sentences
+in every wired panel, the waveform
+strip's health caption (U5), the help
+panel's own section names and shortcut
+table (U3), the open-recent not-found
+sentence (U3), and the serialised
+vocabularies everywhere. (9) GIF import
+stays undecided (the funnel refuses it
+deliberately); a panel export-scale
+control remains unbuilt by design; the
+bundle's JPEG member stays 1.0, so
+whole-bundle scaling is a follow-up if
+the user wants it. (10) T14's flags,
+carried by U16 unchanged: no
+LICENSE/COPYING file in the repo root
+(U16 re-checked — both absent), the
+README's build-from-source framing, and
+the deep feature prose never
+line-audited. (11) docs/MCP.md's 86
+condensed rows stand as the catalogue's
+standing form — a full-verbatim docs
+slice is a possible future wave, not
+drift. (12) §6.14 remainders closed
+here: S14's last two audited panels
+wired in full (U1 stroke_inspector,
+U2 clips_panel); the composed readouts
+§6.14 ¶(8) left standing — segment,
+FX and particles (U7, U8), audio (U5),
+frame_ops (U6), the 3D panel (U9);
+menus.rs's own menu labels (U3); the
+FX display kind names, fx_browser's
+surface since T5 (U4); the README's
+export-scale list, which ¶(7) left
+excluding the JPEG sequence and the
+bundle PNG member (U16); the
+scan-fallback line's missing headless
+proof, T12's named remainder (U12's
+scene, in tree-text form, pending its
+IA pairing); and the encode-phase
+progress contract the Tauri line's
+Wave N left boarded (U11, core side).
+§6.14 ¶(8)'s other items stand: the
+audio `effects_settings_line()` (U5's
+exclusion) and `export_centre` (U10's
+outstanding audit).
+And sound remains user-verified only.
+
+**Integrator's correction (Wave U
+integration).** Two events postdate
+the record above, and this note —
+not a rewrite of it — supersedes the
+points it names. (a) U10 DID complete
+after U20's final check: its audit
+accounts for all 360 keys as 282
+live-direct, 7 live-dynamic, 12 WIRE,
+7 RESERVED and 52 REMOVE. Its
+IA-U10-1 is deferred to Wave V's V11
+per the Wave V board, so none of its
+removals or wirings are in this push
+and the catalogue arithmetic stands
+at 563 × 28 (360 + the 203 Wave U
+keys of IA-U1-1 … IA-U9-1). (b) The
+subtitle-census capture-scale fix and
+the home_panel tuple fix were
+committed and pushed as `b2f948f` +
+`9d7dd0a`; S+T round 2 is build
+42765201236 + headless 42765217055,
+and the census was proven PASS
+locally on run 42764348922's real
+artifacts before that push. (c)
+Accordingly, §6.15's "round 2 owed"
+and "census unfixed" remainders are
+superseded: the round-2 runs exist
+and the census coordinate contract
+is fixed; their verdicts belong to
+the CI record, not to this section's
+remainders.
