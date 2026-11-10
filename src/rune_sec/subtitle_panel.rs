@@ -1460,7 +1460,7 @@ mod tests {
 
     #[test]
     fn palette_is_eight_distinct_colours_with_white_and_black() {
-        let mut sorted = SUBTITLE_PALETTE;
+        let mut sorted: Vec<u32> = SUBTITLE_PALETTE.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), 8, "every swatch colour is distinct");
