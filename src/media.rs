@@ -2414,12 +2414,14 @@ mod tests {
         );
         assert_eq!(items[0].1, [0.0, 0.0, 1.0, 1.0]);
         // Scale 2 about the (offset) centre: both half-extents
-        // double.
+        // double. (Tolerance compare: the funnel's rotation
+        // compose leaves f32 dust on the corners — CI round 4
+        // measured 59.999996 / 50.000008 for the exact 60 / 50.)
         let items = image_items(&project_with_transform([10.0, 0.0], 2.0, 0.0, false));
-        assert_eq!(
-            items[0].0,
-            [[60.0, 50.0], [260.0, 50.0], [260.0, 150.0], [60.0, 150.0]]
-        );
+        let want = [[60.0, 50.0], [260.0, 50.0], [260.0, 150.0], [60.0, 150.0]];
+        for (got, want) in items[0].0.iter().zip(want.iter()) {
+            assert!(close(*got, *want), "scaled corner {got:?} != {want:?}");
+        }
         // Angle 90°: the fitted axes swap — the quad stands
         // across the segment, 50 wide and 100 tall.
         let items = image_items(&project_with_transform([0.0, 0.0], 1.0, 90.0, false));
