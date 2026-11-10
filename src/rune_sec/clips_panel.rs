@@ -47,6 +47,14 @@
 //!   `clear_state_at`) route through the core's state ops
 //!   (`EditorCore::set_state_key` / `remove_state_key`,
 //!   Wave X X2) — one authoring path for panel and MCP.
+//!   Wave Y (Y11) adds the keys' offset/speed steppers
+//!   (`step_state_key` over the pure `state_offset_after`
+//!   / `state_speed_after` clamps): before them a
+//!   non-default key was MCP-only authoring — the panel
+//!   displayed offset/speed but could not create or
+//!   change them, and the strip's replace silently reset
+//!   them — so the steppers restore panel/MCP parity
+//!   through the same `set_state_key` op.
 //! * Per-row "Dup" -> `duplicate_clip` in this module
 //!   (Phase F). The core has NO duplicate/rename movieclip
 //!   op (its clip ops are make/insert/enter/exit/frame-edit/
@@ -941,6 +949,72 @@ pub fn clear_state_at(core: &mut EditorCore, fi: usize, frame: usize) -> bool {
     core.remove_state_key(fi, frame)
 }
 
+/// One offset step from `offset` (Wave Y, Y11): the
+/// panel stepper's pure arithmetic — saturating at 0,
+/// no ceiling (the MCP authoring path is likewise
+/// unbounded; the op validates the rest).
+pub fn state_offset_after(offset: usize, delta: i32) -> usize {
+    if delta >= 0 {
+        offset.saturating_add(delta as usize)
+    } else {
+        offset.saturating_sub(delta.unsigned_abs() as usize)
+    }
+}
+
+/// One speed step from `speed` (Wave Y, Y11): a
+/// quarter-step grid, clamped to [0.25, 4.0] — the
+/// panel's step range. The MCP path stays
+/// unbounded-but-finite and the model sanitises at read
+/// regardless (X1); a stored speed off the grid (an
+/// MCP-authored 1.3) snaps to the grid on the first
+/// step, and one outside the range snaps into it.
+pub fn state_speed_after(speed: f32, steps: i32) -> f32 {
+    let stepped = (speed * 4.0).round() as i32 + steps;
+    (stepped.clamp(1, 16) as f32) / 4.0
+}
+
+/// Step figure `fi`'s state key at `frame` by
+/// `d_offset` frames of clip offset and `d_speed_steps`
+/// speed steps (Wave Y, Y11) — the panel steppers'
+/// write path. The stepped values come from
+/// [`state_offset_after`] / [`state_speed_after`], the
+/// same helpers the buttons' `StepForm`s are computed
+/// from, so a press can never disagree with its button.
+/// No key at the frame → false, no snapshot (stepping
+/// creates nothing; creation is the strip's / MCP's).
+/// Stepped values identical to the stored key (a press
+/// at a clamp) → false, no snapshot. Otherwise ONE
+/// `EditorCore::set_state_key` carrying the key's own
+/// clip with the stepped offset/speed: one snapshot,
+/// the op's rig guard and status line — the MCP
+/// write's exact shape, so panel and MCP stay in
+/// parity. A key whose clip no longer exists refuses
+/// through the op, unchanged.
+pub fn step_state_key(
+    core: &mut EditorCore,
+    fi: usize,
+    frame: usize,
+    d_offset: i32,
+    d_speed_steps: i32,
+) -> bool {
+    let Some(fig) = core.project.figures.get(fi) else {
+        return false;
+    };
+    let Some(key) = fig.states.iter().find(|k| k.frame == frame) else {
+        return false;
+    };
+    let stepped = StateKey {
+        frame,
+        clip: key.clip,
+        offset: state_offset_after(key.offset, d_offset),
+        speed: state_speed_after(key.speed, d_speed_steps),
+    };
+    if stepped.offset == key.offset && stepped.speed == key.speed {
+        return false;
+    }
+    core.set_state_key(fi, stepped)
+}
+
 /// One state key's row label: the plain template, or the
 /// offset/speed template when the key departs from the
 /// defaults (a key authored through MCP with an offset or
@@ -971,6 +1045,14 @@ pub fn state_key_text(core: &EditorCore, key: &StateKey, clip_name: &str) -> Str
 /// `FigureInstance::{clip, states}` + the pool — the section
 /// stores nothing of its own. With no figure at the
 /// selection it renders the bare keyed column.
+///
+/// Wave Y (Y11): each key row is a two-line stack — line 1
+/// is the label + clear row above; line 2 carries the
+/// key's offset and speed steppers ([`step_state_key`]),
+/// the panel half of the panel/MCP parity the MCP tool's
+/// offset/speed args already had. The stack is the
+/// clip_row precedent: one line cannot hold label, clear
+/// and two stepper groups inside the card.
 fn states_section(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let mut section = col().key("clip-states-section").w_full().gap(6.0);
@@ -1006,30 +1088,114 @@ fn states_section(s: &State, t: &Theme) -> El {
         );
     }
     for (key, clip_name) in rows {
+        let kf = key.frame;
+        // The stepper buttons' forms come from the same
+        // stepped-value helpers the write path uses
+        // (the StepForm doctrine): a step that can only
+        // no-op at its clamp renders inert, so a press
+        // there spends no snapshot.
+        let offset_dn_form = if state_offset_after(key.offset, -1) == key.offset {
+            design::StepForm::Noop
+        } else {
+            design::StepForm::Live
+        };
+        let speed_dn_form = if state_speed_after(key.speed, -1) == key.speed {
+            design::StepForm::Noop
+        } else {
+            design::StepForm::Live
+        };
+        let speed_up_form = if state_speed_after(key.speed, 1) == key.speed {
+            design::StepForm::Noop
+        } else {
+            design::StepForm::Live
+        };
         section = section.child(
-            row()
+            col()
                 .key(&format!("clip-state-row-{}", key.frame))
                 .w_full()
-                .gap(8.0)
-                .center_y()
+                .gap(2.0)
                 .child(
-                    text(state_key_text(core, &key, &clip_name))
-                        .font(type_::LABEL)
-                        .color(t.text)
-                        .grow(1.0)
-                        .truncate(),
+                    row()
+                        .w_full()
+                        .gap(8.0)
+                        .center_y()
+                        .child(
+                            text(state_key_text(core, &key, &clip_name))
+                                .font(type_::LABEL)
+                                .color(t.text)
+                                .grow(1.0)
+                                .truncate(),
+                        )
+                        .child(icon_only_btn(
+                            &format!("clip-state-clear-{}", key.frame),
+                            "xmark",
+                            &i18n_wire::tr(core, "clips_states_clear"),
+                            26.0,
+                            false,
+                            t,
+                            move |s: &mut State| {
+                                clear_state_at(&mut s.core, fi, kf);
+                            },
+                        )),
                 )
-                .child(icon_only_btn(
-                    &format!("clip-state-clear-{}", key.frame),
-                    "xmark",
-                    &i18n_wire::tr(core, "clips_states_clear"),
-                    26.0,
-                    false,
-                    t,
-                    move |s: &mut State| {
-                        clear_state_at(&mut s.core, fi, key.frame);
-                    },
-                )),
+                .child(
+                    row()
+                        .w_full()
+                        .gap(6.0)
+                        .center_y()
+                        .flex_wrap()
+                        .child(
+                            text(i18n_wire::tr(core, "clips_states_offset"))
+                                .font(type_::LABEL)
+                                .color(t.text_secondary),
+                        )
+                        .child(design::step_btn(
+                            &format!("clip-state-offset-dn-{kf}"),
+                            "-",
+                            offset_dn_form,
+                            t,
+                            move |s: &mut State| {
+                                step_state_key(&mut s.core, fi, kf, -1, 0);
+                            },
+                        ))
+                        .child(design::stepper_value(&key.offset.to_string(), t))
+                        .child(design::step_btn(
+                            &format!("clip-state-offset-up-{kf}"),
+                            "+",
+                            // No ceiling (state_offset_after
+                            // saturates only at 0), so the up
+                            // step is always live.
+                            design::StepForm::Live,
+                            t,
+                            move |s: &mut State| {
+                                step_state_key(&mut s.core, fi, kf, 1, 0);
+                            },
+                        ))
+                        .child(
+                            text(i18n_wire::tr(core, "clips_states_speed"))
+                                .font(type_::LABEL)
+                                .color(t.text_secondary),
+                        )
+                        .child(design::step_btn(
+                            &format!("clip-state-speed-dn-{kf}"),
+                            "-",
+                            speed_dn_form,
+                            t,
+                            move |s: &mut State| {
+                                step_state_key(&mut s.core, fi, kf, 0, -1);
+                            },
+                        ))
+                        .child(design::stepper_value(&format!("{}", key.speed), t))
+                        .child(design::step_btn(
+                            &format!("clip-state-speed-up-{kf}"),
+                            "+",
+                            speed_up_form,
+                            t,
+                            move |s: &mut State| {
+                                step_state_key(&mut s.core, fi, kf, 0, 1);
+                            },
+                        )),
+                ),
         );
     }
     let strip_label = i18n_wire::tr(core, "clips_states_key_here")
@@ -1679,6 +1845,14 @@ playback_speed: 1.0,
         state.core.make_clip_from_figure();
         let _ = clips_panel(&state, &t);
         update_panel_state(|p| p.select(0));
+        let _ = clips_panel(&state, &t);
+        // A state key with non-default offset/speed:
+        // exercises the states section's key rows with
+        // their stepper line (Wave Y, Y11).
+        assert!(state.core.set_state_key(
+            0,
+            StateKey { frame: 1, clip: 0, offset: 2, speed: 1.5 },
+        ));
         let _ = clips_panel(&state, &t);
         update_panel_state(|p| *p = ClipsPanelState::default());
     }
@@ -2686,6 +2860,67 @@ playback_speed: 1.0,
     }
 
     #[test]
+    fn state_stepped_values_clamp_like_the_write_path() {
+        // Wave Y (Y11): the pure stepper arithmetic the
+        // buttons' forms and the write path share.
+        assert_eq!(state_offset_after(0, -1), 0, "offset saturates at 0");
+        assert_eq!(state_offset_after(3, -1), 2);
+        assert_eq!(state_offset_after(3, 2), 5);
+        assert_eq!(state_speed_after(1.0, 1), 1.25);
+        assert_eq!(state_speed_after(1.0, -1), 0.75);
+        assert_eq!(state_speed_after(0.25, -1), 0.25, "speed floors at 0.25");
+        assert_eq!(state_speed_after(4.0, 1), 4.0, "speed caps at 4.0");
+        // An off-grid MCP-authored speed snaps to the
+        // panel's quarter grid on the first step.
+        assert_eq!(state_speed_after(1.3, 1), 1.5);
+        assert_eq!(state_speed_after(1.3, -1), 1.0);
+    }
+
+    #[test]
+    fn step_state_key_edits_in_one_snapshot_and_noops_at_the_clamps() {
+        // Wave Y (Y11): the steppers' write path — the
+        // panel half of figure_set_state's offset/speed.
+        let mut core = core_with_three_clips();
+        key_state_at(&mut core, 0, 6, 1);
+        // An MCP-authored key: offset/speed off the
+        // defaults (the direct-write shape X3's test
+        // uses for the same fixture).
+        core.project.figures[0].states[0].offset = 3;
+        core.project.figures[0].states[0].speed = 2.0;
+        let depth = core.undo_depth();
+        assert!(step_state_key(&mut core, 0, 6, 1, 0));
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot for the step");
+        let key = core.project.figures[0].states[0];
+        assert_eq!(
+            (key.frame, key.clip, key.offset, key.speed),
+            (6, 1, 4, 2.0),
+            "the step moves only the offset; frame/clip/speed stand"
+        );
+        assert!(step_state_key(&mut core, 0, 6, 0, -2));
+        let key = core.project.figures[0].states[0];
+        assert_eq!(key.speed, 1.5);
+        // Undo restores the stepped key, then the
+        // authored one — the offset/speed the strip's
+        // replace would have destroyed survive stepping.
+        core.undo();
+        core.undo();
+        let key = core.project.figures[0].states[0];
+        assert_eq!((key.offset, key.speed), (3, 2.0));
+        // At the clamp the step is a no-op: no snapshot,
+        // nothing reported as stepped.
+        core.project.figures[0].states[0].offset = 0;
+        let depth = core.undo_depth();
+        assert!(!step_state_key(&mut core, 0, 6, -1, 0));
+        assert_eq!(core.undo_depth(), depth);
+        // No key at the frame / no figure: refusal
+        // without a snapshot, and nothing is created.
+        assert!(!step_state_key(&mut core, 0, 7, 1, 0));
+        assert!(!step_state_key(&mut core, 99, 6, 1, 0));
+        assert_eq!(core.undo_depth(), depth);
+        assert_eq!(core.project.figures[0].states.len(), 1);
+    }
+
+    #[test]
     fn state_key_text_uses_the_plain_template_until_offset_or_speed_depart() {
         let core = core_with_three_clips();
         let plain = StateKey { frame: 2, clip: 0, offset: 0, speed: 1.0 };
@@ -2796,6 +3031,11 @@ playback_speed: 1.0,
             ),
             ("clips_states_key_here", "Key at playhead (frame {frame}):"),
             ("clips_states_clear", "Clear state key"),
+            // Wave Y (IA-Y11-1): the state steppers'
+            // group labels — same Q7 pattern, this pin
+            // passes once the integrator inserts them.
+            ("clips_states_offset", "Offset"),
+            ("clips_states_speed", "Speed"),
             ("clips_prev_frame", "Prev frame"),
             ("clips_next_frame", "Next frame"),
             ("clips_add_frame", "Add frame"),

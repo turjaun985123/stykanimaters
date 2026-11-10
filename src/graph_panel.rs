@@ -160,13 +160,14 @@ impl GraphView {
 }
 
 /// Short human label for a channel target, as used in overlay
-/// legends: "root x", "root y", "angle N", "length N".
+/// legends: "root x", "root y", "angle N", "length N", "bend N".
 fn target_label(target: &ChannelTarget) -> String {
     match target {
         ChannelTarget::RootX => "root x".to_string(),
         ChannelTarget::RootY => "root y".to_string(),
         ChannelTarget::Angle(n) => format!("angle {n}"),
         ChannelTarget::Length(n) => format!("length {n}"),
+        ChannelTarget::Bend(n) => format!("bend {n}"),
     }
 }
 

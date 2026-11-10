@@ -979,7 +979,16 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
         if !visible[fi] {
             continue;
         }
-        let pos = core.positions_f(display, fi);
+        // Wave Y (Y8, P-10): in setup mode the stage
+        // draws the rest pose (rooted at the display
+        // frame's sampled root) — what you see is what
+        // a setup drag edits. The joint handles below
+        // derive from this same `pos`.
+        let pos = if core.setup_mode {
+            core.setup_positions_f(display, fi)
+        } else {
+            core.positions_f(display, fi)
+        };
         // Per-node bends at the display frame (export.rs makes
         // the same per-figure fetch); empty when the project
         // carries no bend data, and every segment then takes
@@ -990,7 +999,25 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
         // unbended, exactly as they were before bends reached
         // the stage (the rasterizer draws no ghosts at all, so
         // there is no exporter ghost behaviour to mirror).
-        let bends = project.bends_at(display, fi);
+        // Wave Y (P-7): with channels present the bends come
+        // from the same `apply_channels` evaluation
+        // `positions_f` runs — its bend rows are seeded from
+        // `bends_at` and overridden by any Bend channel, so a
+        // bend channel shows on the stage; the no-channels
+        // path is `bends_at` verbatim, as before.
+        // Bends are per-frame pose data: a rest pose
+        // draws straight in setup mode (Wave Y, Y8).
+        let bends = if core.setup_mode {
+            Vec::new()
+        } else if project.channels.is_empty() {
+            project.bends_at(display, fi)
+        } else {
+            stykanimate_rs::graph::apply_channels(project, &project.channels, display)
+                .bends
+                .get(fi)
+                .cloned()
+                .unwrap_or_default()
+        };
         // Canvas fade for layer opacity (the rasterizer uses true
         // alpha for segments; the canvas blends toward the bg —
         // the GPUI stage's decision).
@@ -2054,9 +2081,11 @@ mod tests {
             &node.style,
             0xE8E8EC,
         );
-        assert_eq!(pieces.len(), 2);
-        assert_eq!(pieces[0].b, model::bend_mid(pos[parent], pos[ni], 0.5));
-        assert_eq!(pieces[1].a, model::bend_mid(pos[parent], pos[ni], 0.5));
+        // Wave Y (P-7): the bent arc is four pieces; bend_mid
+        // is the middle boundary (pieces[1] -> pieces[2]).
+        assert_eq!(pieces.len(), 4);
+        assert_eq!(pieces[1].b, model::bend_mid(pos[parent], pos[ni], 0.5));
+        assert_eq!(pieces[2].a, model::bend_mid(pos[parent], pos[ni], 0.5));
     }
 
     /// Wave P (P18) — the stage half of the one SETTLED

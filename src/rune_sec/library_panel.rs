@@ -2653,7 +2653,7 @@ mod tests {
         let plain = FigureDef {
             nodes: nodes.clone(),
         };
-        nodes[1].media = Some(model::SegmentMedia::Image { asset: 0 });
+        nodes[1].media = Some(model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
         nodes[2].media = Some(model::SegmentMedia::Text {
             content: "hi".into(),
             size: 12.0,

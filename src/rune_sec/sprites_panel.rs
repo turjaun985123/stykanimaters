@@ -78,6 +78,42 @@
 //!   The selection follows the moved instance via
 //!   [`selected_after_reorder`].
 //!
+//! Wave Y (Y14, SpriteLoop GAP P-6 completion) extends
+//! the edit area to the key's enrichment fields (Wave
+//! X, X9 — `opacity`, `flip_x` / `flip_y`, `scale_y`,
+//! `pivot_x` / `pivot_y`), which until now only the
+//! MCP `sprite_set_key` handler and the .nodes
+//! importer could write. The new steppers, toggles and
+//! the follow-`scale` switch all write through the one
+//! full-key op, in exactly one wrapper each
+//! ([`step_enriched`], [`toggle_flip_selected`],
+//! [`toggle_follow_selected`]):
+//!
+//! - `core.set_sprite_key_full(index: usize, frame:
+//!   usize, key: InstanceKey)` — write a COMPLETE key
+//!   (all eleven fields), one undo step; refusals (no
+//!   such sprite, a non-finite value) spend no
+//!   snapshot.
+//!
+//! The two pre-existing key writes move to the same
+//! op over the same [`base_key`]-built keys: the
+//! scalar `set_sprite_key` authors enrichment
+//! DEFAULTS on a fresh insert, so an Add key (or a
+//! transform step) at a keyless frame between two
+//! enriched keys used to snap the new key's opacity /
+//! flips / pivot to defaults — a visible pop, and not
+//! what the MCP write does (it builds from the
+//! sampled base too). Writing the built key whole
+//! preserves the enrichment by construction: at an
+//! exact key the base IS the stored key (the
+//! `scale_y` follow sentinel survives verbatim); at a
+//! keyless frame the base is the sample, whose
+//! effective values the write materialises — the
+//! transform fields' own upsert rule, now applied to
+//! all eleven. A second readout line,
+//! [`enrichment_readout`], names the enrichment the
+//! first line never mentioned.
+//!
 //! Per the roster, A1's ops take exactly one
 //! `snapshot()` per mutating press and refuse
 //! status-only (no snapshot) on stale indices and bad
@@ -173,6 +209,23 @@ pub const SCALE_STEP: f32 = 0.1;
 pub const SCALE_MIN: f32 = 0.1;
 /// Largest scale a stepper press can write.
 pub const SCALE_MAX: f32 = 8.0;
+
+/// Opacity stepper step (Wave Y, Y14) — the style
+/// inspector's `OPACITY_STEP`, so every opacity
+/// stepper in the shell moves in the same increments.
+pub const OPACITY_STEP: f32 = 0.05;
+/// Pivot stepper step (Wave Y, Y14): the pivot is an
+/// image-relative 0..=1 anchor, so the opacity step
+/// size is the natural increment here too.
+pub const PIVOT_STEP: f32 = 0.05;
+/// Smallest pivot a stepper press can write (the
+/// image's own edge; an imported anchor outside the
+/// image stays legal data — the stepper just cannot
+/// author one, and steps an out-of-range stored
+/// pivot back inside, the scale stepper's edge).
+pub const PIVOT_MIN: f32 = 0.0;
+/// Largest pivot a stepper press can write.
+pub const PIVOT_MAX: f32 = 1.0;
 
 /// How many characters of an asset name a row or
 /// picker label shows before truncating.
@@ -378,6 +431,166 @@ pub fn scale_step_is_noop(scale: f32, dir: i32) -> bool {
     stepped == scale
 }
 
+/// Which enrichment field a stepper press steps
+/// (Wave Y, Y14 — the P-6 fields `stepped_key`'s
+/// four cannot name).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnrichField {
+    Opacity,
+    ScaleY,
+    PivotX,
+    PivotY,
+}
+
+/// Whether `key`'s stored `scale_y` is the
+/// follow-`scale` sentinel — `eff_scale_y`'s own
+/// test (a stored value that is not > 0.0, NaN
+/// included, means the axis follows `scale`). Pure.
+pub fn key_follows_scale(key: &InstanceKey) -> bool {
+    !(key.scale_y > 0.0)
+}
+
+/// `base` with one enrichment field stepped by
+/// `dir` (−1/+1) and its frame set to `frame`: the
+/// full-key twin of [`stepped_key`], written whole
+/// via `set_sprite_key_full` so every other field —
+/// enrichment included — carries over untouched.
+/// Opacity steps [`OPACITY_STEP`] clamped to the
+/// model's 0..=1 range and rounded to whole percents
+/// (the style inspector's `opacity_stepped`, so
+/// repeated steps never accumulate float dust);
+/// ScaleY steps the EFFECTIVE value
+/// (`eff_scale_y()`) by [`SCALE_STEP`] clamped to
+/// [`SCALE_MIN`]..=[`SCALE_MAX`] and stores the
+/// explicit result — stepping a follow-`scale` key
+/// materialises the axis at the stepped value; the
+/// pivots step [`PIVOT_STEP`] clamped to
+/// [`PIVOT_MIN`]..=[`PIVOT_MAX`] and rounded to two
+/// decimals like opacity. Pure.
+pub fn stepped_enrich_key(
+    base: InstanceKey,
+    frame: f32,
+    field: EnrichField,
+    dir: i32,
+) -> InstanceKey {
+    let mut key = InstanceKey { frame, ..base };
+    match field {
+        EnrichField::Opacity => {
+            let stepped = base.opacity + dir as f32 * OPACITY_STEP;
+            key.opacity = (stepped.clamp(0.0, 1.0) * 100.0).round() / 100.0;
+        }
+        EnrichField::ScaleY => {
+            key.scale_y = (base.eff_scale_y() + dir as f32 * SCALE_STEP)
+                .clamp(SCALE_MIN, SCALE_MAX);
+        }
+        EnrichField::PivotX => {
+            let stepped = base.pivot_x + dir as f32 * PIVOT_STEP;
+            key.pivot_x = (stepped.clamp(PIVOT_MIN, PIVOT_MAX) * 100.0).round() / 100.0;
+        }
+        EnrichField::PivotY => {
+            let stepped = base.pivot_y + dir as f32 * PIVOT_STEP;
+            key.pivot_y = (stepped.clamp(PIVOT_MIN, PIVOT_MAX) * 100.0).round() / 100.0;
+        }
+    }
+    key
+}
+
+/// Whether one enrichment step from `key` in `dir`
+/// cannot change the value it steps, so the button
+/// renders inert — [`scale_step_is_noop`]'s rule per
+/// field, judged on the value the step acts on:
+/// ScaleY is judged on the EFFECTIVE value (a
+/// follow-`scale` key whose axis already sits at the
+/// clamp the step pushes against cannot move, so
+/// the press cannot happen — the sentinel is only
+/// ever materialised by a step that moves it). An
+/// out-of-range stored value is NOT a no-op in
+/// either direction — each step clamps it back
+/// inside the range, a real change. Pure.
+pub fn enrich_step_is_noop(key: &InstanceKey, field: EnrichField, dir: i32) -> bool {
+    let stepped = stepped_enrich_key(*key, key.frame, field, dir);
+    match field {
+        EnrichField::Opacity => stepped.opacity == key.opacity,
+        EnrichField::ScaleY => stepped.eff_scale_y() == key.eff_scale_y(),
+        EnrichField::PivotX => stepped.pivot_x == key.pivot_x,
+        EnrichField::PivotY => stepped.pivot_y == key.pivot_y,
+    }
+}
+
+/// Which axis a flip toggle flips (Wave Y, Y14).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlipAxis {
+    X,
+    Y,
+}
+
+/// `base` with one flip axis toggled and its frame
+/// set to `frame`: the other axis and every other
+/// field carry over untouched. Pure.
+pub fn flipped_key(base: InstanceKey, frame: f32, axis: FlipAxis) -> InstanceKey {
+    let mut key = InstanceKey { frame, ..base };
+    match axis {
+        FlipAxis::X => key.flip_x = !base.flip_x,
+        FlipAxis::Y => key.flip_y = !base.flip_y,
+    }
+    key
+}
+
+/// `base` with its follow-`scale` state toggled and
+/// its frame set to `frame`: a following key stores
+/// its current effective `scale_y` explicitly (the
+/// axis freezes at the value it draws today); an
+/// explicit key stores the 0.0 sentinel (the axis
+/// rejoins `scale`). Every other field carries over
+/// untouched. Pure.
+pub fn follow_toggled_key(base: InstanceKey, frame: f32) -> InstanceKey {
+    let mut key = InstanceKey { frame, ..base };
+    key.scale_y = if key_follows_scale(&base) {
+        base.eff_scale_y()
+    } else {
+        0.0
+    };
+    key
+}
+
+/// % readout for an opacity value (the style
+/// inspector's `opacity_text` shape: `100%`, `55%`,
+/// `5%`). Pure.
+pub fn opacity_value(opacity: f32) -> String {
+    format!("{}%", (opacity * 100.0).round() as i32)
+}
+
+/// The edit area's enrichment readout line for
+/// `key` (Wave Y, Y14): the P-6 fields
+/// [`transform_readout`] never named, in stepper
+/// order — opacity as a percent, the flips, the
+/// EFFECTIVE scale_y (with "(follows Scale)" exactly
+/// while the stored field is the sentinel), and the
+/// pivot. Pure — the builder and the dopesheet lane
+/// render this string verbatim, so the wording is
+/// pinned here, once, for both surfaces.
+pub fn enrichment_readout(key: &InstanceKey) -> String {
+    let flip = match (key.flip_x, key.flip_y) {
+        (true, true) => "X+Y",
+        (true, false) => "X",
+        (false, true) => "Y",
+        (false, false) => "none",
+    };
+    let scale_y = if key_follows_scale(key) {
+        format!("×{:.2} (follows Scale)", key.eff_scale_y())
+    } else {
+        format!("×{:.2}", key.eff_scale_y())
+    };
+    format!(
+        "Opacity {} · Flip {} · Scale Y {} · Pivot {:.2}, {:.2}",
+        opacity_value(key.opacity),
+        flip,
+        scale_y,
+        key.pivot_x,
+        key.pivot_y
+    )
+}
+
 /// Where a remembered `selected` index points after
 /// the instance at `removed` is deleted: the
 /// selected instance itself is gone (`None`); an
@@ -533,11 +746,14 @@ fn selected_index(s: &mut State) -> Option<usize> {
 
 /// Stepper handler: step one field of the selected
 /// instance's transform at the current frame, via
-/// A1's `set_sprite_key` upsert. The value written
-/// is [`stepped_key`] over [`base_key`], so a press
-/// at a keyless frame authors the key there. A stale
-/// selection refuses here ("No such sprite.") before
-/// any op is called.
+/// the full-key upsert (`set_sprite_key_full` — Wave
+/// Y, Y14; see the module docs for why the panel
+/// writes whole keys). The value written is
+/// [`stepped_key`] over [`base_key`], so a press at
+/// a keyless frame authors the key there, carrying
+/// the sampled enrichment instead of snapping it to
+/// defaults. A stale selection refuses here ("No
+/// such sprite.") before any op is called.
 fn step_selected(s: &mut State, field: SpriteField, dir: i32) {
     let Some(i) = selected_index(s) else {
         return;
@@ -548,15 +764,76 @@ fn step_selected(s: &mut State, field: SpriteField, dir: i32) {
         return;
     };
     let key = stepped_key(base_key(&s.core, &inst, frame), frame, field, dir);
-    s.core.set_sprite_key(i, key.frame as usize, key.x, key.y, key.scale, key.angle);
+    s.core.set_sprite_key_full(i, key.frame as usize, key);
+}
+
+/// Enrichment stepper handler (Wave Y, Y14): step
+/// one P-6 field of the selected instance's key at
+/// the current frame, via `set_sprite_key_full`.
+/// The value written is [`stepped_enrich_key`] over
+/// [`base_key`] — the whole key, so the transform
+/// and the unstepped enrichment carry over exactly.
+/// Same refusal shape as [`step_selected`].
+fn step_enriched(s: &mut State, field: EnrichField, dir: i32) {
+    let Some(i) = selected_index(s) else {
+        return;
+    };
+    let frame = current_frame(&s.core);
+    let Some(inst) = s.core.project.sprites.get(i).cloned() else {
+        s.core.status = "No such sprite.".into();
+        return;
+    };
+    let key = stepped_enrich_key(base_key(&s.core, &inst, frame), frame, field, dir);
+    s.core.set_sprite_key_full(i, key.frame as usize, key);
+}
+
+/// Flip toggle handler (Wave Y, Y14): toggle one
+/// flip axis of the selected instance's key at the
+/// current frame, via `set_sprite_key_full` over
+/// [`flipped_key`] — one undo step, the other axis
+/// and every other field untouched. Same refusal
+/// shape as [`step_selected`].
+fn toggle_flip_selected(s: &mut State, axis: FlipAxis) {
+    let Some(i) = selected_index(s) else {
+        return;
+    };
+    let frame = current_frame(&s.core);
+    let Some(inst) = s.core.project.sprites.get(i).cloned() else {
+        s.core.status = "No such sprite.".into();
+        return;
+    };
+    let key = flipped_key(base_key(&s.core, &inst, frame), frame, axis);
+    s.core.set_sprite_key_full(i, key.frame as usize, key);
+}
+
+/// Follow-`scale` toggle handler (Wave Y, Y14):
+/// switch the selected instance's key at the
+/// current frame between an explicit `scale_y` and
+/// the follow sentinel, via `set_sprite_key_full`
+/// over [`follow_toggled_key`] — one undo step.
+/// Same refusal shape as [`step_selected`].
+fn toggle_follow_selected(s: &mut State) {
+    let Some(i) = selected_index(s) else {
+        return;
+    };
+    let frame = current_frame(&s.core);
+    let Some(inst) = s.core.project.sprites.get(i).cloned() else {
+        s.core.status = "No such sprite.".into();
+        return;
+    };
+    let key = follow_toggled_key(base_key(&s.core, &inst, frame), frame);
+    s.core.set_sprite_key_full(i, key.frame as usize, key);
 }
 
 /// "Add key" handler: author a key at the current
-/// frame holding the sampled transform unchanged,
-/// via A1's `set_sprite_key`. When a key already
-/// exists at this frame the press refuses here —
-/// the sampled value IS that key, so the write
-/// would only mint a phantom undo step.
+/// frame holding the sampled transform unchanged —
+/// all eleven fields of it (Wave Y, Y14: the write
+/// is the full-key upsert over [`base_key`], so the
+/// sampled enrichment is authored too, not the
+/// defaults the scalar op inserts). When a key
+/// already exists at this frame the press refuses
+/// here — the sampled value IS that key, so the
+/// write would only mint a phantom undo step.
 fn add_key_selected(s: &mut State) {
     let Some(i) = selected_index(s) else {
         return;
@@ -571,7 +848,7 @@ fn add_key_selected(s: &mut State) {
         return;
     }
     let key = base_key(&s.core, &inst, frame);
-    s.core.set_sprite_key(i, key.frame as usize, key.x, key.y, key.scale, key.angle);
+    s.core.set_sprite_key_full(i, key.frame as usize, key);
 }
 
 /// "Delete key" handler: remove the selected
@@ -683,6 +960,43 @@ fn stepper_row(
         }))
 }
 
+/// One enrichment stepper row (Wave Y, Y14):
+/// [`stepper_row`]'s shape — label, − button, value
+/// readout, + button — over an [`EnrichField`],
+/// pressing through [`step_enriched`].
+fn enrich_stepper_row(
+    row_key: &str,
+    label: &str,
+    dn_key: &str,
+    dn_label: &str,
+    up_key: &str,
+    up_label: &str,
+    value: &str,
+    field: EnrichField,
+    live: bool,
+    noop_dn: bool,
+    noop_up: bool,
+    t: &Theme,
+) -> El {
+    row()
+        .key(row_key)
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(
+            text(label)
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        .child(step_btn(dn_key, dn_label, live, noop_dn, t, move |s: &mut State| {
+            step_enriched(s, field, -1)
+        }))
+        .child(design::stepper_value(value, t))
+        .child(step_btn(up_key, up_label, live, noop_up, t, move |s: &mut State| {
+            step_enriched(s, field, 1)
+        }))
+}
+
 /// The Sprites section: the placed instances (select
 /// + delete), the add-from-assets picker, and the
 /// selected instance's transform steppers + key
@@ -783,6 +1097,16 @@ pub fn sprites_panel(s: &State, t: &Theme) -> El {
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         );
+        // The enrichment line (Wave Y, Y14): the P-6
+        // fields the transform line never named, in
+        // the one wording both this panel and the
+        // dopesheet lane render.
+        edit = edit.child(
+            text(enrichment_readout(&key))
+                .key("sprite-enrich-readout")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
     }
     let (x_val, y_val, rot_val, scale_val) = match base {
         Some(k) => (
@@ -800,6 +1124,47 @@ pub fn sprites_panel(s: &State, t: &Theme) -> El {
     };
     let scale_noop_dn = base.map_or(false, |k| scale_step_is_noop(k.scale, -1));
     let scale_noop_up = base.map_or(false, |k| scale_step_is_noop(k.scale, 1));
+
+    // The enrichment rows' values and clamp states
+    // (Wave Y, Y14): Scale Y reads its EFFECTIVE
+    // value (what the passes draw), the flips and
+    // the follow state ride the toggle buttons'
+    // selected marks below.
+    let (opacity_val, scaley_val, pivotx_val, pivoty_val) = match base {
+        Some(k) => (
+            opacity_value(k.opacity),
+            format!("×{:.2}", k.eff_scale_y()),
+            format!("{:.2}", k.pivot_x),
+            format!("{:.2}", k.pivot_y),
+        ),
+        None => (
+            "—".to_string(),
+            "—".to_string(),
+            "—".to_string(),
+            "—".to_string(),
+        ),
+    };
+    let opacity_noop_dn =
+        base.map_or(false, |k| enrich_step_is_noop(&k, EnrichField::Opacity, -1));
+    let opacity_noop_up =
+        base.map_or(false, |k| enrich_step_is_noop(&k, EnrichField::Opacity, 1));
+    let scaley_noop_dn =
+        base.map_or(false, |k| enrich_step_is_noop(&k, EnrichField::ScaleY, -1));
+    let scaley_noop_up =
+        base.map_or(false, |k| enrich_step_is_noop(&k, EnrichField::ScaleY, 1));
+    let pivotx_noop_dn =
+        base.map_or(false, |k| enrich_step_is_noop(&k, EnrichField::PivotX, -1));
+    let pivotx_noop_up =
+        base.map_or(false, |k| enrich_step_is_noop(&k, EnrichField::PivotX, 1));
+    let pivoty_noop_dn =
+        base.map_or(false, |k| enrich_step_is_noop(&k, EnrichField::PivotY, -1));
+    let pivoty_noop_up =
+        base.map_or(false, |k| enrich_step_is_noop(&k, EnrichField::PivotY, 1));
+    let (flip_x_on, flip_y_on) = match base {
+        Some(k) => (k.flip_x, k.flip_y),
+        None => (false, false),
+    };
+    let following = base.map_or(false, |k| key_follows_scale(&k));
 
     // The selected instance's asset picker (Wave X,
     // X5): one button per asset — the Add picker's
@@ -848,11 +1213,29 @@ pub fn sprites_panel(s: &State, t: &Theme) -> El {
     };
     let at_back = matches!(selected_row, Some(r) if r.index == 0);
     let at_front = matches!(selected_row, Some(r) if r.index + 1 == rows.len());
+    // The row wraps (Wave Y, Y14 — an overflow repair,
+    // Y15's citation audit): on one line the four
+    // children measure 330 pt against the card's
+    // 316 pt content width (tree-default.json on the
+    // Wave X integration dispatch: label 64 + "Send
+    // backward" 109.5 + value 34 + "Bring forward"
+    // 98.5 + 3 gaps of 8), so `sprite-z-front` ended
+    // at right edge 1426.0 — +14.0 pt past the 1412.5
+    // edge, its inner element +4.0 — in every dump
+    // whose edit area renders (40 scan hits, one
+    // family). The row already carries `.w_full()`,
+    // the bounded width wrap needs to engage (the
+    // O-1 lesson), so `.flex_wrap()` moves "Bring
+    // forward" to a second line at the row's left
+    // (right edge 1096 + 98.5 = 1194.5, inside);
+    // keys, labels, handlers and the inert-at-edge
+    // discipline are unchanged.
     let z_row = row()
         .key("sprite-z-row")
         .w_full()
         .gap(8.0)
         .center_y()
+        .flex_wrap()
         .child(
             text("Draw order")
                 .font(type_::LABEL)
@@ -876,6 +1259,85 @@ pub fn sprites_panel(s: &State, t: &Theme) -> El {
             |s: &mut State| move_selected(s, 1),
         ));
 
+    // The follow-Scale toggle (Wave Y, Y14): one
+    // button whose selected mark IS the base key's
+    // follow state (the asset picker's current-asset
+    // idiom); a press stores the other state — the
+    // sentinel, or today's effective value explicitly.
+    // Muted-live with nothing selected, like every
+    // edit-area control.
+    let follow_row = row()
+        .key("sprite-follow-row")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(if edit_live {
+            btn(
+                "sprite-scaley-follow",
+                "Scale Y follows Scale",
+                following,
+                t,
+                |s: &mut State| toggle_follow_selected(s),
+            )
+        } else {
+            btn_muted_live(
+                "sprite-scaley-follow",
+                "Scale Y follows Scale",
+                false,
+                t,
+                |s: &mut State| toggle_follow_selected(s),
+            )
+        });
+
+    // The flip toggles (Wave Y, Y14): one button per
+    // axis, each carrying the base key's flip on that
+    // axis as its selected mark; a press toggles that
+    // axis only. Muted-live with nothing selected.
+    let flip_row = row()
+        .key("sprite-flip-row")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(
+            text("Flip")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        .child(if edit_live {
+            btn(
+                "sprite-flip-x",
+                "Flip X",
+                flip_x_on,
+                t,
+                |s: &mut State| toggle_flip_selected(s, FlipAxis::X),
+            )
+        } else {
+            btn_muted_live(
+                "sprite-flip-x",
+                "Flip X",
+                false,
+                t,
+                |s: &mut State| toggle_flip_selected(s, FlipAxis::X),
+            )
+        })
+        .child(if edit_live {
+            btn(
+                "sprite-flip-y",
+                "Flip Y",
+                flip_y_on,
+                t,
+                |s: &mut State| toggle_flip_selected(s, FlipAxis::Y),
+            )
+        } else {
+            btn_muted_live(
+                "sprite-flip-y",
+                "Flip Y",
+                false,
+                t,
+                |s: &mut State| toggle_flip_selected(s, FlipAxis::Y),
+            )
+        });
+
     edit = edit
         .child(stepper_row(
             "sprite-x-row", "X",
@@ -896,6 +1358,28 @@ pub fn sprites_panel(s: &State, t: &Theme) -> El {
             "sprite-scale-row", "Scale",
             "sprite-scale-dn", "Scale −", "sprite-scale-up", "Scale +",
             &scale_val, SpriteField::Scale, edit_live, scale_noop_dn, scale_noop_up, t,
+        ))
+        .child(enrich_stepper_row(
+            "sprite-opacity-row", "Opacity",
+            "sprite-opacity-dn", "Opacity −", "sprite-opacity-up", "Opacity +",
+            &opacity_val, EnrichField::Opacity, edit_live, opacity_noop_dn, opacity_noop_up, t,
+        ))
+        .child(enrich_stepper_row(
+            "sprite-scaley-row", "Scale Y",
+            "sprite-scaley-dn", "Scale Y −", "sprite-scaley-up", "Scale Y +",
+            &scaley_val, EnrichField::ScaleY, edit_live, scaley_noop_dn, scaley_noop_up, t,
+        ))
+        .child(follow_row)
+        .child(flip_row)
+        .child(enrich_stepper_row(
+            "sprite-pivotx-row", "Pivot X",
+            "sprite-pivotx-dn", "Pivot X −", "sprite-pivotx-up", "Pivot X +",
+            &pivotx_val, EnrichField::PivotX, edit_live, pivotx_noop_dn, pivotx_noop_up, t,
+        ))
+        .child(enrich_stepper_row(
+            "sprite-pivoty-row", "Pivot Y",
+            "sprite-pivoty-dn", "Pivot Y −", "sprite-pivoty-up", "Pivot Y +",
+            &pivoty_val, EnrichField::PivotY, edit_live, pivoty_noop_dn, pivoty_noop_up, t,
         ))
         .child(
             row()
@@ -1028,6 +1512,26 @@ mod tests {
     fn assert_key_opt(actual: Option<InstanceKey>, expected: InstanceKey) {
         let actual = actual.expect("expected a key");
         assert_key(actual, expected);
+    }
+
+    /// Enrichment-field equality for a key (Wave Y,
+    /// Y14): the six P-6 fields [`assert_key`] does
+    /// not compare.
+    fn assert_enrichment(
+        actual: InstanceKey,
+        opacity: f32,
+        flip_x: bool,
+        flip_y: bool,
+        scale_y: f32,
+        pivot_x: f32,
+        pivot_y: f32,
+    ) {
+        assert_eq!(actual.opacity, opacity, "opacity");
+        assert_eq!(actual.flip_x, flip_x, "flip_x");
+        assert_eq!(actual.flip_y, flip_y, "flip_y");
+        assert_eq!(actual.scale_y, scale_y, "scale_y");
+        assert_eq!(actual.pivot_x, pivot_x, "pivot_x");
+        assert_eq!(actual.pivot_y, pivot_y, "pivot_y");
     }
 
     #[test]
@@ -1190,6 +1694,148 @@ mod tests {
     }
 
     #[test]
+    fn stepped_enrich_key_steps_each_field_and_reframes() {
+        // Wave Y (Y14): the enrichment stepper math.
+        let mut base = key(0.0, 100.0, 200.0, 2.0, 30.0);
+        base.opacity = 0.5;
+        base.scale_y = 1.0;
+        base.pivot_x = 0.25;
+        base.pivot_y = 0.75;
+        let stepped = stepped_enrich_key(base, 5.0, EnrichField::Opacity, 1);
+        assert_eq!(stepped.frame, 5.0, "the write is re-framed");
+        assert_eq!(stepped.opacity, 0.55);
+        assert_enrichment(stepped, 0.55, false, false, 1.0, 0.25, 0.75);
+        assert_key(stepped, key(5.0, 100.0, 200.0, 2.0, 30.0));
+        assert_eq!(
+            stepped_enrich_key(base, 5.0, EnrichField::ScaleY, -1).scale_y,
+            0.9,
+            "an explicit scale_y steps its own value"
+        );
+        assert_eq!(
+            stepped_enrich_key(base, 5.0, EnrichField::PivotX, 1).pivot_x,
+            0.3
+        );
+        assert_eq!(
+            stepped_enrich_key(base, 5.0, EnrichField::PivotY, -1).pivot_y,
+            0.7
+        );
+        // Repeated opacity steps land on whole
+        // percents, never float dust.
+        let mut k = base;
+        for _ in 0..4 {
+            k = stepped_enrich_key(k, 0.0, EnrichField::Opacity, 1);
+        }
+        assert_eq!(k.opacity, 0.7);
+    }
+
+    #[test]
+    fn stepped_enrich_key_materialises_a_following_scale_y_only_when_it_moves() {
+        // A follow-`scale` key (sentinel 0.0, scale
+        // 2.0): stepping Scale Y stores the stepped
+        // EFFECTIVE value explicitly.
+        let base = key(0.0, 0.0, 0.0, 2.0, 0.0);
+        assert!(key_follows_scale(&base));
+        assert_eq!(
+            stepped_enrich_key(base, 0.0, EnrichField::ScaleY, 1).scale_y,
+            2.1
+        );
+        assert_eq!(
+            stepped_enrich_key(base, 0.0, EnrichField::ScaleY, -1).scale_y,
+            1.9
+        );
+        // At the effective cap the step cannot move
+        // the axis, so it is a no-op and the button
+        // renders inert — the sentinel is NOT silently
+        // materialised by a press that changes nothing.
+        let capped = key(0.0, 0.0, 0.0, SCALE_MAX, 0.0);
+        assert!(enrich_step_is_noop(&capped, EnrichField::ScaleY, 1));
+        assert!(!enrich_step_is_noop(&capped, EnrichField::ScaleY, -1));
+    }
+
+    #[test]
+    fn enrich_step_is_noop_only_at_the_clamp_it_pushes_against() {
+        let mut k = key(0.0, 0.0, 0.0, 1.0, 0.0);
+        k.opacity = 1.0;
+        assert!(enrich_step_is_noop(&k, EnrichField::Opacity, 1));
+        assert!(!enrich_step_is_noop(&k, EnrichField::Opacity, -1));
+        k.opacity = 0.0;
+        assert!(enrich_step_is_noop(&k, EnrichField::Opacity, -1));
+        k.pivot_x = 0.0;
+        assert!(enrich_step_is_noop(&k, EnrichField::PivotX, -1));
+        assert!(!enrich_step_is_noop(&k, EnrichField::PivotX, 1));
+        k.pivot_y = 1.0;
+        assert!(enrich_step_is_noop(&k, EnrichField::PivotY, 1));
+        // An out-of-range stored pivot (the MCP write
+        // allows any finite anchor) steps back inside
+        // — a real change, never a no-op.
+        k.pivot_y = 1.5;
+        assert!(!enrich_step_is_noop(&k, EnrichField::PivotY, -1));
+        assert_eq!(
+            stepped_enrich_key(k, 0.0, EnrichField::PivotY, -1).pivot_y,
+            PIVOT_MAX
+        );
+    }
+
+    #[test]
+    fn flipped_key_toggles_one_axis_only() {
+        let mut base = key(0.0, 100.0, 200.0, 1.0, 30.0);
+        base.opacity = 0.5;
+        let fx = flipped_key(base, 3.0, FlipAxis::X);
+        assert_enrichment(fx, 0.5, true, false, 0.0, 0.5, 0.5);
+        assert_eq!(fx.frame, 3.0);
+        let fy = flipped_key(fx, 3.0, FlipAxis::Y);
+        assert_enrichment(fy, 0.5, true, true, 0.0, 0.5, 0.5);
+        let back = flipped_key(fy, 3.0, FlipAxis::X);
+        assert_enrichment(back, 0.5, false, true, 0.0, 0.5, 0.5);
+    }
+
+    #[test]
+    fn follow_toggled_key_swaps_the_sentinel_for_the_effective_value() {
+        // Following (scale 2.0, sentinel): the toggle
+        // freezes the axis at today's effective value.
+        let following = key(0.0, 0.0, 0.0, 2.0, 0.0);
+        let frozen = follow_toggled_key(following, 1.0);
+        assert_eq!(frozen.scale_y, 2.0);
+        assert!(!key_follows_scale(&frozen));
+        // Explicit: the toggle rejoins `scale`.
+        let rejoined = follow_toggled_key(frozen, 1.0);
+        assert_eq!(rejoined.scale_y, 0.0);
+        assert!(key_follows_scale(&rejoined));
+        assert_eq!(rejoined.frame, 1.0);
+    }
+
+    #[test]
+    fn enrichment_readout_names_every_p6_field() {
+        let plain = key(2.0, 480.0, 360.0, 1.5, 45.0);
+        assert_eq!(
+            enrichment_readout(&plain),
+            "Opacity 100% · Flip none · Scale Y ×1.50 (follows Scale) · Pivot 0.50, 0.50"
+        );
+        let mut rich = key(2.0, 480.0, 360.0, 2.0, 45.0);
+        rich.opacity = 0.5;
+        rich.flip_x = true;
+        rich.scale_y = 1.0;
+        rich.pivot_x = 0.25;
+        rich.pivot_y = 0.75;
+        assert_eq!(
+            enrichment_readout(&rich),
+            "Opacity 50% · Flip X · Scale Y ×1.00 · Pivot 0.25, 0.75"
+        );
+        rich.flip_y = true;
+        assert!(enrichment_readout(&rich).contains("Flip X+Y"));
+        rich.flip_x = false;
+        assert!(enrichment_readout(&rich).contains("Flip Y ·"));
+    }
+
+    #[test]
+    fn opacity_value_is_a_whole_percent() {
+        assert_eq!(opacity_value(1.0), "100%");
+        assert_eq!(opacity_value(0.55), "55%");
+        assert_eq!(opacity_value(0.05), "5%");
+        assert_eq!(opacity_value(0.0), "0%");
+    }
+
+    #[test]
     fn current_frame_is_the_authored_frame() {
         let mut core = EditorCore::new();
         core.current = 7;
@@ -1287,6 +1933,136 @@ mod tests {
             exact_key(inst, 2.0).map(|k| k.angle),
             Some(-ROT_STEP_DEG)
         );
+    }
+
+    #[test]
+    fn step_enriched_writes_the_whole_key_in_one_undo_step() {
+        // Wave Y (Y14): an enrichment step on an exact
+        // enriched key steps its field and preserves
+        // every other field, enrichment included.
+        let mut s = crate::init();
+        s.core = core_with(&["a.png"], &[(0, 1)]);
+        {
+            let k = &mut s.core.project.sprites[0].keys[0];
+            k.opacity = 0.5;
+            k.flip_y = true;
+            k.scale_y = 2.0;
+            k.pivot_x = 0.25;
+            k.pivot_y = 0.75;
+        }
+        s.sprites_panel.selected = Some(0);
+        let depth_before = s.core.undo_depth();
+        step_enriched(&mut s, EnrichField::Opacity, 1);
+        let written = exact_key(&s.core.project.sprites[0], 0.0).expect("the key");
+        assert_enrichment(written, 0.55, false, true, 2.0, 0.25, 0.75);
+        assert_eq!(
+            s.core.undo_depth(),
+            depth_before + 1,
+            "one press is exactly one undo step"
+        );
+        s.core.undo();
+        let restored = exact_key(&s.core.project.sprites[0], 0.0).expect("the key");
+        assert_eq!(restored.opacity, 0.5, "one undo restores the pre-step key");
+    }
+
+    #[test]
+    fn enrichment_handlers_refuse_with_nothing_selected() {
+        let mut s = crate::init();
+        s.core = core_with(&["a.png"], &[(0, 1)]);
+        let depth_before = s.core.undo_depth();
+        step_enriched(&mut s, EnrichField::PivotX, 1);
+        assert_eq!(s.core.status, "Select a sprite first.");
+        toggle_flip_selected(&mut s, FlipAxis::X);
+        assert_eq!(s.core.status, "Select a sprite first.");
+        toggle_follow_selected(&mut s);
+        assert_eq!(s.core.status, "Select a sprite first.");
+        assert_eq!(s.core.undo_depth(), depth_before, "refusals snapshot nothing");
+        assert_enrichment(
+            s.core.project.sprites[0].keys[0],
+            1.0, false, false, 0.0, 0.5, 0.5,
+        );
+    }
+
+    #[test]
+    fn toggle_flip_selected_flips_one_axis_per_press() {
+        let mut s = crate::init();
+        s.core = core_with(&["a.png"], &[(0, 1)]);
+        s.sprites_panel.selected = Some(0);
+        let depth_before = s.core.undo_depth();
+        toggle_flip_selected(&mut s, FlipAxis::X);
+        assert_enrichment(
+            exact_key(&s.core.project.sprites[0], 0.0).expect("the key"),
+            1.0, true, false, 0.0, 0.5, 0.5,
+        );
+        assert_eq!(s.core.undo_depth(), depth_before + 1);
+        toggle_flip_selected(&mut s, FlipAxis::X);
+        assert_enrichment(
+            exact_key(&s.core.project.sprites[0], 0.0).expect("the key"),
+            1.0, false, false, 0.0, 0.5, 0.5,
+        );
+    }
+
+    #[test]
+    fn toggle_follow_selected_authors_and_clears_the_sentinel() {
+        let mut s = crate::init();
+        s.core = core_with(&["a.png"], &[(0, 1)]);
+        // The fixture key follows its scale (1.0).
+        s.sprites_panel.selected = Some(0);
+        toggle_follow_selected(&mut s);
+        let frozen = exact_key(&s.core.project.sprites[0], 0.0).expect("the key");
+        assert_eq!(frozen.scale_y, 1.0, "the axis froze at its effective value");
+        toggle_follow_selected(&mut s);
+        let rejoined = exact_key(&s.core.project.sprites[0], 0.0).expect("the key");
+        assert_eq!(rejoined.scale_y, 0.0, "the axis follows scale again");
+    }
+
+    #[test]
+    fn add_key_between_enriched_keys_authors_the_sampled_enrichment() {
+        // Wave Y (Y14): the Add-key wart — the scalar
+        // op used to author enrichment DEFAULTS on a
+        // fresh insert, so the sprite popped at the
+        // authored frame. The full write authors the
+        // sample whole.
+        let mut s = crate::init();
+        s.core = core_with(&["a.png"], &[(0, 2)]);
+        for k in &mut s.core.project.sprites[0].keys {
+            k.opacity = 0.5;
+            k.flip_x = true;
+            k.pivot_x = 0.25;
+            k.pivot_y = 0.75;
+        }
+        s.core.current = 1; // between the fixture keys at frames 0 and 2
+        s.sprites_panel.selected = Some(0);
+        add_key_selected(&mut s);
+        let written = exact_key(&s.core.project.sprites[0], 1.0).expect("the new key");
+        // (scale_y: both neighbours follow their
+        // scale 1.0, and a sample interpolates the
+        // EFFECTIVE values — the authored key stores
+        // the explicit 1.0 it sampled, the documented
+        // materialisation.)
+        assert_enrichment(written, 0.5, true, false, 1.0, 0.25, 0.75);
+    }
+
+    #[test]
+    fn step_at_a_keyless_frame_between_enriched_keys_keeps_the_sample() {
+        // The transform steppers' twin wart, same fix:
+        // stepping X between two enriched keys must
+        // not snap the inserted key's enrichment to
+        // defaults.
+        let mut s = crate::init();
+        s.core = core_with(&["a.png"], &[(0, 2)]);
+        for k in &mut s.core.project.sprites[0].keys {
+            k.opacity = 0.5;
+            k.flip_x = true;
+        }
+        s.core.current = 1;
+        s.sprites_panel.selected = Some(0);
+        step_selected(&mut s, SpriteField::X, 1);
+        let written = exact_key(&s.core.project.sprites[0], 1.0).expect("the new key");
+        assert_eq!(written.x, 105.0 + POS_STEP);
+        // (scale_y materialises the sampled effective
+        // 1.0, as in the Add-key pin above.)
+        assert_enrichment(written, 0.5, true, false, 1.0, 0.5, 0.5);
     }
 
     #[test]
@@ -1415,6 +2191,20 @@ mod tests {
         // At the scale cap the + button renders inert.
         s.core = core_with(&["a.png"], &[(0, 1)]);
         s.core.project.sprites[0].keys[0].scale = SCALE_MAX;
+        s.sprites_panel.selected = Some(0);
+        let _ = sprites_panel(&s, &t);
+        // An enriched key (Wave Y, Y14): the full edit
+        // area builds — opacity at its floor renders
+        // its − button inert, the flip and follow
+        // toggles carry their marks.
+        s.core = core_with(&["a.png"], &[(0, 1)]);
+        {
+            let k = &mut s.core.project.sprites[0].keys[0];
+            k.opacity = 0.0;
+            k.flip_x = true;
+            k.scale_y = 2.0;
+            k.pivot_x = 0.25;
+        }
         s.sprites_panel.selected = Some(0);
         let _ = sprites_panel(&s, &t);
     }

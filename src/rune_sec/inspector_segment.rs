@@ -113,7 +113,17 @@
 //!   Bend: its angle is never solved, so a limit on it
 //!   could never bind anything, and the ops refuse it.
 //!   Clear limits renders only while a limit is set.
-//!   Stored poses are never rewritten by a limit —
+//!   A preset row (`seg-lim-preset-elbow` /
+//!   `seg-lim-preset-knee`, Wave Y Y12) applies the
+//!   model's anatomical ranges (`NodeDef::ELBOW_LIMITS`
+//!   / `NodeDef::KNEE_LIMITS` — the humanoid
+//!   constructor's own values, one source in the model)
+//!   to the selected node in one press:
+//!   `apply_joint_limit_preset` sets BOTH bounds under
+//!   one snapshot, with the same refusal discipline,
+//!   so a range the constructor ships is never 34
+//!   stepper presses away on a figure built another
+//!   way. Stored poses are never rewritten by a limit —
 //!   enforcement binds solving, not data.
 //! * Cycle bend → `cycle_bend()` (editor.rs:1106) — key
 //!   `cycle-bend`. There is no ± bend op in the core; bend
@@ -165,6 +175,30 @@
 //!   model has ONE media slot per segment, so attaching
 //!   a sprite replaces a label, and `attach_asset`'s
 //!   status says so when it happens.
+//! * Sprite transform (Wave Y, P-8) — keys
+//!   `seg-media-offx-dn/up`, `seg-media-offy-dn/up`,
+//!   `seg-media-scale-dn/up`, `seg-media-rot-dn/up`,
+//!   `seg-media-flip`, `seg-media-reset`. The Media
+//!   section grows a transform block under the picker,
+//!   rendered only while the segment carries a sprite:
+//!   offset X/Y steppers (stage units), a scale
+//!   stepper, a rotation stepper (degrees — the
+//!   panel's one angle language) and a Flip toggle
+//!   edit the `SegmentMedia::Image` local transform
+//!   Y3 composed into the `media_items` funnel, so the
+//!   stage, raster and SVG all follow the same values.
+//!   The writes are this module's own ops
+//!   (`adjust_media_offset` / `adjust_media_scale` /
+//!   `adjust_media_rotate` / `toggle_media_flip` /
+//!   `reset_media_transform`), in `attach_asset`'s
+//!   pattern — validate → ONE `snapshot()` → mutate →
+//!   status — because the core has no by-index media
+//!   op; a press that lands on the stored value (a
+//!   step at a clamp) is a silent no-op, and Reset —
+//!   rendered only while the transform differs from
+//!   the defaults — restores them in one step. The
+//!   MCP twins are `asset_attach` / `clip_asset_attach`
+//!   with their optional transform args (media.rs).
 //! * + Segment → `add_segment()` (editor.rs:402) — key
 //!   `add-seg`.
 //! * Delete segment → `delete_segment()` (editor.rs:434) —
@@ -311,6 +345,63 @@ pub const THICKNESS_STEP: f32 = 1.0;
 /// panel's Cycle colour button reaches it.)
 pub const PALETTE: [u32; 6] = [0xFF5D5D, 0x5DB2FF, 0x7BE495, 0xFFC65D, 0xC792FF, 0x232830];
 
+/// The panel-side view of a segment sprite's local
+/// transform (Wave Y, P-8): the four flat fields of
+/// `SegmentMedia::Image`'s payload (Y3's shape),
+/// carried as one value so the stepper rows and
+/// their ops pass it around whole. `IDENTITY` is
+/// the payload's serde defaults — exactly how every
+/// pre-P-8 project renders: no offset, natural size,
+/// chord-aligned, unflipped.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MediaTransformState {
+    /// Translation of the image centre in stage
+    /// units, in the segment's own frame: `[along
+    /// the segment direction, along its normal]`.
+    pub offset: [f32; 2],
+    /// Uniform multiplier on the fitted quad.
+    pub scale: f32,
+    /// Extra rotation about the image centre, degrees.
+    pub angle_offset: f32,
+    /// Mirror the image along the segment axis.
+    pub flip: bool,
+}
+
+impl MediaTransformState {
+    /// The identity transform — the payload defaults.
+    pub const IDENTITY: MediaTransformState = MediaTransformState {
+        offset: [0.0, 0.0],
+        scale: 1.0,
+        angle_offset: 0.0,
+        flip: false,
+    };
+
+    /// True when every field sits at its default (the
+    /// Reset button renders only while this is false).
+    pub fn is_identity(&self) -> bool {
+        *self == MediaTransformState::IDENTITY
+    }
+}
+
+/// Step for the media offset steppers, stage units.
+pub const MEDIA_OFFSET_STEP: f32 = 2.0;
+/// Hard clamp for either media offset axis, stage
+/// units — far past any stage the app draws, so the
+/// clamp only ever catches a runaway press sequence.
+pub const MEDIA_OFFSET_LIMIT: f32 = 1000.0;
+/// Step for the media scale stepper.
+pub const MEDIA_SCALE_STEP: f32 = 0.1;
+/// The media scale's clamp range: below 0.1 the
+/// sprite all but vanishes, above 8 it swamps the
+/// stage; the StepForms mirror these bounds exactly.
+pub const MEDIA_SCALE_MIN: f32 = 0.1;
+pub const MEDIA_SCALE_MAX: f32 = 8.0;
+/// Step for the media rotation stepper, degrees —
+/// the Rotate/Bend rows' coarse step (LIMIT_STEP's
+/// language), and the stored offset is hard-clamped
+/// to ±180° like a joint limit.
+pub const MEDIA_ROTATE_STEP: f32 = 5.0;
+
 /// Derived view-state for the panel: everything the builder
 /// renders, computed once from the core so the builder stays
 /// a pure function of it (and so the readout math is unit
@@ -378,6 +469,12 @@ pub struct InspectorSegmentState {
     /// renders active. `None` for a text label or no
     /// media.
     pub attached_asset: Option<usize>,
+    /// The attached sprite's local transform (Wave Y,
+    /// P-8), when `media` is `SegmentMedia::Image` —
+    /// the values behind the Media section's transform
+    /// stepper rows. `None` for a text label or no
+    /// media (the rows render only for a sprite).
+    pub media_transform: Option<MediaTransformState>,
     /// Readout text for the Media section: the attached
     /// sprite's asset name, the text label's content, or
     /// "No media attached" (see `media_label`).
@@ -837,6 +934,107 @@ pub fn clear_joint_limits(core: &mut EditorCore) {
     core.status = format!("Segment {} joint limits cleared.", ni);
 }
 
+/// Which anatomical preset range a preset-row press
+/// applies (`apply_joint_limit_preset`'s target): the
+/// humanoid constructor's own one-way ranges, held as
+/// named constants on the model (`NodeDef::ELBOW_LIMITS`
+/// / `NodeDef::KNEE_LIMITS`) so the panel and the
+/// constructor share exactly one source for the values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LimitPreset {
+    Elbow,
+    Knee,
+}
+
+impl LimitPreset {
+    /// The (min, max) this preset stores, degrees.
+    fn range(self) -> (f32, f32) {
+        match self {
+            LimitPreset::Elbow => NodeDef::ELBOW_LIMITS,
+            LimitPreset::Knee => NodeDef::KNEE_LIMITS,
+        }
+    }
+
+    /// The preset's name in the status line.
+    fn label(self) -> &'static str {
+        match self {
+            LimitPreset::Elbow => "elbow",
+            LimitPreset::Knee => "knee",
+        }
+    }
+}
+
+/// Apply an anatomical preset range to the selected
+/// node's joint limits (Wave Y, Y12) — the write behind
+/// the preset row under the limit steppers. Before this
+/// op the shipped ranges existed only inside
+/// `FigureDef::humanoid()`'s constructor: a figure built
+/// any other way, an imported figure, or a node whose
+/// limits were cleared could re-acquire one only by
+/// stepping 5° at a time (up to 34 presses per bound).
+/// Same discipline as `adjust_joint_limit` /
+/// `clear_joint_limits`: validate → ONE `snapshot()` →
+/// set BOTH bounds → status, so one press is exactly
+/// one undo step; refusals (no selection, the origin, a
+/// stale node) are status-only with the limit ops' own
+/// strings; and a press on a node already carrying the
+/// preset's exact range is a silent no-op (the
+/// Straighten rule). The stored range is the model's
+/// constant verbatim — never a panel-side copy.
+pub fn apply_joint_limit_preset(core: &mut EditorCore, preset: LimitPreset) {
+    let Some(ni) = core.selected_node else {
+        core.status = "Select a segment first, then set its joint limits.".into();
+        return;
+    };
+    let fi = core.selected_figure;
+    let (is_root, cur) = match core
+        .project
+        .figures
+        .get(fi)
+        .and_then(|f| f.def.nodes.get(ni))
+    {
+        Some(node) => (node.parent.is_none(), (node.min_angle, node.max_angle)),
+        None => {
+            core.status = format!(
+                "Figure {} has no segment {} to limit.",
+                fi + 1,
+                ni
+            );
+            return;
+        }
+    };
+    if is_root {
+        // The origin refusal, verbatim from the limit
+        // ops: its angle is never solved, so a preset
+        // range on it could never bind anything.
+        core.status = "The origin has no joint to limit.".into();
+        return;
+    }
+    let (lo, hi) = preset.range();
+    if cur == (Some(lo), Some(hi)) {
+        return;
+    }
+    core.snapshot();
+    // Validated above; the `if let` is unreachable
+    // armour, not an expected path.
+    if let Some(node) = core
+        .project
+        .figures
+        .get_mut(fi)
+        .and_then(|f| f.def.nodes.get_mut(ni))
+    {
+        node.min_angle = Some(lo);
+        node.max_angle = Some(hi);
+    }
+    core.status = format!(
+        "Segment {} joint limits set to the {} range ({} to {}).",
+        ni,
+        preset.label(),
+        format_deg(lo),
+        format_deg(hi)
+    );
+}
+
 /// How many per-asset buttons the Media section's
 /// picker row shows before the "Next sprite" cycle
 /// button takes over (Wave 12). The row wraps
@@ -869,7 +1067,7 @@ pub fn media_label(
 ) -> String {
     match media {
         None => i18n_wire::tr(core, "segment_media_none"),
-        Some(SegmentMedia::Image { asset }) => match assets.get(*asset) {
+        Some(SegmentMedia::Image { asset, .. }) => match assets.get(*asset) {
             Some(a) => i18n_wire::tr(core, "segment_media_sprite")
                 .replace("{name}", &fit_segment_header_name(&a.name)),
             None => i18n_wire::tr(core, "segment_media_sprite_missing")
@@ -901,7 +1099,7 @@ pub fn attached_asset(core: &EditorCore) -> Option<usize> {
         .nodes
         .get(ni)?;
     match &node.media {
-        Some(SegmentMedia::Image { asset }) => Some(*asset),
+        Some(SegmentMedia::Image { asset, .. }) => Some(*asset),
         _ => None,
     }
 }
@@ -968,7 +1166,7 @@ pub fn attach_asset(core: &mut EditorCore, asset: usize) {
         .and_then(|f| f.def.nodes.get(ni))
     {
         Some(node) => (
-            node.media == Some(SegmentMedia::Image { asset }),
+            node.media == Some(SegmentMedia::Image { asset, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
             matches!(node.media, Some(SegmentMedia::Text { .. })),
         ),
         None => {
@@ -992,7 +1190,7 @@ pub fn attach_asset(core: &mut EditorCore, asset: usize) {
         .get_mut(fi)
         .and_then(|f| f.def.nodes.get_mut(ni))
     {
-        node.media = Some(SegmentMedia::Image { asset });
+        node.media = Some(SegmentMedia::Image { asset, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
     }
     core.status = if replaced_text {
         format!(
@@ -1007,6 +1205,242 @@ pub fn attach_asset(core: &mut EditorCore, asset: usize) {
             ni
         )
     };
+}
+
+/// Which media offset axis a stepper press adjusts
+/// (`adjust_media_offset`'s target).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaAxis {
+    X,
+    Y,
+}
+
+/// Display form of a media scale value for its
+/// stepper row: up to two decimals, trailing zeros
+/// trimmed ("1", "1.5", "0.25") — the stepper steps
+/// in tenths, so two decimals always show the stored
+/// step exactly, and a finer MCP-written value reads
+/// rounded, never truncated mid-digit.
+pub fn format_media_scale(scale: f32) -> String {
+    let s = format!("{scale:.2}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s.is_empty() {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Resolve the selected node's sprite transform for
+/// an edit (Wave Y, P-8): the figure/node indices and
+/// the transform as stored, or `None` with the
+/// refusal already on the status line — no selection,
+/// a stale node, or media that is not a sprite (none
+/// at all, or a text label, whose editing lives in
+/// the text tool). Shared by all five transform ops
+/// so their refusals cannot drift. Stored values are
+/// sanitised field by field on the way out: a
+/// non-finite value (a hand-edited file is the only
+/// source — the MCP handlers refuse them) reads as
+/// its default, so the op's write repairs it instead
+/// of stepping from NaN forever.
+fn image_media_for_edit(
+    core: &mut EditorCore,
+) -> Option<(usize, usize, MediaTransformState)> {
+    let Some(ni) = core.selected_node else {
+        core.status = "Select a segment first, then adjust its sprite.".into();
+        return None;
+    };
+    let fi = core.selected_figure;
+    let node = match core
+        .project
+        .figures
+        .get(fi)
+        .and_then(|f| f.def.nodes.get(ni))
+    {
+        Some(node) => node,
+        None => {
+            core.status = format!(
+                "Figure {} has no segment {} to adjust.",
+                fi + 1,
+                ni
+            );
+            return None;
+        }
+    };
+    match node.media.image_transform_sanitised() {
+        // The model's own sanitised read (Y3):
+        // non-finite components read as their identity
+        // counterparts and a non-positive scale as 1,
+        // so an op's write repairs a corrupt stored
+        // value instead of stepping from NaN forever.
+        Some((offset, scale, angle_offset, flip)) => Some((
+            fi,
+            ni,
+            MediaTransformState {
+                offset,
+                scale,
+                angle_offset,
+                flip,
+            },
+        )),
+        None => {
+            core.status =
+                "The selected segment carries no sprite to adjust.".into();
+            None
+        }
+    }
+}
+
+/// Write a transform back onto the node's sprite
+/// (the armour half of the transform ops: indices
+/// were validated by `image_media_for_edit`, so the
+/// `if let`s are unreachable armour, not an expected
+/// path).
+fn store_media_transform(
+    core: &mut EditorCore,
+    fi: usize,
+    ni: usize,
+    t: MediaTransformState,
+) {
+    if let Some(node) = core
+        .project
+        .figures
+        .get_mut(fi)
+        .and_then(|f| f.def.nodes.get_mut(ni))
+    {
+        if let Some(SegmentMedia::Image {
+            offset,
+            scale,
+            angle_offset,
+            flip,
+            ..
+        }) = &mut node.media
+        {
+            *offset = t.offset;
+            *scale = t.scale;
+            *angle_offset = t.angle_offset;
+            *flip = t.flip;
+        }
+    }
+}
+
+/// Step the selected sprite's offset along one axis
+/// by `delta` stage units (Wave Y, P-8) — the write
+/// behind the Offset X/Y stepper rows. The core has
+/// no media-transform op, so — exactly as
+/// `attach_asset` writes the media slot — this writes
+/// the definition directly in the core ops' own
+/// pattern: validate → ONE `snapshot()` → mutate →
+/// status, so one press is exactly one undo step.
+/// Refusals are status-only, no snapshot; a press
+/// that lands on the stored value (stepping at the
+/// ±`MEDIA_OFFSET_LIMIT` clamp) is a silent no-op.
+pub fn adjust_media_offset(core: &mut EditorCore, axis: MediaAxis, delta: f32) {
+    let Some((fi, ni, cur)) = image_media_for_edit(core) else {
+        return;
+    };
+    let mut new = cur;
+    let cell = match axis {
+        MediaAxis::X => &mut new.offset[0],
+        MediaAxis::Y => &mut new.offset[1],
+    };
+    *cell = (*cell + delta).clamp(-MEDIA_OFFSET_LIMIT, MEDIA_OFFSET_LIMIT);
+    if new == cur {
+        return;
+    }
+    core.snapshot();
+    store_media_transform(core, fi, ni, new);
+    core.status = format!(
+        "Sprite offset set to ({}, {}).",
+        format_whole_number(new.offset[0]),
+        format_whole_number(new.offset[1])
+    );
+}
+
+/// Step the selected sprite's scale by `delta`
+/// (Wave Y, P-8) — the write behind the Scale stepper
+/// row, in `adjust_media_offset`'s discipline. The
+/// stepped value is rounded to two decimals before
+/// the clamp, so repeated presses walk the exact
+/// tenths the readout shows instead of accumulating
+/// float dust the display then hides.
+pub fn adjust_media_scale(core: &mut EditorCore, delta: f32) {
+    let Some((fi, ni, cur)) = image_media_for_edit(core) else {
+        return;
+    };
+    let mut new = cur;
+    new.scale = ((cur.scale + delta) * 100.0).round() / 100.0;
+    new.scale = new.scale.clamp(MEDIA_SCALE_MIN, MEDIA_SCALE_MAX);
+    if new == cur {
+        return;
+    }
+    core.snapshot();
+    store_media_transform(core, fi, ni, new);
+    core.status = format!("Sprite scale set to {}.", format_media_scale(new.scale));
+}
+
+/// Step the selected sprite's rotation offset by
+/// `delta` degrees (Wave Y, P-8) — the write behind
+/// the Rotation stepper row, in `adjust_media_offset`'s
+/// discipline. The stored offset is hard-clamped to
+/// ±180°, like a joint limit: past the half-circle a
+/// normalised form would wrap and silently become
+/// its mirror, which no press may do by accident.
+pub fn adjust_media_rotate(core: &mut EditorCore, delta: f32) {
+    let Some((fi, ni, cur)) = image_media_for_edit(core) else {
+        return;
+    };
+    let mut new = cur;
+    new.angle_offset = (cur.angle_offset + delta).clamp(-180.0, 180.0);
+    if new == cur {
+        return;
+    }
+    core.snapshot();
+    store_media_transform(core, fi, ni, new);
+    core.status = format!(
+        "Sprite rotation set to {}.",
+        format_deg(new.angle_offset)
+    );
+}
+
+/// Flip the selected sprite's mirror flag (Wave Y,
+/// P-8) — the write behind the Flip toggle, in
+/// `adjust_media_offset`'s discipline. A toggle
+/// always changes the value, so it always spends
+/// exactly one undo step.
+pub fn toggle_media_flip(core: &mut EditorCore) {
+    let Some((fi, ni, cur)) = image_media_for_edit(core) else {
+        return;
+    };
+    let mut new = cur;
+    new.flip = !cur.flip;
+    core.snapshot();
+    store_media_transform(core, fi, ni, new);
+    core.status = if new.flip {
+        "Sprite flip on.".into()
+    } else {
+        "Sprite flip off.".into()
+    };
+}
+
+/// Restore the selected sprite's transform to the
+/// defaults (Wave Y, P-8) — the write behind the
+/// Reset button, in `adjust_media_offset`'s
+/// discipline. Rendered only while the transform
+/// differs from the defaults; a press at the
+/// defaults (reachable only by calling the op
+/// directly) is a silent no-op.
+pub fn reset_media_transform(core: &mut EditorCore) {
+    let Some((fi, ni, cur)) = image_media_for_edit(core) else {
+        return;
+    };
+    if cur.is_identity() {
+        return;
+    }
+    core.snapshot();
+    store_media_transform(core, fi, ni, MediaTransformState::IDENTITY);
+    core.status = "Sprite transform reset to defaults.".into();
 }
 
 /// Label for a node shape, naming the polygons `cycle_shape`
@@ -1085,7 +1519,22 @@ pub fn segment_state(core: &EditorCore) -> Option<InspectorSegmentState> {
         shape_label: shape_label(&node.shape),
         media_label: media_label(core, &node.media, &core.project.assets),
         attached_asset: match &node.media {
-            Some(SegmentMedia::Image { asset }) => Some(*asset),
+            Some(SegmentMedia::Image { asset, .. }) => Some(*asset),
+            _ => None,
+        },
+        media_transform: match &node.media {
+            Some(SegmentMedia::Image {
+                offset,
+                scale,
+                angle_offset,
+                flip,
+                ..
+            }) => Some(MediaTransformState {
+                offset: *offset,
+                scale: *scale,
+                angle_offset: *angle_offset,
+                flip: *flip,
+            }),
             _ => None,
         },
         media: node.media.clone(),
@@ -1577,7 +2026,10 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
     // Length and Bend rows — its angle is never solved,
     // and the op refuses it. Clear limits rides its
     // own line under the rows, rendered only while a
-    // limit is set (the Straighten line's form).
+    // limit is set (the Straighten line's form). The
+    // preset row under that (Wave Y, Y12) applies the
+    // model's anatomical ranges in one press and
+    // renders whenever the steppers do.
     if !st.is_root {
         panel = panel
             .child(stepper_row(
@@ -1633,6 +2085,26 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                     )),
             );
         }
+        panel = panel.child(
+            row()
+                .w_full()
+                .center_y()
+                .gap(8.0)
+                .child(btn(
+                    "seg-lim-preset-elbow",
+                    &i18n_wire::tr(&s.core, "segment_limit_preset_elbow"),
+                    false,
+                    t,
+                    |s| apply_joint_limit_preset(&mut s.core, LimitPreset::Elbow),
+                ))
+                .child(btn(
+                    "seg-lim-preset-knee",
+                    &i18n_wire::tr(&s.core, "segment_limit_preset_knee"),
+                    false,
+                    t,
+                    |s| apply_joint_limit_preset(&mut s.core, LimitPreset::Knee),
+                )),
+        );
     }
     panel = panel
         .child(
@@ -1724,6 +2196,141 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
             ));
         }
         panel = panel.child(picker);
+    }
+    // The sprite transform block (Wave Y, P-8): the
+    // steppers edit the attached sprite's local
+    // transform — see the module docs. Rendered only
+    // while the segment carries a sprite (a text
+    // label's transform is the text tool's business,
+    // and bare segments have nothing to transform).
+    // Each row's StepForms mirror its op's clamp
+    // exactly, like the limit rows above: at a clamp
+    // end the step can only no-op, so the button
+    // renders inert.
+    if let Some(mt) = st.media_transform {
+        panel = panel
+            .child(stepper_row(
+                &i18n_wire::tr(&s.core, "segment_media_offset_x"),
+                format_whole_number(mt.offset[0]),
+                "seg-media-offx-dn",
+                "seg-media-offx-up",
+                if mt.offset[0] <= -MEDIA_OFFSET_LIMIT {
+                    design::StepForm::Noop
+                } else {
+                    design::StepForm::Live
+                },
+                if mt.offset[0] >= MEDIA_OFFSET_LIMIT {
+                    design::StepForm::Noop
+                } else {
+                    design::StepForm::Live
+                },
+                t,
+                |s| {
+                    adjust_media_offset(
+                        &mut s.core,
+                        MediaAxis::X,
+                        -MEDIA_OFFSET_STEP,
+                    )
+                },
+                |s| {
+                    adjust_media_offset(
+                        &mut s.core,
+                        MediaAxis::X,
+                        MEDIA_OFFSET_STEP,
+                    )
+                },
+            ))
+            .child(stepper_row(
+                &i18n_wire::tr(&s.core, "segment_media_offset_y"),
+                format_whole_number(mt.offset[1]),
+                "seg-media-offy-dn",
+                "seg-media-offy-up",
+                if mt.offset[1] <= -MEDIA_OFFSET_LIMIT {
+                    design::StepForm::Noop
+                } else {
+                    design::StepForm::Live
+                },
+                if mt.offset[1] >= MEDIA_OFFSET_LIMIT {
+                    design::StepForm::Noop
+                } else {
+                    design::StepForm::Live
+                },
+                t,
+                |s| {
+                    adjust_media_offset(
+                        &mut s.core,
+                        MediaAxis::Y,
+                        -MEDIA_OFFSET_STEP,
+                    )
+                },
+                |s| {
+                    adjust_media_offset(
+                        &mut s.core,
+                        MediaAxis::Y,
+                        MEDIA_OFFSET_STEP,
+                    )
+                },
+            ))
+            .child(stepper_row(
+                &i18n_wire::tr(&s.core, "segment_media_scale"),
+                format_media_scale(mt.scale),
+                "seg-media-scale-dn",
+                "seg-media-scale-up",
+                if mt.scale <= MEDIA_SCALE_MIN {
+                    design::StepForm::Noop
+                } else {
+                    design::StepForm::Live
+                },
+                if mt.scale >= MEDIA_SCALE_MAX {
+                    design::StepForm::Noop
+                } else {
+                    design::StepForm::Live
+                },
+                t,
+                |s| adjust_media_scale(&mut s.core, -MEDIA_SCALE_STEP),
+                |s| adjust_media_scale(&mut s.core, MEDIA_SCALE_STEP),
+            ))
+            .child(stepper_row(
+                &i18n_wire::tr(&s.core, "segment_media_rotate"),
+                format_deg(mt.angle_offset),
+                "seg-media-rot-dn",
+                "seg-media-rot-up",
+                if mt.angle_offset <= -180.0 {
+                    design::StepForm::Noop
+                } else {
+                    design::StepForm::Live
+                },
+                if mt.angle_offset >= 180.0 {
+                    design::StepForm::Noop
+                } else {
+                    design::StepForm::Live
+                },
+                t,
+                |s| adjust_media_rotate(&mut s.core, -MEDIA_ROTATE_STEP),
+                |s| adjust_media_rotate(&mut s.core, MEDIA_ROTATE_STEP),
+            ));
+        // Flip + Reset row: the toggle renders active
+        // while flipped; Reset rides the same row and
+        // renders only while the transform differs
+        // from the defaults, so it can never be a dead
+        // press.
+        let mut flip_row = row().w_full().gap(8.0).center_y().child(btn(
+            "seg-media-flip",
+            &i18n_wire::tr(&s.core, "segment_media_flip"),
+            mt.flip,
+            t,
+            |s| toggle_media_flip(&mut s.core),
+        ));
+        if !mt.is_identity() {
+            flip_row = flip_row.child(btn(
+                "seg-media-reset",
+                &i18n_wire::tr(&s.core, "segment_media_reset_transform"),
+                false,
+                t,
+                |s| reset_media_transform(&mut s.core),
+            ));
+        }
+        panel = panel.child(flip_row);
     }
     // Import + Clear row: "Attach from import" is the
     // core's import-folder op (with an empty asset
@@ -2702,14 +3309,14 @@ playback_speed: 1.0,
         let assets = vec![asset("hero.png"), asset("cape.png")];
         assert_eq!(media_label(&core, &None, &assets), "No media attached");
         assert_eq!(
-            media_label(&core, &Some(SegmentMedia::Image { asset: 1 }), &assets),
+            media_label(&core, &Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }), &assets),
             "Sprite: cape.png"
         );
         // A stored index past the table reads as
         // missing — never a panic, never an invented
         // name.
         assert_eq!(
-            media_label(&core, &Some(SegmentMedia::Image { asset: 7 }), &assets),
+            media_label(&core, &Some(SegmentMedia::Image { asset: 7, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }), &assets),
             "Sprite: asset 8 (missing)"
         );
         assert_eq!(
@@ -2767,7 +3374,7 @@ playback_speed: 1.0,
         // index resolved, the readout naming the asset.
         let mut core = core_with_assets(Some(1), &["hero.png", "cape.png"]);
         core.project.figures[core.selected_figure].def.nodes[1].media =
-            Some(SegmentMedia::Image { asset: 1 });
+            Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
         let st = segment_state(&core).unwrap();
         assert_eq!(st.asset_names, ["hero.png", "cape.png"]);
         assert_eq!(st.attached_asset, Some(1));
@@ -2784,7 +3391,7 @@ playback_speed: 1.0,
         let mut core = core_with_assets(Some(1), &["hero.png"]);
         assert_eq!(segment_state(&core).unwrap().media, None);
         core.project.figures[core.selected_figure].def.nodes[1].media =
-            Some(SegmentMedia::Image { asset: 0 });
+            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
         let st = segment_state(&core).unwrap();
         assert_eq!(st.attached_asset, Some(0));
         assert_eq!(st.media_label, "Sprite: hero.png");
@@ -2800,7 +3407,7 @@ playback_speed: 1.0,
         attach_asset(&mut core, 1);
         assert_eq!(
             core.project.figures[fi].def.nodes[1].media,
-            Some(SegmentMedia::Image { asset: 1 }),
+            Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
             "the CHOSEN asset is attached, not an import-folder pick"
         );
         assert_eq!(core.undo_depth(), depth + 1, "one snapshot per press");
@@ -2826,6 +3433,232 @@ playback_speed: 1.0,
         attach_asset(&mut core, 0);
         assert_eq!(core.undo_depth(), depth, "no snapshot for a no-change press");
         assert_eq!(core.status, "Sentinel.", "no status churn");
+    }
+
+    /// A core whose selected node (1) carries the
+    /// first asset as a sprite with the identity
+    /// transform — the starting point every media
+    /// transform test steps from.
+    fn core_with_sprite() -> EditorCore {
+        let mut core = core_with_assets(Some(1), &["hero.png"]);
+        attach_asset(&mut core, 0);
+        core
+    }
+
+    fn media_transform_of(core: &EditorCore) -> MediaTransformState {
+        match &core.project.figures[core.selected_figure].def.nodes[1].media {
+            Some(SegmentMedia::Image {
+                offset,
+                scale,
+                angle_offset,
+                flip,
+                ..
+            }) => MediaTransformState {
+                offset: *offset,
+                scale: *scale,
+                angle_offset: *angle_offset,
+                flip: *flip,
+            },
+            other => panic!("expected image media, got {other:?}"),
+        }
+    }
+
+    fn set_media_transform(core: &mut EditorCore, t: MediaTransformState) {
+        core.project.figures[core.selected_figure].def.nodes[1].media =
+            Some(SegmentMedia::Image {
+                asset: 0,
+                offset: t.offset,
+                scale: t.scale,
+                angle_offset: t.angle_offset,
+                flip: t.flip,
+            });
+    }
+
+    #[test]
+    fn media_offset_steps_write_in_one_undo_step_each() {
+        let mut core = core_with_sprite();
+        let depth = core.undo_depth();
+        adjust_media_offset(&mut core, MediaAxis::X, MEDIA_OFFSET_STEP);
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot per press");
+        assert_eq!(media_transform_of(&core).offset, [2.0, 0.0]);
+        assert!(
+            core.status.contains("(2, 0)"),
+            "status names the offset: {}",
+            core.status
+        );
+        adjust_media_offset(&mut core, MediaAxis::Y, -MEDIA_OFFSET_STEP);
+        assert_eq!(core.undo_depth(), depth + 2);
+        assert_eq!(media_transform_of(&core).offset, [2.0, -2.0]);
+        core.undo();
+        assert_eq!(media_transform_of(&core).offset, [2.0, 0.0]);
+    }
+
+    #[test]
+    fn media_offset_step_at_the_limit_is_a_silent_no_op() {
+        let mut core = core_with_sprite();
+        let mut t = MediaTransformState::IDENTITY;
+        t.offset = [MEDIA_OFFSET_LIMIT, -MEDIA_OFFSET_LIMIT];
+        set_media_transform(&mut core, t);
+        let depth = core.undo_depth();
+        core.status = "Sentinel.".into();
+        adjust_media_offset(&mut core, MediaAxis::X, MEDIA_OFFSET_STEP);
+        adjust_media_offset(&mut core, MediaAxis::Y, -MEDIA_OFFSET_STEP);
+        assert_eq!(core.undo_depth(), depth, "no snapshot at the clamp");
+        assert_eq!(core.status, "Sentinel.", "no status churn");
+    }
+
+    #[test]
+    fn media_scale_steps_clamp_at_both_bounds() {
+        let mut core = core_with_sprite();
+        adjust_media_scale(&mut core, MEDIA_SCALE_STEP);
+        assert_eq!(media_transform_of(&core).scale, 1.1);
+        // At the floor a downward step is silent.
+        let mut t = MediaTransformState::IDENTITY;
+        t.scale = MEDIA_SCALE_MIN;
+        set_media_transform(&mut core, t);
+        let depth = core.undo_depth();
+        core.status = "Sentinel.".into();
+        adjust_media_scale(&mut core, -MEDIA_SCALE_STEP);
+        assert_eq!(core.undo_depth(), depth);
+        assert_eq!(core.status, "Sentinel.");
+        // At the ceiling an upward step is silent.
+        t.scale = MEDIA_SCALE_MAX;
+        set_media_transform(&mut core, t);
+        adjust_media_scale(&mut core, MEDIA_SCALE_STEP);
+        assert_eq!(core.undo_depth(), depth);
+    }
+
+    #[test]
+    fn media_rotate_steps_clamp_at_180() {
+        let mut core = core_with_sprite();
+        adjust_media_rotate(&mut core, MEDIA_ROTATE_STEP);
+        assert_eq!(media_transform_of(&core).angle_offset, 5.0);
+        let mut t = MediaTransformState::IDENTITY;
+        t.angle_offset = 180.0;
+        set_media_transform(&mut core, t);
+        let depth = core.undo_depth();
+        adjust_media_rotate(&mut core, MEDIA_ROTATE_STEP);
+        assert_eq!(core.undo_depth(), depth, "no step past the half-circle");
+        t.angle_offset = -180.0;
+        set_media_transform(&mut core, t);
+        adjust_media_rotate(&mut core, -MEDIA_ROTATE_STEP);
+        assert_eq!(core.undo_depth(), depth);
+    }
+
+    #[test]
+    fn media_flip_toggles_in_one_step_each() {
+        let mut core = core_with_sprite();
+        let depth = core.undo_depth();
+        toggle_media_flip(&mut core);
+        assert!(media_transform_of(&core).flip);
+        assert_eq!(core.status, "Sprite flip on.");
+        toggle_media_flip(&mut core);
+        assert!(!media_transform_of(&core).flip);
+        assert_eq!(core.status, "Sprite flip off.");
+        assert_eq!(core.undo_depth(), depth + 2);
+    }
+
+    #[test]
+    fn media_reset_restores_the_identity_in_one_step() {
+        let mut core = core_with_sprite();
+        set_media_transform(
+            &mut core,
+            MediaTransformState {
+                offset: [10.0, -4.0],
+                scale: 2.5,
+                angle_offset: 45.0,
+                flip: true,
+            },
+        );
+        let depth = core.undo_depth();
+        reset_media_transform(&mut core);
+        assert_eq!(core.undo_depth(), depth + 1);
+        assert!(media_transform_of(&core).is_identity());
+        // A second press (the button no longer renders,
+        // but the op stays honest) is a silent no-op.
+        core.status = "Sentinel.".into();
+        reset_media_transform(&mut core);
+        assert_eq!(core.undo_depth(), depth + 1);
+        assert_eq!(core.status, "Sentinel.");
+    }
+
+    #[test]
+    fn media_transform_refusals_are_status_only() {
+        // No media on the selected node.
+        let mut core = core_with_assets(Some(1), &["hero.png"]);
+        let depth = core.undo_depth();
+        adjust_media_offset(&mut core, MediaAxis::X, MEDIA_OFFSET_STEP);
+        assert_eq!(core.undo_depth(), depth);
+        assert!(
+            core.status.contains("carries no sprite"),
+            "refusal explains itself: {}",
+            core.status
+        );
+        // A text label is not a sprite.
+        core.project.figures[core.selected_figure].def.nodes[1].media =
+            Some(SegmentMedia::Text {
+                content: "HEY".into(),
+                size: 24.0,
+            });
+        toggle_media_flip(&mut core);
+        assert_eq!(core.undo_depth(), depth);
+        assert!(core.status.contains("carries no sprite"));
+        // No selection.
+        let mut core = core_with_assets(None, &["hero.png"]);
+        let depth = core.undo_depth();
+        adjust_media_scale(&mut core, MEDIA_SCALE_STEP);
+        assert_eq!(core.undo_depth(), depth);
+        assert!(core.status.contains("Select a segment"));
+    }
+
+    #[test]
+    fn segment_state_carries_the_media_transform() {
+        let mut core = core_with_sprite();
+        let st = segment_state(&core).expect("node 1 is selected");
+        assert_eq!(
+            st.media_transform,
+            Some(MediaTransformState::IDENTITY),
+            "a fresh attach reads as the identity transform"
+        );
+        let t = MediaTransformState {
+            offset: [6.0, 2.0],
+            scale: 0.5,
+            angle_offset: -30.0,
+            flip: true,
+        };
+        set_media_transform(&mut core, t);
+        let st = segment_state(&core).expect("node 1 is selected");
+        assert_eq!(st.media_transform, Some(t));
+        // A text label carries no transform state.
+        core.project.figures[core.selected_figure].def.nodes[1].media =
+            Some(SegmentMedia::Text {
+                content: "HEY".into(),
+                size: 24.0,
+            });
+        let st = segment_state(&core).expect("node 1 is selected");
+        assert_eq!(st.media_transform, None);
+    }
+
+    #[test]
+    fn media_transform_labels_resolve_through_the_catalogue() {
+        // IA-Y4-1 (the Q7 note): these six keys enter
+        // the catalogue through the integrator; until
+        // the insertion lands `tr` returns the key
+        // itself and this pin fails BY DESIGN — it
+        // passes on insertion, proving the panel's
+        // labels are the catalogue's English strings,
+        // byte-identical.
+        let core = EditorCore::new();
+        for (key, english) in [
+            ("segment_media_offset_x", "Sprite offset X"),
+            ("segment_media_offset_y", "Sprite offset Y"),
+            ("segment_media_scale", "Sprite scale"),
+            ("segment_media_rotate", "Sprite rotation"),
+            ("segment_media_flip", "Flip sprite"),
+            ("segment_media_reset_transform", "Reset transform"),
+        ] {
+            assert_eq!(i18n_wire::tr(&core, key), english, "key {key}");
+        }
     }
 
     #[test]
@@ -2869,7 +3702,7 @@ playback_speed: 1.0,
         attach_asset(&mut core, 0);
         assert_eq!(
             core.project.figures[fi].def.nodes[1].media,
-            Some(SegmentMedia::Image { asset: 0 })
+            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false })
         );
         assert!(
             core.status.contains("replacing its text label"),
@@ -2891,7 +3724,7 @@ playback_speed: 1.0,
         });
         assert_eq!(attached_asset(&core), None, "a label is not a sprite");
         core.project.figures[fi].def.nodes[1].media =
-            Some(SegmentMedia::Image { asset: 0 });
+            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
         assert_eq!(attached_asset(&core), Some(0));
         assert_eq!(attached_asset(&EditorCore::new()), None, "no selection");
         assert_eq!(
@@ -3008,6 +3841,84 @@ playback_speed: 1.0,
     }
 
     #[test]
+    fn apply_joint_limit_preset_sets_both_bounds_in_one_undo_step() {
+        // Node 1 carries no limits: one press stores the
+        // model's elbow range verbatim — the same values
+        // the humanoid constructor writes — under exactly
+        // one snapshot, and undo restores the open sides.
+        let mut core = core_with_selection(Some(1));
+        let fi = core.selected_figure;
+        assert!(!core.project.figures[fi].def.nodes[1].has_limits());
+        let depth = core.undo_depth();
+        apply_joint_limit_preset(&mut core, LimitPreset::Elbow);
+        let node = &core.project.figures[fi].def.nodes[1];
+        assert_eq!(node.min_angle, Some(NodeDef::ELBOW_LIMITS.0));
+        assert_eq!(node.max_angle, Some(NodeDef::ELBOW_LIMITS.1));
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot for the preset");
+        assert!(
+            core.status.contains("elbow range"),
+            "status names the applied range: {}",
+            core.status
+        );
+        core.undo();
+        let node = &core.project.figures[fi].def.nodes[1];
+        assert_eq!(node.min_angle, None);
+        assert_eq!(node.max_angle, None);
+    }
+
+    #[test]
+    fn apply_joint_limit_preset_replaces_an_existing_range() {
+        // Node 4 is the demo forearm: it already carries
+        // the elbow range from the constructor, and the
+        // knee press replaces BOTH bounds with the knee
+        // range in one step — never a half-applied mix.
+        let mut core = core_with_selection(Some(4));
+        let fi = core.selected_figure;
+        let depth = core.undo_depth();
+        apply_joint_limit_preset(&mut core, LimitPreset::Knee);
+        let node = &core.project.figures[fi].def.nodes[4];
+        assert_eq!(node.min_angle, Some(NodeDef::KNEE_LIMITS.0));
+        assert_eq!(node.max_angle, Some(NodeDef::KNEE_LIMITS.1));
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot for the replace");
+        assert!(core.status.contains("knee range"));
+    }
+
+    #[test]
+    fn apply_joint_limit_preset_already_applied_is_a_silent_no_op() {
+        // Node 4 already carries the elbow range (the
+        // constructor's presets): pressing Elbow again
+        // stores nothing and spends no undo step.
+        let mut core = core_with_selection(Some(4));
+        let depth = core.undo_depth();
+        core.status = "Sentinel.".into();
+        apply_joint_limit_preset(&mut core, LimitPreset::Elbow);
+        assert_eq!(core.undo_depth(), depth, "no snapshot for a no-change press");
+        assert_eq!(core.status, "Sentinel.", "no status churn");
+    }
+
+    #[test]
+    fn apply_joint_limit_preset_refusals_are_status_only() {
+        // No selection.
+        let mut core = core_with_selection(None);
+        let depth = core.undo_depth();
+        apply_joint_limit_preset(&mut core, LimitPreset::Elbow);
+        assert_eq!(core.undo_depth(), depth);
+        assert!(core.status.contains("Select a segment"));
+        // The origin, with the limit ops' own refusal.
+        let mut core = core_with_selection(Some(0));
+        let depth = core.undo_depth();
+        apply_joint_limit_preset(&mut core, LimitPreset::Knee);
+        assert_eq!(core.undo_depth(), depth);
+        assert!(core.status.contains("origin has no joint"));
+        // Stale node index.
+        let mut core = core_with_selection(Some(999));
+        let depth = core.undo_depth();
+        apply_joint_limit_preset(&mut core, LimitPreset::Elbow);
+        assert_eq!(core.undo_depth(), depth);
+        assert!(core.status.contains("no segment 999"));
+    }
+
+    #[test]
     fn format_limit_bound_reads_off_or_degrees() {
         // IA-X6-1-dependent, like the i18n pin below:
         // the "Off" side resolves through
@@ -3041,6 +3952,11 @@ playback_speed: 1.0,
         // only once that IA lands too. Templates are
         // asserted in their stored form, placeholders
         // intact, like `segment_title_node`.
+        //
+        // Wave Y (Y12) extends the pin with the preset
+        // row's keys: the last two pairs land via
+        // IA-Y12-1, so the pin as a whole passes only
+        // once that IA lands too.
         let core = EditorCore::new();
         for (key, english) in [
             ("segment_title", "Segment"),
@@ -3091,6 +4007,9 @@ playback_speed: 1.0,
             ("segment_limit_max", "Max angle"),
             ("segment_limit_off", "Off"),
             ("segment_limit_clear", "Clear limits"),
+            // Wave Y (Y12) preset-row keys — IA-Y12-1.
+            ("segment_limit_preset_elbow", "Elbow range"),
+            ("segment_limit_preset_knee", "Knee range"),
         ] {
             assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
             assert_eq!(i18n_wire::tr(&core, key), english);

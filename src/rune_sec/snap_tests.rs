@@ -4964,7 +4964,7 @@ fn segment_inspector_media_section_shows_an_attached_sprite() {
     tap(&mut rt, "seg-media-attach-0");
     assert_eq!(
         rt.state.core.project.figures[0].def.nodes[2].media,
-        Some(stykanimate_rs::model::SegmentMedia::Image { asset: 0 }),
+        Some(stykanimate_rs::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
         "the press attached asset 0 to the selected segment"
     );
 

@@ -39,7 +39,13 @@
 //! apply the `graph::` function to the selected channel,
 //! restore key order, and write the outcome to `core.status`.
 //! Those handlers are factored as `apply_*(&mut EditorCore,
-//! ..)` so they are testable without a `State`.
+//! ..)` so they are testable without a `State`. A fourth
+//! action has no core op either — Wave Y's "Key bend"
+//! ([`key_bend`]): it composes `graph::channel_mut` +
+//! `Channel::add_key` panel-side, the same two calls
+//! `key_graph_angle` makes inside the core, so the Bend
+//! channel (P-7) can be authored from this panel like the
+//! angle channel can.
 //!
 //! ## Canvas pointer interaction
 //!
@@ -295,6 +301,18 @@
 //! edit is checked against. The line exists only while a
 //! channel is drawn, resolved by
 //! [`effective_channel_index`] exactly as the canvas is.
+//!
+//! Wave Y (Y12) adds the enforcement context both
+//! readouts were missing: an Angle channel's target node
+//! may carry joint limits (Wave X, P-4) that
+//! `apply_channels` clamps through at evaluation, so the
+//! raw key range and the raw playhead value are not
+//! always what applies. [`joint_limit_note`] appends
+//! "· joint limits {min}..{max}" to the stat row and the
+//! value line of a limited Angle channel — the raw
+//! numbers stay first and unchanged (stored data is
+//! never rewritten; the note names what the solvers
+//! will enforce).
 //!
 //! ## Channel selection by index (Phase J)
 //!
@@ -626,30 +644,34 @@ pub struct GraphPanelState {
 }
 
 /// Human label for a channel target, in UI casing: "Root X",
-/// "Root Y", "Angle 3", "Length 3". (The engine view-model's
-/// own legend labels are lower-case and private; the panel
-/// owns its casing.)
+/// "Root Y", "Angle 3", "Length 3", "Bend 3". (The engine
+/// view-model's own legend labels are lower-case and
+/// private; the panel owns its casing.)
 pub fn channel_label(target: ChannelTarget) -> String {
     match target {
         ChannelTarget::RootX => "Root X".to_string(),
         ChannelTarget::RootY => "Root Y".to_string(),
         ChannelTarget::Angle(n) => format!("Angle {n}"),
         ChannelTarget::Length(n) => format!("Length {n}"),
+        ChannelTarget::Bend(n) => format!("Bend {n}"),
     }
 }
 
 /// The selector's entries for the selected figure, in display
 /// order: Root X and Root Y always; the selected node's Angle
-/// when a node is selected; then every other target the
-/// figure actually has a channel for, in project order,
+/// and Bend when a node is selected; then every other target
+/// the figure actually has a channel for, in project order,
 /// without duplicates. Root/length channels appear even
 /// before they have keys only via the pinned entries — keying
 /// a root channel has no core op (see the module docs), so an
 /// unpinned target is offered only once a channel exists.
+/// Bend is pinned like Angle because this panel CAN author
+/// its first key ([`key_bend`], the "Key bend" button).
 pub fn selector_entries(core: &EditorCore) -> Vec<ChannelTarget> {
     let mut out = vec![ChannelTarget::RootX, ChannelTarget::RootY];
     if let Some(ni) = core.selected_node {
         out.push(ChannelTarget::Angle(ni));
+        out.push(ChannelTarget::Bend(ni));
     }
     for ch in &core.project.channels {
         if ch.figure == core.selected_figure && !out.contains(&ch.target) {
@@ -899,9 +921,49 @@ pub fn stat_line(stat: &ChannelStat) -> String {
     )
 }
 
+/// The joint-limit suffix for one channel's readout
+/// lines (Wave Y, Y12): `joint limits {min}..{max}`
+/// when the channel targets `Angle(n)` and that node
+/// in the channel's figure carries limits (Wave X,
+/// P-4) — the range `apply_channels` clamps the
+/// channel's values through at evaluation, which the
+/// raw stat range and playhead value alone never
+/// showed: a channel keyed to 170 on an elbow applies
+/// as 160, and before this note nothing in the panel
+/// said so. An open side reads "Off", the segment
+/// inspector's own word for an unset bound. `None`
+/// for every other target and for unlimited nodes,
+/// so unlimited channels' lines stay byte-identical.
+/// Bounds print at `{:.0}` in the panel's plain style
+/// — its values carry no degree glyph.
+pub fn joint_limit_note(core: &EditorCore, ch: &Channel) -> Option<String> {
+    let ChannelTarget::Angle(ni) = ch.target else {
+        return None;
+    };
+    let node = core
+        .project
+        .figures
+        .get(ch.figure)
+        .and_then(|f| f.def.nodes.get(ni))?;
+    if !node.has_limits() {
+        return None;
+    }
+    let side = |b: Option<f32>| match b {
+        Some(v) => format!("{v:.0}"),
+        None => "Off".to_string(),
+    };
+    Some(format!(
+        "joint limits {}..{}",
+        side(node.min_angle),
+        side(node.max_angle)
+    ))
+}
+
 /// The stats block's rows: one `(line, is_drawn)` per
 /// channel in the project, in project order — the lines
-/// from [`stat_line`] over `graph_keys::channel_stats`.
+/// from [`stat_line`] over `graph_keys::channel_stats`,
+/// with [`joint_limit_note`]'s suffix appended for a
+/// limited Angle channel (Wave Y, Y12).
 /// `channel_stats` walks `core.project.channels` in order,
 /// so a row's position IS its channel index, and the drawn
 /// channel's row is the one at [`effective_channel_index`]
@@ -920,7 +982,20 @@ pub fn stat_rows(core: &EditorCore, sel: &GraphPanelState) -> Vec<(String, bool)
     channel_stats(core)
         .iter()
         .enumerate()
-        .map(|(i, stat)| (stat_line(stat), drawn == Some(i)))
+        .map(|(i, stat)| {
+            // Wave Y (Y12): a limited Angle channel's row
+            // carries its joint-limit note after the raw
+            // range — the row position IS the channel
+            // index (see the doc above), so the channel
+            // itself resolves directly.
+            let mut line = stat_line(stat);
+            if let Some(ch) = core.project.channels.get(i) {
+                if let Some(note) = joint_limit_note(core, ch) {
+                    line = format!("{line} · {note}");
+                }
+            }
+            (line, drawn == Some(i))
+        })
         .collect()
 }
 
@@ -1012,14 +1087,22 @@ pub fn stat_display_rows(core: &EditorCore, sel: &GraphPanelState) -> Vec<StatDi
 /// [`effective_channel_index`], so a picked duplicate
 /// reports ITS value, never its twin's. `None` when no
 /// channel is drawn (the builder then shows no line).
+/// Wave Y (Y12): a limited Angle channel's line carries
+/// [`joint_limit_note`]'s suffix after the raw value —
+/// the value stays the channel's own; the note names
+/// the range evaluation will clamp it into.
 pub fn value_line(core: &EditorCore, sel: &GraphPanelState) -> Option<String> {
     let idx = effective_channel_index(core, sel)?;
     let ch = &core.project.channels[idx];
-    Some(format!(
+    let mut line = format!(
         "Value at frame {}: {:.1}",
         core.current + 1,
         ch.value_at(core.current as f32)
-    ))
+    );
+    if let Some(note) = joint_limit_note(core, ch) {
+        line = format!("{line} · {note}");
+    }
+    Some(line)
 }
 
 /// Index of the key nearest `frame` — the same pick
@@ -1158,6 +1241,55 @@ pub fn preview_points(preset: TangentPreset, w: f32, h: f32, samples: usize) -> 
             [fx * w, h * (1.0 - v)]
         })
         .collect()
+}
+
+/// Key the selected node's bend on its graph channel at the
+/// current frame — the "Key bend" button (Wave Y, P-7).
+/// There is no core `key_graph_bend` op, so this follows the
+/// panel-side precedent of the `apply_*` family below, and
+/// mirrors `EditorCore::key_graph_angle`'s semantics step
+/// for step: no selected joint is a status-only no-op (no
+/// snapshot); otherwise ONE `core.snapshot()`, the
+/// `(figure, Bend(node))` channel is upserted through
+/// `graph::channel_mut`, and the key lands through
+/// `Channel::add_key` (which replaces a key at the same
+/// frame and keeps the channel sorted) — one undo step.
+///
+/// The keyed value is the bend IN FORCE at the playhead:
+/// when a Bend channel already exists it overrides the pose
+/// bend at evaluation, so its own `value_at` is keyed —
+/// keying the pose value instead would move the curve.
+/// Without a channel, the pose bend
+/// (`Project::bends_at`, 0.0 when the project carries no
+/// bend data) is keyed, exactly as `key_graph_angle` keys
+/// the pose angle. Bend values are radians throughout —
+/// the `bends_at` convention Y1's channel evaluation reads.
+pub fn key_bend(core: &mut EditorCore) {
+    let Some(ni) = core.selected_node else {
+        core.status = "Select a joint first, then Key bend.".into();
+        return;
+    };
+    let fi = core.selected_figure;
+    let frame = core.current as f32;
+    let target = ChannelTarget::Bend(ni);
+    let value = match channel_for(core, target) {
+        Some(ch) => ch.value_at(frame),
+        None => core
+            .project
+            .bends_at(frame, fi)
+            .get(ni)
+            .copied()
+            .unwrap_or(0.0),
+    };
+    core.snapshot();
+    let ch = stykanimate_rs::graph::channel_mut(&mut core.project.channels, fi, target);
+    ch.add_key(frame, value);
+    core.status = format!(
+        "Graph key: figure {} joint {} bend = {value:.2} rad @ frame {}.",
+        fi + 1,
+        ni,
+        core.current + 1
+    );
 }
 
 /// Mirror the `(selected figure, target)` channel in time
@@ -2006,6 +2138,7 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
         .w_full()
         .flex_wrap()
         .child(btn("graph-key", "Key angle", false, t, |s| s.core.key_graph_angle()))
+        .child(btn("graph-key-bend", "Key bend", false, t, |s| key_bend(&mut s.core)))
         .child(btn("graph-smooth", "Auto tangents", false, t, |s| {
             s.core.smooth_graph_tangents()
         }))
@@ -2245,6 +2378,7 @@ mod tests {
         assert_eq!(channel_label(ChannelTarget::RootY), "Root Y");
         assert_eq!(channel_label(ChannelTarget::Angle(3)), "Angle 3");
         assert_eq!(channel_label(ChannelTarget::Length(12)), "Length 12");
+        assert_eq!(channel_label(ChannelTarget::Bend(3)), "Bend 3");
     }
 
     #[test]
@@ -2261,7 +2395,8 @@ mod tests {
             vec![
                 ChannelTarget::RootX,
                 ChannelTarget::RootY,
-                ChannelTarget::Angle(2)
+                ChannelTarget::Angle(2),
+                ChannelTarget::Bend(2)
             ]
         );
         // The figure's own channels join in project order,
@@ -2282,9 +2417,68 @@ mod tests {
                 ChannelTarget::RootX,
                 ChannelTarget::RootY,
                 ChannelTarget::Angle(2),
+                ChannelTarget::Bend(2),
                 ChannelTarget::Angle(5)
             ]
         );
+    }
+
+    #[test]
+    fn key_bend_authors_the_channel_with_the_pose_bend() {
+        // Wave Y (P-7): with no Bend channel yet, Key bend
+        // creates the selected node's channel and keys the
+        // pose bend in force at the playhead — one undo step.
+        let mut core = EditorCore::new();
+        core.selected_node = Some(2);
+        let node_counts: Vec<usize> = core
+            .project
+            .figures
+            .iter()
+            .map(|f| f.def.nodes.len())
+            .collect();
+        core.project.frames[0].bends =
+            node_counts.iter().map(|&n| vec![0.0; n]).collect();
+        core.project.frames[0].bends[0][2] = 0.7;
+        let depth = core.undo_depth();
+        key_bend(&mut core);
+        assert_eq!(core.undo_depth(), depth + 1, "exactly one undo step");
+        let ch = channel_for(&core, ChannelTarget::Bend(2)).expect("bend channel authored");
+        assert_eq!(ch.keys.len(), 1);
+        assert_eq!(ch.keys[0].frame, 0.0);
+        assert_eq!(ch.keys[0].value, 0.7, "the pose bend at the playhead");
+        assert!(core.status.contains("bend = 0.70 rad"), "{}", core.status);
+        // The pick the button enables: Bend resolves as the
+        // drawn channel once selected in the selector.
+        assert!(selector_entries(&core).contains(&ChannelTarget::Bend(2)));
+        // Undo removes the authored channel wholesale.
+        core.undo();
+        assert!(channel_for(&core, ChannelTarget::Bend(2)).is_none());
+    }
+
+    #[test]
+    fn key_bend_keys_the_channel_value_once_a_channel_exists() {
+        // A Bend channel overrides the pose bend at
+        // evaluation, so re-keying must key the CHANNEL's
+        // value at the playhead — keying the pose value
+        // would move the curve.
+        let mut core = EditorCore::new();
+        core.selected_node = Some(1);
+        core.project.channels = vec![channel(
+            ChannelTarget::Bend(1),
+            vec![Key::flat(0.0, 0.3), Key::flat(4.0, 0.3)],
+        )];
+        key_bend(&mut core);
+        let ch = channel_for(&core, ChannelTarget::Bend(1)).unwrap();
+        assert_eq!(ch.keys.len(), 2, "the playhead key replaces, not appends");
+        assert_eq!(ch.keys[0].value, 0.3, "the channel's own value, keyed flat");
+        // No joint selected: status only, nothing authored,
+        // no undo step spent.
+        let mut bare = EditorCore::new();
+        let depth = bare.undo_depth();
+        key_bend(&mut bare);
+        assert!(bare.project.channels.is_empty());
+        assert_eq!(bare.undo_depth(), depth);
+        assert!(bare.status.contains("Select a joint first"));
     }
 
     #[test]
@@ -3390,6 +3584,93 @@ mod tests {
         // so there is no line.
         let core = EditorCore::new();
         assert_eq!(value_line(&core, &GraphPanelState::default()), None);
+    }
+
+    #[test]
+    fn joint_limit_note_names_the_range_for_a_limited_angle_channel() {
+        // The demo figure is the humanoid: node 4 carries
+        // the constructor's elbow range (-10..160).
+        let core = EditorCore::new();
+        let ch = channel(ChannelTarget::Angle(4), vec![Key::flat(0.0, 170.0)]);
+        assert_eq!(
+            joint_limit_note(&core, &ch).as_deref(),
+            Some("joint limits -10..160")
+        );
+        // An unlimited node on the same figure: no note.
+        let ch = channel(ChannelTarget::Angle(1), vec![Key::flat(0.0, 10.0)]);
+        assert_eq!(joint_limit_note(&core, &ch), None);
+        // A non-Angle target on the limited node: no note.
+        let ch = channel(ChannelTarget::Length(4), vec![Key::flat(0.0, 10.0)]);
+        assert_eq!(joint_limit_note(&core, &ch), None);
+        // A stale figure index resolves to no note,
+        // never a panic.
+        let ch = Channel {
+            figure: 99,
+            target: ChannelTarget::Angle(4),
+            keys: vec![],
+        };
+        assert_eq!(joint_limit_note(&core, &ch), None);
+    }
+
+    #[test]
+    fn joint_limit_note_reads_an_open_side_as_off() {
+        // One bound set by hand on an unlimited node:
+        // the open side reads "Off", the segment
+        // inspector's word for an unset bound.
+        let mut core = EditorCore::new();
+        core.project.figures[0].def.nodes[1].max_angle = Some(45.0);
+        let ch = channel(ChannelTarget::Angle(1), vec![Key::flat(0.0, 10.0)]);
+        assert_eq!(
+            joint_limit_note(&core, &ch).as_deref(),
+            Some("joint limits Off..45")
+        );
+    }
+
+    #[test]
+    fn value_line_carries_the_limit_note_for_a_limited_angle_channel() {
+        // Angle(4) keyed to 170 on the demo humanoid
+        // (elbow range -10..160): the raw value stays
+        // first and unchanged, and the note names the
+        // range evaluation will clamp it into — the
+        // line no longer reads as if 170 is what
+        // will apply.
+        let mut core = EditorCore::new();
+        core.project.channels = vec![channel(
+            ChannelTarget::Angle(4),
+            vec![Key::flat(0.0, 170.0)],
+        )];
+        core.goto(0);
+        assert_eq!(
+            value_line(&core, &GraphPanelState::default()).as_deref(),
+            Some("Value at frame 1: 170.0 · joint limits -10..160")
+        );
+    }
+
+    #[test]
+    fn stat_rows_carry_the_limit_note_only_for_limited_angle_channels() {
+        let mut core = EditorCore::new();
+        core.project.channels = vec![
+            channel(ChannelTarget::Angle(4), vec![Key::flat(0.0, 170.0)]),
+            channel(ChannelTarget::Angle(1), vec![Key::flat(0.0, 10.0)]),
+            channel(ChannelTarget::RootX, vec![Key::flat(0.0, 5.0)]),
+        ];
+        let rows = stat_rows(&core, &GraphPanelState::default());
+        assert_eq!(rows.len(), 3);
+        assert!(
+            rows[0].0.ends_with("· joint limits -10..160"),
+            "limited row carries the note: {}",
+            rows[0].0
+        );
+        assert!(
+            !rows[1].0.contains("joint limits"),
+            "unlimited row unchanged: {}",
+            rows[1].0
+        );
+        assert!(
+            !rows[2].0.contains("joint limits"),
+            "root row unchanged: {}",
+            rows[2].0
+        );
     }
 
     #[test]

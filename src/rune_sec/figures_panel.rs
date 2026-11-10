@@ -1742,7 +1742,7 @@ mod tests {
         let plain = model::FigureDef {
             nodes: nodes.clone(),
         };
-        nodes[1].media = Some(model::SegmentMedia::Image { asset: 0 });
+        nodes[1].media = Some(model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
         nodes[2].media = Some(model::SegmentMedia::Text {
             content: "hi".into(),
             size: 12.0,
@@ -1791,7 +1791,7 @@ mod tests {
                     .position(|nd| nd.parent.is_some())
                     .expect("the demo def has a parented node");
                 clip_def.nodes[ni].media =
-                    Some(model::SegmentMedia::Image { asset: 0 });
+                    Some(model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
             }
             core.project.clips.push(model::ClipDef {
                 name: "clip".into(),
@@ -1837,16 +1837,17 @@ mod tests {
         let straight = thumb_prims_for(&fig, &pos, &[], HEAD_RING_R, THUMB_SIZE);
         // Six parented nodes, all flat and straight.
         assert_eq!(piece_count(&straight), 6);
-        // Bend node 3 (an arm): one extra piece.
+        // Bend node 3 (an arm): three extra pieces — the
+        // bent arc is four quarters (Wave Y, P-7).
         let mut bends = vec![0.0; def.nodes.len()];
         bends[3] = 0.5;
         let bent = thumb_prims_for(&fig, &pos, &bends, HEAD_RING_R, THUMB_SIZE);
-        assert_eq!(piece_count(&bent), 7);
-        // The bent node's pieces are the run's 3rd and
-        // 4th (nodes 1 and 2 contribute one piece each
-        // before it): they meet at the bend midpoint of
-        // the node's evaluated span, mapped by the same
-        // fit the straight run used.
+        assert_eq!(piece_count(&bent), 9);
+        // The bent node's pieces are the run's 3rd through
+        // 6th (nodes 1 and 2 contribute one piece each
+        // before it): its 2nd and 3rd quarters meet at the
+        // bend midpoint of the node's evaluated span,
+        // mapped by the same fit the straight run used.
         let fit = thumb_fit(&pos, true, THUMB_SIZE, HEAD_RING_R);
         let parent = def.nodes[3].parent.expect("node 3 is parented");
         let mid = fit.map(model::bend_mid(pos[parent], pos[3], 0.5));
@@ -1854,13 +1855,13 @@ mod tests {
             .iter()
             .filter(|p| matches!(p, ThumbPrim::Piece { .. }))
             .collect();
-        match (pieces[2], pieces[3]) {
+        match (pieces[3], pieces[4]) {
             (
                 ThumbPrim::Piece { b, .. },
                 ThumbPrim::Piece { a, .. },
             ) => {
-                assert_eq!(*b, mid, "first half ends at the bend midpoint");
-                assert_eq!(*a, mid, "second half starts at the bend midpoint");
+                assert_eq!(*b, mid, "second quarter ends at the bend midpoint");
+                assert_eq!(*a, mid, "third quarter starts at the bend midpoint");
             }
             _ => unreachable!(),
         }

@@ -143,11 +143,41 @@
 //! adds, in the same scheme: `dope-sprite-row-{i}` on
 //! each sprite's header cell and
 //! `dope-sprite-cell-{i}-{frame}` on its frame cells.
+//!
+//! ## State-key marks (Wave Y, Y11 — SpriteLoop GAP P-1 deepening)
+//!
+//! A figure's animation state keys (Wave X, P-1:
+//! `FigureInstance::states` — the frames where the
+//! figure switches which clip it plays, with what
+//! offset/speed) are frame events of exactly the kind
+//! this lane shows, but the pose-keyframe derivation
+//! cannot see them: a clip-driven figure whose timeline
+//! poses never change showed one ◆ at frame 0 and no
+//! trace of the frames where its animation actually
+//! changes. Each figure row now also carries its
+//! state-key frames ([`state_key_frames`]): a state key
+//! alone on a frame shows `◇` — the pose diamond's
+//! hollow twin — in the theme's secondary accent (the
+//! brief's second accent, #9B7CFF, via
+//! `app_theme::secondary_accent`), so the two event
+//! kinds read apart by shape AND colour; a frame
+//! holding both a pose key and a state key keeps the
+//! accent `◆` and gains a 1 pt secondary-accent cell
+//! border, so the state channel survives the
+//! coincidence without a second glyph overflowing the
+//! 30 pt chip. Cell presses are unchanged (select +
+//! goto — the mark rides the existing cells, no new
+//! element keys). The lane's gating widens with the
+//! marks: rows render when pose keys OR state keys
+//! exist ([`any_state_keys`]), and the "No keyframes
+//! yet" empty state now requires both silent — a
+//! state-keyed but unposed figure gets its rows, not a
+//! message denying its keys exist.
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, Color, El};
 use stykanimate_rs::editor::EditorCore;
-use stykanimate_rs::model::SpriteInstance;
+use stykanimate_rs::model::{FigureInstance, SpriteInstance};
 use stykanimate_rs::stats::figure_keyframes;
 
 use crate::rune_sec::design;
@@ -298,6 +328,11 @@ pub struct DopeRow {
     /// The figure's keyframe indices, ascending
     /// ([`figure_keyframes`]'s output, verbatim).
     pub keys: Vec<usize>,
+    /// The figure's state-key frames, ascending and
+    /// deduped ([`state_key_frames`]'s output) — the
+    /// frames where an animation state key switches
+    /// the clip this figure plays (Wave Y, Y11).
+    pub state_keys: Vec<usize>,
 }
 
 /// The shown rows for the current project, in display
@@ -316,6 +351,7 @@ pub fn dope_rows(core: &EditorCore) -> Vec<DopeRow> {
                 hidden: fig.hidden,
                 selected: fi == core.selected_figure,
                 keys: figure_keyframes(project, fi),
+                state_keys: state_key_frames(fig),
             }
         })
         .collect()
@@ -335,6 +371,41 @@ pub fn any_keyframes(core: &EditorCore) -> bool {
 /// a binary search.
 pub fn is_key(keys: &[usize], frame: usize) -> bool {
     keys.binary_search(&frame).is_ok()
+}
+
+/// A figure's state-key frames (Wave Y, Y11), ascending
+/// and deduped — the display derivation over
+/// `FigureInstance::states`, the sprite rows'
+/// [`sprite_key_frames`] precedent applied to figures.
+/// Storage is canonical (the authoring ops keep the
+/// vec sorted, upserting by frame), but a hand-edited
+/// project can repeat a frame; the model's tie rule
+/// makes the later key win there, and the mark is
+/// per-frame, so dedupe is the honest display.
+pub fn state_key_frames(fig: &FigureInstance) -> Vec<usize> {
+    let mut frames: Vec<usize> = fig.states.iter().map(|k| k.frame).collect();
+    frames.sort_unstable();
+    frames.dedup();
+    frames
+}
+
+/// Whether `frame` holds one of a row's state keys.
+/// `state_keys` is [`state_key_frames`]'s ascending
+/// output, so this is a binary search — [`is_key`]'s
+/// twin for the state channel.
+pub fn is_state_key(state_keys: &[usize], frame: usize) -> bool {
+    state_keys.binary_search(&frame).is_ok()
+}
+
+/// Whether ANY figure in the project carries a state
+/// key — [`any_keyframes`]'s sibling for the state
+/// channel, so the lane's gating can hear either kind
+/// of key (Wave Y, Y11).
+pub fn any_state_keys(core: &EditorCore) -> bool {
+    core.project
+        .figures
+        .iter()
+        .any(|fig| !fig.states.is_empty())
 }
 
 /// The total width of one figure row (and of the
@@ -442,6 +513,30 @@ pub fn sprite_dope_rows(
     .collect()
 }
 
+/// The sprite section's enrichment readout (Wave Y,
+/// Y14): for the Sprites panel's selected instance,
+/// the key SAMPLED at the current frame, rendered as
+/// one line — `Sprite {n} · frame {f} · ` plus the
+/// panel's own `enrichment_readout` wording, so the
+/// two surfaces can never drift. The sample is what
+/// the stage draws at the playhead: scrubbing is
+/// exactly when an imported sprite's opacity / flip
+/// / scale_y / pivot changes need to be readable
+/// without leaving the timeline. `None` when no
+/// instance is selected, the selection is stale, or
+/// the instance has no key to sample.
+pub fn sprite_enrichment_line(core: &EditorCore, selected: Option<usize>) -> Option<String> {
+    let index = selected?;
+    let inst = core.project.sprites.get(index)?;
+    let key = stykanimate_rs::model::InstanceKey::sample(&inst.keys, core.current as f32)?;
+    Some(format!(
+        "Sprite {} · frame {} · {}",
+        index + 1,
+        core.current + 1,
+        crate::rune_sec::sprites_panel::enrichment_readout(&key)
+    ))
+}
+
 /// The "+N more sprites" line for the instances the
 /// row cap left out — [`more_label`]'s sprite twin.
 pub fn more_sprites_label(more: usize) -> String {
@@ -500,7 +595,11 @@ pub fn dopesheet_lane(s: &State, t: &Theme) -> El {
     // therefore apply only when NEITHER section has
     // anything to show.
     let sprite_rows = sprite_dope_rows(core, s.sprites_panel.selected);
-    let figures_keyed = any_keyframes(core);
+    // Wave Y (Y11): state keys speak for the figure
+    // rows too — a figure can be fully clip-driven
+    // (state keys keyed, timeline poses static or even
+    // absent), and its rows are where those keys show.
+    let figures_keyed = any_keyframes(core) || any_state_keys(core);
 
     if core.project.figures.is_empty() && sprite_rows.is_empty() {
         // No figures and no sprites: nothing can have a
@@ -566,6 +665,19 @@ pub fn dopesheet_lane(s: &State, t: &Theme) -> El {
                     ),
             );
         }
+        // The selected sprite's enrichment at the
+        // playhead (Wave Y, Y14), under its rows —
+        // the "+N more" line's row shape, keyed so
+        // the lane's census can see it.
+        if let Some(line) = sprite_enrichment_line(core, s.sprites_panel.selected) {
+            lane = lane.child(
+                row()
+                    .key("dope-sprite-readout")
+                    .h(DOPE_HEADER_H)
+                    .center_y()
+                    .child(text(line).font(type_::LABEL).color(t.text_secondary)),
+            );
+        }
     }
     lane
 }
@@ -614,8 +726,27 @@ fn figure_row(r: &DopeRow, core: &EditorCore, t: &Theme) -> El {
         if frame == core.current {
             cell = cell.fill(design::selected_fill());
         }
+        // Wave Y (Y11): the state channel — a state key
+        // alone shows the hollow diamond in the
+        // secondary accent; a frame holding both kinds
+        // keeps the pose diamond and gains a
+        // secondary-accent border, so neither event is
+        // lost to the coincidence.
+        let state_key = is_state_key(&r.state_keys, frame);
         if is_key(&r.keys, frame) {
+            if state_key {
+                cell = cell.border(
+                    1.0,
+                    crate::rune_sec::app_theme::secondary_accent(t),
+                );
+            }
             cell = cell.child(text("◆").font(type_::LABEL).color(design::accent()));
+        } else if state_key {
+            cell = cell.child(
+                text("◇")
+                    .font(type_::LABEL)
+                    .color(crate::rune_sec::app_theme::secondary_accent(t)),
+            );
         }
         cells = cells.child(cell);
     }
@@ -694,6 +825,7 @@ mod tests {
     use super::*;
     use stykanimate_rs::model::{
         FigureDef, FigureInstance, Frame, ImageAsset, InstanceKey, Pose, SpriteInstance,
+        StateKey,
     };
 
     fn figure(name: &str) -> FigureInstance {
@@ -866,6 +998,57 @@ mod tests {
     }
 
     #[test]
+    fn state_key_frames_sorts_and_dedupes() {
+        // Wave Y (Y11): the display derivation over a
+        // hand-edited (unsorted, frame-repeating) states
+        // vec — the stored order is canonical, the mark
+        // is per-frame.
+        let mut fig = figure("Alpha");
+        assert!(state_key_frames(&fig).is_empty());
+        fig.states = vec![
+            StateKey { frame: 5, clip: 0, offset: 0, speed: 1.0 },
+            StateKey { frame: 2, clip: 0, offset: 0, speed: 1.0 },
+            StateKey { frame: 5, clip: 1, offset: 0, speed: 1.0 },
+        ];
+        assert_eq!(state_key_frames(&fig), vec![2, 5]);
+        assert!(is_state_key(&state_key_frames(&fig), 5));
+        assert!(!is_state_key(&state_key_frames(&fig), 3));
+    }
+
+    #[test]
+    fn dope_rows_carry_state_key_frames() {
+        let mut s = two_figure_state();
+        s.core.project.figures[0].states = vec![
+            StateKey { frame: 3, clip: 0, offset: 0, speed: 1.0 },
+            StateKey { frame: 1, clip: 0, offset: 2, speed: 0.5 },
+        ];
+        let rows = dope_rows(&s.core);
+        assert_eq!(rows[0].state_keys, vec![1, 3]);
+        assert!(rows[1].state_keys.is_empty());
+        assert!(any_state_keys(&s.core));
+    }
+
+    #[test]
+    fn state_keys_alone_speak_for_the_lane() {
+        // Figures with no poses on any frame: no pose
+        // keyframes can exist, yet a state key still
+        // brings the figure rows up — the lane's gating
+        // hears the state channel, so the "No keyframes
+        // yet" empty state cannot deny the key (Wave Y,
+        // Y11). Construction is the assertable level
+        // here (the module's discipline).
+        let mut s = crate::init();
+        let mut fig = figure("Alpha");
+        fig.states = vec![StateKey { frame: 1, clip: 0, offset: 0, speed: 1.0 }];
+        s.core.project.figures = vec![fig];
+        s.core.project.frames = vec![frame(vec![]), frame(vec![])];
+        assert!(!any_keyframes(&s.core));
+        assert!(any_state_keys(&s.core));
+        let t = rune::tok::theme(true);
+        let _ = dopesheet_lane(&s, &t);
+    }
+
+    #[test]
     fn frame_readout_is_one_based_and_clamped() {
         assert_eq!(frame_readout(0, 5), "Frame 1 / 5");
         assert_eq!(frame_readout(4, 5), "Frame 5 / 5");
@@ -982,6 +1165,37 @@ mod tests {
     }
 
     #[test]
+    fn sprite_enrichment_line_reads_the_selected_sprite_at_the_playhead() {
+        // Wave Y (Y14): the lane's readout of the
+        // panel-selected sprite's sampled key.
+        let mut s = sprite_state(&["a.png"], vec![sprite(0, &[0.0, 4.0])]);
+        s.core.project.sprites[0].keys[1].opacity = 0.5;
+        s.core.project.sprites[0].keys[1].flip_x = true;
+        s.core.current = 4;
+        assert_eq!(
+            sprite_enrichment_line(&s.core, Some(0)).as_deref(),
+            Some(
+                "Sprite 1 · frame 5 · Opacity 50% · Flip X · \
+                 Scale Y ×1.00 (follows Scale) · Pivot 0.50, 0.50"
+            ),
+        );
+        // Between keys the line reads the SAMPLE (what
+        // the stage draws), never a stored key: the
+        // opacity lerps, the flip is still the start
+        // key's.
+        s.core.current = 2;
+        let line = sprite_enrichment_line(&s.core, Some(0)).expect("a sampled line");
+        assert!(line.contains("Opacity 75%"), "the lerp of 1.0 and 0.5: {line}");
+        assert!(line.contains("Flip none"), "the start key's flip: {line}");
+        // No selection, a stale selection, and a
+        // keyless sprite each earn no line.
+        assert!(sprite_enrichment_line(&s.core, None).is_none());
+        assert!(sprite_enrichment_line(&s.core, Some(9)).is_none());
+        let keyless = sprite_state(&["a.png"], vec![sprite(0, &[])]);
+        assert!(sprite_enrichment_line(&keyless.core, Some(0)).is_none());
+    }
+
+    #[test]
     fn more_sprites_label_counts_honestly() {
         assert_eq!(more_sprites_label(1), "+1 more sprite");
         assert_eq!(more_sprites_label(4), "+4 more sprites");
@@ -1039,6 +1253,15 @@ mod tests {
             // Figures but no keyframes anywhere.
             let mut s = crate::init();
             s.core.project.figures = vec![figure("Alpha")];
+            s.core.project.frames = vec![frame(vec![])];
+            let _ = dopesheet_lane(&s, &t);
+            // State keys only (no poses anywhere): the
+            // rows branch, not the no-keys empty state
+            // (Wave Y, Y11).
+            let mut s = crate::init();
+            let mut fig = figure("Alpha");
+            fig.states = vec![StateKey { frame: 0, clip: 0, offset: 0, speed: 1.0 }];
+            s.core.project.figures = vec![fig];
             s.core.project.frames = vec![frame(vec![])];
             let _ = dopesheet_lane(&s, &t);
             // Past the row cap, selected pinned.

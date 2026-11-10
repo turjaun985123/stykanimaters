@@ -135,6 +135,40 @@
 //!   Centre/Ground keep bounding the figure as drawn
 //!   at any scale.
 //!
+//! * Setup mode (Wave Y, Y8 — SpriteLoop GAP P-10) → the
+//!   "Setup" section under the placement row: the kit
+//!   toggle row (key `fig-setup-mode`) flipping the core's
+//!   `setup_mode` flag through [`toggle_setup_mode`], and,
+//!   while the mode is on, a note line (key
+//!   `fig-setup-note`) plus the two set-rest actions
+//!   (keys `fig-setup-set-rest` / `fig-setup-set-rest-abs`)
+//!   that hand the selected figure's current-frame pose to
+//!   Y7's core op `EditorCore::set_rest_from_pose` through
+//!   [`set_rest_from_current_pose`] — rebased (the stored
+//!   animation shifts by the per-node rest delta,
+//!   new−old rest, so every pose keeps its offset from
+//!   the rest stance and the animation's content is
+//!   preserved against the new rig) or absolute (pose
+//!   data untouched, re-read against the new rest).
+//!   While the mode is on, the stage draws every
+//!   figure at its rest pose and stage drags drive the
+//!   existing solvers (`apply_ik` / `aim_node`) against
+//!   rest angles instead of the current frame's pose: that
+//!   branch lives in the core's drag machinery and the
+//!   stage's figure pass, applied by the integrator from
+//!   IA-Y8-1 / IA-Y8-2 in the Wave Y findings — this panel
+//!   owns the flag's only writer and the mode's whole
+//!   visible surface here. Toggling off is the whole
+//!   residue story: the flag is runtime-only core state
+//!   (like `draw_mode`), never serialised, and every
+//!   consumer reads it fresh, so off means frame poses and
+//!   frame drags everywhere again; the rest angles a setup
+//!   session edited are ordinary undoable project data,
+//!   not residue. The section's four strings resolve
+//!   through `i18n_wire::tr` under keys IA-Y8-3 files for
+//!   the integrator's catalogue insertion (`src/i18n.rs`
+//!   is integrator-only), the X3 pattern.
+//!
 //! When the project has no figures — or the selection is
 //! stale — the panel renders its header over the kit's
 //! empty state ("No figures in the project."; UI mission
@@ -240,6 +274,12 @@ pub struct InspectorFigureState {
     pub hidden: bool,
     /// The figure is locked (layers flag).
     pub locked: bool,
+    /// The core's setup (rigging) mode is on (Wave Y, Y8):
+    /// the stage draws rest poses and stage drags edit
+    /// rest angles. Read from `EditorCore::setup_mode` —
+    /// the core field IA-Y8-1 adds beside `draw_mode`,
+    /// this panel's toggle being its only writer.
+    pub setup_mode: bool,
 }
 
 /// Whole-percentage opacity for display (`1.0 → 100`),
@@ -264,6 +304,7 @@ pub fn figure_state(core: &EditorCore) -> Option<InspectorFigureState> {
         segments: fig.def.nodes.len(),
         hidden: fig.hidden,
         locked: fig.locked,
+        setup_mode: core.setup_mode,
     })
 }
 
@@ -922,6 +963,56 @@ pub fn step_head_ring_scale(core: &mut EditorCore, delta: f32) {
     core.set_head_ring_scale(next);
 }
 
+/// Flip the core's setup (rigging) mode — the setup
+/// toggle row's whole action (Wave Y, Y8; SpriteLoop GAP
+/// P-10). The flag is runtime-only core state beside
+/// `draw_mode` (the core field IA-Y8-1 adds): while on,
+/// the stage draws every figure at its rest pose and
+/// stage drags drive the existing solvers against rest
+/// angles (the core/stage branches are IA-Y8-1/IA-Y8-2);
+/// while off, nothing anywhere reads it, so toggling off
+/// leaves no residue — the rest angles a setup session
+/// edited are ordinary undoable project data. The toggle
+/// itself mutates no project data and takes no snapshot;
+/// it only reports itself on the status line, in the
+/// instructive voice the core's own mode refusals use.
+pub fn toggle_setup_mode(core: &mut EditorCore) {
+    core.setup_mode = !core.setup_mode;
+    core.status = if core.setup_mode {
+        "Setup mode on — stage drags now edit the rest pose.".into()
+    } else {
+        "Setup mode off — stage drags edit frame poses again.".into()
+    };
+}
+
+/// Set the selected figure's rest pose from its pose at
+/// the current frame, through Y7's core op — the setup
+/// section's two actions (Wave Y, Y8; SpriteLoop GAP
+/// P-10). `rebase` is the user's choice the board puts on
+/// Y7's contract: true shifts the stored animation
+/// (Frame.poses + ClipDef.frames + Project.channels) by
+/// the per-node rest delta (new−old rest), so every pose
+/// keeps its offset from the rest stance and only the
+/// rig's home pose changes; false is absolute —
+/// the rest becomes the current pose and the stored
+/// animation is re-read against it. The op owns the
+/// operation's one snapshot and its status line, exactly
+/// like this panel's other delegated ops; this helper is
+/// only the stale-selection guard in front of it (the
+/// panel's usual wording, no snapshot) plus THE one call
+/// site of Y7's contract in this file — if Y7's landed
+/// signature differs from `set_rest_from_pose(fi,
+/// rebase)`, this call is the single adaptation point.
+pub fn set_rest_from_current_pose(core: &mut EditorCore, rebase: bool) -> bool {
+    let fi = core.selected_figure;
+    if core.project.figures.get(fi).is_none() {
+        core.status = "No such figure.".into();
+        return false;
+    }
+    core.set_rest_from_pose(fi, rebase);
+    true
+}
+
 /// The scale row: label and the 90% / 110% buttons that
 /// resize the whole selected figure through
 /// [`scale_selected_figure`] (which reads the selection at
@@ -1031,6 +1122,80 @@ fn place_row(t: &Theme) -> El {
         .child(btn("fig-ground", "Ground figure", false, t, |s: &mut State| {
             ground_selected_figure(&mut s.core);
         }))
+}
+
+/// The setup-mode toggle row (Wave Y, Y8): the kit's
+/// one toggle form, its pill reading the core flag
+/// through the view-state (never a mirrored bool — the
+/// live-MCP toggle's doctrine), its label through
+/// `i18n_wire::tr` under the `setup_mode` key IA-Y8-3
+/// files. The press is [`toggle_setup_mode`] and
+/// nothing else: entering or leaving the mode mutates
+/// no project data.
+fn setup_toggle_row(s: &State, st: &InspectorFigureState, t: &Theme) -> El {
+    design::toggle_row(
+        "fig-setup-mode",
+        &i18n_wire::tr(&s.core, "setup_mode"),
+        st.setup_mode,
+        t,
+        |s: &mut State| toggle_setup_mode(&mut s.core),
+    )
+}
+
+/// The setup section's note line, mounted only while
+/// the mode is on: what the mode does to stage drags,
+/// in one line — the visible indication beside the
+/// toggle's pill and the stage's rest-pose drawing.
+/// Truncated in place like the measure line: the
+/// string is catalogue copy, and a translation must
+/// never be able to paint past the card's column.
+fn setup_note(s: &State, t: &Theme) -> El {
+    text(i18n_wire::tr(&s.core, "setup_mode_note"))
+        .key("fig-setup-note")
+        .font(type_::LABEL)
+        .color(t.text_secondary)
+        .truncate()
+}
+
+/// One of the setup section's two set-rest actions,
+/// mounted only while the mode is on: `absolute` false
+/// is the rebased set (the stored animation shifts by
+/// the per-node rest delta, new−old rest, so every pose
+/// keeps its offset from the rest stance), true the
+/// absolute set (pose data untouched, re-read against
+/// the new rest) — both through
+/// [`set_rest_from_current_pose`], which reads the
+/// selection at press time like the scale row does.
+/// Each button gets its own row: the two labels are
+/// long, and side by side they would crowd the card's
+/// 316 pt column (the header-name budget's arithmetic).
+fn setup_set_rest_row(s: &State, t: &Theme, absolute: bool) -> El {
+    // Both buttons are built literally at their own
+    // call shape so each key stands in the source as a
+    // plain `btn("…")` literal, the form the element-key
+    // census extracts.
+    let button = if absolute {
+        btn(
+            "fig-setup-set-rest-abs",
+            &i18n_wire::tr(&s.core, "setup_set_rest_absolute"),
+            false,
+            t,
+            |s: &mut State| {
+                set_rest_from_current_pose(&mut s.core, false);
+            },
+        )
+    } else {
+        btn(
+            "fig-setup-set-rest",
+            &i18n_wire::tr(&s.core, "setup_set_rest"),
+            false,
+            t,
+            |s: &mut State| {
+                set_rest_from_current_pose(&mut s.core, true);
+            },
+        )
+    };
+    row().w_full().gap(8.0).center_y().child(button)
 }
 
 /// One colour swatch: the kit's single swatch
@@ -1149,6 +1314,19 @@ pub fn inspector_figure(s: &State, t: &Theme) -> El {
         );
     }
     panel = panel.child(place_row(t));
+    // The Setup section (Wave Y, Y8): the toggle is
+    // always mounted — the mode must be discoverable
+    // from the figure it rigs — and the note + set-rest
+    // actions mount only while the mode is on, so an
+    // off mode costs the card one toggle row and leaves
+    // nothing else behind.
+    panel = panel.child(design::section_label("Setup", t));
+    panel = panel.child(setup_toggle_row(s, &st, t));
+    if st.setup_mode {
+        panel = panel.child(setup_note(s, t));
+        panel = panel.child(setup_set_rest_row(s, t, false));
+        panel = panel.child(setup_set_rest_row(s, t, true));
+    }
     panel.child(
         row()
             .w_full()
@@ -1184,6 +1362,89 @@ mod tests {
             assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
             assert_eq!(i18n_wire::tr(&core, key), english);
         }
+    }
+
+    #[test]
+    fn inspector_figure_setup_i18n_keys_exist_and_match_the_english_labels() {
+        // Wave Y (Y8, P-10): the setup section's four
+        // strings resolve through i18n_wire::tr under
+        // the keys IA-Y8-3 files for the integrator's
+        // catalogue insertion (src/i18n.rs is
+        // integrator-only). Like X3's clips pin, this
+        // passes on insertion: until the keys land, tr
+        // falls back to the raw key and this pin is the
+        // reminder that they are owed.
+        let core = EditorCore::new();
+        for (key, english) in [
+            ("setup_mode", "Setup mode"),
+            ("setup_mode_note", "Stage drags edit the rest pose."),
+            ("setup_set_rest", "Set rest from current pose"),
+            (
+                "setup_set_rest_absolute",
+                "Set rest from current pose (absolute)",
+            ),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
+    }
+
+    #[test]
+    fn figure_state_reports_setup_mode() {
+        // The view-state's setup flag is the core flag
+        // itself, read fresh — the toggle pill can never
+        // show a mode the core is not in.
+        let mut core = EditorCore::new();
+        assert!(!figure_state(&core).expect("demo figure").setup_mode);
+        core.setup_mode = true;
+        assert!(figure_state(&core).expect("demo figure").setup_mode);
+    }
+
+    #[test]
+    fn toggle_setup_mode_flips_the_flag_and_reports() {
+        // The toggle mutates no project data: the undo
+        // depth and the project JSON are byte-identical
+        // across a flip in either direction — the flag
+        // is runtime-only core state, so leaving the
+        // mode is the whole residue story.
+        let mut core = EditorCore::new();
+        let project_before = serde_json::to_string(&core.project).unwrap();
+        let depth = core.undo_depth();
+        toggle_setup_mode(&mut core);
+        assert!(core.setup_mode);
+        assert!(
+            core.status.contains("Setup mode on"),
+            "status should report entering the mode: {}",
+            core.status
+        );
+        toggle_setup_mode(&mut core);
+        assert!(!core.setup_mode);
+        assert!(
+            core.status.contains("Setup mode off"),
+            "status should report leaving the mode: {}",
+            core.status
+        );
+        assert_eq!(core.undo_depth(), depth, "the toggle took a snapshot");
+        assert_eq!(
+            serde_json::to_string(&core.project).unwrap(),
+            project_before,
+            "the toggle changed project data"
+        );
+    }
+
+    #[test]
+    fn set_rest_from_current_pose_guards_a_stale_selection() {
+        // The guard runs before the Y7 op is ever
+        // consulted: a stale selection refuses with the
+        // panel's usual wording and no snapshot (the
+        // op's own behaviour is Y7's pins' business).
+        let mut core = EditorCore::new();
+        core.selected_figure = 999;
+        let depth = core.undo_depth();
+        assert!(!set_rest_from_current_pose(&mut core, true));
+        assert!(!set_rest_from_current_pose(&mut core, false));
+        assert_eq!(core.status, "No such figure.");
+        assert_eq!(core.undo_depth(), depth);
     }
 
     #[test]
@@ -1448,6 +1709,13 @@ playback_speed: 1.0,
             home_rename: crate::rune_sec::home_panel::HomeRenameState::new(),
         };
         let _ = inspector_figure(&with_figures, &t);
+        // Wave Y (Y8): the same panel with setup mode
+        // on — the toggle reads on and the setup
+        // section (note + both set-rest actions)
+        // mounts.
+        let mut setup_state = with_figures;
+        setup_state.core.setup_mode = true;
+        let _ = inspector_figure(&setup_state, &t);
         let mut bare_core = EditorCore::new();
         bare_core.project.figures.clear();
         let bare = State {

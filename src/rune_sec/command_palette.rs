@@ -1073,6 +1073,77 @@ fn cmd_add_sprite(s: &mut State) {
     let _ = s.core.add_sprite(0);
 }
 
+/// Wave Y (Y6): import a layered set staged in the
+/// ./import folder — Y5's `import_layered_folder` over
+/// the selected figure, the MCP `import_layered_set`
+/// tool's GUI twin. The importer owns every validation
+/// and refusal past the staging check and sets the
+/// status itself on success; a refusal comes back as
+/// the `Err` text and is surfaced verbatim (the shim
+/// refusal pattern, cf. cmd_split_fx_clip).
+fn cmd_import_layered_set(s: &mut State) {
+    let Some(root) = layered_set_candidate() else {
+        s.core.status = "Put a layered set in the import folder first \
+            (a package folder holding spriteloop.import.json, or a folder of PNG/JPEG images)."
+            .into();
+        return;
+    };
+    if let Err(e) = stykanimate_rs::layered_import::import_layered_folder(
+        &mut s.core,
+        &root,
+        s.core.selected_figure,
+    ) {
+        s.core.status = e;
+    }
+}
+
+/// Does `dir` directly hold a layered set — a
+/// `spriteloop.import.json` manifest or at least one
+/// PNG/JPEG file? (The importer's own folder reading,
+/// mirrored for the staging check only.)
+fn layered_set_dir(dir: &std::path::Path) -> bool {
+    if dir.join("spriteloop.import.json").is_file() {
+        return true;
+    }
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries.filter_map(|e| e.ok()).any(|e| {
+                e.path().extension().is_some_and(|x| {
+                    ["png", "jpg", "jpeg"]
+                        .iter()
+                        .any(|ext| x.eq_ignore_ascii_case(ext))
+                })
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Resolve the layered set staged in ./import,
+/// deterministically: the import folder itself when it
+/// holds a set (the loose staging), else the first
+/// subfolder in sorted order that does (the natural
+/// staging — the exporter's package folder dropped in
+/// whole). The `./import` base mirrors the core's own
+/// `first_file_with` resolution.
+fn layered_set_candidate() -> Option<std::path::PathBuf> {
+    let import_dir = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join("import");
+    if layered_set_dir(&import_dir) {
+        return Some(import_dir);
+    }
+    let mut subdirs: Vec<std::path::PathBuf> = std::fs::read_dir(&import_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.is_dir())
+                .collect()
+        })
+        .unwrap_or_default();
+    subdirs.sort();
+    subdirs.into_iter().find(|d| layered_set_dir(d))
+}
+
 /// Wave 13: remove the LAST free-floating sprite
 /// instance — A1's `remove_sprite` over the final
 /// index. There is no sprite selection in the core or
@@ -1483,6 +1554,9 @@ pub static COMMANDS: &[Command] = &[
     Command { key: "style-opacity-down", title: "Decrease segment opacity", group: "Style", run: cmd_style_opacity_down },
     Command { key: "copy-style", title: "Copy segment style", group: "Style", run: cmd_copy_style },
     Command { key: "paste-style", title: "Paste segment style", group: "Style", run: cmd_paste_style },
+    // -- Wave Y (appended: every entry above keeps its
+    // -- place) ------------------------------------------
+    Command { key: "import-layered-set", title: "Import layered set", group: "Projects", run: cmd_import_layered_set },
 ];
 
 // ----------------------------------------------------------------
@@ -2152,8 +2226,13 @@ mod tests {
         // candidate was skipped: A1's ops take explicit
         // indices and neither the core nor the shell State
         // carries a sprite selection for it to advance, so
-        // the command would have nothing real to run).
-        assert_eq!(total, 134, "palette should cover 134 commands, has {total}");
+        // the command would have nothing real to run),
+        // +1 in Wave Y (import-layered-set — Y6's GUI twin
+        // of the `import_layered_set` MCP tool over Y5's
+        // layered-set importer: the shim resolves the set
+        // staged in ./import and forwards to the same
+        // `import_layered_folder` entry the tool calls).
+        assert_eq!(total, 135, "palette should cover 135 commands, has {total}");
         for c in COMMANDS {
             assert!(!c.title.is_empty() && !c.group.is_empty(), "empty field on {}", c.key);
         }
