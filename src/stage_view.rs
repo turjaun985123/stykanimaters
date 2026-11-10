@@ -1948,14 +1948,19 @@ mod tests {
             &flat_style(),
             0x123456,
         );
-        // Two pieces where the straight segment drew one,
-        // both in the flat colour, meeting exactly at
-        // bend_mid's output (computed here by the model
-        // itself).
-        assert_eq!(pieces.len(), 2);
+        // Four pieces where the straight segment drew one
+        // (Wave Y, P-7: the bend arc's quarter points, not
+        // the old two-half split), all in the flat colour,
+        // meeting exactly at the quarter points bend_mid
+        // itself computes.
+        assert_eq!(pieces.len(), 4);
         let mid = model::bend_mid(a, b, bend);
-        assert_eq!((pieces[0].a, pieces[0].b), (a, mid));
-        assert_eq!((pieces[1].a, pieces[1].b), (mid, b));
+        let q1 = model::bend_mid(a, mid, bend * 0.5);
+        let q3 = model::bend_mid(mid, b, bend * 0.5);
+        assert_eq!((pieces[0].a, pieces[0].b), (a, q1));
+        assert_eq!((pieces[1].a, pieces[1].b), (q1, mid));
+        assert_eq!((pieces[2].a, pieces[2].b), (mid, q3));
+        assert_eq!((pieces[3].a, pieces[3].b), (q3, b));
         assert!(pieces.iter().all(|piece| piece.color == 0x123456));
         // The joint really leaves the straight midpoint —
         // bend_mid's whole point for a nonzero bend.
@@ -1974,29 +1979,32 @@ mod tests {
         let (a, b) = ([0.0, 0.0], [90.0, 0.0]);
         let (near, far) = (0x000000u32, 0xFFFFFFu32);
         let style = model::NodeStyle { color2: Some(far), ..flat_style() };
-        // Straight gradient: 4 pieces. Bent: each half gets
-        // its own 4 sub-steps.
+        // Straight gradient: 4 pieces. Bent (Wave Y, P-7):
+        // four arc spans at the quarter points, each with
+        // its own 4 sub-steps — 16 pieces.
         let straight =
             stykanimate_rs::paint::styled_segment_pieces(a, b, 0.0, 6.0, &style, near);
         assert_eq!(straight.len(), 4);
         let bent =
             stykanimate_rs::paint::styled_segment_pieces(a, b, 0.5, 6.0, &style, near);
-        assert_eq!(bent.len(), 8);
-        // The halves meet exactly at the bend midpoint.
+        assert_eq!(bent.len(), 16);
+        // The spans meet exactly at the bend midpoint: it
+        // is the boundary between pieces 7 and 8.
         let mid = model::bend_mid(a, b, 0.5);
-        assert_eq!(bent[3].b, mid);
-        assert_eq!(bent[4].a, mid);
-        // Continuous parameter, start samples: the second
-        // half's first piece starts AT the split, so it
+        assert_eq!(bent[7].b, mid);
+        assert_eq!(bent[8].a, mid);
+        // Continuous parameter, start samples: the third
+        // span's first piece starts AT the split, so it
         // carries the whole-segment lerp at t = 0.5 exactly;
-        // the first half's last piece starts at t = 3/8 (its
-        // span runs 0 → 1/2 in 4 steps). The blends are
+        // the second span's last piece starts at
+        // t = 0.25 + 3/16 = 0.4375 (its span runs
+        // 1/4 → 1/2 in 4 steps). The blends are
         // `style::lerp_color` itself, as the exporters call
         // it.
         let mid_hex = stykanimate_rs::style::lerp_color(near, far, 0.5);
-        assert_eq!(bent[4].color, mid_hex);
-        let expect_first = stykanimate_rs::style::lerp_color(near, far, 0.375);
-        assert_eq!(bent[3].color, expect_first);
+        assert_eq!(bent[8].color, mid_hex);
+        let expect_first = stykanimate_rs::style::lerp_color(near, far, 0.4375);
+        assert_eq!(bent[7].color, expect_first);
     }
 
     #[test]

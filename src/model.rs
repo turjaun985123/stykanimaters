@@ -1180,7 +1180,20 @@ impl InstanceKey {
                     opacity: a.opacity + (b.opacity - a.opacity) * t,
                     flip_x,
                     flip_y,
-                    scale_y: ay + (by - ay) * t,
+                    // Both endpoints following `scale` (the
+                    // scale_y <= 0 sentinel) means the sample
+                    // follows too: keep the sentinel, or the
+                    // enrichment readout loses its "(follows
+                    // Scale)" suffix on sampled keys (the
+                    // dopesheet lane reads samples only).
+                    // eff_scale_y() is unaffected — `scale`
+                    // itself is lerped with the same t, which
+                    // is exactly the value resolved here before.
+                    scale_y: if a.scale_y <= 0.0 && b.scale_y <= 0.0 {
+                        0.0
+                    } else {
+                        ay + (by - ay) * t
+                    },
                     pivot_x: a.pivot_x + (b.pivot_x - a.pivot_x) * t,
                     pivot_y: a.pivot_y + (b.pivot_y - a.pivot_y) * t,
                 });
