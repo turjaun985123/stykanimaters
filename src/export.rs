@@ -1369,6 +1369,62 @@ pub fn export_gif_range_scaled(
     encode_gif_scaled(project, &times, path, scale)
 }
 
+/// One progress update from the **encode phase** of an MP4 /
+/// WebM export (Wave U, U11): the phase that begins once every
+/// sampled frame has been rendered to the temporary PNG
+/// sequence and `ffmpeg` is turning that sequence into video.
+///
+/// `encoded_frames` is the encoder's own output-frame count,
+/// read from ffmpeg's machine-readable `-progress` stream —
+/// never the render loop's counter, so an observer can tell
+/// the two phases apart by construction. `total_frames` is
+/// the number of sampled frame times handed to the encoder
+/// (duration-expanded / tween-sampled, exactly the count the
+/// export returns on success), **not** the authored frame
+/// count.
+///
+/// Delivery contract for the `*_with_encode_progress` entries:
+///
+/// - While ffmpeg runs, an event fires whenever the encoder's
+///   reported frame count advances: `finished == false`,
+///   `encoded_frames` strictly increasing, always within
+///   `1..=total_frames`. The encoder's opening `frame=0`
+///   block is suppressed (no output frame exists yet), and
+///   duplicate / regressive reports are dropped.
+/// - Exactly one terminal event fires, and only after ffmpeg
+///   has exited successfully and its progress stream has been
+///   fully drained: `encoded_frames == total_frames`,
+///   `finished == true`. A spawn failure or a non-zero exit
+///   produces no terminal event.
+/// - `finished` closes the **video encode** only. An MP4
+///   export with audio still has its separate mux step after
+///   the encode, and that step can still fail the export —
+///   the terminal event is not an export-success signal.
+/// - Passing no callback (every pre-existing entry point)
+///   runs the encode exactly as before: no `-progress` flag,
+///   no pipe, no thread.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EncodeProgressEvent {
+    /// Output frames the encoder reports completed so far.
+    pub encoded_frames: usize,
+    /// Sampled frames the encoder was given in total.
+    pub total_frames: usize,
+    /// True only on the single terminal event (see above).
+    pub finished: bool,
+}
+
+/// The encode-progress hook accepted by the
+/// `*_with_encode_progress` export entries: `None`, or a
+/// shared reference to a callable invoked with each
+/// [`EncodeProgressEvent`]. Intermediate events are invoked
+/// from the encode's drainer thread (hence `Sync`); the
+/// terminal event is invoked from the caller's thread. A
+/// panicking callback cannot fail or hang the export — the
+/// panic is contained at the call site and that event is
+/// dropped.
+pub type EncodeProgressCallback<'a> =
+    Option<&'a (dyn Fn(EncodeProgressEvent) + Sync)>;
+
 /// The outcome of a successful MP4 export, full or range:
 /// the frames written, and the audible clips that had to be
 /// left out because their files are missing. A non-empty
@@ -1413,6 +1469,18 @@ impl Mp4ExportOutcome {
 /// file is missing never fails the export: it is skipped and
 /// named in the outcome's `missing_audio` ([`Mp4ExportOutcome`]).
 pub fn export_mp4(project: &Project, path: &Path) -> std::io::Result<Mp4ExportOutcome> {
+    export_mp4_with_encode_progress(project, path, None)
+}
+
+/// [`export_mp4`] with an encode-phase progress hook
+/// ([`EncodeProgressCallback`]): the callback observes the
+/// silent-video encode; the audio mux that may follow it
+/// reports nothing. With `None` this is `export_mp4` itself.
+pub fn export_mp4_with_encode_progress(
+    project: &Project,
+    path: &Path,
+    progress: EncodeProgressCallback<'_>,
+) -> std::io::Result<Mp4ExportOutcome> {
     // Audible = unmuted with an existing file — the same
     // exclusion `mux_plan` applies. This check used to count
     // muted clips too, so an all-muted project took the mux
@@ -1426,14 +1494,14 @@ pub fn export_mp4(project: &Project, path: &Path) -> std::io::Result<Mp4ExportOu
         .any(|c| !c.muted && std::path::Path::new(&c.path).exists());
     let missing_audio = crate::audio::missing_audio_clips(&project.audio);
     if !has_audio {
-        let frames = ffmpeg_encode(project, path, &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"])?;
+        let frames = ffmpeg_encode(project, path, &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"], progress)?;
         return Ok(Mp4ExportOutcome {
             frames,
             missing_audio,
         });
     }
     let silent = unique_temp("silent").with_extension("mp4");
-    let n = ffmpeg_encode(project, &silent, &["-c:v", "libx264", "-pix_fmt", "yuv420p"])?;
+    let n = ffmpeg_encode(project, &silent, &["-c:v", "libx264", "-pix_fmt", "yuv420p"], progress)?;
     let muxed = mux_audio(project, &silent, path)?;
     let _ = std::fs::remove_file(&silent);
     if muxed {
@@ -1461,9 +1529,23 @@ pub fn export_mp4_scaled(
     path: &Path,
     scale: f32,
 ) -> std::io::Result<Mp4ExportOutcome> {
+    export_mp4_scaled_with_encode_progress(project, path, scale, None)
+}
+
+/// [`export_mp4_scaled`] with an encode-phase progress hook
+/// ([`EncodeProgressCallback`]): the callback observes the
+/// silent-video encode; the audio mux that may follow it
+/// reports nothing. At exactly 1.0 the call routes through
+/// [`export_mp4_with_encode_progress`], hook included.
+pub fn export_mp4_scaled_with_encode_progress(
+    project: &Project,
+    path: &Path,
+    scale: f32,
+    progress: EncodeProgressCallback<'_>,
+) -> std::io::Result<Mp4ExportOutcome> {
     let scale = check_export_scale(scale)?;
     if scale == 1.0 {
-        return export_mp4(project, path);
+        return export_mp4_with_encode_progress(project, path, progress);
     }
     let has_audio = project
         .audio
@@ -1476,6 +1558,7 @@ pub fn export_mp4_scaled(
             path,
             &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
             scale,
+            progress,
         )?;
         return Ok(Mp4ExportOutcome {
             frames,
@@ -1488,6 +1571,7 @@ pub fn export_mp4_scaled(
         &silent,
         &["-c:v", "libx264", "-pix_fmt", "yuv420p"],
         scale,
+        progress,
     )?;
     let muxed = mux_audio(project, &silent, path)?;
     let _ = std::fs::remove_file(&silent);
@@ -1534,6 +1618,22 @@ pub fn export_mp4_range(
     to: usize,
     path: &Path,
 ) -> std::io::Result<Mp4ExportOutcome> {
+    export_mp4_range_with_encode_progress(project, from, to, path, None)
+}
+
+/// [`export_mp4_range`] with an encode-phase progress hook
+/// ([`EncodeProgressCallback`]): the callback observes the
+/// silent-video encode; the range audio mux that may follow
+/// it reports nothing. The hook is not invoked at all when
+/// the range's audio plan refuses the export before the
+/// encode (the unprobeable-clip error above).
+pub fn export_mp4_range_with_encode_progress(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    progress: EncodeProgressCallback<'_>,
+) -> std::io::Result<Mp4ExportOutcome> {
     let (from, to) = clamp_frame_range(project, from, to)?;
     let times = sample_times_range(project, from, to);
     let frames = times.len();
@@ -1557,6 +1657,7 @@ pub fn export_mp4_range(
             &times,
             path,
             &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+            progress,
         )?;
         return Ok(Mp4ExportOutcome {
             frames,
@@ -1569,6 +1670,7 @@ pub fn export_mp4_range(
         &times,
         &silent,
         &["-c:v", "libx264", "-pix_fmt", "yuv420p"],
+        progress,
     )?;
     let muxed = mux_audio_range(&plan, &silent, path)?;
     let _ = std::fs::remove_file(&silent);
@@ -1599,9 +1701,26 @@ pub fn export_mp4_range_scaled(
     path: &Path,
     scale: f32,
 ) -> std::io::Result<Mp4ExportOutcome> {
+    export_mp4_range_scaled_with_encode_progress(project, from, to, path, scale, None)
+}
+
+/// [`export_mp4_range_scaled`] with an encode-phase progress
+/// hook ([`EncodeProgressCallback`]): the callback observes
+/// the silent-video encode; the range audio mux that may
+/// follow it reports nothing. At exactly 1.0 the call routes
+/// through [`export_mp4_range_with_encode_progress`], hook
+/// included.
+pub fn export_mp4_range_scaled_with_encode_progress(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    scale: f32,
+    progress: EncodeProgressCallback<'_>,
+) -> std::io::Result<Mp4ExportOutcome> {
     let scale = check_export_scale(scale)?;
     if scale == 1.0 {
-        return export_mp4_range(project, from, to, path);
+        return export_mp4_range_with_encode_progress(project, from, to, path, progress);
     }
     let (from, to) = clamp_frame_range(project, from, to)?;
     let times = sample_times_range(project, from, to);
@@ -1627,6 +1746,7 @@ pub fn export_mp4_range_scaled(
             path,
             &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
             scale,
+            progress,
         )?;
         return Ok(Mp4ExportOutcome {
             frames,
@@ -1640,6 +1760,7 @@ pub fn export_mp4_range_scaled(
         &silent,
         &["-c:v", "libx264", "-pix_fmt", "yuv420p"],
         scale,
+        progress,
     )?;
     let muxed = mux_audio_range(&plan, &silent, path)?;
     let _ = std::fs::remove_file(&silent);
@@ -1650,6 +1771,149 @@ pub fn export_mp4_range_scaled(
         })
     } else {
         Err(std::io::Error::other("audio mux failed"))
+    }
+}
+
+/// Deliver one encode-progress event to the hook, if any.
+/// A panicking observer is contained here: it drops that one
+/// event and can neither fail the export nor kill the
+/// drainer thread (which would risk the child blocking on a
+/// full progress pipe).
+fn report_encode_progress(progress: EncodeProgressCallback<'_>, event: EncodeProgressEvent) {
+    if let Some(callback) = progress {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(event)));
+    }
+}
+
+/// The frame count on one line of ffmpeg's `-progress`
+/// stream (`frame=  123`), or `None` for every other line —
+/// the stream's other values (`fps`, `bitrate`, `out_time_*`,
+/// `speed`, the closing `progress=` marker) are never read:
+/// several are `N/A` in the opening blocks, `out_time_ms` is
+/// microseconds despite its name, and unknown keys from other
+/// ffmpeg versions must stay ignorable by construction.
+fn parse_ffmpeg_progress_frame(line: &str) -> Option<usize> {
+    line.strip_prefix("frame=")?.trim().parse().ok()
+}
+
+/// Drain one ffmpeg `-progress` stream to EOF, reporting
+/// each advancing encoder frame count (see
+/// [`EncodeProgressEvent`] for the delivery contract). Runs
+/// on a dedicated thread for the child's whole life: the
+/// stream is wall-clock-bound (hundreds of bytes per second),
+/// so an undrained pipe would fill its buffer after a few
+/// minutes of encode and deadlock the child. The terminal
+/// event is NOT sent here — only the runner knows the exit
+/// status — so a failed encode never reports `finished`.
+fn drain_ffmpeg_progress<R: std::io::Read>(
+    reader: R,
+    total_frames: usize,
+    progress: EncodeProgressCallback<'_>,
+) {
+    use std::io::BufRead as _;
+    let mut reader = std::io::BufReader::new(reader);
+    let mut last_reported = 0usize;
+    let mut raw_line: Vec<u8> = Vec::new();
+    loop {
+        raw_line.clear();
+        match reader.read_until(b'\n', &mut raw_line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        let line = String::from_utf8_lossy(&raw_line);
+        if let Some(frame) = parse_ffmpeg_progress_frame(&line) {
+            let done = frame.min(total_frames);
+            if done > last_reported {
+                last_reported = done;
+                report_encode_progress(
+                    progress,
+                    EncodeProgressEvent {
+                        encoded_frames: done,
+                        total_frames,
+                        finished: false,
+                    },
+                );
+            }
+        }
+    }
+}
+
+/// Run one ffmpeg video encode (the process tail of
+/// [`ffmpeg_encode_times`] / [`ffmpeg_encode_times_scaled`];
+/// `args` is the full argument list, output path last, and
+/// `total_frames` the sampled frames rendered into the PNG
+/// sequence). With no progress hook the invocation is the
+/// historical one — nulled streams, one blocking `status()`.
+/// With a hook, ffmpeg additionally gets `-nostats -progress
+/// pipe:1` (global options, at the head of the argument
+/// list), stdout is piped, and a drainer thread reads the
+/// progress stream for the child's whole life. An ffmpeg too
+/// old to know `-progress` (pre-1.0, 2012) fails a hooked
+/// encode with the usual `ffmpeg exited with …` error; the
+/// unhooked invocation is untouched by that risk, and no
+/// capability probe or silent retry is attempted.
+fn run_ffmpeg_encode(
+    args: &[String],
+    total_frames: usize,
+    progress: EncodeProgressCallback<'_>,
+) -> std::io::Result<()> {
+    if progress.is_none() {
+        return match std::process::Command::new("ffmpeg")
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) => Err(std::io::Error::other(format!(
+                "ffmpeg exited with {status}"
+            ))),
+            Err(e) => Err(std::io::Error::other(format!(
+                "could not run ffmpeg: {e}"
+            ))),
+        };
+    }
+    let mut progress_args: Vec<String> =
+        vec!["-nostats".into(), "-progress".into(), "pipe:1".into()];
+    progress_args.extend_from_slice(args);
+    let mut child = std::process::Command::new("ffmpeg")
+        .args(&progress_args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| std::io::Error::other(format!("could not run ffmpeg: {e}")))?;
+    let stdout = child.stdout.take();
+    let status = std::thread::scope(|scope| {
+        let drainer = stdout.map(|stdout| {
+            scope.spawn(move || drain_ffmpeg_progress(stdout, total_frames, progress))
+        });
+        let status = child.wait();
+        if let Some(drainer) = drainer {
+            let _ = drainer.join();
+        }
+        status
+    });
+    match status {
+        Ok(status) if status.success() => {
+            if total_frames > 0 {
+                report_encode_progress(
+                    progress,
+                    EncodeProgressEvent {
+                        encoded_frames: total_frames,
+                        total_frames,
+                        finished: true,
+                    },
+                );
+            }
+            Ok(())
+        }
+        Ok(status) => Err(std::io::Error::other(format!(
+            "ffmpeg exited with {status}"
+        ))),
+        Err(e) => Err(std::io::Error::other(format!(
+            "could not run ffmpeg: {e}"
+        ))),
     }
 }
 
@@ -1667,9 +1931,10 @@ fn ffmpeg_encode(
     project: &Project,
     path: &Path,
     video_args: &[&str],
+    progress: EncodeProgressCallback<'_>,
 ) -> std::io::Result<usize> {
     let times = sample_times(project);
-    ffmpeg_encode_times(project, &times, path, video_args)
+    ffmpeg_encode_times(project, &times, path, video_args, progress)
 }
 
 /// Encode the given frame times with ffmpeg using the given
@@ -1682,6 +1947,7 @@ fn ffmpeg_encode_times(
     times: &[f32],
     path: &Path,
     video_args: &[&str],
+    progress: EncodeProgressCallback<'_>,
 ) -> std::io::Result<usize> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1702,17 +1968,9 @@ fn ffmpeg_encode_times(
     ];
     args.extend(video_args.iter().map(|a| a.to_string()));
     args.push(path.to_string_lossy().into_owned());
-    let result = std::process::Command::new("ffmpeg")
-        .args(&args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    let result = run_ffmpeg_encode(&args, times.len(), progress);
     let _ = std::fs::remove_dir_all(&tmp);
-    match result {
-        Ok(status) if status.success() => Ok(times.len()),
-        Ok(status) => Err(std::io::Error::other(format!("ffmpeg exited with {status}"))),
-        Err(e) => Err(std::io::Error::other(format!("could not run ffmpeg: {e}"))),
-    }
+    result.map(|()| times.len())
 }
 
 /// Encode the whole timeline (see `sample_times`) with ffmpeg
@@ -1725,12 +1983,13 @@ fn ffmpeg_encode_scaled(
     path: &Path,
     video_args: &[&str],
     scale: f32,
+    progress: EncodeProgressCallback<'_>,
 ) -> std::io::Result<usize> {
     if scale == 1.0 {
-        return ffmpeg_encode(project, path, video_args);
+        return ffmpeg_encode(project, path, video_args, progress);
     }
     let times = sample_times(project);
-    ffmpeg_encode_times_scaled(project, &times, path, video_args, scale)
+    ffmpeg_encode_times_scaled(project, &times, path, video_args, scale, progress)
 }
 
 /// Encode the given frame times with ffmpeg at `scale` times
@@ -1745,9 +2004,10 @@ fn ffmpeg_encode_times_scaled(
     path: &Path,
     video_args: &[&str],
     scale: f32,
+    progress: EncodeProgressCallback<'_>,
 ) -> std::io::Result<usize> {
     if scale == 1.0 {
-        return ffmpeg_encode_times(project, times, path, video_args);
+        return ffmpeg_encode_times(project, times, path, video_args, progress);
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1768,23 +2028,31 @@ fn ffmpeg_encode_times_scaled(
     ];
     args.extend(video_args.iter().map(|a| a.to_string()));
     args.push(path.to_string_lossy().into_owned());
-    let result = std::process::Command::new("ffmpeg")
-        .args(&args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    let result = run_ffmpeg_encode(&args, times.len(), progress);
     let _ = std::fs::remove_dir_all(&tmp);
-    match result {
-        Ok(status) if status.success() => Ok(times.len()),
-        Ok(status) => Err(std::io::Error::other(format!("ffmpeg exited with {status}"))),
-        Err(e) => Err(std::io::Error::other(format!("could not run ffmpeg: {e}"))),
-    }
+    result.map(|()| times.len())
 }
 
 /// Export a WebM (VP9). Frames are opaque; the alpha channel is
 /// present but fully opaque.
 pub fn export_webm(project: &Project, path: &Path) -> std::io::Result<usize> {
-    ffmpeg_encode(project, path, &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"])
+    export_webm_with_encode_progress(project, path, None)
+}
+
+/// [`export_webm`] with an encode-phase progress hook
+/// ([`EncodeProgressCallback`]). With `None` this is
+/// `export_webm` itself.
+pub fn export_webm_with_encode_progress(
+    project: &Project,
+    path: &Path,
+    progress: EncodeProgressCallback<'_>,
+) -> std::io::Result<usize> {
+    ffmpeg_encode(
+        project,
+        path,
+        &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"],
+        progress,
+    )
 }
 
 /// Export the authored frames `from..=to` (inclusive, clamped to
@@ -1801,6 +2069,19 @@ pub fn export_webm_range(
     to: usize,
     path: &Path,
 ) -> std::io::Result<()> {
+    export_webm_range_with_encode_progress(project, from, to, path, None)
+}
+
+/// [`export_webm_range`] with an encode-phase progress hook
+/// ([`EncodeProgressCallback`]). With `None` this is
+/// `export_webm_range` itself.
+pub fn export_webm_range_with_encode_progress(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    progress: EncodeProgressCallback<'_>,
+) -> std::io::Result<()> {
     let (from, to) = clamp_frame_range(project, from, to)?;
     let times = sample_times_range(project, from, to);
     ffmpeg_encode_times(
@@ -1808,6 +2089,7 @@ pub fn export_webm_range(
         &times,
         path,
         &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"],
+        progress,
     )?;
     Ok(())
 }
@@ -1824,15 +2106,29 @@ pub fn export_webm_scaled(
     path: &Path,
     scale: f32,
 ) -> std::io::Result<usize> {
+    export_webm_scaled_with_encode_progress(project, path, scale, None)
+}
+
+/// [`export_webm_scaled`] with an encode-phase progress hook
+/// ([`EncodeProgressCallback`]). At exactly 1.0 the call
+/// routes through [`export_webm_with_encode_progress`], hook
+/// included.
+pub fn export_webm_scaled_with_encode_progress(
+    project: &Project,
+    path: &Path,
+    scale: f32,
+    progress: EncodeProgressCallback<'_>,
+) -> std::io::Result<usize> {
     let scale = check_export_scale(scale)?;
     if scale == 1.0 {
-        return export_webm(project, path);
+        return export_webm_with_encode_progress(project, path, progress);
     }
     ffmpeg_encode_scaled(
         project,
         path,
         &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"],
         scale,
+        progress,
     )
 }
 
@@ -1850,9 +2146,26 @@ pub fn export_webm_range_scaled(
     path: &Path,
     scale: f32,
 ) -> std::io::Result<()> {
+    export_webm_range_scaled_with_encode_progress(project, from, to, path, scale, None)
+}
+
+/// [`export_webm_range_scaled`] with an encode-phase progress
+/// hook ([`EncodeProgressCallback`]). At exactly 1.0 the call
+/// routes through [`export_webm_range_with_encode_progress`],
+/// hook included. An invalid scale is refused before the
+/// range is even clamped, so a refused call fires no event
+/// and writes nothing.
+pub fn export_webm_range_scaled_with_encode_progress(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    scale: f32,
+    progress: EncodeProgressCallback<'_>,
+) -> std::io::Result<()> {
     let scale = check_export_scale(scale)?;
     if scale == 1.0 {
-        return export_webm_range(project, from, to, path);
+        return export_webm_range_with_encode_progress(project, from, to, path, progress);
     }
     let (from, to) = clamp_frame_range(project, from, to)?;
     let times = sample_times_range(project, from, to);
@@ -1862,6 +2175,7 @@ pub fn export_webm_range_scaled(
         path,
         &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"],
         scale,
+        progress,
     )?;
     Ok(())
 }
@@ -5725,12 +6039,13 @@ mod trail_tests {
 #[cfg(test)]
 mod range_export_tests {
     use super::{
-        export_apng, export_apng_range, export_gif, export_gif_range,
+        drain_ffmpeg_progress, export_apng, export_apng_range, export_gif, export_gif_range,
         export_jpeg_sequence, export_jpeg_sequence_range, export_mp4, export_mp4_range,
-        export_mp4_range_scaled, export_mp4_scaled, export_png_sequence,
-        export_png_sequence_range, export_sheet_range, export_spritesheet,
-        export_svg_range, export_webm_range, export_webm_range_scaled,
-        export_webm_scaled, render_frame, Mp4ExportOutcome,
+        export_mp4_range_scaled, export_mp4_range_with_encode_progress, export_mp4_scaled,
+        export_mp4_with_encode_progress, export_png_sequence, export_png_sequence_range,
+        export_sheet_range, export_spritesheet, export_svg_range, export_webm_range,
+        export_webm_range_scaled, export_webm_scaled, export_webm_scaled_with_encode_progress,
+        parse_ffmpeg_progress_frame, render_frame, EncodeProgressEvent, Mp4ExportOutcome,
     };
     use crate::model::{AudioClip, Project};
     use image::AnimationDecoder as _;
@@ -6108,6 +6423,191 @@ mod range_export_tests {
         assert!(std::fs::metadata(&webm_path).unwrap().len() > 0);
         let _ = std::fs::remove_file(&mp4_path);
         let _ = std::fs::remove_file(&webm_path);
+    }
+
+    /// The delivery contract every hooked encode must keep
+    /// (Wave U, U11): intermediate events unfinished,
+    /// strictly increasing and in range; exactly one
+    /// terminal event, last, at (total, total). How many
+    /// intermediate events a given encode produces is
+    /// ffmpeg's wall-clock business and is NOT pinned.
+    fn assert_encode_progress_contract(events: &[EncodeProgressEvent], total: usize) {
+        let (terminal, intermediate) = events
+            .split_last()
+            .expect("a successful hooked encode reports at least its terminal event");
+        assert_eq!(
+            *terminal,
+            EncodeProgressEvent {
+                encoded_frames: total,
+                total_frames: total,
+                finished: true,
+            },
+            "the terminal event closes the encode at (total, total)"
+        );
+        assert_eq!(
+            events.iter().filter(|e| e.finished).count(),
+            1,
+            "exactly one terminal event"
+        );
+        let mut last = 0usize;
+        for event in intermediate {
+            assert!(!event.finished, "no early terminal event: {event:?}");
+            assert_eq!(event.total_frames, total);
+            assert!(
+                event.encoded_frames > last && event.encoded_frames <= total,
+                "intermediate events strictly increase within the total: {event:?}"
+            );
+            last = event.encoded_frames;
+        }
+    }
+
+    #[test]
+    fn ffmpeg_progress_parser_reads_only_the_frame_count() {
+        // Wave U (U11): ffmpeg's -progress stream is a
+        // key=value block format; the frame count is the one
+        // lawful signal. Whitespace inside the value is
+        // ffmpeg's own padding; N/A and every other key —
+        // measured, version-specific or future — read as
+        // "no frame on this line", never as an error.
+        assert_eq!(parse_ffmpeg_progress_frame("frame=  42"), Some(42));
+        assert_eq!(parse_ffmpeg_progress_frame("frame=0"), Some(0));
+        assert_eq!(parse_ffmpeg_progress_frame("frame=N/A"), None);
+        assert_eq!(parse_ffmpeg_progress_frame("fps=12.5"), None);
+        assert_eq!(parse_ffmpeg_progress_frame("out_time_ms=7933333"), None);
+        assert_eq!(parse_ffmpeg_progress_frame("progress=end"), None);
+        assert_eq!(parse_ffmpeg_progress_frame("stream_0_0_q=-1.0"), None);
+    }
+
+    #[test]
+    fn ffmpeg_progress_drain_reports_only_advancing_counts() {
+        // A captured-shape stream: the opening frame=0 is
+        // suppressed, duplicates and regressions drop,
+        // counts clamp at the total, unknown / N/A lines are
+        // skipped — and the drainer itself never sends the
+        // terminal event (it cannot know the exit status).
+        let stream = "\
+frame=0
+fps=0.00
+bitrate=N/A
+progress=continue
+frame=2
+progress=continue
+frame=2
+frame=99
+frame=3
+progress=end
+";
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let callback = move |event: EncodeProgressEvent| {
+            sink.lock().unwrap().push(event);
+        };
+        drain_ffmpeg_progress(
+            std::io::Cursor::new(stream.as_bytes().to_vec()),
+            5,
+            Some(&callback),
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                EncodeProgressEvent {
+                    encoded_frames: 2,
+                    total_frames: 5,
+                    finished: false,
+                },
+                EncodeProgressEvent {
+                    encoded_frames: 5,
+                    total_frames: 5,
+                    finished: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn mp4_range_encode_progress_fires_and_terminates_once() {
+        // Wave U (U11): the hooked range encode on a
+        // 24 fps fixture — frames 1..=3 sample to exactly 3
+        // encoder frames (durations 1.0, tween playback off).
+        let mut project = tiny_project();
+        project.fps = 24.0;
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let callback = move |event: EncodeProgressEvent| {
+            sink.lock().unwrap().push(event);
+        };
+        let path = temp_file("mp4-progress", "mp4");
+        let outcome = export_mp4_range_with_encode_progress(
+            &project,
+            1,
+            3,
+            &path,
+            Some(&callback),
+        )
+        .unwrap();
+        assert_eq!(outcome.frames, 3);
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[4..8], b"ftyp", "not an MP4 container");
+        assert_encode_progress_contract(&events.lock().unwrap(), 3);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn webm_scaled_encode_progress_fires_and_terminates_once() {
+        // The scaled funnel carries the same hook: the full
+        // 5-frame timeline at 0.5 on the tiny stage.
+        let mut project = tiny_project();
+        project.fps = 24.0;
+        let total = project.frames.len();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let callback = move |event: EncodeProgressEvent| {
+            sink.lock().unwrap().push(event);
+        };
+        let path = temp_file("webm-progress", "webm");
+        let frames = export_webm_scaled_with_encode_progress(
+            &project,
+            &path,
+            0.5,
+            Some(&callback),
+        )
+        .unwrap();
+        assert_eq!(frames, total);
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            &bytes[0..4],
+            &[0x1A, 0x45, 0xDF, 0xA3],
+            "not an EBML/WebM file"
+        );
+        assert_encode_progress_contract(&events.lock().unwrap(), total);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn failed_encode_reports_no_terminal_progress_event() {
+        // An output extension ffmpeg has no format for makes
+        // the encode exit non-zero: whatever intermediate
+        // counts were reported, none may claim `finished`.
+        let mut project = tiny_project();
+        project.fps = 24.0;
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let callback = move |event: EncodeProgressEvent| {
+            sink.lock().unwrap().push(event);
+        };
+        let path = temp_file("mp4-progress-bad", "xyz");
+        let _ = std::fs::remove_file(&path);
+        let err = export_mp4_with_encode_progress(&project, &path, Some(&callback))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("ffmpeg exited"),
+            "the failure is ffmpeg's exit, in the usual voice: {err}"
+        );
+        assert!(
+            events.lock().unwrap().iter().all(|e| !e.finished),
+            "a failed encode never reports a terminal event"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
