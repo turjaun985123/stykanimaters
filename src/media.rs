@@ -137,13 +137,38 @@ fn png_aspect(project: &Project, idx: usize) -> Option<f32> {
 /// the clip fills gaps, never both.
 pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
     let mut out = Vec::new();
-    let poses = project.poses_at(frame_f);
+    // Wave P (P17): segment media rides the figure's segments,
+    // so it takes the evaluated frame every other surface
+    // takes: when the project carries graph channels, poses
+    // AND defs come from `graph::apply_channels` — the
+    // evaluation behind the stage's `positions_f` (which the
+    // stage's own segment-text geometry already follows) and
+    // now behind both exporters. With no channels this is
+    // exactly the raw `poses_at` path, unchanged. (P21's
+    // audit: this raw bypass was the segment-text divergence.)
+    let channelled = if project.channels.is_empty() {
+        None
+    } else {
+        Some(crate::graph::apply_channels(project, &project.channels, frame_f))
+    };
+    let raw_poses = project.poses_at(frame_f);
+    let poses: &Vec<crate::model::Pose> = match &channelled {
+        Some(r) => &r.poses,
+        None => &raw_poses,
+    };
     for (fi, fig) in project.figures.iter().enumerate() {
         if fig.hidden {
             continue;
         }
         let Some(pose) = poses.get(fi) else { continue };
-        let pos = evaluate(&fig.def, pose);
+        // Positions from the channelled def when channels
+        // exist; the media payload and carrier stay on the
+        // figure's own def nodes in the loop below.
+        let def = match &channelled {
+            Some(r) => &r.defs[fi],
+            None => &fig.def,
+        };
+        let pos = evaluate(def, pose);
         for (ni, node) in fig.def.nodes.iter().enumerate() {
             // Wave 14, C1 — clip-def media fallback
             // (docs/wave13/CLIP_MEDIA.md §6.1): the instance's
@@ -951,9 +976,15 @@ pub fn tool_sprite_set_key(core: &mut EditorCore, args: &Value) -> Result<Value,
 }
 
 /// MCP handler: delete sprite `sprite`'s key at `frame`. A
-/// frame the sprite has no key at is refused before the op is
-/// called, so no undo step is spent. One undo step (inside
-/// the op) on success.
+/// frame at/past the project's frame count is refused
+/// before the op is called (Wave P, P38 — it used to be
+/// clamped onto the last frame, deleting THAT frame's key
+/// while the reply reported the requested frame), and a
+/// frame the sprite has no key at is refused the same way,
+/// so no undo step is spent. One undo step (inside the op)
+/// on success. A stale key past the end is deleted by
+/// exact frame via `sprite_delete_key_at`
+/// (src/mcp_sprite_tools.rs).
 pub fn tool_sprite_delete_key(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let index = ast_req_usize(args, "sprite")?;
     ast_check_sprite(core, index)?;
@@ -963,21 +994,36 @@ pub fn tool_sprite_delete_key(core: &mut EditorCore, args: &Value) -> Result<Val
             "argument 'frame' must be a whole frame number (got {frame})"
         ));
     }
-    // Wave 13 splice (integrator): as in `tool_sprite_set_key`
-    // — the existence check, the op call and the verification
-    // all read the clamped frame A1's op will act on; the
-    // refusal below keeps the requested frame.
-    let eff = frame.min(core.frame_count().saturating_sub(1) as f32);
+    // Wave P (P38): refuse a frame at/past the frame count
+    // instead of clamping onto the last frame (the Wave 13
+    // splice this guard replaces did exactly that — the
+    // existence check, the op call and the verification
+    // all read the clamped frame while the success reply
+    // reported the requested one, so naming frame 999
+    // deleted the last frame's key and called it frame
+    // 999). The refusal is the handler family's
+    // frame-range wording (draw_ops / figure_ops /
+    // frame_swap). Nothing is spent: the refusal precedes
+    // any snapshot, and the core status is left untouched.
+    // The core op refuses the same frames in its own
+    // voice, so the layers agree; below this guard the
+    // frame is in range and the op acts on it exactly.
+    if frame >= core.frame_count() as f32 {
+        return Err(format!(
+            "frame index {frame} out of range (project has {} frame(s))",
+            core.frame_count()
+        ));
+    }
     let inst = &core.project.sprites[index];
-    if !inst.keys.iter().any(|k| k.frame == eff) {
+    if !inst.keys.iter().any(|k| k.frame == frame) {
         return Err(format!(
             "sprite {index} has no key at frame {frame} (it has {} key(s))",
             inst.keys.len()
         ));
     }
-    let _ = core.delete_sprite_key(index, eff as usize);
+    let _ = core.delete_sprite_key(index, frame as usize);
     let inst = &core.project.sprites[index];
-    if inst.keys.iter().any(|k| k.frame == eff) {
+    if inst.keys.iter().any(|k| k.frame == frame) {
         return Err(core.status.clone());
     }
     Ok(json!({
@@ -1555,11 +1601,77 @@ mod tests {
             texts: Vec::new(),
             weather: None,
             head_ring_scale: 1.0,
+            subtitles: Vec::new(),
+            subtitle_style: Default::default(),
+            format_version: crate::model::FORMAT_VERSION_CURRENT,
         }
     }
 
     fn close(a: V2, b: V2) -> bool {
         (a[0] - b[0]).abs() < 0.01 && (a[1] - b[1]).abs() < 0.01
+    }
+
+    /// Wave P (P17 — the settlement pin for P21's divergence):
+    /// segment media takes the evaluated (graph-channelled)
+    /// frame. P21 proved the stage's segment text follows
+    /// channels (its geometry derives from `positions_f`, i.e.
+    /// `evaluate(apply_channels(..))`) while `media_items` used
+    /// raw poses, so exported text sat on the un-channelled
+    /// segment. Both sides now derive from the same evaluation:
+    /// under a RootX channel the Text item must sit exactly on
+    /// the channelled segment, and the Image item rides along.
+    #[test]
+    fn segment_media_follows_graph_channels() {
+        use crate::graph::{Channel, ChannelTarget, Key};
+        let text_item = |project: &Project| -> (V2, f32) {
+            media_items(project, 0.0)
+                .iter()
+                .find_map(|i| match i {
+                    MediaItem::Text {
+                        pos, angle_deg, ..
+                    } => Some((*pos, *angle_deg)),
+                    _ => None,
+                })
+                .expect("a text item")
+        };
+        // Raw frame: the label segment runs root (100,100) ->
+        // (100,180); midpoint (100,140), direction +y = 90 deg.
+        let plain = demo_project();
+        let (pos, angle) = text_item(&plain);
+        assert!(close(pos, [100.0, 140.0]), "raw text pos {pos:?}");
+        assert!((angle - 90.0).abs() < 0.01, "raw text angle {angle}");
+
+        let mut channelled = demo_project();
+        channelled.channels = vec![Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: vec![Key::flat(0.0, 50.0)],
+        }];
+        let (pos, angle) = text_item(&channelled);
+        // The channelled evaluation itself — the very input the
+        // stage's text geometry consumes via `positions_f`.
+        let r = crate::graph::apply_channels(&channelled, &channelled.channels, 0.0);
+        let pts = evaluate(&r.defs[0], &r.poses[0]);
+        let mid = scale(add(pts[0], pts[2]), 0.5);
+        assert!(
+            close(pos, mid),
+            "text must sit on the channelled segment: {pos:?} vs {mid:?}"
+        );
+        assert!(close(pos, [50.0, 140.0]), "channelled text pos {pos:?}");
+        assert!((angle - 90.0).abs() < 0.01, "channelled text angle {angle}");
+        // The segment image rides the same funnel: its quad's
+        // first corner moves from x=100 to x=50.
+        let img_x = media_items(&channelled, 0.0)
+            .iter()
+            .find_map(|i| match i {
+                MediaItem::Image { corners, .. } => Some(corners[0][0]),
+                _ => None,
+            })
+            .expect("an image item");
+        assert!(
+            (img_x - 50.0).abs() < 0.01,
+            "image must follow the channel: {img_x}"
+        );
     }
 
     #[test]
@@ -2295,6 +2407,74 @@ mod tests {
             .expect_err("a missing key must be refused");
         assert!(err.contains("has no key at frame 5"), "err: {err}");
         assert_eq!(core.undo_depth(), undo_before + 1);
+    }
+
+    #[test]
+    fn sprite_delete_key_past_the_end_refuses_and_keeps_the_last_key() {
+        // Wave P (P38): the clamped-delete hazard at the
+        // MCP layer — naming a frame at/past the frame
+        // count used to delete the LAST frame's key and
+        // report the requested frame. It now refuses in
+        // the handler family's frame-range wording, and
+        // the last frame's key survives.
+        let mut core = sprite_core();
+        let f0 = core.project.frames[0].clone();
+        while core.project.frames.len() <= 5 {
+            core.project.frames.push(f0.clone());
+        }
+        tool_sprite_add(&mut core, &json!({ "asset": 0 })).expect("add succeeds");
+        tool_sprite_set_key(&mut core, &json!({ "sprite": 0, "frame": 5, "x": 10.0 }))
+            .expect("a key at the last frame");
+        assert_eq!(core.project.sprites[0].keys.len(), 2);
+        let undo_before = core.undo_depth();
+        // The first frame past the end, and one far past it.
+        for frame in [6, 999] {
+            let err = tool_sprite_delete_key(&mut core, &json!({ "sprite": 0, "frame": frame }))
+                .expect_err("a past-end frame must be refused");
+            assert_eq!(
+                err,
+                format!("frame index {frame} out of range (project has 6 frame(s))"),
+                "err: {err}"
+            );
+        }
+        assert_eq!(core.project.sprites[0].keys.len(), 2, "both keys survive");
+        assert_eq!(core.undo_depth(), undo_before, "refusals spend no undo step");
+        // The last frame itself is in range and deletes.
+        let out = tool_sprite_delete_key(&mut core, &json!({ "sprite": 0, "frame": 5 }))
+            .expect("the last frame deletes");
+        assert_eq!(out["key_count"].as_u64(), Some(1));
+    }
+
+    #[test]
+    fn sprite_set_key_reply_reports_the_frame_actually_written() {
+        // Wave P (P38): set_key's clamp stays ONLY because
+        // the reply reports the effect — the stored key in
+        // the reply carries the clamped frame, and the
+        // status names it too (1-based). Pin both halves:
+        // a request for frame 999 in a 6-frame project
+        // writes frame 5 and says so.
+        let mut core = sprite_core();
+        let f0 = core.project.frames[0].clone();
+        while core.project.frames.len() <= 5 {
+            core.project.frames.push(f0.clone());
+        }
+        tool_sprite_add(&mut core, &json!({ "asset": 0 })).expect("add succeeds");
+        let out = tool_sprite_set_key(
+            &mut core,
+            &json!({ "sprite": 0, "frame": 999, "x": 42.0 }),
+        )
+        .expect("set_key succeeds at the clamped frame");
+        assert_eq!(out["created"], json!(true));
+        assert_eq!(
+            out["key"]["frame"].as_f64(),
+            Some(5.0),
+            "the reply's key names the frame actually written"
+        );
+        assert_eq!(out["status"], json!("Sprite 1 key set at frame 6."));
+        assert!(
+            core.project.sprites[0].keys.iter().any(|k| k.frame == 5.0),
+            "the key is stored at the last frame"
+        );
     }
 
     #[test]

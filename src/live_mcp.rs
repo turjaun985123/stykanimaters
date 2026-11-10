@@ -173,7 +173,19 @@
 //! ## Security — read this before enabling
 //!
 //! The listener binds `127.0.0.1` only, so nothing off this
-//! machine can reach it. **There is NO authentication in v1:**
+//! machine can reach it. On top of the bind, every request
+//! must pass the Host/Origin gate ([`host_origin_allowed`]):
+//! a loopback `Host` (`localhost` / `127.0.0.1` / `[::1]`)
+//! and, when an `Origin` is sent, a loopback origin —
+//! anything else is refused HTTP 403 before routing or
+//! dispatch. That gate is what stops a *web page* from
+//! driving the editor: a browser page on a foreign origin
+//! either sends its own origin (refused) or, under DNS
+//! rebinding, its own host name (also refused). The gate is
+//! header **validation, not authentication**: any program
+//! on this machine can simply send the loopback headers,
+//! so it changes nothing about the warning below.
+//! **There is NO authentication in v1:**
 //! while live control is enabled, *any program running as your
 //! user on this machine* can call every MCP tool — edit the
 //! project, save and load files, export — through this endpoint.
@@ -815,6 +827,18 @@ fn handle_connection(mut stream: TcpStream, tx: &SyncSender<LiveRequest>, stop: 
     }
     let head = String::from_utf8_lossy(&buf[..head_len]).into_owned();
 
+    // --- Host/Origin gate: before routing, before the body
+    //     is read, before anything can be queued. A foreign
+    //     Host (DNS rebinding) or a foreign Origin (a web
+    //     page fetching across origins) is refused here, so
+    //     no tool dispatch is reachable from a browser page.
+    //     See `host_origin_allowed` for the rule — and for
+    //     what it is not (authentication). ---
+    if !host_origin_allowed(&head) {
+        write_response(&mut stream, 403, "Forbidden", "text/plain", b"live endpoint serves loopback Host/Origin only\n");
+        return;
+    }
+
     // --- Route on method + path. ---
     let method = request_method(&head);
     let path = path_of(request_target(&head));
@@ -1258,6 +1282,127 @@ fn content_type_acceptable(head: &str) -> bool {
         return media.eq_ignore_ascii_case("application/json");
     }
     true
+}
+
+/// Every value sent for header `name` (case-insensitive
+/// name, value trimmed), in the order sent. The scan is the
+/// same whole-line one the other head helpers use; the
+/// request line itself never matches (it carries no colon
+/// in the name position of a real header line — and if a
+/// malformed one did, the value checks below still apply
+/// to whatever it yields).
+fn header_values<'a>(head: &'a str, name: &str) -> Vec<&'a str> {
+    head.lines()
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(n, _)| n.trim().eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.trim())
+        .collect()
+}
+
+/// Whether an authority (`host` or `host:port`, IPv6 in
+/// brackets) names this machine: `localhost`, `127.0.0.1`
+/// or `[::1]`, in any letter case, with an optional numeric
+/// port. The port is not compared against [`PORT`]: the
+/// request already arrived on this listener's socket, and
+/// local clients legitimately send the bare host (the
+/// test suite's own minimal client does).
+///
+/// Deliberately a whitelist of the spellings a local
+/// client actually sends, NOT a resolver: a trailing dot
+/// (`localhost.`), a shorthand (`127.1`), a name that
+/// merely ends in a loopback spelling
+/// (`127.0.0.1.evil.example`), a non-numeric port, or a
+/// malformed bracket all refuse. Nothing here is ever
+/// resolved through DNS — a name is loopback only if it
+/// is spelled loopback.
+fn authority_is_loopback(authority: &str) -> bool {
+    fn port_ok(port: &str) -> bool {
+        !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())
+    }
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        // Bracketed IPv6: `[::1]`, optionally `[::1]:port`.
+        let Some((host, after)) = rest.split_once(']') else {
+            return false;
+        };
+        if !after.is_empty() && !after.strip_prefix(':').is_some_and(port_ok) {
+            return false;
+        }
+        host
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) => {
+                if !port_ok(port) {
+                    return false;
+                }
+                host
+            }
+            None => authority,
+        }
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host.eq_ignore_ascii_case("::1")
+}
+
+/// Whether an `Origin` header value is a loopback origin:
+/// an `http`/`https` scheme over a loopback authority,
+/// and nothing else. A serialized origin has no path,
+/// query, fragment or userinfo, so any of those refuses —
+/// as does the literal `null` browsers send for opaque
+/// origins (sandboxed frames, `file:` pages): it carries
+/// no authority to check, so it is not loopback.
+fn origin_is_loopback(origin: &str) -> bool {
+    let Some((scheme, authority)) = origin.split_once("://") else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return false;
+    }
+    if authority.chars().any(|c| matches!(c, '/' | '?' | '#' | '@')) {
+        return false;
+    }
+    authority_is_loopback(authority)
+}
+
+/// The Host/Origin gate [`handle_connection`] applies to
+/// every request before routing, before the body is read,
+/// before anything can be queued:
+///
+/// - at least one `Host` header must be present, and
+///   EVERY `Host` value must be a loopback authority
+///   ([`authority_is_loopback`]). A missing Host refuses:
+///   HTTP/1.1 requires the header and every real MCP
+///   client sends it, so its absence is not a shape this
+///   endpoint serves. A foreign Host is the DNS-rebinding
+///   shape — a page whose domain was rebound to 127.0.0.1
+///   still sends its own domain as Host.
+/// - every `Origin` value, when the header is sent at
+///   all, must be a loopback origin
+///   ([`origin_is_loopback`]). Non-browser clients do not
+///   send Origin; browsers always send it on cross-origin
+///   fetches, which is exactly the traffic this refuses.
+///
+/// What this gate is NOT: it is header **validation, not
+/// authentication**. Any program running on this machine
+/// can send loopback headers — curl and every local MCP
+/// client do — so the gate changes nothing for local
+/// processes; the module docs' warning (any local program
+/// can call every tool while live control is enabled)
+/// stands in full. The gate's whole job is the browser
+/// threat the loopback bind alone does not stop: a web
+/// page the user happens to have open must not be able to
+/// drive the editor, by its origin or by its host name.
+fn host_origin_allowed(head: &str) -> bool {
+    let hosts = header_values(head, "host");
+    if hosts.is_empty() {
+        return false;
+    }
+    if !hosts.iter().all(|h| authority_is_loopback(h)) {
+        return false;
+    }
+    header_values(head, "origin")
+        .iter()
+        .all(|o| origin_is_loopback(o))
 }
 
 /// The request target of the request line (`/mcp`, `/`, …):
@@ -1811,6 +1956,165 @@ mod tests {
         ));
     }
 
+    /// Build a request head from an optional Host value and
+    /// an optional Origin value, for the gate matrix below.
+    fn gated_head(host: Option<&str>, origin: Option<&str>) -> String {
+        let mut head = String::from("POST /mcp HTTP/1.1\r\n");
+        if let Some(h) = host {
+            head.push_str(&format!("Host: {h}\r\n"));
+        }
+        if let Some(o) = origin {
+            head.push_str(&format!("Origin: {o}\r\n"));
+        }
+        head.push_str("Content-Type: application/json\r\nContent-Length: 2\r\n\r\n");
+        head
+    }
+
+    #[test]
+    fn host_origin_gate_allows_loopback_spellings() {
+        // The spellings local clients actually send: bare
+        // host and host:port, IPv4, name and IPv6, any case,
+        // header name in any case.
+        for host in [
+            "127.0.0.1",
+            "127.0.0.1:32117",
+            "localhost",
+            "localhost:32117",
+            "LOCALHOST",
+            "LocalHost:8080",
+            "[::1]",
+            "[::1]:32117",
+        ] {
+            assert!(
+                host_origin_allowed(&gated_head(Some(host), None)),
+                "loopback Host {host} must pass the gate"
+            );
+        }
+        assert!(host_origin_allowed(
+            "POST /mcp HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n"
+        ));
+        // The head the module's own sample carries passes.
+        assert!(host_origin_allowed(SAMPLE_HEAD));
+        // Absent Origin is the non-browser case: allowed.
+        // A loopback Origin (a local page served from this
+        // machine) is allowed on any port, over https too.
+        for origin in [
+            "http://127.0.0.1:32117",
+            "http://localhost:8080",
+            "https://[::1]:32117",
+            "http://LOCALHOST",
+        ] {
+            assert!(
+                host_origin_allowed(&gated_head(Some("127.0.0.1"), Some(origin))),
+                "loopback Origin {origin} must pass the gate"
+            );
+        }
+    }
+
+    #[test]
+    fn host_origin_gate_refuses_foreign_and_missing() {
+        // Missing Host: HTTP/1.1 requires it and every real
+        // client sends it — absence refuses.
+        assert!(!host_origin_allowed(&gated_head(None, None)));
+        assert!(!host_origin_allowed("GET /health HTTP/1.1\r\n\r\n"));
+        // Foreign Host spellings, including the ones that
+        // merely CONTAIN a loopback spelling: a whitelist,
+        // not a substring or resolver check.
+        for host in [
+            "evil.example",
+            "evil.example:32117",
+            "127.0.0.1.evil.example",
+            "localhost.evil.example",
+            "localhost.",
+            "127.1",
+            "0.0.0.0",
+            "[::2]",
+            "[::1",
+            "::1",
+            "127.0.0.1:abc",
+            "127.0.0.1:",
+            "",
+            "user@127.0.0.1",
+        ] {
+            assert!(
+                !host_origin_allowed(&gated_head(Some(host), None)),
+                "Host {host:?} must refuse at the gate"
+            );
+        }
+        // A second, foreign Host header poisons an otherwise
+        // loopback request (every value must pass).
+        assert!(!host_origin_allowed(
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nHost: evil.example\r\n\r\n"
+        ));
+        // Foreign Origin refuses even behind a loopback
+        // Host: this is the cross-origin web-page shape.
+        for origin in [
+            "https://evil.example",
+            "http://evil.example:32117",
+            "http://127.0.0.1.evil.example",
+            "null",
+            "file://127.0.0.1",
+            "http://user@127.0.0.1",
+            "http://127.0.0.1/some/path",
+            "127.0.0.1",
+            "",
+        ] {
+            assert!(
+                !host_origin_allowed(&gated_head(Some("localhost"), Some(origin))),
+                "Origin {origin:?} must refuse at the gate"
+            );
+        }
+    }
+
+    #[test]
+    fn foreign_host_is_refused_403_before_anything_is_queued() {
+        // End to end through the real handler: the refusal
+        // is an HTTP 403 and the request never reaches the
+        // queue (no tool dispatch is reachable behind it).
+        let (port, rx, server) = spawn_one_shot_server();
+        let mut client = connect_client(port);
+        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }).to_string();
+        let request = format!(
+            "POST /mcp HTTP/1.1\r\nHost: evil.example\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        client.write_all(request.as_bytes()).expect("request write");
+        let (status, _) = read_one_response(&mut client);
+        assert_eq!(status, 403, "a foreign Host is refused 403");
+        server.join().expect("the server finishes after refusing");
+        assert!(
+            rx.try_recv().is_err(),
+            "a gated request must never be queued for dispatch"
+        );
+    }
+
+    #[test]
+    fn foreign_origin_is_refused_403_before_anything_is_queued() {
+        // The DNS-rebinding twin: loopback Host (the socket
+        // really is local) but a web page's Origin — refused
+        // the same way, before queueing.
+        let (port, rx, server) = spawn_one_shot_server();
+        let mut client = connect_client(port);
+        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }).to_string();
+        let request = format!(
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+             Origin: https://evil.example\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        client.write_all(request.as_bytes()).expect("request write");
+        let (status, _) = read_one_response(&mut client);
+        assert_eq!(status, 403, "a foreign Origin is refused 403");
+        server.join().expect("the server finishes after refusing");
+        assert!(
+            rx.try_recv().is_err(),
+            "a gated request must never be queued for dispatch"
+        );
+    }
+
     #[test]
     fn too_large_body_is_a_json_rpc_error_with_null_id() {
         let body: Value = serde_json::from_str(&body_too_large_body()).expect("valid JSON");
@@ -1999,10 +2303,13 @@ mod tests {
         let mut client = connect_client(port);
         // A complete head promising 100 body bytes, then a
         // tenth of the body, then a disconnect: the framing
-        // fails, so nothing may be queued or executed.
+        // fails, so nothing may be queued or executed. (The
+        // Host is a real loopback one so the request passes
+        // the Host/Origin gate and it is the BODY framing
+        // this test pins that refuses it.)
         client
             .write_all(
-                b"POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"jsonrpc\"",
+                b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"jsonrpc\"",
             )
             .expect("head + partial body write");
         drop(client);

@@ -25,9 +25,10 @@
 //! XML safety: almost no user-controlled string is
 //! interpolated into the document — every `format!` argument
 //! below is a number, a `hex()` colour (u32-masked), or a
-//! fixed literal. The one exception is media text content
-//! (Wave 12, C3), which routes through [`xml_escape`] — the
-//! pinned helper any future text emission (names, labels)
+//! fixed literal. The exceptions are media text content
+//! (Wave 12, C3) and subtitle cue text (Wave P, P27, see
+//! `append_subtitles`), which route through [`xml_escape`] —
+//! the pinned helper any future text emission (names, labels)
 //! MUST also route through.
 //!
 //! Camera rotation (wave 6) is applied by rotating points inside
@@ -116,7 +117,27 @@ pub fn export_svg(project: &Project, dir: &Path) -> std::io::Result<usize> {
 /// writes for the same frame. The parent directory is NOT
 /// created — callers do that, as `export_svg` always has.
 pub fn write_frame_svg(project: &Project, frame: usize, path: &Path) -> std::io::Result<()> {
-    let poses = project.poses_at(frame as f32);
+    // Wave P (P17): the evaluated frame, as in the rasterizer —
+    // when the project carries graph channels, poses AND defs
+    // come from `graph::apply_channels` (the stage's
+    // `positions_f` evaluation), shared by the figure loop and
+    // the FX clip anchors below; the media pass funnels through
+    // `media_items`, which applies the same rule. With no
+    // channels this is exactly the raw `poses_at` path.
+    let channelled = if project.channels.is_empty() {
+        None
+    } else {
+        Some(crate::graph::apply_channels(
+            project,
+            &project.channels,
+            frame as f32,
+        ))
+    };
+    let raw_poses = project.poses_at(frame as f32);
+    let poses: &Vec<crate::model::Pose> = match &channelled {
+        Some(r) => &r.poses,
+        None => &raw_poses,
+    };
     let (cam_x, cam_y, zoom) = project.camera_at(frame as f32);
     let angle = project.camera_angle_at(frame as f32);
     let view = |p: V2| -> V2 {
@@ -152,7 +173,15 @@ pub fn write_frame_svg(project: &Project, frame: usize, path: &Path) -> std::io:
         if fig.hidden {
             continue;
         }
-        let pos = evaluate(&fig.def, &poses[fi]);
+        // Positions from the channelled def when channels
+        // exist (P17); node properties stay on the figure's own
+        // def below — the stage's split (`positions_f` returns
+        // only positions).
+        let def = match &channelled {
+            Some(r) => &r.defs[fi],
+            None => &fig.def,
+        };
+        let pos = evaluate(def, &poses[fi]);
         // Per-node bends at this frame (Wave 12, C1) — the same
         // source the rasterizer reads; empty when the project
         // carries no bend data.
@@ -542,7 +571,13 @@ pub fn write_frame_svg(project: &Project, frame: usize, path: &Path) -> std::io:
         let Some(pose) = poses.get(entry.figure) else {
             continue;
         };
-        let pos = evaluate(&fig.def, pose);
+        // FX anchors sit on the evaluated (channelled) figure,
+        // as in the rasterizer and the stage's stage_fx layer.
+        let def = match &channelled {
+            Some(r) => &r.defs[entry.figure],
+            None => &fig.def,
+        };
+        let pos = evaluate(def, pose);
         let Some(&anchor) = pos.get(entry.node) else {
             continue;
         };
@@ -604,9 +639,147 @@ pub fn write_frame_svg(project: &Project, frame: usize, path: &Path) -> std::io:
     // list appends nothing, so media-free projects stay
     // byte-identical.
     append_media(&mut svg, &mut defs, project, frame, &view, angle, zoom);
+    // Subtitles (Wave P, P27): every cue live at this frame
+    // is emitted as centre `<text>` AFTER the media pass, so
+    // subtitles paint over everything else in the frame —
+    // the raster burn-in composites its cues into the
+    // finished frame the same way. The lookup is over
+    // `Project::subtitles` under the half-open liveness rule
+    // (this writer works from the project alone; there is no
+    // core here): ALL live cues in stored order, stacked per
+    // the layout contract `append_subtitles` documents. A
+    // frame with no live cue appends nothing, so cue-free
+    // projects stay byte-identical.
+    let live_cues: Vec<&crate::subtitles::SubtitleCue> = project
+        .subtitles
+        .iter()
+        .filter(|c| c.start_frame <= frame && frame < c.end_frame)
+        .collect();
+    if !live_cues.is_empty() {
+        append_subtitles(&mut svg, project, &live_cues);
+    }
     svg += "</svg>\n";
     let svg = svg.replace("<!--DEFS-->", &defs);
     std::fs::write(path, svg)
+}
+
+/// Subtitle emission (Wave P, P27): emit every live cue as
+/// centre `<text>` stacked from the style's anchor edge.
+///
+/// Position is in STAGE coordinates, deliberately NOT
+/// routed through the camera `view` closure: a subtitle is
+/// frame furniture pinned to the picture, so camera pan,
+/// zoom and rotation must not move it (the raster frame the
+/// burn-in draws into is stage space as well). The viewBox
+/// is exactly the stage, so stage coordinates are document
+/// coordinates.
+///
+/// Style: the anchor conventions match this file's existing
+/// `<text>` emission (media text in `append_media`) —
+/// `text-anchor="middle"` with
+/// `dominant-baseline="central"`. The face follows subtitle
+/// convention rather than the media text's monospace:
+/// sans-serif at 20 units times the project style's font
+/// scale, the style's text colour as fill with its backing
+/// colour as a stroke under `paint-order="stroke"` so the
+/// glyphs stay legible over arbitrary scene content. Under
+/// the default style (bottom, scale 1.0, white on black)
+/// the emitted values are the house subtitle look.
+///
+/// Stacking: ONE `<text>` element per line — each line is
+/// independently centred and positioned, no `tspan`/`dy`
+/// bookkeeping. Lines stack away from the anchored edge in
+/// cue order — the first cue closest to the edge: at the
+/// bottom anchor a cue's LAST line sits closest to the
+/// edge, so it always lands at the same position however
+/// many lines or cues stack above it. That offset rule is
+/// the shared layout contract the raster burn-in and the
+/// stage draw with the same maths, computed by the core's
+/// shared helper, `subtitles::subtitle_stack_line_offset`
+/// (Wave P, P23; swapped in per IA-P27-1 in the wave
+/// findings) — the pins below are the parity evidence.
+///
+/// The text is split on line boundaries BEFORE escaping:
+/// [`xml_escape`] maps control characters (newline
+/// included) to spaces, so escaping first would destroy
+/// the line breaks. Each line is then escaped on its own,
+/// as the module header requires of every text emission.
+fn append_subtitles(
+    svg: &mut String,
+    project: &Project,
+    cues: &[&crate::subtitles::SubtitleCue],
+) {
+    const BASE_FONT_SIZE: f32 = 20.0;
+    const BASE_LINE_HEIGHT: f32 = 24.0;
+    const EDGE_MARGIN: f32 = 16.0;
+    let style = project.subtitle_style;
+    // The style's font scale, sanitised at read the way the
+    // core sanitises its other per-project scales (cf.
+    // `Project::head_ring_radius`): a non-finite value falls
+    // back to 1.0 and any finite value is clamped into the
+    // style's [0.5, 3.0] range, so a hand-edited or corrupt
+    // project file can never produce an invisible or absurd
+    // subtitle.
+    let font_scale = if style.font_scale.is_finite() {
+        style.font_scale.clamp(0.5, 3.0)
+    } else {
+        1.0
+    };
+    let font_size = BASE_FONT_SIZE * font_scale;
+    let line_height = BASE_LINE_HEIGHT * font_scale;
+    let fill = hex(style.text_color);
+    let stroke = hex(style.box_color);
+    // The outline width scales with the font so a scaled
+    // style keeps its outline proportion; `matrix_num`'s
+    // trimmed formatting keeps the default's literal `3`.
+    let stroke_width = matrix_num(3.0 * font_scale);
+    let cx = project.stage[0] / 2.0;
+    let mut lines_before = 0usize;
+    for cue in cues {
+        let lines: Vec<&str> = cue.text.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            // Distance of this line from the anchored edge,
+            // in lines — the shared layout contract, computed
+            // by the core's `subtitle_stack_line_offset`: at
+            // the bottom anchor the cue's lines count DOWN
+            // toward the edge — its last line is offset 0 —
+            // while at the top they count away in their own
+            // order.
+            let from_edge = crate::subtitles::subtitle_stack_line_offset(
+                lines_before,
+                lines.len(),
+                i,
+                style.position,
+            ) as f32;
+            // Centre of this line: its block sits
+            // EDGE_MARGIN from the anchored edge and the
+            // `from_edge` offset steps it one line height
+            // further in; `dominant-baseline="central"`
+            // centres the glyph box on this y.
+            let y = match style.position {
+                crate::subtitles::SubtitlePosition::Bottom => {
+                    project.stage[1]
+                        - EDGE_MARGIN
+                        - from_edge * line_height
+                        - line_height / 2.0
+                }
+                crate::subtitles::SubtitlePosition::Top => {
+                    EDGE_MARGIN + from_edge * line_height + line_height / 2.0
+                }
+            };
+            *svg += &format!(
+                "<text x=\"{:.1}\" y=\"{:.1}\" font-family=\"sans-serif\" font-size=\"{:.1}\" fill=\"{}\" stroke=\"{}\" stroke-width=\"{}\" paint-order=\"stroke\" text-anchor=\"middle\" dominant-baseline=\"central\">{}</text>\n",
+                cx,
+                y,
+                font_size,
+                fill,
+                stroke,
+                stroke_width,
+                xml_escape(line)
+            );
+        }
+        lines_before += lines.len();
+    }
 }
 
 /// One matrix component for a media `<use>` transform:
@@ -795,6 +968,80 @@ mod tests {
     use super::*;
     use crate::model::Project;
 
+
+    /// Wave P (P17): the SVG writer takes the same evaluated
+    /// (graph-channelled) frame as the rasterizer and the
+    /// stage. A project whose channels move/lengthen/rotate
+    /// the figure must emit byte-identically to the same
+    /// project with those values baked into its poses and def,
+    /// and differently from the un-channelled project. A Burst
+    /// clip rides along so the FX anchor funnel is covered by
+    /// the same comparison.
+    #[test]
+    fn svg_channelled_figure_matches_the_baked_equivalent() {
+        use crate::graph::{Channel, ChannelTarget, Key};
+        let base = || {
+            let mut project = Project::new_demo();
+            project.fx_clips.push(crate::model::FxClipEntry {
+                clip: crate::vfx::ParticleClip {
+                    start: 0.0,
+                    duration: 10.0,
+                    kind: crate::vfx::ClipKind::Burst,
+                    color: 0xFF4040,
+                    seed: 5,
+                    angle: 0.0,
+                    length: 80.0,
+                    color2: None,
+                },
+                figure: 0,
+                node: 5,
+                hidden: false,
+            });
+            project
+        };
+        let chan = |target: ChannelTarget, value: f32| Channel {
+            figure: 0,
+            target,
+            keys: vec![Key::flat(0.0, value)],
+        };
+        let mut channelled = base();
+        channelled.channels = vec![
+            chan(ChannelTarget::RootX, 600.0),
+            chan(ChannelTarget::Angle(1), 45.0),
+            chan(ChannelTarget::Length(1), 99.0),
+        ];
+        let mut baked = base();
+        for frame in &mut baked.frames {
+            frame.poses[0].root[0] = 600.0;
+            frame.poses[0].angles[1] = 45.0;
+        }
+        baked.figures[0].def.nodes[1].length = 99.0;
+
+        let render = |project: &Project, name: &str, frame: usize| -> String {
+            let dir = std::path::Path::new(name);
+            let _ = std::fs::remove_dir_all(dir);
+            // write_frame_svg does not create the parent dir.
+            std::fs::create_dir_all(dir).unwrap();
+            write_frame_svg(project, frame, &dir.join("frame.svg")).unwrap();
+            std::fs::read_to_string(dir.join("frame.svg")).unwrap()
+        };
+        // Frame 2: the figure. Frame 0: the Burst clip's
+        // particles sit exactly on the anchor, pinning the
+        // FX anchor funnel as well.
+        for frame in [2, 0] {
+            let plain = render(&base(), "/tmp/styk-svg-chan-plain", frame);
+            let via_channels = render(&channelled, "/tmp/styk-svg-chan-moved", frame);
+            let via_bake = render(&baked, "/tmp/styk-svg-chan-baked", frame);
+            assert_ne!(
+                via_channels, plain,
+                "channels must move the SVG figure (frame {frame})"
+            );
+            assert_eq!(
+                via_channels, via_bake,
+                "channelled SVG must equal the baked equivalent (frame {frame})"
+            );
+        }
+    }
 
     #[test]
     fn svg_renders_gradient_polygons_and_square_caps() {
@@ -2136,6 +2383,172 @@ mod tests {
         assert!(
             !a.contains("asset0"),
             "media-free clip gained an asset def:\n{a}"
+        );
+    }
+
+    // ---- Wave P (P27): subtitle emission ----
+
+    /// A demo project on a known 800×600 stage with the
+    /// given cues and an explicitly-set style (bottom,
+    /// scale 1.0, white on black unless a test overrides),
+    /// so the pins below measure THIS writer's layout maths
+    /// and not the style type's `Default` values.
+    fn subtitled_project(
+        cues: Vec<crate::subtitles::SubtitleCue>,
+    ) -> Project {
+        let mut project = Project::new_demo();
+        project.stage = [800.0, 600.0];
+        project.subtitles = cues;
+        project.subtitle_style = crate::subtitles::SubtitleStyle {
+            position: crate::subtitles::SubtitlePosition::Bottom,
+            font_scale: 1.0,
+            text_color: 0xFF_FF_FF,
+            box_color: 0x00_00_00,
+        };
+        project
+    }
+
+    fn cue(start: usize, end: usize, text: &str) -> crate::subtitles::SubtitleCue {
+        crate::subtitles::SubtitleCue {
+            start_frame: start,
+            end_frame: end,
+            text: text.to_string(),
+        }
+    }
+
+    fn frame_svg(project: &Project, frame: usize, name: &str) -> String {
+        let path = std::path::Path::new(name);
+        write_frame_svg(project, frame, path).unwrap();
+        std::fs::read_to_string(path).unwrap()
+    }
+
+    #[test]
+    fn svg_subtitle_bottom_cue_emits_one_text_at_the_pinned_band() {
+        // Layout contract on an 800×600 stage, scale 1.0:
+        // font 20, line height 24, edge margin 16 — the
+        // single bottom line's centre sits at
+        // 600 − 16 − 0×24 − 24/2 = 572, centred at x = 400.
+        let project = subtitled_project(vec![cue(0, 48, "Hello world")]);
+        let text = frame_svg(&project, 0, "/tmp/styk-svg-sub-bottom.svg");
+        assert_eq!(
+            text.matches("<text").count(),
+            1,
+            "one live cue must emit exactly one <text>:\n{text}"
+        );
+        assert!(
+            text.contains("<text x=\"400.0\" y=\"572.0\" font-family=\"sans-serif\" font-size=\"20.0\" fill=\"#FFFFFF\" stroke=\"#000000\" stroke-width=\"3\" paint-order=\"stroke\" text-anchor=\"middle\" dominant-baseline=\"central\">Hello world</text>"),
+            "bottom subtitle element wrong:\n{text}"
+        );
+    }
+
+    #[test]
+    fn svg_subtitle_top_cue_mirrors_the_bottom_band() {
+        // Top anchor: centre at 16 + 0×24 + 24/2 = 28 — the
+        // exact mirror of the bottom band (600 − 572 = 28).
+        let mut project = subtitled_project(vec![cue(0, 48, "Hello world")]);
+        project.subtitle_style.position = crate::subtitles::SubtitlePosition::Top;
+        let text = frame_svg(&project, 0, "/tmp/styk-svg-sub-top.svg");
+        assert_eq!(text.matches("<text").count(), 1, "{text}");
+        assert!(
+            text.contains("<text x=\"400.0\" y=\"28.0\" font-family=\"sans-serif\" font-size=\"20.0\" fill=\"#FFFFFF\" stroke=\"#000000\" stroke-width=\"3\" paint-order=\"stroke\" text-anchor=\"middle\" dominant-baseline=\"central\">Hello world</text>"),
+            "top subtitle element is not the bottom mirror:\n{text}"
+        );
+    }
+
+    #[test]
+    fn svg_subtitle_stack_grows_away_from_the_anchor_edge_in_stored_order() {
+        // Two live cues, bottom: the FIRST cue stays closest
+        // to the edge (572); the second stacks one line
+        // height further in (548). Top mirrors: 28 then 52.
+        let project = subtitled_project(vec![cue(0, 48, "First"), cue(0, 48, "Second")]);
+        let text = frame_svg(&project, 0, "/tmp/styk-svg-sub-stack.svg");
+        assert_eq!(text.matches("<text").count(), 2, "{text}");
+        assert!(
+            text.contains("y=\"572.0\" font-family=\"sans-serif\" font-size=\"20.0\" fill=\"#FFFFFF\" stroke=\"#000000\" stroke-width=\"3\" paint-order=\"stroke\" text-anchor=\"middle\" dominant-baseline=\"central\">First</text>"),
+            "first cue left the edge band:\n{text}"
+        );
+        assert!(
+            text.contains("y=\"548.0\" font-family=\"sans-serif\" font-size=\"20.0\" fill=\"#FFFFFF\" stroke=\"#000000\" stroke-width=\"3\" paint-order=\"stroke\" text-anchor=\"middle\" dominant-baseline=\"central\">Second</text>"),
+            "second cue did not stack inward:\n{text}"
+        );
+        let mut project = subtitled_project(vec![cue(0, 48, "First"), cue(0, 48, "Second")]);
+        project.subtitle_style.position = crate::subtitles::SubtitlePosition::Top;
+        let text = frame_svg(&project, 0, "/tmp/styk-svg-sub-stack-top.svg");
+        assert!(
+            text.contains("y=\"28.0\" font-family=\"sans-serif\" font-size=\"20.0\" fill=\"#FFFFFF\" stroke=\"#000000\" stroke-width=\"3\" paint-order=\"stroke\" text-anchor=\"middle\" dominant-baseline=\"central\">First</text>"),
+            "top stack: first cue wrong:\n{text}"
+        );
+        assert!(
+            text.contains("y=\"52.0\" font-family=\"sans-serif\" font-size=\"20.0\" fill=\"#FFFFFF\" stroke=\"#000000\" stroke-width=\"3\" paint-order=\"stroke\" text-anchor=\"middle\" dominant-baseline=\"central\">Second</text>"),
+            "top stack: second cue wrong:\n{text}"
+        );
+    }
+
+    #[test]
+    fn svg_subtitle_multiline_cue_puts_its_last_line_at_the_edge() {
+        // One two-line cue at the bottom anchor: the LAST
+        // line owns the edge band (572); the first line
+        // stacks above it (548). One <text> per line.
+        let project = subtitled_project(vec![cue(0, 48, "one\ntwo")]);
+        let text = frame_svg(&project, 0, "/tmp/styk-svg-sub-multiline.svg");
+        assert_eq!(text.matches("<text").count(), 2, "{text}");
+        assert!(
+            text.contains("y=\"572.0\" font-family=\"sans-serif\" font-size=\"20.0\" fill=\"#FFFFFF\" stroke=\"#000000\" stroke-width=\"3\" paint-order=\"stroke\" text-anchor=\"middle\" dominant-baseline=\"central\">two</text>"),
+            "last line not at the edge:\n{text}"
+        );
+        assert!(
+            text.contains("y=\"548.0\" font-family=\"sans-serif\" font-size=\"20.0\" fill=\"#FFFFFF\" stroke=\"#000000\" stroke-width=\"3\" paint-order=\"stroke\" text-anchor=\"middle\" dominant-baseline=\"central\">one</text>"),
+            "first line not stacked above:\n{text}"
+        );
+    }
+
+    #[test]
+    fn svg_subtitle_no_live_cue_emits_nothing_and_bytes_match_cue_free() {
+        // Half-open liveness: cue 10..20 is dead at frame 0
+        // and at frame 20, live at 19. A dead frame's
+        // document carries no <text> and is byte-identical
+        // to the cue-free project.
+        let project = subtitled_project(vec![cue(10, 20, "Later")]);
+        let dead = frame_svg(&project, 0, "/tmp/styk-svg-sub-dead.svg");
+        assert!(!dead.contains("<text"), "dead frame gained a <text>:\n{dead}");
+        let mut cue_free = subtitled_project(vec![]);
+        cue_free.subtitles.clear();
+        let plain = frame_svg(&cue_free, 0, "/tmp/styk-svg-sub-plain.svg");
+        assert_eq!(dead, plain, "a frame with no live cue changed the SVG bytes");
+        let live = frame_svg(&project, 19, "/tmp/styk-svg-sub-live19.svg");
+        assert_eq!(live.matches("<text").count(), 1, "{live}");
+        let after = frame_svg(&project, 20, "/tmp/styk-svg-sub-after.svg");
+        assert!(!after.contains("<text"), "end frame is exclusive:\n{after}");
+    }
+
+    #[test]
+    fn svg_subtitle_text_is_xml_escaped() {
+        let project = subtitled_project(vec![cue(0, 48, "Fish & <Chips>")]);
+        let text = frame_svg(&project, 0, "/tmp/styk-svg-sub-escape.svg");
+        assert!(
+            text.contains(">Fish &amp; &lt;Chips&gt;</text>"),
+            "cue text not escaped:\n{text}"
+        );
+        assert!(
+            !text.contains("Fish & <Chips>"),
+            "raw cue text leaked into the document:\n{text}"
+        );
+    }
+
+    #[test]
+    fn svg_subtitle_style_scales_font_band_and_colours() {
+        // Scale 2.0: font 40, line height 48, stroke width
+        // 6; the bottom band centre moves to
+        // 600 − 16 − 0×48 − 48/2 = 560. Style colours reach
+        // fill (text) and stroke (backing) verbatim.
+        let mut project = subtitled_project(vec![cue(0, 48, "Big")]);
+        project.subtitle_style.font_scale = 2.0;
+        project.subtitle_style.text_color = 0xFF_00_00;
+        project.subtitle_style.box_color = 0x11_22_33;
+        let text = frame_svg(&project, 0, "/tmp/styk-svg-sub-style.svg");
+        assert!(
+            text.contains("<text x=\"400.0\" y=\"560.0\" font-family=\"sans-serif\" font-size=\"40.0\" fill=\"#FF0000\" stroke=\"#112233\" stroke-width=\"6\" paint-order=\"stroke\" text-anchor=\"middle\" dominant-baseline=\"central\">Big</text>"),
+            "styled subtitle element wrong:\n{text}"
         );
     }
 }

@@ -57,7 +57,19 @@
 //!   decode anything.
 //! * Frame arguments are clamped to the project's last
 //!   frame — the `particle_ops` rule: a key placed past
-//!   the end could never be reached by the playhead.
+//!   the end could never be reached by the playhead. The
+//!   one exception is `delete_sprite_key` (Wave P, P38):
+//!   it REFUSES a frame at/past the frame count instead
+//!   of clamping, because a clamped delete would remove
+//!   the LAST frame's key while the caller named a
+//!   different frame — a write may land somewhere safe,
+//!   a delete must land exactly where it was aimed or
+//!   not at all. A key left past the end by a shortened
+//!   timeline (a "stale" key) is deleted or retimed by
+//!   exact frame through the MCP tools
+//!   `sprite_delete_key_at` / `sprite_move_key`
+//!   (src/mcp_sprite_tools.rs), which address frames
+//!   with no clamp at all.
 //! * Non-finite transform values (x / y / scale / angle)
 //!   are a status-only refusal, the `set_project_fps`
 //!   discipline in `editor.rs`. Nothing else is clamped:
@@ -88,8 +100,9 @@ impl EditorCore {
     /// Clamp a frame argument to the project's last frame
     /// (0 for a project with no frames — defensive; a real
     /// project always has at least one). The
-    /// `particle_ops` clamp, shared by every op here that
-    /// takes a frame.
+    /// `particle_ops` clamp, used by `set_sprite_key`;
+    /// `delete_sprite_key` validates its frame instead
+    /// (see the module docs).
     fn sprite_clamp_frame(&self, frame: usize) -> usize {
         frame.min(self.frame_count().saturating_sub(1))
     }
@@ -183,13 +196,16 @@ impl EditorCore {
         self.status = format!("Sprite {} key set at frame {}.", index + 1, frame + 1);
     }
 
-    /// Delete sprite `index`'s key at `frame` (clamped to
-    /// the project's last frame, like every frame argument
-    /// here). Deleting the last remaining key is allowed
-    /// and leaves an instance that renders nothing — see
-    /// the module docs. One undo step; refusals (no such
-    /// sprite, or no key at that frame) only set the
-    /// status.
+    /// Delete sprite `index`'s key at `frame`. Unlike the
+    /// write path, the frame is NOT clamped: a frame
+    /// at/past the project's frame count is refused
+    /// outright (Wave P, P38 — a clamped delete removes
+    /// the last frame's key under a past-end request; see
+    /// the module docs). Deleting the last remaining key
+    /// is allowed and leaves an instance that renders
+    /// nothing — see the module docs. One undo step;
+    /// refusals (no such sprite, a frame past the end,
+    /// or no key at that frame) only set the status.
     pub fn delete_sprite_key(&mut self, index: usize, frame: usize) {
         if self.project.sprites.get(index).is_none() {
             self.status = format!(
@@ -198,7 +214,14 @@ impl EditorCore {
             );
             return;
         }
-        let frame = self.sprite_clamp_frame(frame);
+        if frame >= self.frame_count() {
+            self.status = format!(
+                "Sprite key delete failed: frame {} is past the last frame (project has {} frame(s)).",
+                frame + 1,
+                self.frame_count()
+            );
+            return;
+        }
         let frame_f = frame as f32;
         if !self.project.sprites[index]
             .keys
@@ -479,6 +502,48 @@ mod tests {
         );
         assert_eq!(project_json(&core), before);
         assert_eq!(core.edits_since_autosave(), edits);
+    }
+
+    #[test]
+    fn delete_sprite_key_past_the_end_refuses_and_keeps_the_last_key() {
+        // Wave P (P38): the clamped-delete hazard — a
+        // delete naming a frame at/past the frame count
+        // used to clamp onto the last frame and remove
+        // ITS key. The op now refuses in the family
+        // voice, spends nothing, and the last frame's
+        // key survives.
+        let mut core = core_with(
+            1,
+            vec![sprite(
+                0,
+                vec![
+                    key(0.0, 0.0, 0.0, 1.0, 0.0),
+                    key(4.0, 90.0, 90.0, 1.0, 0.0),
+                ],
+            )],
+        );
+        let before = project_json(&core);
+        let edits = core.edits_since_autosave();
+        // The first frame past the end (the demo project
+        // has five frames), and one far past it.
+        for frame in [5usize, 999] {
+            core.delete_sprite_key(0, frame);
+            assert_eq!(
+                core.status,
+                format!(
+                    "Sprite key delete failed: frame {} is past the last frame (project has 5 frame(s)).",
+                    frame + 1
+                )
+            );
+        }
+        assert_eq!(project_json(&core), before, "the last frame's key survives");
+        assert_eq!(core.edits_since_autosave(), edits, "a refusal spends no snapshot");
+        // The boundary itself still deletes: frame 4 IS
+        // the last frame, not past it.
+        core.delete_sprite_key(0, 4);
+        assert_eq!(core.status, "Sprite 1 key at frame 5 deleted.");
+        let frames: Vec<f32> = core.project.sprites[0].keys.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, vec![0.0]);
     }
 
     #[test]

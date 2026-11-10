@@ -2363,6 +2363,9 @@ fn empty_project(name: String, fps: f32, auto_tween: bool) -> Project {
         texts: Vec::new(),
         weather: None,
         head_ring_scale: 1.0,
+        subtitles: Vec::new(),
+        subtitle_style: Default::default(),
+        format_version: crate::model::FORMAT_VERSION_CURRENT,
     }
 }
 

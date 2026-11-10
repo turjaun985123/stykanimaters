@@ -938,6 +938,9 @@ pub fn import_nodes(data: &[u8]) -> Result<Project, String> {
         texts: Vec::new(),
         weather: None,
         head_ring_scale: 1.0,
+        subtitles: Vec::new(),
+        subtitle_style: Default::default(),
+        format_version: crate::model::FORMAT_VERSION_CURRENT,
     })
 }
 

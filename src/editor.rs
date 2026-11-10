@@ -39,6 +39,16 @@ pub struct EditorCore {
     /// When true, canvas drags move the camera instead of posing.
     pub camera_mode: bool,
     camera_last: Option<V2>,
+    /// Wave P (P6): the pose of the figure a stage pose drag
+    /// grabbed, captured in `begin_drag` before the first
+    /// `drag_to` writes, so `end_drag` can tell a real move
+    /// from a press that changed nothing and post the
+    /// gesture-end recap only for the former.
+    drag_pose_before: Option<crate::model::Pose>,
+    /// Wave P (P6): the camera in effect when a camera drag
+    /// began — `end_drag`'s comparison baseline for its pan
+    /// recap, mirroring `drag_pose_before`.
+    drag_camera_before: Option<(f32, f32, f32)>,
     pub status: String,
     undo: Vec<String>,
     redo: Vec<String>,
@@ -56,6 +66,21 @@ pub struct EditorCore {
     /// state changed" and clear index-based panel selections
     /// that would otherwise point into the new project.
     project_swaps: usize,
+    /// Wave P (P14): stored paths of the current project's
+    /// unmuted audio clips whose files did not exist at the
+    /// last refresh — one entry per missing clip, in timeline
+    /// order (the classification of
+    /// [`crate::audio::missing_audio_clips`]: muted clips are
+    /// intentionally silent, so their files' absence loses
+    /// nothing and is not reported). Refreshed by
+    /// `refresh_missing_audio` wherever
+    /// the project is wholesale replaced (the swap funnels
+    /// and undo/redo), so the report always describes the
+    /// project actually in the core. Runtime only, like
+    /// `project_swaps`: undo snapshots cover the project,
+    /// not this report. It is a report, not a repair — the
+    /// clips themselves are never dropped or rewritten.
+    missing_audio: Vec<String>,
     clipboard: Option<crate::model::Frame>,
     /// Wave 9: deep-copied frames held by `copy_range` for
     /// `paste_range`. Distinct from the single-frame `clipboard`.
@@ -174,12 +199,15 @@ impl EditorCore {
             playing: false,
             camera_mode: false,
             camera_last: None,
+            drag_pose_before: None,
+            drag_camera_before: None,
             status: "Drag a joint to pose. Hands and feet use IK; drag the hips to move.".into(),
             undo: Vec::new(),
             redo: Vec::new(),
             edit_count: 0,
             last_autosave_count: 0,
             project_swaps: 0,
+            missing_audio: Vec::new(),
             clipboard: None,
             frame_clipboard: Vec::new(),
             playhead: 0.0,
@@ -288,6 +316,7 @@ impl EditorCore {
                     .selected_figure
                     .min(self.project.figures.len().saturating_sub(1));
                 self.repair_clip_session_after_history();
+                self.refresh_missing_audio();
                 self.status = "Redone.".into();
             }
         } else {
@@ -307,6 +336,7 @@ impl EditorCore {
                     .selected_figure
                     .min(self.project.figures.len().saturating_sub(1));
                 self.repair_clip_session_after_history();
+                self.refresh_missing_audio();
                 self.status = "Undone.".into();
             }
         } else {
@@ -389,6 +419,9 @@ impl EditorCore {
         } else {
             DragKind::Aim(ni)
         };
+        // Wave P (P6): the pre-drag pose, for `end_drag`'s
+        // recap decision (see the field docs).
+        self.drag_pose_before = Some(self.project.frames[self.current].poses[fi].clone());
         self.dragging = Some(kind);
         self.drag_to(p);
         true
@@ -397,6 +430,9 @@ impl EditorCore {
     /// Start a camera drag (camera mode): snapshots once, then
     /// `drag_to` pans the key at the current frame.
     pub fn begin_camera_drag(&mut self, p: V2) {
+        // Wave P (P6): the pre-drag camera, for `end_drag`'s
+        // recap decision (see the field docs).
+        self.drag_camera_before = Some(self.camera_here());
         self.snapshot();
         self.dragging = Some(DragKind::Camera);
         self.camera_last = Some(p);
@@ -433,9 +469,64 @@ impl EditorCore {
         }
     }
 
+    /// End a stage drag. The gesture's writes were visible
+    /// throughout — the pose / camera follows the pointer —
+    /// and a drag that actually moved something also leaves
+    /// the status-line recap the shell's other gestures post
+    /// at their end (`end_draw`'s "Stroke drawn (…)", the
+    /// graph canvas's "Graph key moved: …", the rotation
+    /// dial's per-write rotation line). Wave P (P6, charter
+    /// §6 feedback completeness): pose and camera drags were
+    /// the two stage gestures that ended silent, leaving
+    /// whatever stale status preceded them standing. A press
+    /// that changed nothing (a click on a joint, a camera
+    /// press with no travel) posts nothing — the rotation
+    /// dial's dead-zone discipline, applied at gesture end.
     pub fn end_drag(&mut self) {
-        self.dragging = None;
+        let kind = self.dragging.take();
         self.camera_last = None;
+        let pose_before = self.drag_pose_before.take();
+        let camera_before = self.drag_camera_before.take();
+        match kind {
+            Some(DragKind::Camera) => {
+                if let Some(before) = camera_before {
+                    let now = self.camera_here();
+                    if (now.0 - before.0).abs() > 0.01
+                        || (now.1 - before.1).abs() > 0.01
+                        || (now.2 - before.2).abs() > 0.0001
+                    {
+                        self.status =
+                            format!("Camera key moved at frame {}.", self.current + 1);
+                    }
+                }
+            }
+            Some(_) => {
+                if let Some(before) = pose_before {
+                    let fi = self.selected_figure;
+                    let changed = self
+                        .project
+                        .frames
+                        .get(self.current)
+                        .and_then(|f| f.poses.get(fi))
+                        .map(|now| {
+                            (now.root[0] - before.root[0]).abs() > 0.01
+                                || (now.root[1] - before.root[1]).abs() > 0.01
+                                || now.angles.len() != before.angles.len()
+                                || now
+                                    .angles
+                                    .iter()
+                                    .zip(before.angles.iter())
+                                    .any(|(a, b)| (a - b).abs() > 0.01)
+                        })
+                        .unwrap_or(false);
+                    if changed {
+                        self.status =
+                            format!("Posed figure {} at frame {}.", fi + 1, self.current + 1);
+                    }
+                }
+            }
+            None => {}
+        }
     }
 
     pub fn add_frame(&mut self) {
@@ -1892,7 +1983,8 @@ impl EditorCore {
                 self.selected_node = None;
                 self.solo = None;
                 self.note_project_swapped();
-                self.status = format!("Opened {}", path.display());
+                self.status =
+                    format!("Opened {}{}", path.display(), self.missing_audio_note());
             }
             None => self.status = format!("Could not open {} as a project.", path.display()),
         }
@@ -1961,7 +2053,8 @@ impl EditorCore {
                 self.selected_node = None;
                 self.undo.clear();
                 self.note_project_swapped();
-                self.status = format!("Loaded {}", path.display());
+                self.status =
+                    format!("Loaded {}{}", path.display(), self.missing_audio_note());
             }
             Err(e) => self.status = format!("Load failed: {e}"),
         }
@@ -2042,6 +2135,45 @@ impl EditorCore {
         if !Self::autosave_due(self.edit_count, self.last_autosave_count) {
             return;
         }
+        self.write_recovery_snapshot();
+    }
+
+    /// Wave P (P19): the window-close flush. The Rune
+    /// framework offers no close veto (proven from the
+    /// pinned framework source: `Window::close` runs the
+    /// `on_close` hook, then closes unconditionally — see
+    /// docs in wave-p/findings/p19.md), so a dirty window
+    /// close cannot be confirmed or refused; the fail-closed
+    /// behaviour available is that it must lose NOTHING.
+    /// `maybe_autosave` only writes every `AUTOSAVE_EVERY`
+    /// edits, so up to 24 counted edits could sit outside
+    /// the recovery snapshot when the window closes. This
+    /// flush closes that gap: while any counted edit is not
+    /// yet covered by the snapshot (the shell's dirty truth,
+    /// `edits_since_autosave() > 0` — the same counter the
+    /// dirty dot and `session_dirty` read), write the
+    /// snapshot NOW, whatever the cadence says. A clean
+    /// session writes nothing, so the snapshot's mtime keeps
+    /// meaning "unsaved work" to the startup recovery offer
+    /// (`shell::recovery_is_newer_than_last_project`) instead
+    /// of being refreshed by every clean exit. Called from
+    /// the shell's `on_close` hook (main.rs, integrator
+    /// wiring); silent on success and honest on failure
+    /// exactly like `maybe_autosave`, whose write body this
+    /// shares.
+    pub fn flush_recovery_on_close(&mut self) {
+        if self.edits_since_autosave() == 0 {
+            return;
+        }
+        self.write_recovery_snapshot();
+    }
+
+    /// The one recovery-snapshot write both autosave paths
+    /// share: on success the last-autosave counter catches
+    /// up with the edit counter (the session reads clean);
+    /// on failure the status reports it and the counter is
+    /// left alone, so the next call retries.
+    fn write_recovery_snapshot(&mut self) {
         match crate::shell::write_recovery(&self.project) {
             Ok(_) => self.last_autosave_count = self.edit_count,
             Err(e) => self.status = format!("Autosave failed: {e}"),
@@ -2094,6 +2226,7 @@ impl EditorCore {
         }
         self.snapshot();
         let target = target as usize;
+        let figure_count = self.project.figures.len();
         self.project.figures.swap(fi, target);
         for frame in &mut self.project.frames {
             // Wave 11 (E6 residual): swap pose rows only where
@@ -2103,9 +2236,24 @@ impl EditorCore {
             if fi < frame.poses.len() && target < frame.poses.len() {
                 frame.poses.swap(fi, target);
             }
-            // Bend rows are per-figure like pose rows;
-            // swap them where both rows exist (the table
-            // is sparse — a missing row reads as 0.0).
+            // Bend rows are per-figure like pose rows, but
+            // the both-rows guard alone strands a row at the
+            // padded-prefix boundary (Wave P, P46 — the
+            // single-step form of the corruption P13 fixed
+            // in layers::move_figure): the bend writer pads
+            // the table only up to the highest figure edited
+            // in the frame, so with a length-1 table the
+            // 0<->1 swap never fires and figure 0's row stays
+            // behind on figure 1. Pad-then-swap, mirroring
+            // layers: a non-empty table shorter than the
+            // figure count is padded with empty rows first
+            // (an absent row and an empty row both read as
+            // straight in `Project::bends_at`), then the
+            // guarded swap runs. An empty table stays empty:
+            // a bend-free frame gains no rows from a reorder.
+            if !frame.bends.is_empty() && frame.bends.len() < figure_count {
+                frame.bends.resize(figure_count, Vec::new());
+            }
             if fi < frame.bends.len() && target < frame.bends.len() {
                 frame.bends.swap(fi, target);
             }
@@ -2451,6 +2599,11 @@ impl EditorCore {
                     self.playhead = 0.0;
                     self.selected_figure = 0;
                     self.selected_node = None;
+                    // Wave P (P14): this replace bypasses the
+                    // swap funnels (it is undoable), so refresh
+                    // the missing-audio report directly — it
+                    // must describe the project now in the core.
+                    self.refresh_missing_audio();
                     self.status = format!("Imported {}.", path.display());
                 }
                 Err(e) => self.status = format!("Stick Nodes animation import failed: {e}"),
@@ -2769,6 +2922,10 @@ impl EditorCore {
                     self.current = 0;
                     self.selected_figure = 0;
                     self.selected_node = None;
+                    // Wave P (P14): same funnel bypass as the
+                    // nodes-animation import — refresh the
+                    // missing-audio report for the new project.
+                    self.refresh_missing_audio();
                     self.status = format!("Imported {} as a figure.", path.display());
                 }
                 Err(e) => self.status = format!("Stick Nodes import failed: {e}"),
@@ -4688,6 +4845,11 @@ impl EditorCore {
         // every swap path funnels through here, so the session
         // can never keep editing a same-index different clip.
         self.repair_clip_session_after_history();
+        // Wave P (P14): the missing-audio report settles
+        // against the new project here too, so every swap
+        // path (opens, New, Recover) reports the project it
+        // actually landed on.
+        self.refresh_missing_audio();
     }
 
     /// Wave 11 (E9): how many wholesale project swaps this core
@@ -4704,6 +4866,53 @@ impl EditorCore {
     pub fn note_project_replaced(&mut self) {
         self.project_swaps += 1;
         self.repair_clip_session_after_history();
+        // Wave P (P14): a snapshot-first replace is still a
+        // new project under the session — refresh the
+        // missing-audio report with the same funnel rule.
+        self.refresh_missing_audio();
+    }
+
+    /// Wave P (P14): recompute the missing-audio report
+    /// against the project now in the core. Called wherever
+    /// the project is wholesale replaced — the swap funnels
+    /// (`note_project_swapped`, `note_project_replaced`)
+    /// and undo/redo — so the report can neither name clips
+    /// of a project the session has already moved away from
+    /// nor miss the clips of the one just landed.
+    fn refresh_missing_audio(&mut self) {
+        self.missing_audio = crate::audio::missing_audio_clips(&self.project.audio);
+    }
+
+    /// Wave P (P14): the current project's audio clips
+    /// whose files were missing at the last refresh (see
+    /// the field note on `missing_audio`): their stored
+    /// paths, one per clip in timeline order, classified by
+    /// the tree's one missing-file query
+    /// ([`crate::audio::missing_audio_clips`] — the same
+    /// classification the MP4 export outcome reports, and
+    /// the same unmuted-and-present test playback planning
+    /// and the export mix apply). Empty when every unmuted
+    /// clip's file is present.
+    pub fn missing_audio_clips(&self) -> &[String] {
+        &self.missing_audio
+    }
+
+    /// The status-line suffix a load appends when the
+    /// missing-audio report is non-empty; the empty string
+    /// when nothing is missing, so a clean load's status
+    /// stays byte-identical to before this report existed.
+    fn missing_audio_note(&self) -> String {
+        match self.missing_audio.len() {
+            0 => String::new(),
+            1 => format!(
+                " — 1 audio clip is missing its file: {}",
+                self.missing_audio[0]
+            ),
+            n => format!(
+                " — {n} audio clips are missing their files: {}",
+                self.missing_audio.join(", ")
+            ),
+        }
     }
 
     /// Wave 11 (A5): drop both history stacks without touching
@@ -4819,7 +5028,8 @@ impl EditorCore {
                 // every figure in the newly opened one.
                 self.solo = None;
                 self.note_project_swapped();
-                self.status = format!("Opened {}", path.display());
+                self.status =
+                    format!("Opened {}{}", path.display(), self.missing_audio_note());
             }
             Err(e) => self.status = format!("Open failed: {e}"),
         }
@@ -4836,7 +5046,26 @@ impl EditorCore {
             .join("export")
             .join("animation.mp4");
         match render_mp4(&self.project, &path) {
-            Ok(n) => self.status = format!("Exported {n}-frame MP4 to {}", path.display()),
+            Ok(outcome) => {
+                // Wave P (P15): the export succeeded, but any
+                // clips whose files are missing were left out
+                // — the status names them instead of the mux
+                // dropping them silently. With every clip
+                // present the status is the sentence it
+                // always was.
+                self.status = match outcome.missing_audio_note() {
+                    Some(note) => format!(
+                        "Exported {}-frame MP4 to {}. {note}",
+                        outcome.frames,
+                        path.display()
+                    ),
+                    None => format!(
+                        "Exported {}-frame MP4 to {}",
+                        outcome.frames,
+                        path.display()
+                    ),
+                }
+            }
             Err(e) => self.status = format!("MP4 export failed: {e}"),
         }
     }
@@ -5889,6 +6118,335 @@ pub fn tool_get_editor_settings(core: &mut EditorCore, _args: &Value) -> Result<
         "stage": core.project.stage,
         "head_ring_scale": core.project.head_ring_scale,
     }))
+}
+
+// ---------------------------------------------------------------------
+// Wave P (P23): subtitle ops — the EditorCore half of board
+// contract 1. The data, the style, the layout maths and the
+// SRT/WebVTT converters live in `subtitles.rs`; these are the
+// editing ops over `Project::subtitles` /
+// `Project::subtitle_style`, in the house op style:
+//
+// * A refused op (bad range, empty text, no such cue,
+//   non-finite font scale) changes nothing and takes NO
+//   snapshot — it only sets `status`, in the failure voice
+//   ("… failed: …").
+// * A successful mutation snapshots exactly once (one undo
+//   step via `snapshot()`), then writes.
+// * The cue list is kept sorted by `(start_frame, end_frame)`
+//   at all times; inserts are stable, so cues with equal
+//   ranges keep their authoring order. Frame numbers are NOT
+//   clamped to the timeline.
+// * Success is reported on `status` with 1-based cue and
+//   frame numbers.
+// ---------------------------------------------------------------------
+
+impl EditorCore {
+    /// Add a cue over `[start_frame, end_frame)` with
+    /// `text`, keeping the list sorted. One undo step.
+    /// Returns the new cue's index in the sorted list, or
+    /// `None` when the cue is refused (invalid range or
+    /// empty text) — a refusal changes nothing and takes
+    /// no snapshot.
+    pub fn subtitle_add(
+        &mut self,
+        start_frame: usize,
+        end_frame: usize,
+        text: &str,
+    ) -> Option<usize> {
+        if let Err(reason) = crate::subtitles::SubtitleCue::validate(start_frame, end_frame, text) {
+            self.status = format!("Subtitle add failed: {reason}.");
+            return None;
+        }
+        self.snapshot();
+        let cue = crate::subtitles::SubtitleCue {
+            start_frame,
+            end_frame,
+            text: text.to_string(),
+        };
+        // Insert after every cue whose key is <= the new
+        // key: the list stays sorted and the insert is
+        // stable among equal ranges.
+        let key = (cue.start_frame, cue.end_frame);
+        let index = self
+            .project
+            .subtitles
+            .partition_point(|c| (c.start_frame, c.end_frame) <= key);
+        self.project.subtitles.insert(index, cue);
+        self.status = format!(
+            "Subtitle {} added at frame {}.",
+            index + 1,
+            start_frame + 1
+        );
+        Some(index)
+    }
+
+    /// Replace cue `index` (an index into the sorted list —
+    /// validated before anything is taken or changed) with a
+    /// new range and text, re-sorting afterwards. One undo
+    /// step. Returns the cue's index after the re-sort, or
+    /// `None` when refused (no such cue, or the new values
+    /// fail validation) — a refusal changes nothing and
+    /// takes no snapshot.
+    pub fn subtitle_update(
+        &mut self,
+        index: usize,
+        start_frame: usize,
+        end_frame: usize,
+        text: &str,
+    ) -> Option<usize> {
+        if self.project.subtitles.get(index).is_none() {
+            self.status = format!("Subtitle update failed: no subtitle {}.", index + 1);
+            return None;
+        }
+        if let Err(reason) = crate::subtitles::SubtitleCue::validate(start_frame, end_frame, text) {
+            self.status = format!("Subtitle update failed: {reason}.");
+            return None;
+        }
+        self.snapshot();
+        self.project.subtitles.remove(index);
+        let cue = crate::subtitles::SubtitleCue {
+            start_frame,
+            end_frame,
+            text: text.to_string(),
+        };
+        let key = (cue.start_frame, cue.end_frame);
+        let new_index = self
+            .project
+            .subtitles
+            .partition_point(|c| (c.start_frame, c.end_frame) <= key);
+        self.project.subtitles.insert(new_index, cue);
+        self.status = format!("Subtitle {} updated.", new_index + 1);
+        Some(new_index)
+    }
+
+    /// Delete cue `index` (an index into the sorted list,
+    /// validated first). One undo step. Returns false —
+    /// changing nothing and taking no snapshot — when there
+    /// is no such cue.
+    pub fn subtitle_delete(&mut self, index: usize) -> bool {
+        if self.project.subtitles.get(index).is_none() {
+            self.status = format!("Subtitle delete failed: no subtitle {}.", index + 1);
+            return false;
+        }
+        self.snapshot();
+        self.project.subtitles.remove(index);
+        self.status = format!("Subtitle {} deleted.", index + 1);
+        true
+    }
+
+    /// All cues, in the list's kept order: sorted by
+    /// `(start_frame, end_frame)`, stable among equals.
+    pub fn subtitle_cues(&self) -> &[crate::subtitles::SubtitleCue] {
+        &self.project.subtitles
+    }
+
+    /// How many cues the project carries.
+    pub fn subtitle_count(&self) -> usize {
+        self.project.subtitles.len()
+    }
+
+    /// The first cue (in stored order) live at `frame`,
+    /// when one is. Overlapping cues resolve to the
+    /// earliest-stored one.
+    pub fn subtitle_at(&self, frame: usize) -> Option<&crate::subtitles::SubtitleCue> {
+        self.project.subtitles.iter().find(|c| c.is_live_at(frame))
+    }
+
+    /// ALL cues live at `frame`, in the list's kept
+    /// (stored) order. Overlapping cues are all returned:
+    /// the renderers stack them (see
+    /// `subtitles::subtitle_stack_line_offset`).
+    /// `subtitle_at` above keeps its first-cue contract
+    /// unchanged — it is exactly this list's first element.
+    pub fn subtitles_at(&self, frame: usize) -> Vec<&crate::subtitles::SubtitleCue> {
+        crate::subtitles::live_subtitle_cues(&self.project, frame)
+    }
+
+    /// The project's current subtitle style (the stored
+    /// value verbatim; renderers sanitise at read via
+    /// `SubtitleStyle::sanitised`).
+    pub fn subtitle_style(&self) -> crate::subtitles::SubtitleStyle {
+        self.project.subtitle_style
+    }
+
+    /// Replace the project's subtitle style. Exactly ONE
+    /// undo step on success. The style is validated first
+    /// (see `SubtitleStyle::validated`): a non-finite font
+    /// scale is refused — the error is returned and mirrored
+    /// on `status` in the ops' failure voice, nothing
+    /// changes and no snapshot is taken. A finite
+    /// out-of-range scale is clamped, not refused.
+    pub fn set_subtitle_style(
+        &mut self,
+        style: crate::subtitles::SubtitleStyle,
+    ) -> Result<(), String> {
+        let style = match style.validated() {
+            Ok(style) => style,
+            Err(reason) => {
+                self.status = format!("Subtitle style set failed: {reason}.");
+                return Err(reason);
+            }
+        };
+        self.snapshot();
+        self.project.subtitle_style = style;
+        self.status = "Subtitle style updated.".to_string();
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod subtitle_ops_tests {
+    use super::*;
+    use crate::subtitles::{SubtitleCue, SubtitlePosition, SubtitleStyle};
+
+    fn cue(start_frame: usize, end_frame: usize, text: &str) -> SubtitleCue {
+        SubtitleCue {
+            start_frame,
+            end_frame,
+            text: text.to_string(),
+        }
+    }
+
+    /// The whole project as its snapshot JSON — the exact
+    /// bytes `snapshot()` would store. `Project` has no
+    /// `PartialEq`, so this is how "untouched" is asserted
+    /// (the house pattern).
+    fn project_json(core: &EditorCore) -> String {
+        serde_json::to_string(&core.project).unwrap()
+    }
+
+    #[test]
+    fn add_keeps_the_list_sorted_and_reports_the_index() {
+        let mut core = EditorCore::new();
+        assert_eq!(core.subtitle_add(10, 14, "last"), Some(0));
+        assert_eq!(core.subtitle_add(0, 4, "first"), Some(0));
+        assert_eq!(core.subtitle_add(4, 10, "middle"), Some(1));
+        // Equal ranges keep authoring order (stable insert).
+        assert_eq!(core.subtitle_add(4, 10, "middle two"), Some(2));
+        let texts: Vec<&str> = core.subtitle_cues().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["first", "middle", "middle two", "last"]);
+        assert_eq!(core.subtitle_count(), 4);
+    }
+
+    #[test]
+    fn each_successful_mutation_takes_exactly_one_undo_step() {
+        let mut core = EditorCore::new();
+        assert_eq!(core.undo_depth(), 0);
+        core.subtitle_add(0, 4, "one");
+        assert_eq!(core.undo_depth(), 1);
+        core.subtitle_add(4, 8, "two");
+        assert_eq!(core.undo_depth(), 2);
+        core.subtitle_update(0, 8, 12, "one moved");
+        assert_eq!(core.undo_depth(), 3);
+        core.subtitle_delete(0);
+        assert_eq!(core.undo_depth(), 4);
+        // Undo restores the pre-delete list verbatim.
+        core.undo();
+        let texts: Vec<&str> = core.subtitle_cues().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["two", "one moved"]);
+    }
+
+    #[test]
+    fn refused_ops_change_nothing_and_take_no_snapshot() {
+        let mut core = EditorCore::new();
+        core.subtitle_add(0, 4, "kept");
+        let before = project_json(&core);
+        let depth = core.undo_depth();
+
+        assert_eq!(core.subtitle_add(4, 4, "empty range"), None);
+        assert_eq!(core.subtitle_add(5, 4, "inverted"), None);
+        assert_eq!(core.subtitle_add(4, 8, "  "), None);
+        assert_eq!(core.subtitle_update(9, 0, 4, "ghost"), None);
+        assert_eq!(core.subtitle_update(0, 3, 3, "bad range"), None);
+        assert_eq!(core.subtitle_update(0, 0, 4, ""), None);
+        assert!(!core.subtitle_delete(9));
+
+        assert_eq!(project_json(&core), before);
+        assert_eq!(core.undo_depth(), depth);
+        assert!(core.status.contains("failed"), "{}", core.status);
+    }
+
+    #[test]
+    fn update_replaces_and_resorts() {
+        let mut core = EditorCore::new();
+        core.subtitle_add(0, 4, "a");
+        core.subtitle_add(4, 8, "b");
+        core.subtitle_add(8, 12, "c");
+        // Move "a" past "c": it lands at the end, and the
+        // returned index is its new position.
+        assert_eq!(core.subtitle_update(0, 12, 16, "a2"), Some(2));
+        let texts: Vec<&str> = core.subtitle_cues().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["b", "c", "a2"]);
+        assert_eq!(core.subtitle_cues()[2], cue(12, 16, "a2"));
+    }
+
+    #[test]
+    fn delete_removes_the_cue() {
+        let mut core = EditorCore::new();
+        core.subtitle_add(0, 4, "a");
+        core.subtitle_add(4, 8, "b");
+        assert!(core.subtitle_delete(0));
+        assert_eq!(core.subtitle_cues(), [cue(4, 8, "b")]);
+    }
+
+    #[test]
+    fn subtitle_at_uses_the_half_open_range() {
+        let mut core = EditorCore::new();
+        core.subtitle_add(2, 5, "cue");
+        assert_eq!(core.subtitle_at(1), None);
+        assert_eq!(core.subtitle_at(2).map(|c| c.text.as_str()), Some("cue"));
+        assert_eq!(core.subtitle_at(4).map(|c| c.text.as_str()), Some("cue"));
+        // end_frame is exclusive.
+        assert_eq!(core.subtitle_at(5), None);
+    }
+
+    #[test]
+    fn subtitles_at_returns_every_live_cue_in_stored_order() {
+        let mut core = EditorCore::new();
+        core.subtitle_add(0, 10, "under");
+        core.subtitle_add(2, 6, "over");
+        let live: Vec<&str> = core.subtitles_at(3).iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(live, ["under", "over"]);
+        // subtitle_at is exactly the first of subtitles_at.
+        assert_eq!(core.subtitle_at(3).map(|c| c.text.as_str()), Some("under"));
+        assert!(core.subtitles_at(10).is_empty());
+    }
+
+    #[test]
+    fn set_subtitle_style_is_one_step_and_validates() {
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        let style = SubtitleStyle {
+            position: SubtitlePosition::Top,
+            font_scale: 2.0,
+            text_color: 0xFF_FF_00,
+            box_color: 0x10_20_30,
+        };
+        core.set_subtitle_style(style).expect("a valid style sets");
+        assert_eq!(core.subtitle_style(), style);
+        assert_eq!(core.undo_depth(), depth + 1);
+        // A finite out-of-range scale clamps, not refuses.
+        core.set_subtitle_style(SubtitleStyle {
+            font_scale: 99.0,
+            ..SubtitleStyle::default()
+        })
+        .expect("a finite scale clamps");
+        assert_eq!(core.subtitle_style().font_scale, crate::subtitles::SUBTITLE_FONT_SCALE_MAX);
+        // A non-finite scale refuses: no step, style kept.
+        let depth = core.undo_depth();
+        let kept = core.subtitle_style();
+        let err = core
+            .set_subtitle_style(SubtitleStyle {
+                font_scale: f32::NAN,
+                ..SubtitleStyle::default()
+            })
+            .expect_err("a non-finite scale refuses");
+        assert!(err.contains("not a finite number"), "{err}");
+        assert_eq!(core.undo_depth(), depth);
+        assert_eq!(core.subtitle_style(), kept);
+        assert!(core.status.contains("failed"), "{}", core.status);
+    }
 }
 
 #[cfg(test)]
@@ -7514,6 +8072,33 @@ mod tests {
     }
 
     #[test]
+    fn wave_p_end_drag_recaps_only_real_moves() {
+        // Wave P (P6, feedback completeness): a pose drag
+        // that moved the pose ends with the status recap;
+        // a press that changed nothing posts none.
+        let mut c = EditorCore::new();
+        let root = c.positions(0, 0)[0];
+        let before = c.status.clone();
+        assert!(c.begin_drag(root));
+        c.end_drag();
+        assert_eq!(c.status, before, "an unmoved press posts no recap");
+        assert!(c.begin_drag(root));
+        c.drag_to([root[0] + 40.0, root[1] + 25.0]);
+        c.end_drag();
+        assert_eq!(c.status, "Posed figure 1 at frame 1.");
+        // Camera drags follow the same discipline.
+        let mut c = EditorCore::new();
+        let before = c.status.clone();
+        c.begin_camera_drag([5.0, 5.0]);
+        c.end_drag();
+        assert_eq!(c.status, before, "an untravelled camera press posts no recap");
+        c.begin_camera_drag([5.0, 5.0]);
+        c.drag_to([35.0, 15.0]);
+        c.end_drag();
+        assert_eq!(c.status, "Camera key moved at frame 1.");
+    }
+
+    #[test]
     fn wave5_graph_key_drives_positions() {
         let mut c = EditorCore::new();
         c.selected_node = Some(2);
@@ -8546,6 +9131,149 @@ mod wave11_tests {
             muted: false,
         });
         core
+    }
+
+    /// P14 fixture: a demo project whose audio is exactly
+    /// `clips`, in order.
+    fn project_with_audio(clips: Vec<crate::model::AudioClip>) -> Project {
+        let mut project = Project::new_demo();
+        project.audio = clips;
+        project
+    }
+
+    /// P14 fixture: an unmuted unity-gain clip at
+    /// `start_frame` pointing at `path`.
+    fn audio_clip_at(path: String, start_frame: usize) -> crate::model::AudioClip {
+        crate::model::AudioClip {
+            path,
+            start_frame,
+            gain: 1.0,
+            muted: false,
+        }
+    }
+
+    /// P14 fixture: write `project` into `dir` as a project
+    /// file and return its path, ready to be opened through
+    /// `open_project_file` via the `project_files` selector.
+    fn write_project_file(dir: &PathBuf, project: &Project) -> PathBuf {
+        let file = dir.join("proj.styk.json");
+        std::fs::write(&file, serde_json::to_string_pretty(project).unwrap()).unwrap();
+        file
+    }
+
+    #[test]
+    fn open_project_file_reports_a_missing_audio_clip() {
+        let dir = audio_temp_dir("p14-missing-open");
+        let present = dir.join("present.wav");
+        std::fs::write(&present, b"").unwrap();
+        let present_s = present.to_string_lossy().into_owned();
+        let missing_s = dir.join("gone.wav").to_string_lossy().into_owned();
+        let project = project_with_audio(vec![
+            audio_clip_at(present_s.clone(), 0),
+            audio_clip_at(missing_s.clone(), 3),
+        ]);
+        let file = write_project_file(&dir, &project);
+
+        let mut core = EditorCore::new();
+        core.project_files = vec![file];
+        core.project_index = 0;
+        core.open_project_file();
+
+        // The missing clip is reported by its stored path;
+        // the present clip is not in the report.
+        assert_eq!(core.missing_audio_clips().len(), 1);
+        assert_eq!(core.missing_audio_clips()[0], missing_s);
+        // The load dropped nothing: both clips survive, the
+        // present one exactly as saved.
+        assert_eq!(core.project.audio.len(), 2);
+        assert_eq!(core.project.audio[0].path, present_s);
+        assert_eq!(core.project.audio[0].start_frame, 0);
+        assert_eq!(core.project.audio[1].path, missing_s);
+        assert_eq!(core.project.audio[1].start_frame, 3);
+        // The load status carries the finding and names the
+        // missing file (and not the present one).
+        assert!(core.status.starts_with("Opened "), "status: {}", core.status);
+        assert!(core.status.contains(&missing_s), "status: {}", core.status);
+        assert!(
+            !core.status.contains("present.wav"),
+            "status: {}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn open_project_file_with_all_audio_present_reports_nothing() {
+        let dir = audio_temp_dir("p14-all-present");
+        let a = write_editor_wav(&dir, "a.wav", &const_editor_wav(8000, 8, 0.0));
+        let b = write_editor_wav(&dir, "b.wav", &const_editor_wav(8000, 8, 0.0));
+        let project = project_with_audio(vec![audio_clip_at(a, 0), audio_clip_at(b, 5)]);
+        let file = write_project_file(&dir, &project);
+
+        let mut core = EditorCore::new();
+        core.project_files = vec![file.clone()];
+        core.project_index = 0;
+        core.open_project_file();
+
+        assert!(core.missing_audio_clips().is_empty());
+        // A clean load's status is byte-identical to before
+        // the report existed.
+        assert_eq!(core.status, format!("Opened {}", file.display()));
+    }
+
+    #[test]
+    fn missing_audio_report_classifies_an_empty_path_as_missing() {
+        // An empty path names no file at all, so nothing can
+        // ever be found there: the clip is reported, under
+        // its stored (empty) path.
+        let mut core = core_with_clip(String::new());
+        core.note_project_swapped();
+        assert_eq!(core.missing_audio_clips().len(), 1);
+        assert_eq!(core.missing_audio_clips()[0], "");
+    }
+
+    #[test]
+    fn missing_audio_report_excludes_muted_clips() {
+        // The report shares the tree's one classification
+        // (`crate::audio::missing_audio_clips`, also consumed
+        // by the MP4 export outcome): a muted clip is
+        // intentionally silent, so its file's absence loses
+        // nothing and is not reported — the same exclusion
+        // playback planning and the export mix apply.
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(crate::model::AudioClip {
+            path: "/nonexistent/p14-muted-gone.wav".to_string(),
+            start_frame: 0,
+            gain: 1.0,
+            muted: true,
+        });
+        core.note_project_swapped();
+        assert!(core.missing_audio_clips().is_empty());
+        // Unmute the same clip and the loss becomes real:
+        // the next refresh names it.
+        core.project.audio[0].muted = false;
+        core.note_project_swapped();
+        assert_eq!(core.missing_audio_clips().len(), 1);
+        assert_eq!(
+            core.missing_audio_clips()[0],
+            "/nonexistent/p14-muted-gone.wav"
+        );
+    }
+
+    #[test]
+    fn missing_audio_report_refreshes_on_the_next_swap() {
+        let mut core = core_with_clip("/nonexistent/p14-definitely-gone.wav".to_string());
+        core.note_project_swapped();
+        assert_eq!(core.missing_audio_clips().len(), 1);
+
+        // Point the same clip at a file that exists and swap
+        // again: the stale report clears instead of naming a
+        // clip whose file is now present.
+        let dir = audio_temp_dir("p14-refresh");
+        let present = write_editor_wav(&dir, "here.wav", &const_editor_wav(8000, 8, 0.0));
+        core.project.audio[0].path = present;
+        core.note_project_swapped();
+        assert!(core.missing_audio_clips().is_empty());
     }
 
     #[test]

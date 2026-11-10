@@ -723,8 +723,26 @@ pub struct FxClipEntry {
     pub hidden: bool,
 }
 
+/// The on-disk project format version this build writes
+/// ([`Project::format_version`]). Version 1 is the format
+/// as it stood when versioning was introduced (Wave P):
+/// every field carries a serde default, so a version-1
+/// file may omit any field and still load. Bump this only
+/// for a change that a loader cannot absorb through serde
+/// defaults alone, and land the migration for older
+/// versions in the same change.
+pub const FORMAT_VERSION_CURRENT: u32 = 1;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
+    /// Format version this project was written in (see
+    /// [`FORMAT_VERSION_CURRENT`]). Files saved before the
+    /// field existed carry no value and load as
+    /// `FORMAT_VERSION_CURRENT`: the pre-versioning format
+    /// IS version 1, because every field such a file may
+    /// omit already has a serde default.
+    #[serde(default = "default_format_version")]
+    pub format_version: u32,
     // Wave 11 (E7 serde census): the six original fields
     // below carried no serde default — every other field
     // in this struct (and every later-added field in the
@@ -790,6 +808,21 @@ pub struct Project {
     /// field existed carry no value and load as 1.0.
     #[serde(default = "default_head_ring_scale")]
     pub head_ring_scale: f32,
+    /// Subtitle cues over the timeline (see subtitles.rs).
+    /// Files saved before this field existed carry no value
+    /// and load with no cues.
+    #[serde(default)]
+    pub subtitles: Vec<crate::subtitles::SubtitleCue>,
+    /// How subtitle cues are presented (see subtitles.rs).
+    /// Files saved before this field existed carry no value
+    /// and load with the default style — bottom-anchored,
+    /// unscaled, white text over a black backing.
+    #[serde(default)]
+    pub subtitle_style: crate::subtitles::SubtitleStyle,
+}
+
+fn default_format_version() -> u32 {
+    FORMAT_VERSION_CURRENT
 }
 
 fn default_head_ring_scale() -> f32 {
@@ -839,6 +872,7 @@ impl Project {
         }
 
         Project {
+            format_version: FORMAT_VERSION_CURRENT,
             name: "Untitled".into(),
             fps: 12.0,
             stage: [960.0, 720.0],
@@ -860,6 +894,8 @@ impl Project {
             texts: Vec::new(),
             weather: None,
             head_ring_scale: 1.0,
+            subtitles: Vec::new(),
+            subtitle_style: Default::default(),
         }
     }
 

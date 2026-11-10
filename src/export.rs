@@ -256,11 +256,30 @@ pub fn node_trail(
         // 0 = oldest sample, 1 = the current frame.
         let frac = k as f32 / (samples - 1) as f32;
         let tf = (frame_f - span * (1.0 - frac)).max(0.0);
-        let poses = project.poses_at(tf);
+        // Wave P (P17): trail samples take the evaluated
+        // (graph-channelled) frame like every other evaluation.
+        // This helper is shared by the rasterizer, the SVG
+        // writer AND the stage's stage_fx layer, so funnelling
+        // here moves all three surfaces at once; with no
+        // channels it is the raw `poses_at` path unchanged.
+        let channelled = if project.channels.is_empty() {
+            None
+        } else {
+            Some(crate::graph::apply_channels(project, &project.channels, tf))
+        };
+        let raw_poses = project.poses_at(tf);
+        let poses: &Vec<crate::model::Pose> = match &channelled {
+            Some(r) => &r.poses,
+            None => &raw_poses,
+        };
         let Some(pose) = poses.get(fi) else {
             return out;
         };
-        let pos = evaluate(&fig.def, pose);
+        let def = match &channelled {
+            Some(r) => &r.defs[fi],
+            None => &fig.def,
+        };
+        let pos = evaluate(def, pose);
         let Some(&p) = pos.get(ni) else {
             return out;
         };
@@ -297,7 +316,29 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
     );
     let bg = rgb(project.background);
     let mut buf = ImageBuffer::from_pixel(w, h, Rgb(bg));
-    let poses = project.poses_at(frame_f);
+    // Wave P (P17): the evaluated frame. The stage draws figures
+    // through `EditorCore::positions_f`, which substitutes
+    // graph-channelled poses AND defs whenever the project
+    // carries channels; an export must render the frame the user
+    // sees, so the same evaluation is taken here and shared by
+    // every consumer below (the figure loop, FX clip anchors;
+    // the media composite funnels through `media_items`, which
+    // applies the same rule). With no channels this is exactly
+    // the raw `poses_at` path, byte for byte.
+    let channelled = if project.channels.is_empty() {
+        None
+    } else {
+        Some(crate::graph::apply_channels(
+            project,
+            &project.channels,
+            frame_f,
+        ))
+    };
+    let raw_poses = project.poses_at(frame_f);
+    let poses: &Vec<crate::model::Pose> = match &channelled {
+        Some(r) => &r.poses,
+        None => &raw_poses,
+    };
     let (cam_x, cam_y, zoom) = project.camera_at(frame_f);
     let angle = project.camera_angle_at(frame_f);
     let view = |p: [f32; 2]| -> [f32; 2] {
@@ -339,7 +380,16 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
             continue;
         }
         let pose = &poses[fi];
-        let pos = evaluate(&fig.def, pose);
+        // Positions come from the channelled def when channels
+        // exist (P17); node PROPERTIES (colour, style, shape,
+        // thickness) are still read from the figure's own def in
+        // the loop below — the same split the stage makes, since
+        // `positions_f` likewise returns only positions.
+        let def = match &channelled {
+            Some(r) => &r.defs[fi],
+            None => &fig.def,
+        };
+        let pos = evaluate(def, pose);
         // Per-node bends at this time (wave 7); empty when the
         // project carries no bend data.
         let bends = project.bends_at(frame_f, fi);
@@ -637,7 +687,14 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
         if entry.figure < project.figures.len() {
             let fig = &project.figures[entry.figure];
             if !fig.hidden {
-                let pos = evaluate(&fig.def, &poses[entry.figure]);
+                // FX anchors sit on the evaluated (channelled)
+                // figure, exactly as the stage's stage_fx layer
+                // anchors them through `positions_f` (P17).
+                let def = match &channelled {
+                    Some(r) => &r.defs[entry.figure],
+                    None => &fig.def,
+                };
+                let pos = evaluate(def, &poses[entry.figure]);
                 if let Some(&anchor) = pos.get(entry.node) {
                     for (p, r, c, a) in crate::vfx::clip_particles(&entry.clip, frame_f, anchor) {
                         particles.push((view(p), r * zoom * ss as f32, c, a));
@@ -782,6 +839,145 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
             let v = view(p);
             [v[0] / ssf, v[1] / ssf]
         });
+        out = image::DynamicImage::ImageRgba8(rgba).to_rgb8();
+    }
+    // Wave P (P26): subtitle burn-in. When cues are live at
+    // this frame, their text is drawn into the finished frame
+    // through the SAME text path stage texts take —
+    // `composite_media`'s built-in 3x5 bitmap-font stamp — so
+    // every raster format built on this funnel (GIF, MP4,
+    // WebM, PNG/JPEG sequences, spritesheet, contact sheet)
+    // carries subtitles with no per-format work.
+    // `render_frame_at` holds a `&Project`, not an
+    // `EditorCore`, so the lookup is the core's shared one,
+    // `subtitles::live_subtitle_cues`, over
+    // `Project::subtitles` under the half-open liveness
+    // rule: EVERY cue live at the nearest authored frame,
+    // in stored order.
+    let cue_frame = frame_f.round().max(0.0) as usize;
+    let live_cues = crate::subtitles::live_subtitle_cues(project, cue_frame);
+    if !live_cues.is_empty() {
+        // Placement: centred horizontally, stacked from the
+        // style's anchor edge in cue order — the FIRST cue
+        // closest to the edge. Glyph height is 6% of the
+        // stage height (this renderer's house subtitle size),
+        // multiplied by the style's font scale. Legibility on
+        // any background comes from the stamp itself: each
+        // line is stamped in the backing colour at the eight
+        // one-cell offsets first (an outline), then in the
+        // text colour centred — all nine stamps are ordinary
+        // text items through the one funnel, in list order.
+        //
+        // The block is drawn in STAGE space, NOT through the
+        // camera `view`: a subtitle is frame furniture pinned
+        // to the picture, so camera pan, zoom and rotation
+        // must not move it — the settlement the SVG writer
+        // took on this tree (see `append_subtitles` in
+        // svg.rs), kept here so the two exporters' bands
+        // agree at any camera. The finished frame is exactly
+        // stage-sized, so the view is the identity.
+        //
+        // The style is sanitised at read via the core's
+        // `SubtitleStyle::sanitised()` — the read-path rule
+        // the SVG writer applies the same way: a non-finite
+        // font scale falls back to 1.0, a finite one is
+        // clamped into [0.5, 3.0]; position and colours pass
+        // through verbatim. The offset arithmetic below is
+        // the core's shared layout helper (first cue closest
+        // to the edge; at the bottom anchor a cue's LAST
+        // line sits closest) — IA-P26-1 in the Wave P
+        // findings.
+        let style = project.subtitle_style.sanitised();
+        let size = project.stage[1] * 0.06 * style.font_scale;
+        let cell = size / 5.0;
+        // The funnel draws only what `media_items` derives
+        // from a project, so the cues ride a text-only
+        // overlay: a clone of the project with every other
+        // media source cleared (sprites, stage texts, and
+        // segment media on figure and clip defs), leaving
+        // exactly the subtitles' text items. Paid only on
+        // frames where any cue is live.
+        let mut overlay = project.clone();
+        overlay.sprites.clear();
+        overlay.texts.clear();
+        for fig in &mut overlay.figures {
+            for node in &mut fig.def.nodes {
+                node.media = None;
+            }
+        }
+        for clip in &mut overlay.clips {
+            for node in &mut clip.def.nodes {
+                node.media = None;
+            }
+        }
+        let cx = project.stage[0] / 2.0;
+        let line_step = size * 1.35;
+        // The anchor lines: the bottom-anchored block's edge
+        // line and its mirror at the top edge. A line's
+        // `from_edge` offset steps it away from its anchor.
+        let last_y = project.stage[1] - size * 1.1;
+        let first_y = size * 1.1;
+        let mut lines_before = 0usize;
+        for cue in &live_cues {
+            let lines: Vec<&str> = cue.text.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                if line.is_empty() {
+                    continue;
+                }
+                // Distance of this line from the anchored
+                // edge, in lines — the shared layout
+                // contract, computed by the core's
+                // `subtitle_stack_line_offset`: at the
+                // bottom anchor the cue's lines count DOWN
+                // toward the edge — its last line is offset
+                // 0 — while at the top they count away in
+                // their own order.
+                let from_edge = crate::subtitles::subtitle_stack_line_offset(
+                    lines_before,
+                    lines.len(),
+                    i,
+                    style.position,
+                ) as f32;
+                let y = match style.position {
+                    crate::subtitles::SubtitlePosition::Bottom => {
+                        last_y - from_edge * line_step
+                    }
+                    crate::subtitles::SubtitlePosition::Top => {
+                        first_y + from_edge * line_step
+                    }
+                };
+                let stamp = |x: f32, y: f32, color: u32| -> crate::model::TextInstance {
+                    crate::model::TextInstance {
+                        content: (*line).to_string(),
+                        size,
+                        color,
+                        keys: vec![crate::model::InstanceKey {
+                            frame: 0.0,
+                            x,
+                            y,
+                            scale: 1.0,
+                            angle: 0.0,
+                        }],
+                    }
+                };
+                for (dx, dy) in [
+                    (-cell, 0.0),
+                    (cell, 0.0),
+                    (0.0, -cell),
+                    (0.0, cell),
+                    (-cell, -cell),
+                    (cell, -cell),
+                    (-cell, cell),
+                    (cell, cell),
+                ] {
+                    overlay.texts.push(stamp(cx + dx, y + dy, style.box_color));
+                }
+                overlay.texts.push(stamp(cx, y, style.text_color));
+            }
+            lines_before += lines.len();
+        }
+        let mut rgba = image::DynamicImage::ImageRgb8(out).to_rgba8();
+        crate::media::composite_media(&overlay, frame_f, &mut rgba, &|p| p);
         out = image::DynamicImage::ImageRgba8(rgba).to_rgb8();
     }
     out
@@ -989,10 +1185,50 @@ pub fn export_gif_range(
     encode_gif(project, &times, path)
 }
 
+/// The outcome of a successful MP4 export, full or range:
+/// the frames written, and the audible clips that had to be
+/// left out because their files are missing. A non-empty
+/// `missing_audio` is NOT a failure — the video is complete
+/// and the export succeeded — but the loss is named here so
+/// the entry points can tell the user, instead of the mux
+/// plan dropping the clips without a trace (the plan's own
+/// business stays deciding what sounds: [`mux_plan`]; this
+/// outcome is the report of what could not).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mp4ExportOutcome {
+    /// Frames written to the video file.
+    pub frames: usize,
+    /// Paths of unmuted clips skipped because their files do
+    /// not exist, in project order (range exports: only clips
+    /// that may intersect the exported window). Empty when
+    /// every audible clip was included.
+    pub missing_audio: Vec<String>,
+}
+
+impl Mp4ExportOutcome {
+    /// The one-sentence warning naming the skipped clips, for
+    /// status lines — `None` when nothing was skipped, so an
+    /// export with all its audio present reports exactly as
+    /// it did before this outcome existed.
+    pub fn missing_audio_note(&self) -> Option<String> {
+        if self.missing_audio.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "Skipped {} audio clip(s) whose files are missing: {}.",
+                self.missing_audio.len(),
+                self.missing_audio.join(", ")
+            ))
+        }
+    }
+}
+
 /// Export an MP4 (H.264, yuv420p) via the system `ffmpeg`. When
 /// the project has an audio clip whose file exists, it is muxed in
-/// at its start frame. Errors if ffmpeg is missing.
-pub fn export_mp4(project: &Project, path: &Path) -> std::io::Result<usize> {
+/// at its start frame. Errors if ffmpeg is missing. A clip whose
+/// file is missing never fails the export: it is skipped and
+/// named in the outcome's `missing_audio` ([`Mp4ExportOutcome`]).
+pub fn export_mp4(project: &Project, path: &Path) -> std::io::Result<Mp4ExportOutcome> {
     // Audible = unmuted with an existing file — the same
     // exclusion `mux_plan` applies. This check used to count
     // muted clips too, so an all-muted project took the mux
@@ -1004,15 +1240,23 @@ pub fn export_mp4(project: &Project, path: &Path) -> std::io::Result<usize> {
         .audio
         .iter()
         .any(|c| !c.muted && std::path::Path::new(&c.path).exists());
+    let missing_audio = crate::audio::missing_audio_clips(&project.audio);
     if !has_audio {
-        return ffmpeg_encode(project, path, &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]);
+        let frames = ffmpeg_encode(project, path, &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"])?;
+        return Ok(Mp4ExportOutcome {
+            frames,
+            missing_audio,
+        });
     }
     let silent = unique_temp("silent").with_extension("mp4");
     let n = ffmpeg_encode(project, &silent, &["-c:v", "libx264", "-pix_fmt", "yuv420p"])?;
     let muxed = mux_audio(project, &silent, path)?;
     let _ = std::fs::remove_file(&silent);
     if muxed {
-        Ok(n)
+        Ok(Mp4ExportOutcome {
+            frames: n,
+            missing_audio,
+        })
     } else {
         Err(std::io::Error::other("audio mux failed"))
     }
@@ -1039,7 +1283,10 @@ pub fn export_mp4(project: &Project, path: &Path) -> std::io::Result<usize> {
 /// export fails with an error naming it, before anything is
 /// written, rather than silently producing a file without
 /// its audio — the same stance the full export takes when a
-/// mux fails. When no audible clip intersects the range the
+/// mux fails. A clip whose file is missing entirely is the
+/// opposite case: nothing exists to include, so it never
+/// fails the export — it is skipped and named in the
+/// outcome's `missing_audio` ([`Mp4ExportOutcome`]). When no audible clip intersects the range the
 /// export is the plain video-only encode it always was,
 /// unchanged.
 pub fn export_mp4_range(
@@ -1047,9 +1294,10 @@ pub fn export_mp4_range(
     from: usize,
     to: usize,
     path: &Path,
-) -> std::io::Result<()> {
+) -> std::io::Result<Mp4ExportOutcome> {
     let (from, to) = clamp_frame_range(project, from, to)?;
     let times = sample_times_range(project, from, to);
+    let frames = times.len();
     let (win_start, win_len) = range_window(project, from, times.len());
     let outcome = range_plan_outcome(project, win_start, win_len, &probe_duration_secs);
     if !outcome.unprobeable.is_empty() {
@@ -1062,6 +1310,7 @@ pub fn export_mp4_range(
             outcome.unprobeable.join(", ")
         )));
     }
+    let missing_audio = outcome.missing;
     let plan = outcome.plan;
     if matches!(plan, RangeMuxPlan::None) {
         ffmpeg_encode_times(
@@ -1070,7 +1319,10 @@ pub fn export_mp4_range(
             path,
             &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
         )?;
-        return Ok(());
+        return Ok(Mp4ExportOutcome {
+            frames,
+            missing_audio,
+        });
     }
     let silent = unique_temp("silent").with_extension("mp4");
     ffmpeg_encode_times(
@@ -1082,7 +1334,10 @@ pub fn export_mp4_range(
     let muxed = mux_audio_range(&plan, &silent, path)?;
     let _ = std::fs::remove_file(&silent);
     if muxed {
-        Ok(())
+        Ok(Mp4ExportOutcome {
+            frames,
+            missing_audio,
+        })
     } else {
         Err(std::io::Error::other("audio mux failed"))
     }
@@ -1555,7 +1810,10 @@ enum RangeMuxPlan {
 /// so the plain plan stays the small decision
 /// [`mux_audio_range`] consumes, while the export entry
 /// point can still tell the user the truth about what it
-/// could not include (see [`export_mp4_range`]).
+/// could not include (see [`export_mp4_range`]): clips that
+/// exist but cannot be measured in `unprobeable` (they fail
+/// the export), clips whose files are missing in `missing`
+/// (they are skipped, but named).
 #[derive(Clone, Debug, PartialEq)]
 struct RangePlanOutcome {
     plan: RangeMuxPlan,
@@ -1563,9 +1821,15 @@ struct RangePlanOutcome {
     /// measure ([`probe_duration_secs`]) and whose start
     /// falls before the window's end, so they may intersect
     /// the range — as far as the export can tell, their
-    /// audio belongs in it. Missing files are NOT listed:
-    /// every mux path skips those silently, by design.
+    /// audio belongs in it.
     unprobeable: Vec<String>,
+    /// Paths of unmuted clips whose files are missing and
+    /// whose start falls before the window's end, so they
+    /// may intersect the range. Unlike `unprobeable` these
+    /// never fail the export — there is nothing to schedule
+    /// — but they are carried out in the export outcome so
+    /// the skip is named instead of silent (Wave P, P15).
+    missing: Vec<String>,
 }
 
 /// Decide the mux plan for the window
@@ -1579,7 +1843,9 @@ struct RangePlanOutcome {
 /// nothing; clips no probe can measure contribute no
 /// segment either, but are reported in
 /// [`RangePlanOutcome::unprobeable`] when they may
-/// intersect, so the loss is never silent.
+/// intersect, so the loss is never silent — and clips
+/// whose files are missing are reported in
+/// [`RangePlanOutcome::missing`] on the same terms.
 fn range_plan_outcome(
     project: &Project,
     win_start_secs: f32,
@@ -1590,6 +1856,7 @@ fn range_plan_outcome(
     let win_end_secs = win_start_secs + win_len_secs;
     let mut segments: Vec<RangeSegment> = Vec::new();
     let mut unprobeable: Vec<String> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
     for clip in project.audio.iter().filter(|clip| !clip.muted) {
         let clip_start_secs = clip.start_frame as f32 / fps;
         match probe(&clip.path) {
@@ -1610,10 +1877,12 @@ fn range_plan_outcome(
                 }
             }
             None => {
-                if clip_start_secs < win_end_secs
-                    && std::path::Path::new(&clip.path).exists()
-                {
-                    unprobeable.push(clip.path.clone());
+                if clip_start_secs < win_end_secs {
+                    if std::path::Path::new(&clip.path).exists() {
+                        unprobeable.push(clip.path.clone());
+                    } else {
+                        missing.push(clip.path.clone());
+                    }
                 }
             }
         }
@@ -1628,7 +1897,11 @@ fn range_plan_outcome(
         1 => RangeMuxPlan::Single(segments.into_iter().next().unwrap()),
         _ => RangeMuxPlan::Mixed(segments),
     };
-    RangePlanOutcome { plan, unprobeable }
+    RangePlanOutcome {
+        plan,
+        unprobeable,
+        missing,
+    }
 }
 
 /// Decide the mux plan for the window
@@ -2403,12 +2676,19 @@ mod range_mux_tests {
         let outcome = range_plan_outcome(&project, WIN.0, WIN.1, &|_| None);
         assert_eq!(outcome.plan, RangeMuxPlan::None);
         assert_eq!(outcome.unprobeable, vec![junk.clone()]);
-        // A missing file is skipped silently — every mux
-        // path skips those by design — so it is not
-        // reported.
+        // A missing file is not unprobeable — there is
+        // nothing there to probe — so it stays out of this
+        // list; since Wave P (P15) it is reported in
+        // `missing` instead of being skipped silently
+        // (pinned by
+        // `plan_reports_missing_clips_that_may_intersect`).
         let project = project_with(vec![("/nonexistent/styk-range-gone.mp3", 10, 1.0)]);
         let outcome = range_plan_outcome(&project, WIN.0, WIN.1, &|_| None);
         assert!(outcome.unprobeable.is_empty());
+        assert_eq!(
+            outcome.missing,
+            vec!["/nonexistent/styk-range-gone.mp3".to_string()]
+        );
         // A clip starting after the window's end (frame 50
         // = 5s > 3s) cannot intersect it, probed or not:
         // not reported.
@@ -2422,6 +2702,44 @@ mod range_mux_tests {
         let outcome = range_plan_outcome(&project, WIN.0, WIN.1, &|_| None);
         assert!(outcome.unprobeable.is_empty());
         let _ = std::fs::remove_file(&junk_path);
+    }
+
+    #[test]
+    fn plan_reports_missing_clips_that_may_intersect() {
+        // Wave P (P15): a missing file whose clip starts
+        // before the window's end may have sounded inside
+        // the range, so the outcome names it — the plan
+        // still skips it (nothing exists to schedule) and
+        // the export still succeeds; only the silence is
+        // gone.
+        let project = project_with(vec![("/nonexistent/styk-range-gone.wav", 10, 1.0)]);
+        let outcome = range_plan_outcome(&project, WIN.0, WIN.1, &|_| None);
+        assert_eq!(outcome.plan, RangeMuxPlan::None);
+        assert_eq!(
+            outcome.missing,
+            vec!["/nonexistent/styk-range-gone.wav".to_string()]
+        );
+        assert!(outcome.unprobeable.is_empty());
+        // A missing clip starting after the window's end
+        // (frame 50 = 5s > 3s) could not have sounded in
+        // the range: not reported.
+        let project = project_with(vec![("/nonexistent/styk-range-gone.wav", 50, 1.0)]);
+        let outcome = range_plan_outcome(&project, WIN.0, WIN.1, &|_| None);
+        assert!(outcome.missing.is_empty());
+        // A muted missing clip is intentionally silent:
+        // its absence loses nothing, so it is not
+        // reported.
+        let mut project = project_with(vec![("/nonexistent/styk-range-gone.wav", 10, 1.0)]);
+        project.audio[0].muted = true;
+        let outcome = range_plan_outcome(&project, WIN.0, WIN.1, &|_| None);
+        assert!(outcome.missing.is_empty());
+        // A clip whose file exists and probes fine is
+        // planned, not reported.
+        let real = temp_wav("present", 1.5, 8000);
+        let project = project_with(vec![(real.as_str(), 10, 1.0)]);
+        let outcome = range_plan_outcome(&project, WIN.0, WIN.1, &probe_duration_secs);
+        assert!(outcome.missing.is_empty());
+        let _ = std::fs::remove_file(&real);
     }
 
     // ---- decode_window_args: the non-WAV mix decode ----
@@ -2479,6 +2797,55 @@ mod range_mux_tests {
         assert!(msg.contains("junk"), "{msg}");
         assert!(!out.exists(), "no silent file is written");
         let _ = std::fs::remove_file(&junk_path);
+    }
+
+    // ---- export_mp4_range: missing audio (Wave P, P15) ----
+
+    #[test]
+    fn range_export_names_missing_audio_instead_of_dropping_it_silently() {
+        // The mirror image of the unprobeable refusal
+        // above: a clip whose file is MISSING never fails
+        // the export — there is nothing to include — but
+        // the outcome names it, where the old `()` outcome
+        // dropped it without a trace.
+        let mut project = project_with(vec![("/nonexistent/styk-range-gone.wav", 0, 1.0)]);
+        project.stage = [96.0, 72.0];
+        let out = std::env::temp_dir().join(format!(
+            "styk-range-export-missing-out-{}.mp4",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&out);
+        let outcome = export_mp4_range(&project, 0, 2, &out).unwrap();
+        assert_eq!(
+            outcome.missing_audio,
+            vec!["/nonexistent/styk-range-gone.wav".to_string()]
+        );
+        let note = outcome.missing_audio_note().expect("a skipped clip is named");
+        assert!(note.contains("styk-range-gone.wav"), "{note}");
+        assert!(outcome.frames > 0, "the video itself is complete");
+        assert!(std::fs::metadata(&out).unwrap().len() > 0);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn range_export_with_present_audio_reports_no_missing() {
+        // The same export with its clip's file present
+        // (a real WAV, muxed in) carries no warning: the
+        // outcome reports exactly as it did before the
+        // field existed.
+        let real = temp_wav("export-present", 1.5, 8000);
+        let mut project = project_with(vec![(real.as_str(), 0, 1.0)]);
+        project.stage = [96.0, 72.0];
+        let out = std::env::temp_dir().join(format!(
+            "styk-range-export-present-out-{}.mp4",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&out);
+        let outcome = export_mp4_range(&project, 0, 2, &out).unwrap();
+        assert!(outcome.missing_audio.is_empty());
+        assert_eq!(outcome.missing_audio_note(), None);
+        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(&real);
     }
 
     // ---- range_direct_args: the ffmpeg invocation ----
@@ -3040,6 +3407,89 @@ mod tests {
         );
     }
 
+    /// Wave P (P17): graph channels are part of the evaluated
+    /// frame. The stage draws the figure through
+    /// `EditorCore::positions_f` (channelled poses + defs), so
+    /// the rasterizer must render the same frame: a project
+    /// whose channels move/lengthen/rotate the figure exports
+    /// byte-identically to the same project with those values
+    /// baked into its poses and def, and differently from the
+    /// un-channelled project. A Burst clip (anchor evaluation)
+    /// and a Trail clip (the shared `node_trail` helper) ride
+    /// along, so the FX anchor and trail funnels are pinned by
+    /// the same byte comparison.
+    #[test]
+    fn channelled_figure_exports_at_the_channelled_position() {
+        use crate::graph::{Channel, ChannelTarget, Key};
+        let base = || {
+            let mut project = Project::new_demo();
+            let clip = |kind| crate::model::FxClipEntry {
+                clip: crate::vfx::ParticleClip {
+                    start: 0.0,
+                    duration: 10.0,
+                    kind,
+                    color: 0xFF4040,
+                    seed: 5,
+                    angle: 0.0,
+                    length: 80.0,
+                    color2: None,
+                },
+                figure: 0,
+                node: 5,
+                hidden: false,
+            };
+            project.fx_clips.push(clip(crate::vfx::ClipKind::Burst));
+            project.fx_clips.push(clip(crate::vfx::ClipKind::Trail));
+            project
+        };
+        let chan = |target: ChannelTarget, value: f32| Channel {
+            figure: 0,
+            target,
+            keys: vec![Key::flat(0.0, value)],
+        };
+        let mut channelled = base();
+        channelled.channels = vec![
+            chan(ChannelTarget::RootX, 600.0),
+            chan(ChannelTarget::Angle(1), 45.0),
+            chan(ChannelTarget::Length(1), 99.0),
+        ];
+        // The baked equivalent: the same three values written
+        // into every frame's pose and the figure's def.
+        let mut baked = base();
+        for frame in &mut baked.frames {
+            frame.poses[0].root[0] = 600.0;
+            frame.poses[0].angles[1] = 45.0;
+        }
+        baked.figures[0].def.nodes[1].length = 99.0;
+
+        // The trail helper itself: channelled samples must be
+        // the baked samples, point for point (and non-empty, or
+        // the byte comparison below would not cover it).
+        let trail_channels = node_trail(&channelled, 2.0, 0, 5, 8, 5.0);
+        let trail_baked = node_trail(&baked, 2.0, 0, 5, 8, 5.0);
+        assert!(!trail_baked.is_empty(), "fixture must draw a trail");
+        assert_eq!(trail_channels, trail_baked, "node_trail must follow channels");
+
+        // Frame 2: figure + trail path. Frame 0: the Burst
+        // clip's particles sit exactly on the anchor, so the
+        // anchor funnel is byte-pinned there too.
+        for f in [2.0, 0.0] {
+            let plain = render_frame_at(&base(), f);
+            let via_channels = render_frame_at(&channelled, f);
+            let via_bake = render_frame_at(&baked, f);
+            assert_ne!(
+                via_channels.as_raw(),
+                plain.as_raw(),
+                "channels must move the exported figure (frame {f})"
+            );
+            assert_eq!(
+                via_channels.as_raw(),
+                via_bake.as_raw(),
+                "channelled export must equal the baked equivalent (frame {f})"
+            );
+        }
+    }
+
     /// A single horizontal white bar (length 200, thickness 10)
     /// on black: root (100, 150) -> joint (300, 150).
     fn bend_bar_project() -> Project {
@@ -3438,6 +3888,9 @@ mod tests {
             texts: Vec::new(),
             weather: None,
             head_ring_scale: 1.0,
+            subtitles: Vec::new(),
+            subtitle_style: Default::default(),
+            format_version: crate::model::FORMAT_VERSION_CURRENT,
         }
     }
 
@@ -3668,6 +4121,9 @@ mod tests {
             texts: Vec::new(),
             weather: None,
             head_ring_scale: 1.0,
+            subtitles: Vec::new(),
+            subtitle_style: Default::default(),
+            format_version: crate::model::FORMAT_VERSION_CURRENT,
         }
     }
 
@@ -3825,6 +4281,9 @@ mod tests {
             texts: Vec::new(),
             weather: None,
             head_ring_scale: 1.0,
+            subtitles: Vec::new(),
+            subtitle_style: Default::default(),
+            format_version: crate::model::FORMAT_VERSION_CURRENT,
         };
         let img = render_frame(&project, 0);
         let px = img.get_pixel(117, 100).0;
@@ -4169,11 +4628,12 @@ mod trail_tests {
 mod range_export_tests {
     use super::{
         export_apng, export_apng_range, export_gif, export_gif_range,
-        export_jpeg_sequence, export_jpeg_sequence_range, export_mp4_range,
+        export_jpeg_sequence, export_jpeg_sequence_range, export_mp4, export_mp4_range,
         export_png_sequence, export_png_sequence_range, export_sheet_range,
         export_spritesheet, export_svg_range, export_webm_range, render_frame,
+        Mp4ExportOutcome,
     };
-    use crate::model::Project;
+    use crate::model::{AudioClip, Project};
     use image::AnimationDecoder as _;
     use std::path::{Path, PathBuf};
 
@@ -4348,6 +4808,83 @@ mod range_export_tests {
         assert!(!bytes.is_empty(), "mp4 range export is empty");
         assert_eq!(&bytes[4..8], b"ftyp", "not an MP4 container");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mp4_export_names_missing_audio_instead_of_dropping_it_silently() {
+        // Wave P (P15): a full export whose only clip's
+        // file is missing succeeds — the video is
+        // complete — and the outcome names the clip the
+        // mux plan had to skip, where the old bare frame
+        // count dropped it without a trace.
+        let mut project = tiny_project();
+        project.audio = vec![AudioClip {
+            path: "/nonexistent/styk-export-gone.wav".to_string(),
+            start_frame: 0,
+            gain: 1.0,
+            muted: false,
+        }];
+        let path = temp_file("mp4-missing-audio", "mp4");
+        let outcome = export_mp4(&project, &path).unwrap();
+        assert_eq!(
+            outcome.missing_audio,
+            vec!["/nonexistent/styk-export-gone.wav".to_string()]
+        );
+        let note = outcome.missing_audio_note().expect("a skipped clip is named");
+        assert!(note.contains("styk-export-gone.wav"), "{note}");
+        assert!(outcome.frames > 0, "the video itself is complete");
+        assert!(std::fs::metadata(&path).unwrap().len() > 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mp4_export_with_present_audio_reports_no_missing() {
+        // The same export with its clip's file present
+        // (a real WAV, muxed in) carries no warning: the
+        // outcome reports exactly as it did before the
+        // field existed.
+        let wav = std::env::temp_dir().join(format!(
+            "styk-export-present-{}.wav",
+            std::process::id()
+        ));
+        let data = crate::audio_edit::WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: vec![0.0; 8000],
+        };
+        std::fs::write(&wav, crate::audio_edit::write_wav(&data)).unwrap();
+        let mut project = tiny_project();
+        project.audio = vec![AudioClip {
+            path: wav.to_string_lossy().into_owned(),
+            start_frame: 0,
+            gain: 1.0,
+            muted: false,
+        }];
+        let path = temp_file("mp4-present-audio", "mp4");
+        let outcome = export_mp4(&project, &path).unwrap();
+        assert!(outcome.missing_audio.is_empty());
+        assert_eq!(outcome.missing_audio_note(), None);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    #[test]
+    fn mp4_outcome_note_names_every_skipped_clip() {
+        // The note is the status-line sentence the entry
+        // points append: absent when nothing was skipped,
+        // naming every skipped clip when some were.
+        let quiet = Mp4ExportOutcome {
+            frames: 3,
+            missing_audio: Vec::new(),
+        };
+        assert_eq!(quiet.missing_audio_note(), None);
+        let skipped = Mp4ExportOutcome {
+            frames: 3,
+            missing_audio: vec!["a.wav".to_string(), "b.wav".to_string()],
+        };
+        let note = skipped.missing_audio_note().unwrap();
+        assert!(note.contains("a.wav"), "{note}");
+        assert!(note.contains("b.wav"), "{note}");
     }
 
     #[test]
@@ -4814,5 +5351,255 @@ mod spray_render_tests {
         assert_eq!(plain.get_pixel(100, 100), &Rgb([255u8, 255, 255]));
         assert_eq!(plain.get_pixel(50, 100), &Rgb([255u8, 255, 255]));
         assert_eq!(plain.get_pixel(100, 80), &Rgb([0u8, 0, 0]));
+    }
+}
+
+// ---------------------------------------------------------------------
+// Wave P (P26): raster subtitle burn-in pins.
+//
+// The fixture stage is 480x400, so under the default style
+// (bottom anchor, font scale 1.0, white text on black
+// backing) the house subtitle size is 400 * 0.06 = 24 stage
+// units, the line step is 32.4, and the stacked line centres
+// sit at 373.6 / 341.2 / 308.8 from the top at the bottom
+// anchor (26.4 / 58.8 / 91.2 at the top anchor). A line's
+// text-colour face spans roughly [centre - 10, centre + 15]
+// rows, so the bands below (a midpoint partition of the
+// stack) each contain exactly one line's face:
+//   bottom: B0 = 358..=390, B1 = 325..=357, B2 = 292..=324
+//   top:    T0 =  11..= 42, T1 =  43..= 74, T2 =  75..=107
+// The fixture carries no figures, so the ONLY source of the
+// exact text colour in a render is the burn-in's centre
+// stamp (the backing is the box colour; the background is
+// 0x333333).
+// ---------------------------------------------------------------------
+#[cfg(test)]
+mod wave_p_subtitle_burn_in_tests {
+    use super::render_frame;
+    use crate::model::{Frame, Project};
+    use crate::subtitles::{SubtitleCue, SubtitlePosition, SubtitleStyle};
+    use image::{ImageBuffer, Rgb};
+
+    const WHITE: [u8; 3] = [255, 255, 255];
+
+    fn cue(start_frame: usize, end_frame: usize, text: &str) -> SubtitleCue {
+        SubtitleCue {
+            start_frame,
+            end_frame,
+            text: text.to_string(),
+        }
+    }
+
+    /// An empty 480x400 stage (background 0x333333, no
+    /// figures) carrying exactly `cues` under `style`, at
+    /// 24 fps (set explicitly, per the wave's timing rule).
+    fn fixture(cues: Vec<SubtitleCue>, style: SubtitleStyle) -> Project {
+        let mut project = Project::new_demo();
+        project.fps = 24.0;
+        project.stage = [480.0, 400.0];
+        project.background = 0x333333;
+        project.figures.clear();
+        project.frames = vec![Frame {
+            poses: Vec::new(),
+            duration: 1.0,
+            easing: None,
+            bends: Vec::new(),
+        }];
+        project.subtitles = cues;
+        project.subtitle_style = style;
+        project
+    }
+
+    /// How many pixels of exactly `color` sit in `rows`.
+    fn count_in_rows(
+        img: &ImageBuffer<Rgb<u8>, Vec<u8>>,
+        rows: std::ops::RangeInclusive<u32>,
+        color: [u8; 3],
+    ) -> usize {
+        let mut n = 0;
+        for y in rows {
+            for x in 0..img.width() {
+                if img.get_pixel(x, y).0 == color {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    fn white_in(img: &ImageBuffer<Rgb<u8>, Vec<u8>>, rows: std::ops::RangeInclusive<u32>) -> usize {
+        count_in_rows(img, rows, WHITE)
+    }
+
+    #[test]
+    fn burn_in_single_cue_paints_inside_the_bottom_band() {
+        let project = fixture(
+            vec![cue(0, 30, "HELLO")],
+            SubtitleStyle::default(),
+        );
+        let mut bare = project.clone();
+        bare.subtitles.clear();
+        let img = render_frame(&project, 0);
+        let control = render_frame(&bare, 0);
+        // Every changed pixel sits in the bottom band (the
+        // burn-in's full extent, backing included, is rows
+        // ~359..394); the rest of the frame is untouched.
+        let mut diffs = 0usize;
+        for y in 0..img.height() {
+            for x in 0..img.width() {
+                if img.get_pixel(x, y) != control.get_pixel(x, y) {
+                    diffs += 1;
+                    assert!(
+                        y >= 350,
+                        "subtitle paint leaked to row {y}, above the bottom band"
+                    );
+                }
+            }
+        }
+        assert!(diffs > 0, "a live cue must change the frame");
+        assert!(
+            white_in(&img, 358..=390) > 0,
+            "the cue's text-colour face must paint in the bottom band"
+        );
+    }
+
+    #[test]
+    fn burn_in_no_live_cue_is_byte_identical() {
+        let project = fixture(
+            vec![cue(0, 30, "HELLO")],
+            SubtitleStyle::default(),
+        );
+        let mut bare = project.clone();
+        bare.subtitles.clear();
+        // Frame 40 is past the cue's half-open range: the
+        // render must be the pre-subtitle render, byte for
+        // byte.
+        let img = render_frame(&project, 40);
+        let control = render_frame(&bare, 40);
+        assert_eq!(
+            img.as_raw(),
+            control.as_raw(),
+            "a frame with no live cue must render exactly as before subtitles"
+        );
+        // Sanity: at a live frame the same pair DOES differ,
+        // so the equality above is the gate working, not a
+        // fixture that never paints.
+        assert_ne!(
+            render_frame(&project, 5).as_raw(),
+            render_frame(&bare, 5).as_raw(),
+            "the cue must paint while it is live"
+        );
+    }
+
+    /// The staggered-stack order proof, run at both anchors:
+    /// cue A is live from frame 0, B from 10, C from 20 (all
+    /// end at 30). Frame 5 shows A alone — it must sit in the
+    /// band nearest the anchor edge; frame 15 adds B in the
+    /// next band out; frame 25 adds C in the third. In the
+    /// all-live frame the three faces occupy disjoint bands
+    /// and no text-colour pixel exists outside them.
+    fn stacked_order_and_disjoint_bands(position: SubtitlePosition) {
+        let style = SubtitleStyle {
+            position,
+            ..SubtitleStyle::default()
+        };
+        let project = fixture(
+            vec![
+                cue(0, 30, "AAAA"),
+                cue(10, 30, "BBBB"),
+                cue(20, 30, "CCCC"),
+            ],
+            style,
+        );
+        // Bands nearest-to-farthest from the anchor edge.
+        let bands: [std::ops::RangeInclusive<u32>; 3] = match position {
+            SubtitlePosition::Bottom => [358..=390, 325..=357, 292..=324],
+            SubtitlePosition::Top => [11..=42, 43..=74, 75..=107],
+        };
+        let f5 = render_frame(&project, 5);
+        assert!(white_in(&f5, bands[0].clone()) > 0, "cue A paints at the edge band");
+        assert_eq!(white_in(&f5, bands[1].clone()), 0, "no second line yet");
+        assert_eq!(white_in(&f5, bands[2].clone()), 0, "no third line yet");
+
+        let f15 = render_frame(&project, 15);
+        assert!(white_in(&f15, bands[0].clone()) > 0, "cue A stays at the edge band");
+        assert!(white_in(&f15, bands[1].clone()) > 0, "cue B paints in the next band out");
+        assert_eq!(white_in(&f15, bands[2].clone()), 0, "no third line yet");
+
+        let f25 = render_frame(&project, 25);
+        let mut total = 0usize;
+        for (i, band) in bands.iter().enumerate() {
+            let n = white_in(&f25, band.clone());
+            assert!(n > 0, "stacked cue {} must paint in its band", i + 1);
+            total += n;
+        }
+        assert_eq!(
+            white_in(&f25, 0..=399),
+            total,
+            "every text-colour pixel sits inside one of the three disjoint bands"
+        );
+    }
+
+    #[test]
+    fn burn_in_stacked_cues_disjoint_bands_bottom_anchor() {
+        stacked_order_and_disjoint_bands(SubtitlePosition::Bottom);
+    }
+
+    #[test]
+    fn burn_in_stacked_cues_disjoint_bands_top_anchor() {
+        stacked_order_and_disjoint_bands(SubtitlePosition::Top);
+    }
+
+    #[test]
+    fn burn_in_multiline_cue_puts_its_last_line_nearest_the_bottom_edge() {
+        // One cue, two lines: a single narrow glyph over a
+        // ten-glyph line. At the bottom anchor the cue's LAST
+        // line sits closest to the edge, so the wide line's
+        // face fills the edge band and the narrow line sits
+        // one band up — proven by the face-pixel counts,
+        // which differ by an order of magnitude.
+        let project = fixture(
+            vec![cue(0, 30, "I\nWWWWWWWWWW")],
+            SubtitleStyle::default(),
+        );
+        let img = render_frame(&project, 0);
+        let edge = white_in(&img, 358..=390);
+        let above = white_in(&img, 325..=357);
+        assert!(above > 0, "the cue's first line paints in the band above");
+        assert!(
+            edge > 4 * above,
+            "the cue's last (wide) line must dominate the edge band: edge {edge}, above {above}"
+        );
+    }
+
+    #[test]
+    fn burn_in_honours_style_position_colours_and_scale() {
+        let style = SubtitleStyle {
+            position: SubtitlePosition::Top,
+            font_scale: 2.0,
+            text_color: 0xFF0000,
+            box_color: 0x00FF00,
+        };
+        let project = fixture(vec![cue(0, 30, "HELLO")], style);
+        let img = render_frame(&project, 0);
+        let red = [255, 0, 0];
+        let green = [0, 255, 0];
+        // Top-anchored at scale 2.0 (glyph height 48): the
+        // red face spans roughly rows 33..82 — it must reach
+        // rows 60..120, which an unscaled top cue (face ends
+        // ~row 40) could never touch.
+        assert!(
+            count_in_rows(&img, 60..=120, red) > 0,
+            "the scaled cue's text colour must paint in the top band"
+        );
+        assert!(
+            count_in_rows(&img, 0..=140, green) > 0,
+            "the backing colour must paint around the text"
+        );
+        assert_eq!(
+            count_in_rows(&img, 200..=399, red),
+            0,
+            "a top-anchored cue paints nothing in the bottom half"
+        );
     }
 }

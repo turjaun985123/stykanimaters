@@ -46,6 +46,26 @@ pub fn clip_offset_secs(start_frame: usize, fps: f32) -> f32 {
     start_frame as f32 / fps.max(1.0)
 }
 
+/// Paths of the clips that would sound but cannot, because
+/// their files are missing — the clips playback and the export
+/// muxes skip. Muted clips are excluded: they are intentionally
+/// silent, so their files' absence loses nothing (the same
+/// exclusion [`playback_plan`] and the export mux plan apply).
+/// Returned in clip order, one entry per clip, so two clips
+/// pointing at the same missing file are both named.
+///
+/// This is the one missing-file query for the surfaces that
+/// surface the loss instead of skipping silently: the project
+/// open path (Wave P, P14) and the MP4 export outcome in
+/// `crate::export` (Wave P, P15) both consume it.
+pub fn missing_audio_clips(clips: &[crate::model::AudioClip]) -> Vec<String> {
+    clips
+        .iter()
+        .filter(|clip| !clip.muted && !std::path::Path::new(&clip.path).exists())
+        .map(|clip| clip.path.clone())
+        .collect()
+}
+
 /// What playback should do for the clips audible at a playhead.
 ///
 /// Produced by [`playback_plan`]; consumed by
@@ -420,6 +440,42 @@ mod tests {
             }
             other => panic!("expected a Direct plan, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn missing_audio_clips_names_unmuted_missing_files_in_order() {
+        // One real file on disk, two missing paths, and a
+        // muted clip whose file is also missing: only the
+        // unmuted missing clips are named, in clip order —
+        // a muted clip's absence loses nothing, and an
+        // existing file is not a loss at all.
+        let real = std::env::temp_dir().join(format!(
+            "styk-audio-missing-{}-{}.wav",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::write(&real, b"").unwrap();
+        let real = real.to_string_lossy().into_owned();
+        let clips = vec![
+            clip("/nonexistent/styk-gone-a.wav", 0),
+            clip(real.as_str(), 10),
+            muted_clip("/nonexistent/styk-gone-muted.wav", 20),
+            clip("/nonexistent/styk-gone-b.wav", 30),
+        ];
+        assert_eq!(
+            missing_audio_clips(&clips),
+            vec![
+                "/nonexistent/styk-gone-a.wav".to_string(),
+                "/nonexistent/styk-gone-b.wav".to_string(),
+            ]
+        );
+        // No clips, and no missing files: nothing to name.
+        assert!(missing_audio_clips(&[]).is_empty());
+        assert!(missing_audio_clips(&[clip(real.as_str(), 0)]).is_empty());
+        let _ = fs::remove_file(&real);
     }
 
     #[test]

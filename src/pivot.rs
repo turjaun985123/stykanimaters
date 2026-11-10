@@ -975,6 +975,9 @@ fn assemble(
         texts: Vec::new(),
         weather: None,
         head_ring_scale: 1.0,
+        subtitles: Vec::new(),
+        subtitle_style: Default::default(),
+        format_version: crate::model::FORMAT_VERSION_CURRENT,
     }
 }
 
@@ -1753,6 +1756,9 @@ fn import_v5(r: &mut Reader) -> Result<Project, String> {
         texts: Vec::new(),
         weather: None,
         head_ring_scale: 1.0,
+        subtitles: Vec::new(),
+        subtitle_style: Default::default(),
+        format_version: crate::model::FORMAT_VERSION_CURRENT,
     })
 }
 

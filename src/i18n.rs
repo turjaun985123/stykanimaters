@@ -367,6 +367,7 @@ static EN: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "Settings"),
     ("frame", "Frame"),
@@ -486,6 +487,7 @@ static BN: &[(&str, &str)] = &[
     ("ws_audio", "অডিও"),
     ("ws_3d", "3D"),
     ("ws_export", "এক্সপোর্ট"),
+    ("ws_home", "হোম"),
     // Rune shell labels (Phase E)
     ("settings", "সেটিংস"),
     ("frame", "ফ্রেম"),
@@ -605,6 +607,7 @@ static ES: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Exportar"),
+    ("ws_home", "Inicio"),
     // Rune shell labels (Phase E)
     ("settings", "Ajustes"),
     ("frame", "Fotograma"),
@@ -724,6 +727,7 @@ static AR: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "الإعدادات"),
     ("frame", "إطار"),
@@ -843,6 +847,7 @@ static CS: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "Nastavení"),
     ("frame", "Snímek"),
@@ -962,6 +967,7 @@ static DA: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "Indstillinger"),
     ("frame", "Billede"),
@@ -1081,6 +1087,7 @@ static DE: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Exportieren"),
+    ("ws_home", "Startseite"),
     // Rune shell labels (Phase E)
     ("settings", "Einstellungen"),
     ("frame", "Frame"),
@@ -1200,6 +1207,7 @@ static EL: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "Ρυθμίσεις"),
     ("frame", "Καρέ"),
@@ -1319,6 +1327,7 @@ static ES419: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "Ajustes"),
     ("frame", "Fotograma"),
@@ -1438,6 +1447,7 @@ static FI: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "Asetukset"),
     ("frame", "Ruutu"),
@@ -1557,6 +1567,7 @@ static FR: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Exporter"),
+    ("ws_home", "Accueil"),
     // Rune shell labels (Phase E)
     ("settings", "Paramètres"),
     ("frame", "Image"),
@@ -1676,6 +1687,7 @@ static HE: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "הגדרות"),
     ("frame", "פריים"),
@@ -1795,6 +1807,7 @@ static HR: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "Postavke"),
     ("frame", "Sličica"),
@@ -1914,6 +1927,7 @@ static HU: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "Beállítások"),
     ("frame", "Képkocka"),
@@ -2033,6 +2047,7 @@ static ID: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "Pengaturan"),
     ("frame", "Bingkai"),
@@ -2152,6 +2167,7 @@ static IT: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Esporta"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "Impostazioni"),
     ("frame", "Fotogramma"),
@@ -2271,6 +2287,7 @@ static KK: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "Параметрлер"),
     ("frame", "Кадр"),
@@ -2390,6 +2407,7 @@ static NB: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "Innstillinger"),
     ("frame", "Bilde"),
@@ -2509,6 +2527,7 @@ static NL: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "Instellingen"),
     ("frame", "Frame"),
@@ -2628,6 +2647,7 @@ static PL: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "Ustawienia"),
     ("frame", "Klatka"),
@@ -2747,6 +2767,7 @@ static PT_BR: &[(&str, &str)] = &[
     ("ws_audio", "Áudio"),
     ("ws_3d", "3D"),
     ("ws_export", "Exportar"),
+    ("ws_home", "Início"),
     // Rune shell labels (Phase E)
     ("settings", "Configurações"),
     ("frame", "Quadro"),
@@ -2866,6 +2887,7 @@ static RO: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "Setări"),
     ("frame", "Cadru"),
@@ -2985,6 +3007,7 @@ static RU: &[(&str, &str)] = &[
     ("ws_audio", "Аудио"),
     ("ws_3d", "3D"),
     ("ws_export", "Экспорт"),
+    ("ws_home", "Главная"),
     // Rune shell labels (Phase E)
     ("settings", "Настройки"),
     ("frame", "Кадр"),
@@ -3104,6 +3127,7 @@ static SL: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "Nastavitve"),
     ("frame", "Sličica"),
@@ -3223,6 +3247,7 @@ static TR: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "Ayarlar"),
     ("frame", "Kare"),
@@ -3342,6 +3367,7 @@ static UK: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "Налаштування"),
     ("frame", "Кадр"),
@@ -3461,6 +3487,7 @@ static VI: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    ("ws_home", "Home"),
     // Rune shell labels (Phase E)
     ("settings", "Cài đặt"),
     ("frame", "Khung hình"),
@@ -3580,6 +3607,7 @@ static ZH_HANS: &[(&str, &str)] = &[
     ("ws_audio", "音频"),
     ("ws_3d", "3D"),
     ("ws_export", "导出"),
+    ("ws_home", "主页"),
     // Rune shell labels (Phase E)
     ("settings", "设置"),
     ("frame", "帧"),

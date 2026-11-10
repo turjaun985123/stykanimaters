@@ -1219,7 +1219,9 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
         }
     }
     // FX particles, text labels, then weather on top — the
-    // rasterizer's pass order (export.rs render_frame_at).
+    // rasterizer's pass order (export.rs render_frame_at) —
+    // and subtitles over all of it (the burn-in's slot),
+    // before the selection gizmos below.
     // Both particle passes clip their discs to the stage
     // rect (`particle_prim`'s `clip`): exports have no
     // pixels outside the frame, and the canvas must not
@@ -1235,6 +1237,24 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
     }
     for prim in crate::rune_sec::stage_fx::weather_geometry(core) {
         shape = particle_prim(shape, &rt, s, prim, disc_clip);
+    }
+    // Subtitles (Wave P, P28): the display frame's live cues
+    // over ALL frame content — the raster burn-in composites
+    // its cues into the finished frame the same way, and the
+    // band layout is the shared contract `stage_text`'s
+    // subtitle section documents, so the stage shows what
+    // the SVG export contains (the raster burn-in adopts
+    // the same layout via IA-P26-1). The prims are stage-space
+    // like the text pass's, mapped through the same display
+    // transform: the bands stay pinned to the picture under
+    // camera and view moves. The selection gizmos still
+    // follow — they are editor markers, not frame content,
+    // and must stay findable over a subtitle. A frame with
+    // no live cue yields no prims and draws as before.
+    for prim in crate::rune_sec::stage_text::subtitle_geometry(core) {
+        let crate::rune_sec::stage_text::TextPrim::GlyphBox { corners, color, alpha } = prim;
+        let screen: Vec<[f32; 2]> = corners.iter().map(|p| rt.to_screen(*p)).collect();
+        shape = shape.fill(screen, hex_color(color).unwrap_or(Color::WHITE).alpha(alpha));
     }
     // Selected particle event's anchor gizmo (Phase G), drawn
     // last — over figures, FX, text and weather — so the
@@ -2037,5 +2057,187 @@ mod tests {
         assert_eq!(pieces.len(), 2);
         assert_eq!(pieces[0].b, model::bend_mid(pos[parent], pos[ni], 0.5));
         assert_eq!(pieces[1].a, model::bend_mid(pos[parent], pos[ni], 0.5));
+    }
+
+    /// Wave P (P18) — the stage half of the one SETTLED
+    /// zero-length cell (board contract 4; the full matrix
+    /// is in ~/workspace/wave-p/findings/p18.md). A
+    /// zero-length segment in the plain style (the default
+    /// `NodeStyle`: round cap, taper 1.0, no `color2`)
+    /// paints a disc of radius thickness/2 on all three
+    /// surfaces. The stage's share of that agreement is
+    /// built here: the shared generator yields ONE piece
+    /// for coincident endpoints, carrying the full
+    /// thickness and the near colour — no subdivision (the
+    /// style does not vary) and no square-cap extension
+    /// (the extension is length-gated in the generator).
+    #[test]
+    fn zero_length_flat_segment_is_one_coincident_piece() {
+        let p = [40.0, 30.0];
+        let pieces = stykanimate_rs::paint::styled_segment_pieces(
+            p,
+            p,
+            0.0,
+            12.0,
+            &flat_style(),
+            0xFF0000,
+        );
+        assert_eq!(pieces.len(), 1);
+        assert_eq!((pieces[0].a, pieces[0].b), (p, p));
+        assert_eq!(pieces[0].width, 12.0);
+        assert_eq!(pieces[0].color, 0xFF0000);
+        assert_eq!(pieces[0].alpha, 1.0);
+    }
+
+    /// Wave P (P18) — the stage DRAW half of the same
+    /// settled cell: `stage_shape` turns that one piece
+    /// into one stroke op whose endpoints coincide, at the
+    /// full thickness, with a round cap — and a zero-length
+    /// round-capped stroke is a capsule of zero length,
+    /// i.e. the disc the exporters paint (the rune painter
+    /// emits one KIND_SEGMENT capsule per segment; the
+    /// raster pin and the SVG pin for this cell live in
+    /// tests/wave_p_zero_length.rs). The shape's ops are
+    /// crate-private to rune, so the assertion reads the
+    /// `Debug` form and scans every stroke op for the
+    /// coincident one at width 12 — transform-proof,
+    /// because both endpoints pass through the same
+    /// `to_screen`, so they stay bit-equal whatever the
+    /// view transform is.
+    #[test]
+    fn stage_shape_draws_zero_length_segment_as_coincident_round_stroke() {
+        reset_view_nav();
+        let mut core = EditorCore::new();
+        let node = |name: &str, parent: Option<usize>, thickness: f32| model::NodeDef {
+            name: name.into(),
+            parent,
+            length: 0.0,
+            rest_angle: 0.0,
+            head: false,
+            bend: 1.0,
+            thickness,
+            color: Some(0xFF0000),
+            ik_end: false,
+            shape: model::Shape::Line,
+            style: flat_style(),
+            media: None,
+        };
+        let mut project = model::Project::new_demo();
+        project.stage = [200.0, 200.0];
+        project.background = 0x000000;
+        project.camera.clear();
+        project.camera_follow = None;
+        project.strokes.clear();
+        project.figures = vec![model::FigureInstance {
+            name: "zero".into(),
+            color: 0xFF0000,
+            def: model::FigureDef {
+                nodes: vec![node("root", None, 5.0), node("dot", Some(0), 12.0)],
+            },
+            hidden: false,
+            clip: None,
+            locked: false,
+            opacity: 1.0,
+        }];
+        project.frames = vec![model::Frame {
+            poses: vec![model::Pose {
+                root: [100.0, 100.0],
+                angles: vec![0.0, 0.0],
+            }],
+            duration: 1.0,
+            easing: None,
+            bends: Vec::new(),
+        }];
+        core.project = project;
+        let shape = stage_shape(&core, [200.0, 200.0], StageOverlays::default());
+        let dbg = format!("{shape:?}");
+        let mut rest = dbg.as_str();
+        let mut found = false;
+        while let Some(idx) = rest.find("Stroke { points: [[") {
+            let seg = &rest[idx..];
+            if let Some(end) = seg.find("]]") {
+                let pts = &seg["Stroke { points: [[".len()..end];
+                let nums: Vec<f32> = pts
+                    .split(|c: char| c == ',' || c == '[' || c == ']')
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| s.trim().parse().expect("a point coordinate"))
+                    .collect();
+                if nums.len() == 4
+                    && nums[0] == nums[2]
+                    && nums[1] == nums[3]
+                    && seg[end..].starts_with("]], closed: false, width: 12.0, cap: Round")
+                {
+                    found = true;
+                    break;
+                }
+            }
+            rest = &rest[idx + 1..];
+        }
+        assert!(
+            found,
+            "the zero-length segment must reach the stage as one coincident \
+             round-capped stroke at full thickness:\n{dbg}"
+        );
+        reset_view_nav();
+    }
+
+    /// Wave P (P28) — the stage DRAW half of the subtitle
+    /// feature: `stage_shape` turns
+    /// `stage_text::subtitle_geometry`'s prims into fill
+    /// ops over the frame content. The pin counts fill ops
+    /// in the shape's `Debug` form (the P18 idiom above):
+    /// a frame with no live cue adds NO fills over the
+    /// cue-free stage (those frames draw exactly as
+    /// before), and a live cue adds exactly one fill per
+    /// geometry prim — plates and glyphs alike — so the
+    /// wiring cannot silently drop (or double) the
+    /// subtitle pass. The geometry itself (bands, colours,
+    /// stacking) is pinned in `stage_text`'s tests; this
+    /// pin proves the prims reach the stage.
+    #[test]
+    fn stage_shape_paints_live_subtitle_prims_and_nothing_otherwise() {
+        reset_view_nav();
+        let fill_ops = |core: &EditorCore| {
+            format!("{:?}", stage_shape(core, [640.0, 360.0], StageOverlays::default()))
+                .matches("Fill { points:")
+                .count()
+        };
+        let core_with = |cue: Option<stykanimate_rs::subtitles::SubtitleCue>| {
+            let mut core = EditorCore::new();
+            core.project.stage = [640.0, 360.0];
+            core.project.subtitle_style = stykanimate_rs::subtitles::SubtitleStyle {
+                position: stykanimate_rs::subtitles::SubtitlePosition::Bottom,
+                font_scale: 1.0,
+                text_color: 0xFFEE00,
+                box_color: 0x112233,
+            };
+            if let Some(c) = cue {
+                core.project.subtitles.push(c);
+            }
+            core
+        };
+        let cue = |start: usize, end: usize| stykanimate_rs::subtitles::SubtitleCue {
+            start_frame: start,
+            end_frame: end,
+            text: "HI".into(),
+        };
+        let none = core_with(None);
+        let live = core_with(Some(cue(0, 10)));
+        let later = core_with(Some(cue(5, 9)));
+        // "HI" is 20 lit pixels (H = 11, I = 9), each
+        // preceded by its backing plate: 40 prims.
+        let prims = crate::rune_sec::stage_text::subtitle_geometry(&live).len();
+        assert_eq!(prims, 40, "the live cue's prim stream");
+        assert_eq!(
+            fill_ops(&later),
+            fill_ops(&none),
+            "a cue outside the display frame adds no fills"
+        );
+        assert_eq!(
+            fill_ops(&live),
+            fill_ops(&none) + prims,
+            "every subtitle prim reaches the stage as one fill"
+        );
+        reset_view_nav();
     }
 }

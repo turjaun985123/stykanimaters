@@ -19,6 +19,7 @@
 //! |---|---|---|
 //! | `figures` | the vector itself | remove + insert |
 //! | `frames[].poses` | yes, one `Pose` per figure per frame | same remove + insert per frame (indices past the end of a short pose vec are skipped defensively) |
+//! | `frames[].bends` | yes, one bend row per figure per frame, but SPARSE: the bend writer pads the outer vec only up to the highest figure edited in that frame | padded with empty rows to the figure count when non-empty (an absent row and an empty row both read as straight in `Project::bends_at`), then the same remove + insert; an empty vec stays empty |
 //! | `camera_follow` | yes, `Option<usize>` | remapped |
 //! | `particles[].figure` | yes, `Option<usize>` | remapped when `Some`; `node` is a node index *within* that figure and is unchanged |
 //! | `fx_clips[].figure` | yes | remapped; `node` unchanged; `ParticleClip` itself carries no figure index |
@@ -179,6 +180,26 @@ pub fn move_figure(project: &mut Project, fi: usize, delta: i32) -> bool {
             let at = to.min(frame.poses.len());
             frame.poses.insert(at, pose);
         }
+        // Bends are per-figure-indexed in the same frame (outer
+        // index = figure, see `Frame::bends`) and must travel the
+        // same way — but the table is sparse: the bend writer pads
+        // it only up to the highest figure edited in that frame,
+        // so a missing row is a bend-free figure, not a short
+        // table, and a bare remove + insert would strand rows on
+        // the wrong figures whenever the moved range crosses the
+        // padded prefix. Pad with empty rows first (an absent row
+        // and an empty row both read as straight in
+        // `Project::bends_at`), then permute identically. An
+        // empty table stays empty: a bend-free frame gains no
+        // rows from a reorder.
+        if !frame.bends.is_empty() && frame.bends.len() < n {
+            frame.bends.resize(n, Vec::new());
+        }
+        if fi < frame.bends.len() {
+            let row = frame.bends.remove(fi);
+            let at = to.min(frame.bends.len());
+            frame.bends.insert(at, row);
+        }
     }
 
     if let Some(follow) = &mut project.camera_follow {
@@ -278,6 +299,175 @@ mod tests {
         assert!(move_figure(&mut p, 1, -1));
         assert_eq!(names(&p), ["Styk", "B", "C"]);
         assert_eq!(roots(&p, 0), [100.0, 200.0, 300.0]);
+    }
+
+    /// Give every figure a distinct one-node bend row in every
+    /// frame: figure `i`'s row is `[(i + 1) * 0.25]` (exact binary
+    /// fractions), so a bend row found on the wrong figure is
+    /// visible at a glance.
+    fn bends_for_all(p: &mut Project) {
+        for frame in &mut p.frames {
+            frame.bends = (0..p.figures.len())
+                .map(|i| vec![(i as f32 + 1.0) * 0.25])
+                .collect();
+        }
+    }
+
+    fn bend_rows(p: &Project, frame: usize) -> Vec<Vec<f32>> {
+        p.frames[frame].bends.clone()
+    }
+
+    #[test]
+    fn move_figure_permutates_bends_with_figures() {
+        let mut p = three_figures();
+        bends_for_all(&mut p);
+        let original = vec![vec![0.25], vec![0.5], vec![0.75]];
+        for f in 0..p.frames.len() {
+            assert_eq!(bend_rows(&p, f), original, "frame {f} setup");
+        }
+
+        // Styk moves one slot toward the front: order B, Styk, C —
+        // the bend rows follow their figures in every frame.
+        assert!(move_figure(&mut p, 0, 1));
+        assert_eq!(names(&p), ["B", "Styk", "C"]);
+        for f in 0..p.frames.len() {
+            assert_eq!(
+                bend_rows(&p, f),
+                vec![vec![0.5], vec![0.25], vec![0.75]],
+                "frame {f}"
+            );
+        }
+        // The evaluated read agrees: figure 0 is B now and samples
+        // B's bend, figure 1 samples Styk's.
+        assert_eq!(p.bends_at(0.0, 0)[0], 0.5);
+        assert_eq!(p.bends_at(0.0, 1)[0], 0.25);
+
+        // And straight back again restores the original pairing.
+        assert!(move_figure(&mut p, 1, -1));
+        assert_eq!(names(&p), ["Styk", "B", "C"]);
+        for f in 0..p.frames.len() {
+            assert_eq!(bend_rows(&p, f), original, "frame {f}");
+        }
+    }
+
+    #[test]
+    fn move_figure_bends_sparse_rows_travel() {
+        // The bend writer pads the outer vec only up to the
+        // highest figure edited in a frame, so "only Styk carries
+        // a bend row" is the normal sparse shape — one row for
+        // three figures.
+        let mut sparse = three_figures();
+        for frame in &mut sparse.frames {
+            frame.bends = vec![vec![0.25]];
+        }
+
+        // A bend-free figure (C) jumps from the back to the front,
+        // crossing the padded prefix: Styk's row must land on
+        // Styk (now index 1), not stay behind on C.
+        let mut p = sparse.clone();
+        assert!(move_figure(&mut p, 2, -2));
+        assert_eq!(names(&p), ["C", "Styk", "B"]);
+        for f in 0..p.frames.len() {
+            assert_eq!(
+                bend_rows(&p, f),
+                vec![Vec::<f32>::new(), vec![0.25], Vec::<f32>::new()],
+                "frame {f}"
+            );
+        }
+        assert!(p.bends_at(0.0, 0).is_empty(), "C reads straight");
+        assert_eq!(p.bends_at(0.0, 1)[0], 0.25, "Styk keeps its bend");
+
+        // The bend carrier itself moves to the far end: its row
+        // travels to the last slot.
+        let mut p = sparse.clone();
+        assert!(move_figure(&mut p, 0, 2));
+        assert_eq!(names(&p), ["B", "C", "Styk"]);
+        for f in 0..p.frames.len() {
+            assert_eq!(
+                bend_rows(&p, f),
+                vec![Vec::<f32>::new(), Vec::<f32>::new(), vec![0.25]],
+                "frame {f}"
+            );
+        }
+
+        // A hole in the middle (Styk and C carry rows, B's row is
+        // present but empty): Styk moves past both.
+        let mut p = three_figures();
+        for frame in &mut p.frames {
+            frame.bends = vec![vec![0.25], Vec::new(), vec![0.75]];
+        }
+        assert!(move_figure(&mut p, 0, 2));
+        assert_eq!(names(&p), ["B", "C", "Styk"]);
+        for f in 0..p.frames.len() {
+            assert_eq!(
+                bend_rows(&p, f),
+                vec![Vec::<f32>::new(), vec![0.75], vec![0.25]],
+                "frame {f}"
+            );
+        }
+    }
+
+    #[test]
+    fn move_figure_multi_step_moves_keep_bend_pairing() {
+        let mut p = three_figures();
+        bends_for_all(&mut p);
+
+        // One multi-slot move: Styk crosses both figures at once.
+        assert!(move_figure(&mut p, 0, 2));
+        assert_eq!(names(&p), ["B", "C", "Styk"]);
+        assert_eq!(bend_rows(&p, 0), vec![vec![0.5], vec![0.75], vec![0.25]]);
+
+        // Two single steps back, pairing checked after each.
+        assert!(move_figure(&mut p, 2, -1));
+        assert_eq!(names(&p), ["B", "Styk", "C"]);
+        assert_eq!(bend_rows(&p, 0), vec![vec![0.5], vec![0.25], vec![0.75]]);
+        assert!(move_figure(&mut p, 1, -1));
+        assert_eq!(names(&p), ["Styk", "B", "C"]);
+        assert_eq!(bend_rows(&p, 0), vec![vec![0.25], vec![0.5], vec![0.75]]);
+    }
+
+    #[test]
+    fn move_figure_leaves_bend_free_frames_empty() {
+        // A project with no bend data anywhere: a reorder must
+        // not materialise bend rows into its frames.
+        let mut p = three_figures();
+        assert!(move_figure(&mut p, 0, 2));
+        for frame in &p.frames {
+            assert!(frame.bends.is_empty());
+        }
+    }
+
+    #[test]
+    fn move_figure_full_undo_restores_bend_pairing() {
+        // The editor wrapper snapshots the whole project before
+        // the move, so undo restores figures and bend rows as one
+        // pairing — exercised through the real EditorCore path.
+        let mut core = crate::editor::EditorCore::new();
+        let mut p = three_figures();
+        bends_for_all(&mut p);
+        // Sparse in frame 0 as well: undo must restore even the
+        // unpadded shape, not the padded permutation.
+        p.frames[0].bends = vec![vec![0.25]];
+        let before = p.clone();
+        core.project = p;
+        core.selected_figure = 0;
+
+        core.move_figure_full(2);
+        assert_eq!(names(&core.project), ["B", "C", "Styk"]);
+        assert_eq!(core.undo_depth(), 1);
+        core.undo();
+        assert_eq!(names(&core.project), ["Styk", "B", "C"]);
+        for f in 0..before.frames.len() {
+            assert_eq!(
+                core.project.frames[f].bends, before.frames[f].bends,
+                "frame {f} bends restored"
+            );
+            assert_eq!(
+                roots(&core.project, f),
+                roots(&before, f),
+                "frame {f} poses restored"
+            );
+        }
     }
 
     #[test]
