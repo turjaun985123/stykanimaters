@@ -1568,6 +1568,8 @@ mod tests {
         // colour does — the prim counts and widths below
         // are the library test's own numbers.
         let n = |parent: Option<usize>, length: f32, rest: f32| model::NodeDef {
+            min_angle: None,
+            max_angle: None,
             name: "n".into(),
             parent,
             length,
@@ -1615,6 +1617,7 @@ mod tests {
             def: def.clone(),
             hidden: false,
             clip: None,
+            states: Vec::new(),
             locked: false,
             opacity: 1.0,
         };
@@ -1715,6 +1718,8 @@ mod tests {
         // compared whole, not just counted: media must
         // change nothing at all.
         let n = |parent: Option<usize>, length: f32, rest: f32| model::NodeDef {
+            min_angle: None,
+            max_angle: None,
             name: "n".into(),
             parent,
             length,
@@ -1750,6 +1755,7 @@ mod tests {
                 def: def.clone(),
                 hidden: false,
                 clip: None,
+                states: Vec::new(),
                 locked: false,
                 opacity: 1.0,
             };
@@ -1817,6 +1823,7 @@ mod tests {
             def: def.clone(),
             hidden: false,
             clip: None,
+            states: Vec::new(),
             locked: false,
             opacity: 1.0,
         };

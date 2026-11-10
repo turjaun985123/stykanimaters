@@ -945,12 +945,13 @@ impl JobKind {
 /// entries' own return shapes: a frame count (PNG/JPEG
 /// sequences and the full WebM), the MP4 outcome (the
 /// frame count plus the missing-audio report), or the
-/// unit value of the range WebM entry.
+/// range WebM outcome — the same shared outcome type
+/// since Wave X (X12) widened the WebM range entries.
 #[derive(Debug)]
 enum ExportJobResult {
     Frames(usize),
     Mp4(stykanimate_rs::export::Mp4ExportOutcome),
-    Done,
+    Webm(stykanimate_rs::export::Mp4ExportOutcome),
 }
 
 /// What the worker sends back: the entry's result, with
@@ -1113,7 +1114,7 @@ fn run_job(
                 Some(&encode_cb),
                 Some(&render_cb),
             )
-            .map(|_| ExportJobResult::Done)
+            .map(ExportJobResult::Webm)
         }
     };
     result.map_err(|e| e.to_string())
@@ -1244,7 +1245,10 @@ fn job_failure_status(op: ExportOp, reason: &str) -> String {
 /// full ops produced for the same result — the MP4
 /// missing-audio note composed from the outcome in
 /// both modes, the range WebM's video-only sentence
-/// kept verbatim as the class-C wording of record —
+/// kept verbatim as the class-C wording of record
+/// (its job outcome rides along since Wave X, X12,
+/// but the sentence itself is the exclusion's, and
+/// does not change) —
 /// then `note_single`, as the actions called it.
 fn finish_export_job(s: &mut State, job: &ExportJob, result: ExportJobOutcome) {
     let op = job.kind.op();
@@ -1301,7 +1305,12 @@ fn finish_export_job(s: &mut State, job: &ExportJob, result: ExportJobOutcome) {
             (JobKind::WebmFull, ExportJobResult::Frames(n)) => {
                 format!("Exported {n}-frame WebM.")
             }
-            (JobKind::WebmRange(a, b), ExportJobResult::Done) => format!(
+            // The outcome (Wave X, X12) is carried for
+            // type parity with the MP4 arms; the sentence
+            // is the class-C wording of record and stays
+            // byte-identical whether or not the outcome
+            // names skipped clips.
+            (JobKind::WebmRange(a, b), ExportJobResult::Webm(_)) => format!(
                 "Exported WebM (frames {}–{}, video only) to {}",
                 a + 1,
                 b + 1,
@@ -3593,6 +3602,33 @@ mod tests {
     }
 
     #[test]
+    fn webm_range_finish_keeps_the_class_c_sentence_with_an_outcome() {
+        // Wave X (X12): the range WebM job now carries the
+        // shared outcome — but the finish sentence is the
+        // class-C wording of record, so it stays
+        // byte-identical even when the outcome names a
+        // skipped clip (the note composition belongs to
+        // the MP4 sentences; the standing exclusion owns
+        // this wording).
+        let mut s = crate::init();
+        let outcome = stykanimate_rs::export::Mp4ExportOutcome {
+            frames: 5,
+            missing_audio: vec!["gone.wav".to_string()],
+        };
+        let release = blocked_job(
+            &mut s,
+            JobKind::WebmRange(0, 4),
+            Ok(ExportJobResult::Webm(outcome)),
+        );
+        release.send(()).expect("worker listening");
+        poll_until_finished(&mut s);
+        assert_eq!(
+            s.core.status,
+            "Exported WebM (frames 1–5, video only) to out-test"
+        );
+    }
+
+    #[test]
     fn phases_stay_separate_in_the_slots_and_the_lines() {
         let mut s = crate::init();
         let (release_tx, release_rx) = mpsc::channel::<()>();
@@ -3608,7 +3644,12 @@ mod tests {
                 finished: false,
             });
             let _ = release_rx.recv();
-            Ok(ExportJobResult::Done)
+            Ok(ExportJobResult::Webm(
+                stykanimate_rs::export::Mp4ExportOutcome {
+                    frames: 5,
+                    missing_audio: Vec::new(),
+                },
+            ))
         });
         let project = s.core.project.clone();
         begin_job(

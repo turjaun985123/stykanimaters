@@ -62,6 +62,22 @@
 //! - `core.delete_sprite_key(index: usize, frame:
 //!   usize)` — remove the key at `frame`, if one exists.
 //!
+//! Wave X (X5, SpriteLoop GAP P-3) extends the contract
+//! with the two instance-level ops in the same file,
+//! each called from exactly one wrapper below
+//! ([`set_asset_selected`], [`move_selected`]):
+//!
+//! - `core.set_sprite_asset(index: usize, asset:
+//!   usize)` — re-point the instance at another asset,
+//!   keys verbatim; naming its current asset is a
+//!   validated no-op (no snapshot).
+//! - `core.reorder_sprite(index: usize, to: usize)` —
+//!   move the instance to a new table position (draw
+//!   order is vec order, so this is the z-order);
+//!   naming its current position is a validated no-op.
+//!   The selection follows the moved instance via
+//!   [`selected_after_reorder`].
+//!
 //! Per the roster, A1's ops take exactly one
 //! `snapshot()` per mutating press and refuse
 //! status-only (no snapshot) on stale indices and bad
@@ -310,6 +326,12 @@ pub fn base_key(core: &EditorCore, inst: &SpriteInstance, frame: f32) -> Instanc
         y: core.project.stage[1] / 2.0,
         scale: 1.0,
         angle: 0.0,
+        opacity: 1.0,
+        flip_x: false,
+        flip_y: false,
+        scale_y: 0.0,
+        pivot_x: 0.5,
+        pivot_y: 0.5,
     }
 }
 
@@ -371,6 +393,27 @@ pub fn selected_after_removal(selected: Option<usize>, removed: usize) -> Option
     }
 }
 
+/// Where a remembered `selected` index points after
+/// the instance at `from` is moved to position `to`
+/// (Wave X, X5 — the z-reorder's fix-up, the
+/// [`selected_after_removal`] discipline for a move
+/// instead of a removal): the moved instance's
+/// selection follows it; an instance between the two
+/// positions shifts by one toward `from`; anything
+/// else is unmoved. Pure.
+pub fn selected_after_reorder(
+    selected: Option<usize>,
+    from: usize,
+    to: usize,
+) -> Option<usize> {
+    match selected {
+        Some(s) if s == from => Some(to),
+        Some(s) if from < s && s <= to => Some(s - 1),
+        Some(s) if to <= s && s < from => Some(s + 1),
+        other => other,
+    }
+}
+
 /// The edit area's readout line for the transform
 /// `key` at `frame`: whether it is an authored key
 /// or the sampled value, then the four fields in
@@ -427,6 +470,51 @@ fn delete_sprite_row(s: &mut State, index: usize) {
             selected_after_removal(s.sprites_panel.selected, index);
     }
     s.core.remove_sprite(index);
+}
+
+/// Asset-picker handler (edit area): re-point the
+/// selected instance at `asset` via the
+/// `set_sprite_asset` op (Wave X, X5 — SpriteLoop
+/// GAP P-3). The op owns the refusals (a stale asset
+/// cannot be picked — the picker is built from the
+/// live table — but a stale selection refuses
+/// there); the instance's keys are untouched by
+/// construction.
+fn set_asset_selected(s: &mut State, asset: usize) {
+    let Some(i) = selected_index(s) else {
+        return;
+    };
+    s.core.set_sprite_asset(i, asset);
+}
+
+/// Draw-order handler (edit area): move the selected
+/// instance one step toward the front (`dir` +1 —
+/// later in the table paints later, i.e. on top) or
+/// the back (`dir` −1), via the `reorder_sprite` op
+/// (Wave X, X5). The selection follows the instance
+/// via [`selected_after_reorder`], applied only when
+/// the op actually moved it (an in-range index and a
+/// different target — the op's own success condition;
+/// its refusal or no-op leaves the selection alone).
+/// A boundary press cannot happen (the button
+/// renders inert there); a direct call clamps its
+/// target onto the boundary and earns the op's
+/// validated no-op sentence instead of moving
+/// anything.
+fn move_selected(s: &mut State, dir: i32) {
+    let Some(i) = selected_index(s) else {
+        return;
+    };
+    let n = s.core.project.sprites.len();
+    if n == 0 {
+        return;
+    }
+    let target = (i as i32 + dir).clamp(0, (n - 1) as i32) as usize;
+    s.core.reorder_sprite(i, target);
+    if i < n && target != i {
+        s.sprites_panel.selected =
+            selected_after_reorder(s.sprites_panel.selected, i, target);
+    }
 }
 
 /// The selected instance's index, or a status-only
@@ -712,6 +800,82 @@ pub fn sprites_panel(s: &State, t: &Theme) -> El {
     };
     let scale_noop_dn = base.map_or(false, |k| scale_step_is_noop(k.scale, -1));
     let scale_noop_up = base.map_or(false, |k| scale_step_is_noop(k.scale, 1));
+
+    // The selected instance's asset picker (Wave X,
+    // X5): one button per asset — the Add picker's
+    // shape, gated like the edit area (muted-live with
+    // nothing selected) and with the instance's
+    // current asset marked, since this picker REPLACES
+    // rather than adds. Its keys keep their keys: the
+    // op writes the asset field only.
+    let current_asset = selected_inst.map(|inst| inst.asset);
+    let mut asset_picker = col().key("sprite-asset-row").w_full().gap(2.0);
+    asset_picker = asset_picker.child(design::section_label("Asset", t));
+    {
+        let mut picker = row().gap(6.0).w_full().flex_wrap();
+        for opt in &options {
+            let a = opt.index;
+            picker = picker.child(if edit_live {
+                btn(
+                    &format!("sprite-asset-{a}"),
+                    &sprite_label(&opt.name),
+                    current_asset == Some(a),
+                    t,
+                    move |s: &mut State| set_asset_selected(s, a),
+                )
+            } else {
+                btn_muted_live(
+                    &format!("sprite-asset-{a}"),
+                    &sprite_label(&opt.name),
+                    false,
+                    t,
+                    move |s: &mut State| set_asset_selected(s, a),
+                )
+            });
+        }
+        asset_picker = asset_picker.child(picker);
+    }
+
+    // The draw-order row (Wave X, X5): the selected
+    // instance's 1-based position of the table count,
+    // one step each way. A step at the table's edge
+    // renders inert (the step_btn discipline — the
+    // press cannot happen); with nothing selected the
+    // pair is muted-live and earns the refusal.
+    let z_readout = match selected_row {
+        Some(r) => format!("{} of {}", r.index + 1, rows.len()),
+        None => "—".to_string(),
+    };
+    let at_back = matches!(selected_row, Some(r) if r.index == 0);
+    let at_front = matches!(selected_row, Some(r) if r.index + 1 == rows.len());
+    let z_row = row()
+        .key("sprite-z-row")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(
+            text("Draw order")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        .child(step_btn(
+            "sprite-z-back",
+            "Send backward",
+            edit_live,
+            at_back,
+            t,
+            |s: &mut State| move_selected(s, -1),
+        ))
+        .child(design::stepper_value(&z_readout, t))
+        .child(step_btn(
+            "sprite-z-front",
+            "Bring forward",
+            edit_live,
+            at_front,
+            t,
+            |s: &mut State| move_selected(s, 1),
+        ));
+
     edit = edit
         .child(stepper_row(
             "sprite-x-row", "X",
@@ -762,6 +926,14 @@ pub fn sprites_panel(s: &State, t: &Theme) -> El {
                     btn_inert("sprite-key-del", "Delete key", t)
                 }),
         );
+    // The asset picker renders only when there is an
+    // asset to pick — with an empty table it could
+    // offer nothing, and the Add section above already
+    // states that fact in its own empty state.
+    if !options.is_empty() {
+        edit = edit.child(asset_picker);
+    }
+    edit = edit.child(z_row);
 
     design::panel_col("sprite-panel", t)
         .child(
@@ -813,6 +985,12 @@ mod tests {
                         y: 200.0,
                         scale: 1.0,
                         angle: 0.0,
+                        opacity: 1.0,
+                        flip_x: false,
+                        flip_y: false,
+                        scale_y: 0.0,
+                        pivot_x: 0.5,
+                        pivot_y: 0.5,
                     })
                     .collect(),
             })
@@ -827,6 +1005,12 @@ mod tests {
             y,
             scale,
             angle,
+            opacity: 1.0,
+            flip_x: false,
+            flip_y: false,
+            scale_y: 0.0,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
         }
     }
 
@@ -1134,6 +1318,74 @@ mod tests {
             s.sprites_panel.selected, None,
             "deleting the selected sprite clears the selection"
         );
+    }
+
+    #[test]
+    fn selected_after_reorder_follows_the_move() {
+        // The moved instance's selection follows it.
+        assert_eq!(selected_after_reorder(Some(0), 0, 2), Some(2));
+        assert_eq!(selected_after_reorder(Some(2), 2, 0), Some(0));
+        // Instances between the two positions shift one
+        // step toward the vacated slot.
+        assert_eq!(selected_after_reorder(Some(1), 0, 2), Some(0));
+        assert_eq!(selected_after_reorder(Some(2), 0, 2), Some(1));
+        assert_eq!(selected_after_reorder(Some(0), 2, 0), Some(1));
+        assert_eq!(selected_after_reorder(Some(1), 2, 0), Some(2));
+        // Outside the span: unmoved; no selection: none.
+        assert_eq!(selected_after_reorder(Some(3), 0, 2), Some(3));
+        assert_eq!(selected_after_reorder(Some(0), 1, 2), Some(0));
+        assert_eq!(selected_after_reorder(None, 0, 2), None);
+        // A same-position "move" is the identity.
+        assert_eq!(selected_after_reorder(Some(1), 1, 1), Some(1));
+    }
+
+    #[test]
+    fn set_asset_selected_repoints_the_selected_sprite_only() {
+        let mut s = crate::init();
+        s.core = core_with(&["a.png", "b.png"], &[(0, 2), (1, 1)]);
+        s.sprites_panel.selected = Some(0);
+        set_asset_selected(&mut s, 1);
+        assert_eq!(s.core.project.sprites[0].asset, 1);
+        assert_eq!(s.core.project.sprites[0].keys.len(), 2, "keys untouched");
+        assert_eq!(s.core.project.sprites[1].asset, 1, "the other sprite is untouched");
+        assert_eq!(s.core.status, "Sprite 1 now uses asset 2.");
+        // With nothing selected the press earns the
+        // panel's refusal and changes nothing.
+        s.sprites_panel.selected = None;
+        set_asset_selected(&mut s, 0);
+        assert_eq!(s.core.status, "Select a sprite first.");
+        assert_eq!(s.core.project.sprites[0].asset, 1);
+    }
+
+    #[test]
+    fn move_selected_swaps_neighbours_and_the_selection_follows() {
+        let mut s = crate::init();
+        s.core = core_with(&["a.png"], &[(0, 1), (0, 1), (0, 1)]);
+        // Tell the three instances apart by their key x.
+        for (i, inst) in s.core.project.sprites.iter_mut().enumerate() {
+            inst.keys[0].x = (i + 1) as f32 * 10.0;
+        }
+        s.sprites_panel.selected = Some(0);
+        move_selected(&mut s, 1);
+        let xs: Vec<f32> = s.core.project.sprites.iter().map(|i| i.keys[0].x).collect();
+        assert_eq!(xs, vec![20.0, 10.0, 30.0], "one step toward the front");
+        assert_eq!(s.sprites_panel.selected, Some(1), "the selection follows");
+        move_selected(&mut s, 1);
+        assert_eq!(s.sprites_panel.selected, Some(2));
+        // At the front edge a further press is the op's
+        // validated no-op: order and selection stand.
+        move_selected(&mut s, 1);
+        let xs: Vec<f32> = s.core.project.sprites.iter().map(|i| i.keys[0].x).collect();
+        assert_eq!(xs, vec![20.0, 30.0, 10.0]);
+        assert_eq!(s.sprites_panel.selected, Some(2));
+        assert_eq!(s.core.status, "Sprite 3 is already at position 3.");
+        // Back again.
+        move_selected(&mut s, -1);
+        assert_eq!(s.sprites_panel.selected, Some(1));
+        // With nothing selected: the refusal, no motion.
+        s.sprites_panel.selected = None;
+        move_selected(&mut s, 1);
+        assert_eq!(s.core.status, "Select a sprite first.");
     }
 
     #[test]

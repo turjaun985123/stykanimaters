@@ -295,6 +295,7 @@ pub fn blank_project(name: &str) -> Project {
             def,
             hidden: false,
             clip: None,
+            states: Vec::new(),
             locked: false,
             opacity: 1.0,
         }],

@@ -959,8 +959,8 @@ mod tests {
             size: 20.0,
             color: 0x112233,
             keys: vec![
-                InstanceKey { frame: 0.0, x: 50.0, y: 60.0, scale: 1.0, angle: 0.0 },
-                InstanceKey { frame: 4.0, x: 90.0, y: 60.0, scale: 1.0, angle: 0.0 },
+                InstanceKey { frame: 0.0, x: 50.0, y: 60.0, scale: 1.0, angle: 0.0, opacity: 1.0, flip_x: false, flip_y: false, scale_y: 0.0, pivot_x: 0.5, pivot_y: 0.5 },
+                InstanceKey { frame: 4.0, x: 90.0, y: 60.0, scale: 1.0, angle: 0.0, opacity: 1.0, flip_x: false, flip_y: false, scale_y: 0.0, pivot_x: 0.5, pivot_y: 0.5 },
             ],
         });
         let prims = text_geometry(&core);
@@ -1004,7 +1004,7 @@ mod tests {
             content: "A".into(),
             size: 20.0,
             color: 0x445566,
-            keys: vec![InstanceKey { frame: 3.0, x: 70.0, y: 80.0, scale: 2.0, angle: 0.0 }],
+            keys: vec![InstanceKey { frame: 3.0, x: 70.0, y: 80.0, scale: 2.0, angle: 0.0, opacity: 1.0, flip_x: false, flip_y: false, scale_y: 0.0, pivot_x: 0.5, pivot_y: 0.5 }],
         });
         let prims = text_geometry(&core);
         assert_eq!(prims.len(), 20, "10 glyph pixels, each with a backing plate");
@@ -1237,7 +1237,7 @@ mod tests {
             content: "A".into(),
             size: 20.0,
             color: 0xABCDEF,
-            keys: vec![InstanceKey { frame: 0.0, x: 50.0, y: 60.0, scale: 1.0, angle: 0.0 }],
+            keys: vec![InstanceKey { frame: 0.0, x: 50.0, y: 60.0, scale: 1.0, angle: 0.0, opacity: 1.0, flip_x: false, flip_y: false, scale_y: 0.0, pivot_x: 0.5, pivot_y: 0.5 }],
         });
         let seg_color = core.project.figures[0].def.nodes[ni]
             .color

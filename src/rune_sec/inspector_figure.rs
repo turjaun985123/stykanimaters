@@ -1821,6 +1821,8 @@ playback_speed: 1.0,
     fn figure_measure_matches_a_hand_built_chain() {
         use stykanimate_rs::model::{FigureDef, NodeDef, NodeStyle, Shape};
         let node = |name: &str, parent: Option<usize>, length: f32| NodeDef {
+            min_angle: None,
+            max_angle: None,
             name: name.into(),
             parent,
             length,
@@ -1925,6 +1927,8 @@ playback_speed: 1.0,
     fn chain_core(head: bool) -> EditorCore {
         use stykanimate_rs::model::{FigureDef, NodeDef, NodeStyle, Shape};
         let node = |name: &str, parent: Option<usize>, length: f32, head: bool| NodeDef {
+            min_angle: None,
+            max_angle: None,
             name: name.into(),
             parent,
             length,

@@ -37,6 +37,16 @@
 //!   which reaches the target mode through the one loop op
 //!   the core exposes, `EditorCore::cycle_clip_loop`
 //!   (editor.rs:3473).
+//! * The derived state section (Wave X, P-1 / GAP #13) ->
+//!   `states_section` under the loop-mode row: the selected
+//!   figure's base link and state keys presented by clip
+//!   name, with click-to-key-at-playhead over the pool. No
+//!   new model field — the registry derives from
+//!   `FigureInstance::states` + `clip` against
+//!   `Project::clips`, and the writes (`key_state_at` /
+//!   `clear_state_at`) route through the core's state ops
+//!   (`EditorCore::set_state_key` / `remove_state_key`,
+//!   Wave X X2) — one authoring path for panel and MCP.
 //! * Per-row "Dup" -> `duplicate_clip` in this module
 //!   (Phase F). The core has NO duplicate/rename movieclip
 //!   op (its clip ops are make/insert/enter/exit/frame-edit/
@@ -240,7 +250,7 @@ use std::cell::RefCell;
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El, TextEdit, Tx};
 use stykanimate_rs::editor::{ClipEditSession, EditorCore};
-use stykanimate_rs::model::{ClipDef, ClipLoop, FigureInstance};
+use stykanimate_rs::model::{ClipDef, ClipLoop, FigureInstance, StateKey};
 
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
@@ -834,10 +844,15 @@ pub fn span_text(core: &EditorCore, clip: &ClipDef) -> String {
 /// text). Resolved through the `clips_usage*` keys (Wave
 /// U, IA-U2-1); the names are user data carried through
 /// the `{names}` slot, joined with the literal `", "`.
+/// Wave X (P-1): a figure also counts as playing the clip
+/// when one of its state keys names it — the base-link-only
+/// filter would call a state-keyed clip "not used".
 pub fn usage_text(core: &EditorCore, figures: &[FigureInstance], clip_idx: usize) -> String {
     let names: Vec<&str> = figures
         .iter()
-        .filter(|f| f.clip == Some(clip_idx))
+        .filter(|f| {
+            f.clip == Some(clip_idx) || f.states.iter().any(|k| k.clip == clip_idx)
+        })
         .map(|f| f.name.as_str())
         .collect();
     if names.is_empty() {
@@ -845,6 +860,198 @@ pub fn usage_text(core: &EditorCore, figures: &[FigureInstance], clip_idx: usize
     } else {
         i18n_wire::tr(core, "clips_usage_some").replace("{names}", &names.join(", "))
     }
+}
+
+/// The figure's state keys in timeline order, each paired
+/// with its clip's name (Wave X, P-1 / GAP #13 — the derived
+/// named-state registry: no new model field, the rows are
+/// `FigureInstance::states` read against the clip pool).
+/// Keys whose clip no longer exists (a clip deleted outside
+/// the remapping ops) are skipped — the derivation never
+/// panics on a dangling index. The sort is stable, so keys
+/// sharing a frame keep authoring order, matching the
+/// model's tie rule in `model::active_state_key`.
+pub fn state_rows(core: &EditorCore, fi: usize) -> Vec<(StateKey, String)> {
+    let Some(fig) = core.project.figures.get(fi) else {
+        return Vec::new();
+    };
+    let mut rows: Vec<(StateKey, String)> = fig
+        .states
+        .iter()
+        .filter_map(|key| {
+            core.project
+                .clips
+                .get(key.clip)
+                .map(|clip| (*key, clip.name.clone()))
+        })
+        .collect();
+    rows.sort_by_key(|(key, _)| key.frame);
+    rows
+}
+
+/// Which clip figure `fi` plays at `frame`: the state key
+/// in force (`model::active_state_key`) when one applies,
+/// else the figure's base link. `None` = the figure plays
+/// its timeline poses there.
+pub fn state_clip_at(core: &EditorCore, fi: usize, frame: usize) -> Option<usize> {
+    let fig = core.project.figures.get(fi)?;
+    if let Some(key) = stykanimate_rs::model::active_state_key(fig, frame as f32) {
+        return Some(key.clip);
+    }
+    fig.clip
+}
+
+/// Key `clip` for figure `fi` at `frame`, starting at the
+/// clip's first frame at the timeline rate (offset 0, speed
+/// 1.0) — the panel's click-to-key-at-playhead write. The
+/// write itself is the core's `set_state_key` op (Wave X,
+/// X2), so the panel and MCP author keys through one path,
+/// rig guard included; an existing key at the frame is
+/// replaced wholesale by the op — its offset/speed belonged
+/// to the old clip's clock. A key that already says exactly
+/// this is a no-op with no snapshot (a panel-side read,
+/// the `set_clip_loop_mode` discipline); every other case
+/// is the op's one snapshot and status line.
+pub fn key_state_at(core: &mut EditorCore, fi: usize, frame: usize, clip: usize) {
+    let already = core.project.figures.get(fi).is_some_and(|fig| {
+        fig.states.iter().any(|k| {
+            k.frame == frame && k.clip == clip && k.offset == 0 && k.speed == 1.0
+        })
+    });
+    if already {
+        return;
+    }
+    core.set_state_key(
+        fi,
+        StateKey {
+            frame,
+            clip,
+            offset: 0,
+            speed: 1.0,
+        },
+    );
+}
+
+/// Remove figure `fi`'s state key at `frame` — the core's
+/// `remove_state_key` op (Wave X, X2): false with a status
+/// line (no snapshot) when the figure does not exist or no
+/// key sits at that frame; otherwise one snapshot and the
+/// removal.
+pub fn clear_state_at(core: &mut EditorCore, fi: usize, frame: usize) -> bool {
+    core.remove_state_key(fi, frame)
+}
+
+/// One state key's row label: the plain template, or the
+/// offset/speed template when the key departs from the
+/// defaults (a key authored through MCP with an offset or
+/// a non-1.0 speed). Frames display 1-based, as everywhere
+/// in this panel (`span_text`).
+pub fn state_key_text(core: &EditorCore, key: &StateKey, clip_name: &str) -> String {
+    if key.offset == 0 && key.speed == 1.0 {
+        i18n_wire::tr(core, "clips_states_key")
+            .replace("{frame}", &(key.frame + 1).to_string())
+            .replace("{clip}", clip_name)
+    } else {
+        i18n_wire::tr(core, "clips_states_key_fx")
+            .replace("{frame}", &(key.frame + 1).to_string())
+            .replace("{clip}", clip_name)
+            .replace("{offset}", &key.offset.to_string())
+            .replace("{speed}", &format!("{}", key.speed))
+    }
+}
+
+/// The derived named-state section (Wave X, P-1 / GAP #13),
+/// mounted under the loop-mode row: for the SELECTED figure —
+/// its base link, its state keys in timeline order (each
+/// with a clear button), and a keying strip: one button per
+/// clip in the pool, labelled with the clip's name, the clip
+/// in force at the playhead marked selected; pressing keys
+/// that clip at the playhead frame (`key_state_at`).
+/// Everything shown is derived from
+/// `FigureInstance::{clip, states}` + the pool — the section
+/// stores nothing of its own. With no figure at the
+/// selection it renders the bare keyed column.
+fn states_section(s: &State, t: &Theme) -> El {
+    let core = &s.core;
+    let mut section = col().key("clip-states-section").w_full().gap(6.0);
+    let Some(fig) = core.project.figures.get(core.selected_figure) else {
+        return section;
+    };
+    let fi = core.selected_figure;
+    let frame = core.playhead.floor() as usize;
+    let title = i18n_wire::tr(core, "clips_states_figure").replace("{name}", &fig.name);
+    section = section.child(design::section_label(&title, t));
+    let base = match fig.clip {
+        Some(ci) => match core.project.clips.get(ci) {
+            Some(clip) => i18n_wire::tr(core, "clips_states_base").replace("{clip}", &clip.name),
+            None => i18n_wire::tr(core, "clips_states_no_base"),
+        },
+        None => i18n_wire::tr(core, "clips_states_no_base"),
+    };
+    section = section.child(
+        text(base)
+            .font(type_::LABEL)
+            .color(t.text_secondary)
+            .wrap()
+            .w_full(),
+    );
+    let rows = state_rows(core, fi);
+    if rows.is_empty() {
+        section = section.child(
+            text(i18n_wire::tr(core, "clips_states_none"))
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .wrap()
+                .w_full(),
+        );
+    }
+    for (key, clip_name) in rows {
+        section = section.child(
+            row()
+                .key(&format!("clip-state-row-{}", key.frame))
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text(state_key_text(core, &key, &clip_name))
+                        .font(type_::LABEL)
+                        .color(t.text)
+                        .grow(1.0)
+                        .truncate(),
+                )
+                .child(icon_only_btn(
+                    &format!("clip-state-clear-{}", key.frame),
+                    "xmark",
+                    &i18n_wire::tr(core, "clips_states_clear"),
+                    26.0,
+                    false,
+                    t,
+                    move |s: &mut State| {
+                        clear_state_at(&mut s.core, fi, key.frame);
+                    },
+                )),
+        );
+    }
+    let strip_label = i18n_wire::tr(core, "clips_states_key_here")
+        .replace("{frame}", &(frame + 1).to_string());
+    section = section.child(
+        text(strip_label)
+            .font(type_::LABEL)
+            .color(t.text_secondary),
+    );
+    let active = state_clip_at(core, fi, frame);
+    for (ci, clip) in core.project.clips.iter().enumerate() {
+        section = section.child(btn(
+            &format!("clip-state-key-{ci}"),
+            &clip.name,
+            active == Some(ci),
+            t,
+            move |s: &mut State| {
+                key_state_at(&mut s.core, fi, frame, ci);
+            },
+        ));
+    }
+    section
 }
 
 /// One clip row: name, span + usage, current loop mode.
@@ -1245,7 +1452,8 @@ fn clip_edit_section(s: &State, t: &Theme) -> El {
 /// actions, the clip list (each row with Dup, Rename, Up,
 /// Dn and Del buttons), the rename editor row while a rename is in
 /// progress, the selected clip's loop-mode segmented
-/// control, and the clip-edit session section
+/// control, the selected figure's derived state section
+/// (`states_section`, Wave X), and the clip-edit session section
 /// (`clip_edit_section`: enter/frame-step/add/delete/exit over
 /// the core's `enter_clip`/`clip_goto`/`clip_add_frame`/
 /// `clip_delete_frame`/`exit_clip` session ops).
@@ -1303,6 +1511,7 @@ pub fn clips_panel(s: &State, t: &Theme) -> El {
     panel
         .child(rename_row(s, t))
         .child(loop_mode_row(s, t, selected))
+        .child(states_section(s, t))
         .child(clip_edit_section(s, t))
 }
 
@@ -2385,6 +2594,127 @@ playback_speed: 1.0,
     }
 
     #[test]
+    fn state_rows_come_in_timeline_order_and_skip_dangling_clips() {
+        let mut core = core_with_three_clips();
+        core.project.figures[0].states = vec![
+            StateKey { frame: 9, clip: 2, offset: 0, speed: 1.0 },
+            StateKey { frame: 3, clip: 0, offset: 0, speed: 1.0 },
+            // Clip 99 does not exist: skipped, never a panic.
+            StateKey { frame: 5, clip: 99, offset: 0, speed: 1.0 },
+        ];
+        let rows = state_rows(&core, 0);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0.frame, 3);
+        assert_eq!(rows[0].1, "Alpha");
+        assert_eq!(rows[1].0.frame, 9);
+        assert_eq!(rows[1].1, "Charlie");
+        assert!(state_rows(&core, 99).is_empty(), "no figure, no rows");
+    }
+
+    #[test]
+    fn state_clip_at_prefers_the_key_in_force_then_the_base_link() {
+        let mut core = core_with_three_clips();
+        core.project.figures[0].clip = Some(0);
+        core.project.figures[0].states = vec![StateKey {
+            frame: 4,
+            clip: 1,
+            offset: 0,
+            speed: 1.0,
+        }];
+        // Before the first key the base link governs.
+        assert_eq!(state_clip_at(&core, 0, 0), Some(0));
+        assert_eq!(state_clip_at(&core, 0, 3), Some(0));
+        // At and after the key's frame the key governs.
+        assert_eq!(state_clip_at(&core, 0, 4), Some(1));
+        assert_eq!(state_clip_at(&core, 0, 40), Some(1));
+        // No link and no keys: timeline poses.
+        assert_eq!(state_clip_at(&core, 1, 0), None);
+    }
+
+    #[test]
+    fn key_state_at_inserts_replaces_and_noops_under_one_snapshot() {
+        let mut core = core_with_three_clips();
+        let depth = core.undo_depth();
+        key_state_at(&mut core, 0, 6, 1);
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot for the write");
+        assert_eq!(core.project.figures[0].states.len(), 1);
+        assert_eq!(core.project.figures[0].states[0].clip, 1);
+        // Identical key again: a true no-op, no snapshot.
+        key_state_at(&mut core, 0, 6, 1);
+        assert_eq!(core.undo_depth(), depth + 1);
+        assert_eq!(core.project.figures[0].states.len(), 1);
+        // A different clip at the same frame replaces wholesale,
+        // resetting an MCP-authored offset/speed to the defaults.
+        core.project.figures[0].states[0].offset = 3;
+        core.project.figures[0].states[0].speed = 2.0;
+        key_state_at(&mut core, 0, 6, 2);
+        assert_eq!(core.undo_depth(), depth + 2);
+        assert_eq!(core.project.figures[0].states.len(), 1);
+        let key = core.project.figures[0].states[0];
+        assert_eq!((key.clip, key.offset, key.speed), (2, 0, 1.0));
+        // Keys stay in timeline order as they accumulate.
+        key_state_at(&mut core, 0, 2, 0);
+        let frames: Vec<usize> = core.project.figures[0]
+            .states
+            .iter()
+            .map(|k| k.frame)
+            .collect();
+        assert_eq!(frames, [2, 6]);
+        // Refusals write nothing (the core op's voice).
+        let depth = core.undo_depth();
+        key_state_at(&mut core, 99, 0, 0);
+        assert_eq!(core.status, "No figure 100 to set a state key on.");
+        key_state_at(&mut core, 0, 0, 99);
+        assert_eq!(core.status, "No such clip.");
+        assert_eq!(core.undo_depth(), depth);
+    }
+
+    #[test]
+    fn clear_state_at_removes_the_key_or_refuses_without_a_snapshot() {
+        let mut core = core_with_three_clips();
+        key_state_at(&mut core, 0, 6, 1);
+        let depth = core.undo_depth();
+        assert!(clear_state_at(&mut core, 0, 6));
+        assert_eq!(core.undo_depth(), depth + 1);
+        assert!(core.project.figures[0].states.is_empty());
+        let depth = core.undo_depth();
+        assert!(!clear_state_at(&mut core, 0, 6));
+        assert_eq!(core.status, "Figure 1 has no state key at frame 7.");
+        assert!(!clear_state_at(&mut core, 99, 6));
+        assert_eq!(core.status, "No figure 100 to remove a state key from.");
+        assert_eq!(core.undo_depth(), depth, "refusals never snapshot");
+    }
+
+    #[test]
+    fn state_key_text_uses_the_plain_template_until_offset_or_speed_depart() {
+        let core = core_with_three_clips();
+        let plain = StateKey { frame: 2, clip: 0, offset: 0, speed: 1.0 };
+        // Identity is asserted against the same tr() composition
+        // (the W1 pin discipline): the pin holds before and after
+        // IA-X3-1 lands the keys in the catalogue.
+        let expect = i18n_wire::tr(&core, "clips_states_key")
+            .replace("{frame}", "3")
+            .replace("{clip}", "Alpha");
+        assert_eq!(state_key_text(&core, &plain, "Alpha"), expect);
+        let fx = StateKey { frame: 2, clip: 0, offset: 4, speed: 1.5 };
+        let text = state_key_text(&core, &fx, "Alpha");
+        assert!(text.contains("Alpha"), "fx label names the clip: {text}");
+        assert_ne!(text, expect, "offset/speed keys take the fx template");
+    }
+
+    #[test]
+    fn usage_text_counts_state_key_usage() {
+        let mut core = core_with_three_clips();
+        assert_eq!(
+            usage_text(&core, &core.project.figures, 1),
+            "not used by any figure"
+        );
+        key_state_at(&mut core, 0, 2, 1);
+        let used = usage_text(&core, &core.project.figures, 1);
+        assert!(used.starts_with("used by "), "state usage counts: {used}");
+    }
+
+    #[test]
     fn clips_i18n_keys_exist_and_match_the_english_labels() {
         // Wave U (U2): every label and composed readout
         // the panel wires through `i18n_wire::tr` must
@@ -2446,6 +2776,26 @@ playback_speed: 1.0,
                 "clips_session_frame",
                 "Editing {name} · frame {frame} of {total}",
             ),
+            // Wave X (IA-X3-1): the state section's keys —
+            // this pin passes once the integrator inserts
+            // them into the catalogue (the Q7 pattern).
+            ("clips_states_figure", "States for {name}"),
+            ("clips_states_base", "Base: {clip}"),
+            (
+                "clips_states_no_base",
+                "Base: timeline poses (no clip linked)",
+            ),
+            ("clips_states_key", "Frame {frame}: {clip}"),
+            (
+                "clips_states_key_fx",
+                "Frame {frame}: {clip} (offset {offset}, speed {speed})",
+            ),
+            (
+                "clips_states_none",
+                "No states keyed — the figure plays its base clip or timeline poses throughout.",
+            ),
+            ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+            ("clips_states_clear", "Clear state key"),
             ("clips_prev_frame", "Prev frame"),
             ("clips_next_frame", "Next frame"),
             ("clips_add_frame", "Add frame"),

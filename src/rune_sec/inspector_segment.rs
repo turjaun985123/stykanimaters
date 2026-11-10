@@ -92,6 +92,29 @@
 //!   once its guards pass, so even a zero delta would
 //!   snapshot — the guard lives in
 //!   `straighten_selected`, not in the shared op.
+//! * Joint limits (Wave X, P-4) → `adjust_joint_limit` /
+//!   `clear_joint_limits` (this module) — keys
+//!   `seg-lim-min-dn` / `seg-lim-min-up` /
+//!   `seg-lim-max-dn` / `seg-lim-max-up` / `seg-lim-clear`.
+//!   Two F-STEP rows step the selected node's
+//!   `NodeDef::min_angle` / `max_angle` (degrees, 5°
+//!   steps) — the joint limits the model's solvers
+//!   (`aim_node` / `apply_ik`) and the graph Angle
+//!   channels enforce on the node's RELATIVE angle.
+//!   The core has no limit op, so the writes follow
+//!   `attach_asset`'s pattern (validate → one
+//!   `snapshot()` → mutate → status): one press is
+//!   exactly one undo step, refusals are status-only,
+//!   and a press that changes nothing (stepping at
+//!   the ±180° hard clamp, clearing an unlimited
+//!   node) is a silent no-op. An open side reads "Off"
+//!   (`format_limit_bound`) and steps in from 0°. The
+//!   rows are omitted for the origin, like Length and
+//!   Bend: its angle is never solved, so a limit on it
+//!   could never bind anything, and the ops refuse it.
+//!   Clear limits renders only while a limit is set.
+//!   Stored poses are never rewritten by a limit —
+//!   enforcement binds solving, not data.
 //! * Cycle bend → `cycle_bend()` (editor.rs:1106) — key
 //!   `cycle-bend`. There is no ± bend op in the core; bend
 //!   steps 0 → +0.35 → +0.7 → −0.35 → −0.7 rad per frame.
@@ -332,6 +355,14 @@ pub struct InspectorSegmentState {
     /// the frame stores no bend for it — the same read
     /// `cycle_bend` performs).
     pub bend_deg: f32,
+    /// Joint limits on the node's relative angle, degrees,
+    /// read from the definition (`NodeDef::min_angle`) —
+    /// the values behind the Min angle stepper row
+    /// (Wave X, P-4). `None` = that side is open.
+    pub min_angle: Option<f32>,
+    /// The upper joint limit (`NodeDef::max_angle`); see
+    /// `min_angle`.
+    pub max_angle: Option<f32>,
     /// The node's own colour, or `None` for the figure colour.
     pub color: Option<u32>,
     /// Human label of the node's shape ("Line", "Circle",
@@ -633,6 +664,179 @@ pub fn straighten_selected(core: &mut EditorCore) {
     bend_selected(core, -cur);
 }
 
+/// Step size for the joint-limit steppers, degrees —
+/// the Rotate/Bend rows' coarse step, so the panel
+/// speaks one step language for angles everywhere.
+pub const LIMIT_STEP: f32 = 5.0;
+
+/// Which joint limit a stepper press adjusts
+/// (`adjust_joint_limit`'s target).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LimitBound {
+    Min,
+    Max,
+}
+
+/// Display form of one joint-limit bound for its
+/// stepper row: the degrees for a set bound (the
+/// panel's one angle formatter, `format_deg`), the
+/// localised "Off" for an open side (the
+/// `segment_limit_off` key, IA-X6-1). The single
+/// formatter behind both limit rows, so the two can
+/// never disagree about how a bound reads.
+pub fn format_limit_bound(core: &EditorCore, bound: Option<f32>) -> String {
+    match bound {
+        Some(v) => format_deg(v),
+        None => i18n_wire::tr(core, "segment_limit_off"),
+    }
+}
+
+/// Adjust the selected node's joint limit by
+/// `delta` degrees (Wave X, P-4) — the write behind
+/// the Min/Max angle stepper rows. The core has no
+/// limit op, so — exactly as `attach_asset` writes
+/// the media slot the core has no by-index op for —
+/// this writes the definition directly in the core
+/// ops' own pattern: validate → ONE `snapshot()` →
+/// mutate → status, so one press is exactly one undo
+/// step. Refusals (no selection, the origin, a stale
+/// node) are status-only, no snapshot.
+///
+/// Two deliberate details:
+///
+/// * An unset bound steps from 0°: the first press
+///   engages it one step out in the pressed
+///   direction, so engaging a knee's max at +5° or
+///   its min at −5° is one press, not a mode switch.
+/// * A press that lands on the value already stored
+///   (stepping at the ±180° hard clamp) is a SILENT
+///   no-op — no write, no status, no undo step —
+///   the Straighten-at-zero rule.
+///
+/// The stored bound is hard-clamped to ±180°: past
+/// the half-circle a bound's normalised form would
+/// wrap and silently become its mirror, which no
+/// press may do by accident. Setting min above max
+/// is NOT refused: it is the model's wrap arc (the
+/// allowed set runs clockwise from min through
+/// ±180° to max — see `NodeDef::clamp_angle`), and
+/// the steppers are how a user builds one on purpose.
+pub fn adjust_joint_limit(core: &mut EditorCore, bound: LimitBound, delta: f32) {
+    let Some(ni) = core.selected_node else {
+        core.status = "Select a segment first, then set its joint limits.".into();
+        return;
+    };
+    let fi = core.selected_figure;
+    let (is_root, cur) = match core
+        .project
+        .figures
+        .get(fi)
+        .and_then(|f| f.def.nodes.get(ni))
+    {
+        Some(node) => (
+            node.parent.is_none(),
+            match bound {
+                LimitBound::Min => node.min_angle,
+                LimitBound::Max => node.max_angle,
+            },
+        ),
+        None => {
+            core.status = format!(
+                "Figure {} has no segment {} to limit.",
+                fi + 1,
+                ni
+            );
+            return;
+        }
+    };
+    if is_root {
+        // The origin's angle is never solved (it has
+        // no parent segment), so a limit on it could
+        // never bind anything — refuse rather than
+        // store a dead value.
+        core.status = "The origin has no joint to limit.".into();
+        return;
+    }
+    let new = (cur.unwrap_or(0.0) + delta).clamp(-180.0, 180.0);
+    if cur == Some(new) {
+        return;
+    }
+    core.snapshot();
+    // Validated above; the `if let` is unreachable
+    // armour, not an expected path.
+    if let Some(node) = core
+        .project
+        .figures
+        .get_mut(fi)
+        .and_then(|f| f.def.nodes.get_mut(ni))
+    {
+        match bound {
+            LimitBound::Min => node.min_angle = Some(new),
+            LimitBound::Max => node.max_angle = Some(new),
+        }
+    }
+    core.status = format!(
+        "Segment {} {} angle set to {}.",
+        ni,
+        match bound {
+            LimitBound::Min => "minimum",
+            LimitBound::Max => "maximum",
+        },
+        format_deg(new)
+    );
+}
+
+/// Clear BOTH of the selected node's joint limits
+/// (Wave X, P-4) — the write behind the Clear limits
+/// button, which renders only while a limit is set.
+/// Same discipline as `adjust_joint_limit`: validate
+/// → ONE `snapshot()` → mutate → status; refusals
+/// are status-only; and clearing a node that carries
+/// no limits is a silent no-op (the button is not
+/// rendered then — this is the armour, not an
+/// expected path).
+pub fn clear_joint_limits(core: &mut EditorCore) {
+    let Some(ni) = core.selected_node else {
+        core.status = "Select a segment first, then clear its joint limits.".into();
+        return;
+    };
+    let fi = core.selected_figure;
+    let (is_root, any) = match core
+        .project
+        .figures
+        .get(fi)
+        .and_then(|f| f.def.nodes.get(ni))
+    {
+        Some(node) => (node.parent.is_none(), node.has_limits()),
+        None => {
+            core.status = format!(
+                "Figure {} has no segment {} to limit.",
+                fi + 1,
+                ni
+            );
+            return;
+        }
+    };
+    if is_root {
+        core.status = "The origin has no joint to limit.".into();
+        return;
+    }
+    if !any {
+        return;
+    }
+    core.snapshot();
+    if let Some(node) = core
+        .project
+        .figures
+        .get_mut(fi)
+        .and_then(|f| f.def.nodes.get_mut(ni))
+    {
+        node.min_angle = None;
+        node.max_angle = None;
+    }
+    core.status = format!("Segment {} joint limits cleared.", ni);
+}
+
 /// How many per-asset buttons the Media section's
 /// picker row shows before the "Next sprite" cycle
 /// button takes over (Wave 12). The row wraps
@@ -875,6 +1079,8 @@ pub fn segment_state(core: &EditorCore) -> Option<InspectorSegmentState> {
         thickness: node.thickness,
         angle_deg,
         bend_deg,
+        min_angle: node.min_angle,
+        max_angle: node.max_angle,
         color: node.color,
         shape_label: shape_label(&node.shape),
         media_label: media_label(core, &node.media, &core.project.assets),
@@ -1358,6 +1564,75 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                         |s| straighten_selected(&mut s.core),
                     )),
             );
+    }
+    // The Joint limits rows (Wave X, P-4): the node's
+    // min/max relative angle, stepped in 5° increments
+    // through `adjust_joint_limit`. An open side reads
+    // "Off" and either step engages it one step out
+    // from 0° (see the op). The StepForms mirror the
+    // op's ±180° hard clamp exactly, like the Length
+    // row mirrors `adjust_length`'s range: at a clamp
+    // end the step can only no-op, so the button
+    // renders inert. Omitted for the origin like the
+    // Length and Bend rows — its angle is never solved,
+    // and the op refuses it. Clear limits rides its
+    // own line under the rows, rendered only while a
+    // limit is set (the Straighten line's form).
+    if !st.is_root {
+        panel = panel
+            .child(stepper_row(
+                &i18n_wire::tr(&s.core, "segment_limit_min"),
+                format_limit_bound(&s.core, st.min_angle),
+                "seg-lim-min-dn",
+                "seg-lim-min-up",
+                if st.min_angle == Some(-180.0) {
+                    design::StepForm::Noop
+                } else {
+                    design::StepForm::Live
+                },
+                if st.min_angle == Some(180.0) {
+                    design::StepForm::Noop
+                } else {
+                    design::StepForm::Live
+                },
+                t,
+                |s| adjust_joint_limit(&mut s.core, LimitBound::Min, -LIMIT_STEP),
+                |s| adjust_joint_limit(&mut s.core, LimitBound::Min, LIMIT_STEP),
+            ))
+            .child(stepper_row(
+                &i18n_wire::tr(&s.core, "segment_limit_max"),
+                format_limit_bound(&s.core, st.max_angle),
+                "seg-lim-max-dn",
+                "seg-lim-max-up",
+                if st.max_angle == Some(-180.0) {
+                    design::StepForm::Noop
+                } else {
+                    design::StepForm::Live
+                },
+                if st.max_angle == Some(180.0) {
+                    design::StepForm::Noop
+                } else {
+                    design::StepForm::Live
+                },
+                t,
+                |s| adjust_joint_limit(&mut s.core, LimitBound::Max, -LIMIT_STEP),
+                |s| adjust_joint_limit(&mut s.core, LimitBound::Max, LIMIT_STEP),
+            ));
+        if st.min_angle.is_some() || st.max_angle.is_some() {
+            panel = panel.child(
+                row()
+                    .w_full()
+                    .center_y()
+                    .gap(8.0)
+                    .child(btn(
+                        "seg-lim-clear",
+                        &i18n_wire::tr(&s.core, "segment_limit_clear"),
+                        false,
+                        t,
+                        |s| clear_joint_limits(&mut s.core),
+                    )),
+            );
+        }
     }
     panel = panel
         .child(
@@ -2283,6 +2558,8 @@ playback_speed: 1.0,
     /// mirrors the model constructors, model.rs:181).
     fn nav_node(parent: Option<usize>) -> NodeDef {
         NodeDef {
+            min_angle: None,
+            max_angle: None,
             name: "n".into(),
             parent,
             length: 10.0,
@@ -2625,6 +2902,124 @@ playback_speed: 1.0,
     }
 
     #[test]
+    fn joint_limit_steppers_engage_from_off_and_step_in_one_undo_step_each() {
+        // Wave X (P-4). Node 1 (the demo chest) carries
+        // no limits, so both sides start open.
+        let mut core = core_with_selection(Some(1));
+        let fi = core.selected_figure;
+        let depth = core.undo_depth();
+        // A first press on an open side engages it one
+        // step out from 0° in the pressed direction.
+        adjust_joint_limit(&mut core, LimitBound::Max, LIMIT_STEP);
+        assert_eq!(core.project.figures[fi].def.nodes[1].max_angle, Some(5.0));
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot per press");
+        assert!(
+            core.status.contains("maximum angle set to 5.0°"),
+            "status names the bound and value: {}",
+            core.status
+        );
+        // Stepping continues from the stored value, and
+        // the other side steps independently.
+        adjust_joint_limit(&mut core, LimitBound::Max, LIMIT_STEP);
+        assert_eq!(core.project.figures[fi].def.nodes[1].max_angle, Some(10.0));
+        adjust_joint_limit(&mut core, LimitBound::Min, -LIMIT_STEP);
+        assert_eq!(core.project.figures[fi].def.nodes[1].min_angle, Some(-5.0));
+        // segment_state carries the definition's limits
+        // to the builder.
+        let st = segment_state(&core).unwrap();
+        assert_eq!(st.min_angle, Some(-5.0));
+        assert_eq!(st.max_angle, Some(10.0));
+        // One undo restores the last press whole.
+        core.undo();
+        assert_eq!(core.project.figures[fi].def.nodes[1].min_angle, None);
+        assert_eq!(core.project.figures[fi].def.nodes[1].max_angle, Some(10.0));
+    }
+
+    #[test]
+    fn joint_limit_stepper_at_the_clamp_end_is_a_silent_no_op() {
+        // Stepping at the ±180° hard clamp lands on the
+        // stored value: no write, no status, no undo
+        // step (the Straighten-at-zero rule).
+        let mut core = core_with_selection(Some(1));
+        let fi = core.selected_figure;
+        core.project.figures[fi].def.nodes[1].max_angle = Some(180.0);
+        let depth = core.undo_depth();
+        core.status = "Sentinel.".into();
+        adjust_joint_limit(&mut core, LimitBound::Max, LIMIT_STEP);
+        assert_eq!(core.project.figures[fi].def.nodes[1].max_angle, Some(180.0));
+        assert_eq!(core.undo_depth(), depth, "no snapshot for a no-change press");
+        assert_eq!(core.status, "Sentinel.", "no status churn");
+    }
+
+    #[test]
+    fn joint_limit_refusals_are_status_only() {
+        // No selection.
+        let mut core = core_with_selection(None);
+        let depth = core.undo_depth();
+        adjust_joint_limit(&mut core, LimitBound::Min, -LIMIT_STEP);
+        assert_eq!(core.undo_depth(), depth);
+        assert!(core.status.contains("Select a segment"));
+        // The origin: its angle is never solved, so a
+        // limit on it could never bind anything.
+        let mut core = core_with_selection(Some(0));
+        let depth = core.undo_depth();
+        adjust_joint_limit(&mut core, LimitBound::Max, LIMIT_STEP);
+        assert_eq!(core.undo_depth(), depth);
+        assert!(
+            core.status.contains("origin has no joint"),
+            "refusal explains itself: {}",
+            core.status
+        );
+        // Stale node index.
+        let mut core = core_with_selection(Some(999));
+        let depth = core.undo_depth();
+        clear_joint_limits(&mut core);
+        assert_eq!(core.undo_depth(), depth);
+        assert!(core.status.contains("no segment 999"));
+    }
+
+    #[test]
+    fn clear_joint_limits_clears_both_sides_in_one_undo_step() {
+        // Node 4 is the demo forearm: the constructor's
+        // presets (-10..160) are set, and clearing
+        // removes both sides in a single undo step.
+        let mut core = core_with_selection(Some(4));
+        let fi = core.selected_figure;
+        assert!(core.project.figures[fi].def.nodes[4].has_limits());
+        let depth = core.undo_depth();
+        clear_joint_limits(&mut core);
+        assert_eq!(core.project.figures[fi].def.nodes[4].min_angle, None);
+        assert_eq!(core.project.figures[fi].def.nodes[4].max_angle, None);
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot for the clear");
+        assert!(core.status.contains("joint limits cleared"));
+        core.undo();
+        assert_eq!(core.project.figures[fi].def.nodes[4].min_angle, Some(-10.0));
+        assert_eq!(core.project.figures[fi].def.nodes[4].max_angle, Some(160.0));
+    }
+
+    #[test]
+    fn clear_joint_limits_without_limits_is_a_silent_no_op() {
+        let mut core = core_with_selection(Some(1));
+        let depth = core.undo_depth();
+        core.status = "Sentinel.".into();
+        clear_joint_limits(&mut core);
+        assert_eq!(core.undo_depth(), depth, "no snapshot when nothing is set");
+        assert_eq!(core.status, "Sentinel.", "no status churn");
+    }
+
+    #[test]
+    fn format_limit_bound_reads_off_or_degrees() {
+        // IA-X6-1-dependent, like the i18n pin below:
+        // the "Off" side resolves through
+        // `segment_limit_off`, so this passes once the
+        // integrator lands the key.
+        let core = EditorCore::new();
+        assert_eq!(format_limit_bound(&core, None), "Off");
+        assert_eq!(format_limit_bound(&core, Some(-10.0)), "-10.0°");
+        assert_eq!(format_limit_bound(&core, Some(160.0)), "160.0°");
+    }
+
+    #[test]
     fn segment_i18n_keys_exist_and_match_the_english_labels() {
         // Wave T (T4): every label the panel wires
         // through `i18n_wire::tr` must resolve to exactly
@@ -2691,6 +3086,11 @@ playback_speed: 1.0,
             ),
             ("segment_media_text", "Text: {content}"),
             ("segment_media_text_empty", "Text label (empty)"),
+            // Wave X (X6) joint-limit keys — IA-X6-1.
+            ("segment_limit_min", "Min angle"),
+            ("segment_limit_max", "Max angle"),
+            ("segment_limit_off", "Off"),
+            ("segment_limit_clear", "Clear limits"),
         ] {
             assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
             assert_eq!(i18n_wire::tr(&core, key), english);

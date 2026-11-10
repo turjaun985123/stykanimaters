@@ -176,6 +176,10 @@
 //! ([`bar_colors`]), and the caption gains its suffix
 //! through [`clip_caption`]: "Clip {n} · muted" (the
 //! unmuted caption is byte-identical to Phase I's).
+//! Wave X (X14) wired the caption's muted segment
+//! through the i18n table (the `audio_muted_segment`
+//! key, IA-U5-1), so it localises with the panel's
+//! readout; see [`clip_caption`].
 //! In project mode the bars are untouched — they show
 //! the last clip, selected or not — but the SELECTED
 //! clip's span bracket dims by the same factor
@@ -303,6 +307,7 @@ use stykanimate_rs::model::AudioClip;
 
 use crate::rune_sec::app_theme;
 use crate::rune_sec::audio_panel::{health_segment, probe_clip, ClipHealth};
+use crate::rune_sec::i18n_wire;
 use crate::State;
 
 /// Height the caption row takes under the strip in
@@ -701,12 +706,27 @@ pub fn waveform_mode(
 /// is muted (Phase M, section 16). The unmuted string
 /// is byte-identical to the caption Phase I introduced;
 /// muting only appends the suffix.
-pub fn clip_caption(index: usize, muted: bool) -> String {
+///
+/// Wave X (X14): the muted segment now resolves
+/// through the i18n table like the panel's own
+/// surfaces — the caption is `"Clip {n}"` plus the
+/// `audio_muted_segment` segment (IA-U5-1), the same
+/// key the panel's readout appends inline
+/// (`clip_readout`), closing the adjacent observation
+/// W5 recorded when it wired [`clip_health_caption`],
+/// under which this caption alone stayed
+/// canonical-English. No shared segment helper exists
+/// to reuse — the panel resolves this key inline too;
+/// [`health_segment`] exists because the health word
+/// varies by state — so the caption resolves the key
+/// directly, and the English caption is byte-identical
+/// to the pre-wiring composition.
+pub fn clip_caption(core: &EditorCore, index: usize, muted: bool) -> String {
+    let mut caption = format!("Clip {}", index + 1);
     if muted {
-        format!("Clip {} · muted", index + 1)
-    } else {
-        format!("Clip {}", index + 1)
+        caption += &i18n_wire::tr(core, "audio_muted_segment");
     }
+    caption
 }
 
 /// The caption naming the strip's mode, or `None` when no
@@ -716,9 +736,15 @@ pub fn clip_caption(index: usize, muted: bool) -> String {
 /// before Phase I (section 17). `muted` is the mode's
 /// clip's flag ([`clip_is_muted`]); it is ignored in
 /// project mode, which grows no caption either way.
-pub fn waveform_caption(mode: WaveformMode, muted: bool) -> Option<String> {
+/// The `core` threads to [`clip_caption`] for the muted
+/// segment's table resolution (Wave X, X14).
+pub fn waveform_caption(
+    core: &EditorCore,
+    mode: WaveformMode,
+    muted: bool,
+) -> Option<String> {
     match mode {
-        WaveformMode::Clip(i) => Some(clip_caption(i, muted)),
+        WaveformMode::Clip(i) => Some(clip_caption(core, i, muted)),
         WaveformMode::Project => None,
     }
 }
@@ -1323,7 +1349,9 @@ pub fn waveform_el_state(s: &State, el_size: [f32; 2], t: &Theme) -> El {
         WaveformMode::Clip(i) => clip_is_muted(&s.core, i),
         WaveformMode::Project => false,
     };
-    if let (WaveformMode::Clip(i), Some(caption)) = (mode, waveform_caption(mode, muted)) {
+    if let (WaveformMode::Clip(i), Some(caption)) =
+        (mode, waveform_caption(&s.core, mode, muted))
+    {
         let canvas_h = (el_size[1] - CAPTION_STRIP_H).max(0.0);
         return col()
             .gap(2.0)
@@ -1781,17 +1809,18 @@ mod tests {
 
     #[test]
     fn waveform_caption_only_in_clip_mode() {
+        let core = EditorCore::new();
         // 1-based, the audio panel's own numbering.
         assert_eq!(
-            waveform_caption(WaveformMode::Clip(0), false).as_deref(),
+            waveform_caption(&core, WaveformMode::Clip(0), false).as_deref(),
             Some("Clip 1")
         );
         assert_eq!(
-            waveform_caption(WaveformMode::Clip(4), false).as_deref(),
+            waveform_caption(&core, WaveformMode::Clip(4), false).as_deref(),
             Some("Clip 5")
         );
         // Project mode grows no caption element at all.
-        assert_eq!(waveform_caption(WaveformMode::Project, false), None);
+        assert_eq!(waveform_caption(&core, WaveformMode::Project, false), None);
     }
 
     // ---- Clip health caption (Wave 6-D) ----
@@ -1978,20 +2007,28 @@ mod tests {
 
     #[test]
     fn clip_caption_muted_suffix() {
+        // Wave X (X14): the muted segment resolves
+        // through the table (`audio_muted_segment`)
+        // under this default English core, so the exact
+        // strings below stay the canonical tie — the
+        // panel's readout pin
+        // (`audio_readout_i18n_keys_exist_and_match_the_english`)
+        // asserts the table's segment is `" · muted"`.
+        let core = EditorCore::new();
         // Unmuted: byte-identical to Phase I's caption.
-        assert_eq!(clip_caption(0, false), "Clip 1");
-        assert_eq!(clip_caption(4, false), "Clip 5");
+        assert_eq!(clip_caption(&core, 0, false), "Clip 1");
+        assert_eq!(clip_caption(&core, 4, false), "Clip 5");
         // Muted: the suffix is appended, nothing else moves.
-        assert_eq!(clip_caption(0, true), "Clip 1 · muted");
-        assert_eq!(clip_caption(4, true), "Clip 5 · muted");
+        assert_eq!(clip_caption(&core, 0, true), "Clip 1 · muted");
+        assert_eq!(clip_caption(&core, 4, true), "Clip 5 · muted");
         // The mode-level caption routes through the same
         // string, and project mode stays captionless even
         // when handed a muted flag.
         assert_eq!(
-            waveform_caption(WaveformMode::Clip(0), true).as_deref(),
+            waveform_caption(&core, WaveformMode::Clip(0), true).as_deref(),
             Some("Clip 1 · muted")
         );
-        assert_eq!(waveform_caption(WaveformMode::Project, true), None);
+        assert_eq!(waveform_caption(&core, WaveformMode::Project, true), None);
     }
 
     #[test]

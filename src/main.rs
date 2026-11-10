@@ -453,16 +453,34 @@ fn stage_drag(s: &mut State, d: &mut Drag) {
                 core.begin_camera_drag(p);
             } else if !core.begin_drag(p) {
                 // The press hit no joint (begin_drag only
-                // starts on a joint and reports the miss):
-                // pick the nearest stroke instead — the
-                // selection the stage highlight draws and
-                // the stroke panel steps (Phase G). A clean
-                // miss clears the selection.
-                s.stroke_selected = rune_sec::stage_layers::stroke_at_point(
-                    core,
-                    p,
-                    rune_sec::stage_layers::PICK_TOLERANCE,
-                );
+                // starts on a joint and reports the miss).
+                // Sprites composite OVER the figures and
+                // their strokes (media_items' order), so a
+                // sprite under the point is picked before
+                // the stroke beneath it (Wave X, X5 —
+                // SpriteLoop GAP P-3's stage click-to-
+                // select): the pick writes the Sprites
+                // panel's selection, which the stage's
+                // sprite pass already draws corner marks
+                // for, and clears the stroke pick the
+                // sprite was covering. The press starts
+                // no drag — the same gesture shape as the
+                // stroke pick below.
+                if let Some(sprite) = stage_sprites::sprite_pick_at(core, p) {
+                    s.sprites_panel.selected = Some(sprite);
+                    s.stroke_selected = None;
+                } else {
+                    // Pick the nearest stroke instead —
+                    // the selection the stage highlight
+                    // draws and the stroke panel steps
+                    // (Phase G). A clean miss clears the
+                    // selection.
+                    s.stroke_selected = rune_sec::stage_layers::stroke_at_point(
+                        core,
+                        p,
+                        rune_sec::stage_layers::PICK_TOLERANCE,
+                    );
+                }
             }
         }
         Phase::Move => {

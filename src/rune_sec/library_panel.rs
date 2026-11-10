@@ -350,7 +350,7 @@
 //! || s.library_panel.rename.focused
 //! ```
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rune::tok::{type_, Theme};
 use rune::{canvas, col, row, text, Color, El, LineCap, ScrollSpec, Shape, TextEdit, Tx};
@@ -500,15 +500,16 @@ pub fn filter_active(query: &str) -> bool {
 }
 
 /// The verbatim file-name form of the library entry
-/// `name`: `<name>.json` for a saved entry — the form
-/// [`entry_matches`] searches against, and the first
+/// `name`: `<name>.json` for a saved entry — the first
 /// candidate [`library_entry_file`] tries when
 /// resolving a display name to its backing file. It
 /// is NOT always the backing file: since Wave V (V1)
 /// an entry's display name is stored inside its file
 /// and can differ from the file's slug ("Styk" lives
-/// in `styk.json`). Built-ins are constructed in code
-/// and have no file: `None`.
+/// in `styk.json`), so [`entry_matches`]' file-name
+/// leg searches the RESOLVED backing name, not this
+/// form. Built-ins are constructed in code and have
+/// no file: `None`.
 pub fn entry_file_name(name: &str) -> Option<String> {
     if is_builtin(name) {
         None
@@ -519,17 +520,43 @@ pub fn entry_file_name(name: &str) -> Option<String> {
 
 /// True when the library entry `name` matches the search
 /// `query`: a case-insensitive substring hit on the
-/// display name OR — for saved entries — on the entry's
-/// file-name form ([`entry_file_name`]), so `hero.json` and
-/// `.json` find the entry `my-hero`. An empty (or
-/// whitespace-only) query matches everything, via
-/// [`name_matches`].
+/// display name OR — for saved entries — on the name of
+/// the file that actually backs the entry, resolved
+/// through [`library_entry_file`] (the resolution delete
+/// and rename also use), so `hero.json` and `.json` find
+/// the entry `my-hero`. The file-name leg follows the
+/// resolver, not the verbatim [`entry_file_name`] form:
+/// since Wave V (V1) the display name is stored inside
+/// its file and can differ from the file's slug, so
+/// `foo-bar.json` finds the entry displayed as "Foo Bar"
+/// (Wave X, X13 — before this the leg searched the
+/// fabricated `Foo Bar.json` and the slug query missed).
+/// Built-ins have no file and match by name only. An
+/// empty (or whitespace-only) query matches everything,
+/// via [`name_matches`].
 pub fn entry_matches(name: &str, query: &str) -> bool {
     if name_matches(name, query) {
         return true;
     }
     match entry_file_name(name) {
-        Some(file) => name_matches(&file, query),
+        // A saved entry: match against the name of the
+        // file the resolver says backs it. Built-ins
+        // have no file form (`None`) and match by name
+        // only.
+        Some(_) => entry_matches_file(&library_entry_file(name), query),
+        None => false,
+    }
+}
+
+/// The file-name leg of [`entry_matches`]: a
+/// case-insensitive substring hit on the file name of
+/// the resolved backing file `backing`. Factored out
+/// so the leg's fidelity to the RESOLVED name —
+/// verbatim and slug forms alike — is pinnable
+/// without a library on disk.
+fn entry_matches_file(backing: &Path, query: &str) -> bool {
+    match backing.file_name().and_then(|f| f.to_str()) {
+        Some(file) => name_matches(file, query),
         None => false,
     }
 }
@@ -2018,6 +2045,44 @@ mod tests {
     }
 
     #[test]
+    fn entry_matches_finds_entries_by_their_real_file_name() {
+        // Wave X (X13): the file-name leg resolves the
+        // backing file instead of fabricating the
+        // verbatim `<display name>.json`. A saved entry's
+        // display name can differ from its file's slug
+        // (the name is stored inside the file — Wave V,
+        // V1), so the slug query is the one a user copies
+        // from their file manager. In this test
+        // environment no verbatim `Foo Bar.json` exists,
+        // so resolution lands on the slug — the same
+        // landing it makes for every app-saved entry.
+        assert!(entry_matches("Foo Bar", "foo-bar.json"));
+        assert!(entry_matches("Foo Bar", "bar.json"));
+        assert!(entry_matches("Styk", "styk.json"));
+        // Genuine misses still miss.
+        assert!(!entry_matches("Foo Bar", "foo-baz.json"));
+        assert!(!entry_matches("Foo Bar", "other.json"));
+    }
+
+    #[test]
+    fn entry_matches_file_leg_follows_the_resolved_file() {
+        // The leg matches against the file the resolver
+        // named — whichever form that is — and against
+        // no other form. Pinned at the factored leg so
+        // both directions hold without a library on disk.
+        let slug = PathBuf::from("library").join("foo-bar.json");
+        assert!(entry_matches_file(&slug, "foo-bar.json"));
+        assert!(entry_matches_file(&slug, ".JSON"));
+        assert!(!entry_matches_file(&slug, "foo bar.json"));
+        let verbatim = PathBuf::from("library").join("Foo Bar.json");
+        assert!(entry_matches_file(&verbatim, "foo bar.json"));
+        assert!(entry_matches_file(&verbatim, "Foo Bar.json"));
+        assert!(!entry_matches_file(&verbatim, "foo-bar.json"));
+        // A path with no file name has nothing to hit.
+        assert!(!entry_matches_file(Path::new("/"), ".json"));
+    }
+
+    #[test]
     fn filtered_rows_match_file_name_queries() {
         let mut core = EditorCore::new();
         core.library
@@ -2424,6 +2489,8 @@ mod tests {
         // stage's rule), so the piece run is one run per
         // parented node, in node order.
         let n = |parent: Option<usize>, length: f32, rest: f32| model::NodeDef {
+            min_angle: None,
+            max_angle: None,
             name: "n".into(),
             parent,
             length,
@@ -2562,6 +2629,8 @@ mod tests {
         // from a bare def at all (see
         // `library_thumb_prims`' docs).
         let n = |parent: Option<usize>, length: f32, rest: f32| model::NodeDef {
+            min_angle: None,
+            max_angle: None,
             name: "n".into(),
             parent,
             length,

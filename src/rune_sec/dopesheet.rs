@@ -112,17 +112,42 @@
 //! well, the figures panel's belt-and-braces for an
 //! unbounded user string in a fixed-sum row.
 //!
+//! ## Sprite rows (Wave X, X5 — SpriteLoop GAP P-3)
+//!
+//! Under the figure rows, a "Sprites" section gives the
+//! free sprite instances (`Project.sprites`) the same
+//! display + navigation: one row per instance (asset
+//! name in the header cell, a diamond on each frame
+//! holding a stored transform key — [`sprite_key_frames`]),
+//! the same [`DOPE_MAX_ROWS`] cap with the Sprites
+//! panel's selected instance pinned first and a
+//! "+N more sprites" line. A header press selects the
+//! instance in the Sprites panel (panel state — sprite
+//! selection has no core field, exactly as the stage's
+//! sprite prims take it); a cell press selects it AND
+//! goes to the frame. The section renders whenever
+//! instances exist, on its own condition: the two
+//! empty states above now apply only when neither the
+//! figure sheet nor the sprite section has anything to
+//! show, so a sprites-only project (or a figures project
+//! with no keys yet) gets its rows instead of a message
+//! about figures.
+//!
 //! ## Keys (all additive, Wave 10)
 //!
 //! `dopesheet-lane` on the lane root, [`row_key`]
 //! (`dope-row-{fi}`) on each figure's header cell,
 //! [`cell_key`] (`dope-cell-{fi}-{frame}`, 0-based
 //! frame — the marker keys' numbering, not the chips'
-//! 1-based labels) on each frame cell.
+//! 1-based labels) on each frame cell. Wave X (X5)
+//! adds, in the same scheme: `dope-sprite-row-{i}` on
+//! each sprite's header cell and
+//! `dope-sprite-cell-{i}-{frame}` on its frame cells.
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, Color, El};
 use stykanimate_rs::editor::EditorCore;
+use stykanimate_rs::model::SpriteInstance;
 use stykanimate_rs::stats::figure_keyframes;
 
 use crate::rune_sec::design;
@@ -339,6 +364,94 @@ pub fn more_label(more: usize) -> String {
     }
 }
 
+// ---------------------------------------------------------------------
+// Sprite rows (Wave X, X5 — SpriteLoop GAP P-3's
+// dopesheet lane: display + navigation for the free
+// sprite instances, which the figure sheet above never
+// knew about).
+// ---------------------------------------------------------------------
+
+/// The whole frames at which sprite instance `inst`
+/// holds a STORED transform key, ascending, deduplicated
+/// — the sprite row's diamonds. Instance keys are
+/// authored at whole frames by every op in the shell;
+/// an imported key at a fractional frame (`.nodes`
+/// writes frames as text) names no cell of a whole-frame
+/// sheet and is skipped rather than rounded onto a frame
+/// it was not authored at — it stays fully visible in
+/// the Sprites panel and `sprite_list`. A stale key past
+/// the timeline's end likewise has no cell to mark.
+pub fn sprite_key_frames(inst: &SpriteInstance) -> Vec<usize> {
+    let mut frames: Vec<usize> = inst
+        .keys
+        .iter()
+        .filter(|k| k.frame >= 0.0 && k.frame.fract() == 0.0)
+        .map(|k| k.frame as usize)
+        .collect();
+    frames.sort_unstable();
+    frames.dedup();
+    frames
+}
+
+/// One shown sprite row's data, the [`DopeRow`]
+/// discipline for instances: computed once per render
+/// by [`sprite_dope_rows`].
+pub struct SpriteDopeRow {
+    /// The instance's index in `Project.sprites`.
+    pub index: usize,
+    /// The asset's display name (the Sprites panel's
+    /// own `asset_name`, missing-asset fallback and
+    /// all; fitted only at paint time).
+    pub name: String,
+    /// The instance's stored-key frames, ascending
+    /// ([`sprite_key_frames`]' output, verbatim).
+    pub keys: Vec<usize>,
+    /// This is the Sprites panel's selected instance —
+    /// sprite selection is panel state (there is no
+    /// core sprite selection), so the caller passes it
+    /// in, exactly as the stage's sprite prims take it.
+    pub selected: bool,
+}
+
+/// The shown sprite rows, in display order: table
+/// order capped at [`DOPE_MAX_ROWS`] with the panel-
+/// selected instance pinned first past the cap — the
+/// figure rows' [`dope_row_order`] rule, reused
+/// verbatim (its "selected" is an index into the same
+/// kind of table). A stale panel selection pins
+/// nothing.
+pub fn sprite_dope_rows(
+    core: &EditorCore,
+    panel_selected: Option<usize>,
+) -> Vec<SpriteDopeRow> {
+    let project = &core.project;
+    dope_row_order(
+        project.sprites.len(),
+        panel_selected.unwrap_or(usize::MAX),
+    )
+    .into_iter()
+    .map(|index| {
+        let inst = &project.sprites[index];
+        SpriteDopeRow {
+            index,
+            name: crate::rune_sec::sprites_panel::asset_name(core, inst.asset),
+            keys: sprite_key_frames(inst),
+            selected: panel_selected == Some(index),
+        }
+    })
+    .collect()
+}
+
+/// The "+N more sprites" line for the instances the
+/// row cap left out — [`more_label`]'s sprite twin.
+pub fn more_sprites_label(more: usize) -> String {
+    if more == 1 {
+        "+1 more sprite".to_string()
+    } else {
+        format!("+{more} more sprites")
+    }
+}
+
 /// The dopesheet lane: header, then either an empty
 /// state (no figures at all, or figures but no
 /// keyframes anywhere) or one row per shown figure
@@ -379,23 +492,34 @@ pub fn dopesheet_lane(s: &State, t: &Theme) -> El {
 
     let mut lane = col().key("dopesheet-lane").gap(2.0).child(header);
 
-    if core.project.figures.is_empty() {
-        // No figures: nothing can have a keyframe, and
-        // the next action lives in the Figures panel —
-        // the message says so in words; this lane has
-        // no figure-creating handler of its own to offer
-        // as a button, and a fake one is not an option.
+    // The sprite section (Wave X, X5) renders on its own
+    // condition — instances exist — not on the figure
+    // sheet's: a project can carry sprites before it has
+    // a single figure key, and the lane is their
+    // navigation surface too. The two empty states below
+    // therefore apply only when NEITHER section has
+    // anything to show.
+    let sprite_rows = sprite_dope_rows(core, s.sprites_panel.selected);
+    let figures_keyed = any_keyframes(core);
+
+    if core.project.figures.is_empty() && sprite_rows.is_empty() {
+        // No figures and no sprites: nothing can have a
+        // keyframe, and the next action lives in the
+        // Figures panel — the message says so in words;
+        // this lane has no figure-creating handler of
+        // its own to offer as a button, and a fake one
+        // is not an option.
         return lane.child(design::empty_state(
             "person",
             "No figures yet — add a figure from the Figures panel to start posing.",
             t,
         ));
     }
-    if !any_keyframes(core) {
-        // Figures but no keys anywhere: posing a figure
-        // on a frame is exactly how a key comes to exist
-        // (see the module docs), so the state can name
-        // the real next action.
+    if !figures_keyed && sprite_rows.is_empty() {
+        // Figures but no keys anywhere, and no sprites:
+        // posing a figure on a frame is exactly how a
+        // key comes to exist (see the module docs), so
+        // the state can name the real next action.
         return lane.child(design::empty_state(
             "film",
             "No keyframes yet — pose a figure on a frame to create one.",
@@ -403,18 +527,45 @@ pub fn dopesheet_lane(s: &State, t: &Theme) -> El {
         ));
     }
 
-    let rows = dope_rows(core);
-    for r in &rows {
-        lane = lane.child(figure_row(r, core, t));
+    if figures_keyed {
+        let rows = dope_rows(core);
+        for r in &rows {
+            lane = lane.child(figure_row(r, core, t));
+        }
+        let more = core.project.figures.len() - rows.len();
+        if more > 0 {
+            lane = lane.child(
+                row()
+                    .h(DOPE_HEADER_H)
+                    .center_y()
+                    .child(text(more_label(more)).font(type_::LABEL).color(t.text_secondary)),
+            );
+        }
     }
-    let more = core.project.figures.len() - rows.len();
-    if more > 0 {
+
+    if !sprite_rows.is_empty() {
         lane = lane.child(
             row()
                 .h(DOPE_HEADER_H)
                 .center_y()
-                .child(text(more_label(more)).font(type_::LABEL).color(t.text_secondary)),
+                .child(design::section_label("Sprites", t)),
         );
+        for r in &sprite_rows {
+            lane = lane.child(sprite_row(r, core, t));
+        }
+        let more = core.project.sprites.len() - sprite_rows.len();
+        if more > 0 {
+            lane = lane.child(
+                row()
+                    .h(DOPE_HEADER_H)
+                    .center_y()
+                    .child(
+                        text(more_sprites_label(more))
+                            .font(type_::LABEL)
+                            .color(t.text_secondary),
+                    ),
+            );
+        }
     }
     lane
 }
@@ -476,10 +627,74 @@ fn figure_row(r: &DopeRow, core: &EditorCore, t: &Theme) -> El {
     }
 }
 
+/// One sprite instance's row (Wave X, X5): the header
+/// cell (a square accent swatch — the quad's shape,
+/// where a figure's round dot is its joint — plus the
+/// fitted asset name; press selects the instance in
+/// the Sprites panel, a panel-state write only) then
+/// one cell per frame at the chips' pitch (press
+/// selects the instance AND goes to the frame — the
+/// figure cells' navigation, both real writes, neither
+/// snapshotted). A diamond marks each frame holding a
+/// stored key; the panel-selected instance's row
+/// carries the selected tint, the current frame's cell
+/// carries it in every row — the figure rows' two
+/// bands, unchanged.
+fn sprite_row(r: &SpriteDopeRow, core: &EditorCore, t: &Theme) -> El {
+    let i = r.index;
+    let header = row()
+        .key(format!("dope-sprite-row-{i}"))
+        .size(DOPE_HEADER_W, DOPE_ROW_H)
+        .px(6.0)
+        .gap(6.0)
+        .center_y()
+        .radius(design::ROW_RADIUS)
+        .hover(t.hover)
+        .press(t.press)
+        .on_press(move |s: &mut State| s.sprites_panel.selected = Some(i))
+        .child(el().size(10.0, 10.0).radius(2.5).fill(design::accent()))
+        .child(
+            text(fit_dope_name(&r.name))
+                .font(type_::LABEL)
+                .truncate()
+                .color(t.text),
+        );
+
+    let mut cells = row().gap(CHIP_GAP).child(header);
+    for frame in 0..core.frame_count() {
+        let mut cell = el()
+            .key(format!("dope-sprite-cell-{i}-{frame}"))
+            .size(CHIP_W, DOPE_ROW_H)
+            .radius(design::CONTROL_RADIUS)
+            .center()
+            .hover(t.control_track)
+            .press(t.press)
+            .on_press(move |s: &mut State| {
+                s.sprites_panel.selected = Some(i);
+                s.core.goto(frame);
+            });
+        if frame == core.current {
+            cell = cell.fill(design::selected_fill());
+        }
+        if is_key(&r.keys, frame) {
+            cell = cell.child(text("◆").font(type_::LABEL).color(design::accent()));
+        }
+        cells = cells.child(cell);
+    }
+
+    if r.selected {
+        cells.fill(design::selected_fill()).radius(design::ROW_RADIUS)
+    } else {
+        cells
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stykanimate_rs::model::{FigureDef, FigureInstance, Frame, Pose};
+    use stykanimate_rs::model::{
+        FigureDef, FigureInstance, Frame, ImageAsset, InstanceKey, Pose, SpriteInstance,
+    };
 
     fn figure(name: &str) -> FigureInstance {
         FigureInstance {
@@ -488,6 +703,7 @@ mod tests {
             def: FigureDef::humanoid(),
             hidden: false,
             clip: None,
+            states: Vec::new(),
             locked: false,
             opacity: 1.0,
         }
@@ -671,6 +887,136 @@ mod tests {
     fn more_label_counts_honestly() {
         assert_eq!(more_label(1), "+1 more figure");
         assert_eq!(more_label(3), "+3 more figures");
+    }
+
+    fn skey(frame: f32) -> InstanceKey {
+        InstanceKey {
+            frame,
+            x: 100.0,
+            y: 100.0,
+            scale: 1.0,
+            angle: 0.0,
+            opacity: 1.0,
+            flip_x: false,
+            flip_y: false,
+            scale_y: 0.0,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
+        }
+    }
+
+    fn sprite(asset: usize, key_frames: &[f32]) -> SpriteInstance {
+        SpriteInstance {
+            asset,
+            keys: key_frames.iter().map(|&f| skey(f)).collect(),
+        }
+    }
+
+    /// A state whose project carries `assets` named
+    /// assets and `sprites` instances over the demo
+    /// frames, figures untouched (one demo figure).
+    fn sprite_state(assets: &[&str], sprites: Vec<SpriteInstance>) -> State {
+        let mut s = crate::init();
+        s.core.project.assets = assets
+            .iter()
+            .map(|name| ImageAsset {
+                name: name.to_string(),
+                png: Vec::new(),
+            })
+            .collect();
+        s.core.project.sprites = sprites;
+        s
+    }
+
+    #[test]
+    fn sprite_key_frames_takes_whole_frames_only() {
+        let inst = sprite(0, &[0.0, 2.0, 2.0, 4.0]);
+        assert_eq!(sprite_key_frames(&inst), vec![0, 2, 4], "sorted + deduplicated");
+        // A fractional imported key names no whole-frame
+        // cell and is skipped, never rounded onto one.
+        let inst = sprite(0, &[1.5, 2.0]);
+        assert_eq!(sprite_key_frames(&inst), vec![2]);
+        // A negative frame is not a cell either.
+        let inst = sprite(0, &[-1.0, 0.0]);
+        assert_eq!(sprite_key_frames(&inst), vec![0]);
+        assert!(sprite_key_frames(&sprite(0, &[])).is_empty());
+    }
+
+    #[test]
+    fn sprite_dope_rows_carry_name_keys_and_selection() {
+        let s = sprite_state(
+            &["hero.png", "tree.png"],
+            vec![sprite(1, &[0.0, 3.0]), sprite(0, &[2.0]), sprite(9, &[])],
+        );
+        let rows = sprite_dope_rows(&s.core, Some(1));
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].index, 0);
+        assert_eq!(rows[0].name, "tree.png");
+        assert_eq!(rows[0].keys, vec![0, 3]);
+        assert!(!rows[0].selected);
+        assert_eq!(rows[1].index, 1);
+        assert_eq!(rows[1].name, "hero.png");
+        assert!(rows[1].selected, "the panel selection marks its row");
+        // A dangling asset reads through the panel's own
+        // missing-asset fallback.
+        assert_eq!(rows[2].name, "asset 10 (missing)");
+        assert!(rows[2].keys.is_empty());
+    }
+
+    #[test]
+    fn sprite_dope_rows_cap_and_pin_the_panel_selection() {
+        let sprites: Vec<SpriteInstance> = (0..6).map(|_| sprite(0, &[0.0])).collect();
+        let s = sprite_state(&["a.png"], sprites);
+        let rows = sprite_dope_rows(&s.core, Some(5));
+        let shown: Vec<usize> = rows.iter().map(|r| r.index).collect();
+        assert_eq!(shown, vec![5, 0, 1, 2], "the figure rows' pin rule, reused");
+        assert!(rows[0].selected);
+        // No selection (or a stale one) pins nothing.
+        let rows = sprite_dope_rows(&s.core, None);
+        let shown: Vec<usize> = rows.iter().map(|r| r.index).collect();
+        assert_eq!(shown, vec![0, 1, 2, 3]);
+        assert!(rows.iter().all(|r| !r.selected));
+        let rows = sprite_dope_rows(&s.core, Some(99));
+        let shown: Vec<usize> = rows.iter().map(|r| r.index).collect();
+        assert_eq!(shown, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn more_sprites_label_counts_honestly() {
+        assert_eq!(more_sprites_label(1), "+1 more sprite");
+        assert_eq!(more_sprites_label(4), "+4 more sprites");
+    }
+
+    #[test]
+    fn lane_constructs_with_sprite_sections() {
+        // Construction is the assertable level (the
+        // figure lane's own discipline); what is pinned
+        // here is that every new branch builds.
+        for dark in [true, false] {
+            let t = rune::tok::theme(dark);
+            // Sprites but NO figures at all: the sprite
+            // section renders instead of the no-figures
+            // empty state.
+            let mut s = sprite_state(&["a.png"], vec![sprite(0, &[0.0, 2.0])]);
+            s.core.project.figures = Vec::new();
+            let _ = dopesheet_lane(&s, &t);
+            // Figures with no keyframes anywhere, plus
+            // sprites: the sprite section renders instead
+            // of the no-keys empty state.
+            let mut s = sprite_state(&["a.png"], vec![sprite(0, &[1.0])]);
+            s.core.project.frames = vec![frame(vec![])];
+            let _ = dopesheet_lane(&s, &t);
+            // Both sections populated, sprites past the
+            // cap with the panel selection pinned.
+            let mut s = two_figure_state();
+            s.core.project.assets = vec![ImageAsset {
+                name: "a.png".into(),
+                png: Vec::new(),
+            }];
+            s.core.project.sprites = (0..6).map(|_| sprite(0, &[0.0])).collect();
+            s.sprites_panel.selected = Some(4);
+            let _ = dopesheet_lane(&s, &t);
+        }
     }
 
     #[test]

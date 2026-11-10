@@ -10,7 +10,7 @@
 //! The language set mirrors the original app's locale packs
 //! (`src/locales/packs/` in StykAnimate-App: 27 packs) plus Bengali,
 //! which the port added for its user — 28 languages in total.
-//! Every table carries exactly the same 666 keys.
+//! Every table carries exactly the same 678 keys.
 //!
 //! Translation approach: established animation terms are used where
 //! a language has them (French "pelure d'oignon", Polish "skórka
@@ -149,6 +149,19 @@
 //! survive verbatim in every table. Same translation
 //! convention as the Wave T panel keys: genuine in the
 //! eight translated tables, English placeholders in the
+//! remaining 19.
+//!
+//! The Wave X keys (12: the segment inspector's 4
+//! `segment_limit_*` joint-limit labels on IA-X6-1, and the
+//! clips panel's 8 `clips_states_*` figure-state labels on
+//! IA-X3-1) were inserted at integration at the end of the
+//! segment and clips blocks of each table. The segment
+//! labels wire the joint-limit rows the same wave added;
+//! the clips labels wire the states section, and their
+//! `{name}` / `{clip}` / `{frame}` / `{offset}` / `{speed}`
+//! braces survive verbatim in every table. Same translation
+//! convention as the Wave U keys: genuine in the eight
+//! translated tables, English placeholders in the
 //! remaining 19.
 
 /// Languages the UI can be displayed in: the original app's 27
@@ -642,6 +655,11 @@ static EN: &[(&str, &str)] = &[
     ("segment_clear_media", "Clear media"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Delete segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Min angle"),
+    ("segment_limit_max", "Max angle"),
+    ("segment_limit_off", "Off"),
+    ("segment_limit_clear", "Clear limits"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX clips"),
     ("fx_no_clips", "No FX clips in this project."),
@@ -784,6 +802,15 @@ static EN: &[(&str, &str)] = &[
     ("clips_session_stale", "Editing {name} · clip changed — exit and re-enter"),
     ("clips_session_no_frames", "Editing {name} · no frames"),
     ("clips_session_frame", "Editing {name} · frame {frame} of {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "States for {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: timeline poses (no clip linked)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (offset {offset}, speed {speed})"),
+    ("clips_states_none", "No states keyed — the figure plays its base clip or timeline poses throughout."),
+    ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+    ("clips_states_clear", "Clear state key"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Edit"),
@@ -1354,6 +1381,11 @@ static BN: &[(&str, &str)] = &[
     ("segment_clear_media", "মিডিয়া পরিষ্কার করুন"),
     ("segment_add", "+ অংশ"),
     ("segment_delete", "অংশ মুছুন"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "সর্বনিম্ন কোণ"),
+    ("segment_limit_max", "সর্বোচ্চ কোণ"),
+    ("segment_limit_off", "বন্ধ"),
+    ("segment_limit_clear", "সীমা মুছুন"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX ক্লিপ"),
     ("fx_no_clips", "এই প্রজেক্টে কোনো FX ক্লিপ নেই।"),
@@ -1496,6 +1528,15 @@ static BN: &[(&str, &str)] = &[
     ("clips_session_stale", "{name} সম্পাদনা চলছে · ক্লিপ বদলেছে — বেরিয়ে আবার ঢুকুন"),
     ("clips_session_no_frames", "{name} সম্পাদনা চলছে · কোনো ফ্রেম নেই"),
     ("clips_session_frame", "{name} সম্পাদনা চলছে · ফ্রেম {frame} / {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "{name}-এর অবস্থা"),
+    ("clips_states_base", "বেস: {clip}"),
+    ("clips_states_no_base", "বেস: টাইমলাইন পোজ (কোনো ক্লিপ সংযুক্ত নয়)"),
+    ("clips_states_key", "ফ্রেম {frame}: {clip}"),
+    ("clips_states_key_fx", "ফ্রেম {frame}: {clip} (অফসেট {offset}, গতি {speed})"),
+    ("clips_states_none", "কোনো অবস্থা কী করা হয়নি — ফিগারটি পুরো সময় তার বেস ক্লিপ বা টাইমলাইন পোজ চালিয়ে যায়।"),
+    ("clips_states_key_here", "প্লেহেডে কী (ফ্রেম {frame}):"),
+    ("clips_states_clear", "অবস্থা কী মুছুন"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "ফাইল"),
     ("menu_edit", "সম্পাদনা"),
@@ -2066,6 +2107,11 @@ static ES: &[(&str, &str)] = &[
     ("segment_clear_media", "Borrar medios"),
     ("segment_add", "+ Segmento"),
     ("segment_delete", "Eliminar segmento"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Ángulo mínimo"),
+    ("segment_limit_max", "Ángulo máximo"),
+    ("segment_limit_off", "Desactivado"),
+    ("segment_limit_clear", "Borrar límites"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "Clips FX"),
     ("fx_no_clips", "No hay clips FX en este proyecto."),
@@ -2208,6 +2254,15 @@ static ES: &[(&str, &str)] = &[
     ("clips_session_stale", "Editando {name} · el clip cambió: sal y vuelve a entrar"),
     ("clips_session_no_frames", "Editando {name} · sin fotogramas"),
     ("clips_session_frame", "Editando {name} · fotograma {frame} de {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "Estados de {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: poses de la línea de tiempo (ningún clip vinculado)"),
+    ("clips_states_key", "Fotograma {frame}: {clip}"),
+    ("clips_states_key_fx", "Fotograma {frame}: {clip} (desplazamiento {offset}, velocidad {speed})"),
+    ("clips_states_none", "Ningún estado fijado — la figura reproduce su clip base o las poses de la línea de tiempo en todo momento."),
+    ("clips_states_key_here", "Clave en el cabezal (fotograma {frame}):"),
+    ("clips_states_clear", "Borrar clave de estado"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "Archivo"),
     ("menu_edit", "Editar"),
@@ -2778,6 +2833,11 @@ static AR: &[(&str, &str)] = &[
     ("segment_clear_media", "Clear media"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Delete segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Min angle"),
+    ("segment_limit_max", "Max angle"),
+    ("segment_limit_off", "Off"),
+    ("segment_limit_clear", "Clear limits"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX clips"),
     ("fx_no_clips", "No FX clips in this project."),
@@ -2920,6 +2980,15 @@ static AR: &[(&str, &str)] = &[
     ("clips_session_stale", "Editing {name} · clip changed — exit and re-enter"),
     ("clips_session_no_frames", "Editing {name} · no frames"),
     ("clips_session_frame", "Editing {name} · frame {frame} of {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "States for {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: timeline poses (no clip linked)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (offset {offset}, speed {speed})"),
+    ("clips_states_none", "No states keyed — the figure plays its base clip or timeline poses throughout."),
+    ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+    ("clips_states_clear", "Clear state key"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Edit"),
@@ -3490,6 +3559,11 @@ static CS: &[(&str, &str)] = &[
     ("segment_clear_media", "Clear media"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Delete segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Min angle"),
+    ("segment_limit_max", "Max angle"),
+    ("segment_limit_off", "Off"),
+    ("segment_limit_clear", "Clear limits"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX clips"),
     ("fx_no_clips", "No FX clips in this project."),
@@ -3632,6 +3706,15 @@ static CS: &[(&str, &str)] = &[
     ("clips_session_stale", "Editing {name} · clip changed — exit and re-enter"),
     ("clips_session_no_frames", "Editing {name} · no frames"),
     ("clips_session_frame", "Editing {name} · frame {frame} of {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "States for {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: timeline poses (no clip linked)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (offset {offset}, speed {speed})"),
+    ("clips_states_none", "No states keyed — the figure plays its base clip or timeline poses throughout."),
+    ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+    ("clips_states_clear", "Clear state key"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Edit"),
@@ -4202,6 +4285,11 @@ static DA: &[(&str, &str)] = &[
     ("segment_clear_media", "Clear media"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Delete segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Min angle"),
+    ("segment_limit_max", "Max angle"),
+    ("segment_limit_off", "Off"),
+    ("segment_limit_clear", "Clear limits"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX clips"),
     ("fx_no_clips", "No FX clips in this project."),
@@ -4344,6 +4432,15 @@ static DA: &[(&str, &str)] = &[
     ("clips_session_stale", "Editing {name} · clip changed — exit and re-enter"),
     ("clips_session_no_frames", "Editing {name} · no frames"),
     ("clips_session_frame", "Editing {name} · frame {frame} of {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "States for {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: timeline poses (no clip linked)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (offset {offset}, speed {speed})"),
+    ("clips_states_none", "No states keyed — the figure plays its base clip or timeline poses throughout."),
+    ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+    ("clips_states_clear", "Clear state key"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Edit"),
@@ -4914,6 +5011,11 @@ static DE: &[(&str, &str)] = &[
     ("segment_clear_media", "Medien löschen"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Segment löschen"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Mindestwinkel"),
+    ("segment_limit_max", "Höchstwinkel"),
+    ("segment_limit_off", "Aus"),
+    ("segment_limit_clear", "Grenzen löschen"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX-Clips"),
     ("fx_no_clips", "Keine FX-Clips in diesem Projekt."),
@@ -5056,6 +5158,15 @@ static DE: &[(&str, &str)] = &[
     ("clips_session_stale", "{name} wird bearbeitet · Clip hat sich geändert — beenden und erneut eintreten"),
     ("clips_session_no_frames", "{name} wird bearbeitet · keine Frames"),
     ("clips_session_frame", "{name} wird bearbeitet · Frame {frame} von {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "Zustände für {name}"),
+    ("clips_states_base", "Basis: {clip}"),
+    ("clips_states_no_base", "Basis: Zeitleisten-Posen (kein Clip verknüpft)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (Versatz {offset}, Geschwindigkeit {speed})"),
+    ("clips_states_none", "Keine Zustände gesetzt — die Figur spielt durchgehend ihren Basis-Clip oder die Zeitleisten-Posen."),
+    ("clips_states_key_here", "Key am Playhead (Frame {frame}):"),
+    ("clips_states_clear", "Zustands-Key löschen"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "Datei"),
     ("menu_edit", "Bearbeiten"),
@@ -5626,6 +5737,11 @@ static EL: &[(&str, &str)] = &[
     ("segment_clear_media", "Clear media"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Delete segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Min angle"),
+    ("segment_limit_max", "Max angle"),
+    ("segment_limit_off", "Off"),
+    ("segment_limit_clear", "Clear limits"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX clips"),
     ("fx_no_clips", "No FX clips in this project."),
@@ -5768,6 +5884,15 @@ static EL: &[(&str, &str)] = &[
     ("clips_session_stale", "Editing {name} · clip changed — exit and re-enter"),
     ("clips_session_no_frames", "Editing {name} · no frames"),
     ("clips_session_frame", "Editing {name} · frame {frame} of {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "States for {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: timeline poses (no clip linked)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (offset {offset}, speed {speed})"),
+    ("clips_states_none", "No states keyed — the figure plays its base clip or timeline poses throughout."),
+    ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+    ("clips_states_clear", "Clear state key"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Edit"),
@@ -6338,6 +6463,11 @@ static ES419: &[(&str, &str)] = &[
     ("segment_clear_media", "Clear media"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Delete segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Min angle"),
+    ("segment_limit_max", "Max angle"),
+    ("segment_limit_off", "Off"),
+    ("segment_limit_clear", "Clear limits"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX clips"),
     ("fx_no_clips", "No FX clips in this project."),
@@ -6480,6 +6610,15 @@ static ES419: &[(&str, &str)] = &[
     ("clips_session_stale", "Editing {name} · clip changed — exit and re-enter"),
     ("clips_session_no_frames", "Editing {name} · no frames"),
     ("clips_session_frame", "Editing {name} · frame {frame} of {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "States for {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: timeline poses (no clip linked)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (offset {offset}, speed {speed})"),
+    ("clips_states_none", "No states keyed — the figure plays its base clip or timeline poses throughout."),
+    ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+    ("clips_states_clear", "Clear state key"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Edit"),
@@ -7050,6 +7189,11 @@ static FI: &[(&str, &str)] = &[
     ("segment_clear_media", "Clear media"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Delete segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Min angle"),
+    ("segment_limit_max", "Max angle"),
+    ("segment_limit_off", "Off"),
+    ("segment_limit_clear", "Clear limits"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX clips"),
     ("fx_no_clips", "No FX clips in this project."),
@@ -7192,6 +7336,15 @@ static FI: &[(&str, &str)] = &[
     ("clips_session_stale", "Editing {name} · clip changed — exit and re-enter"),
     ("clips_session_no_frames", "Editing {name} · no frames"),
     ("clips_session_frame", "Editing {name} · frame {frame} of {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "States for {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: timeline poses (no clip linked)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (offset {offset}, speed {speed})"),
+    ("clips_states_none", "No states keyed — the figure plays its base clip or timeline poses throughout."),
+    ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+    ("clips_states_clear", "Clear state key"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Edit"),
@@ -7762,6 +7915,11 @@ static FR: &[(&str, &str)] = &[
     ("segment_clear_media", "Effacer le média"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Supprimer le segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Angle min."),
+    ("segment_limit_max", "Angle max."),
+    ("segment_limit_off", "Désactivé"),
+    ("segment_limit_clear", "Effacer les limites"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "Clips FX"),
     ("fx_no_clips", "Aucun clip FX dans ce projet."),
@@ -7904,6 +8062,15 @@ static FR: &[(&str, &str)] = &[
     ("clips_session_stale", "Édition de {name} · le clip a changé — quittez puis revenez"),
     ("clips_session_no_frames", "Édition de {name} · aucune image"),
     ("clips_session_frame", "Édition de {name} · image {frame} sur {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "États de {name}"),
+    ("clips_states_base", "Base : {clip}"),
+    ("clips_states_no_base", "Base : poses de la chronologie (aucun clip lié)"),
+    ("clips_states_key", "Image {frame} : {clip}"),
+    ("clips_states_key_fx", "Image {frame} : {clip} (décalage {offset}, vitesse {speed})"),
+    ("clips_states_none", "Aucun état défini — la figure joue son clip de base ou les poses de la chronologie en entier."),
+    ("clips_states_key_here", "Clé à la tête de lecture (image {frame}) :"),
+    ("clips_states_clear", "Effacer la clé d'état"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "Fichier"),
     ("menu_edit", "Édition"),
@@ -8474,6 +8641,11 @@ static HE: &[(&str, &str)] = &[
     ("segment_clear_media", "Clear media"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Delete segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Min angle"),
+    ("segment_limit_max", "Max angle"),
+    ("segment_limit_off", "Off"),
+    ("segment_limit_clear", "Clear limits"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX clips"),
     ("fx_no_clips", "No FX clips in this project."),
@@ -8616,6 +8788,15 @@ static HE: &[(&str, &str)] = &[
     ("clips_session_stale", "Editing {name} · clip changed — exit and re-enter"),
     ("clips_session_no_frames", "Editing {name} · no frames"),
     ("clips_session_frame", "Editing {name} · frame {frame} of {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "States for {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: timeline poses (no clip linked)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (offset {offset}, speed {speed})"),
+    ("clips_states_none", "No states keyed — the figure plays its base clip or timeline poses throughout."),
+    ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+    ("clips_states_clear", "Clear state key"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Edit"),
@@ -9186,6 +9367,11 @@ static HR: &[(&str, &str)] = &[
     ("segment_clear_media", "Clear media"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Delete segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Min angle"),
+    ("segment_limit_max", "Max angle"),
+    ("segment_limit_off", "Off"),
+    ("segment_limit_clear", "Clear limits"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX clips"),
     ("fx_no_clips", "No FX clips in this project."),
@@ -9328,6 +9514,15 @@ static HR: &[(&str, &str)] = &[
     ("clips_session_stale", "Editing {name} · clip changed — exit and re-enter"),
     ("clips_session_no_frames", "Editing {name} · no frames"),
     ("clips_session_frame", "Editing {name} · frame {frame} of {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "States for {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: timeline poses (no clip linked)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (offset {offset}, speed {speed})"),
+    ("clips_states_none", "No states keyed — the figure plays its base clip or timeline poses throughout."),
+    ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+    ("clips_states_clear", "Clear state key"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Edit"),
@@ -9898,6 +10093,11 @@ static HU: &[(&str, &str)] = &[
     ("segment_clear_media", "Clear media"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Delete segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Min angle"),
+    ("segment_limit_max", "Max angle"),
+    ("segment_limit_off", "Off"),
+    ("segment_limit_clear", "Clear limits"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX clips"),
     ("fx_no_clips", "No FX clips in this project."),
@@ -10040,6 +10240,15 @@ static HU: &[(&str, &str)] = &[
     ("clips_session_stale", "Editing {name} · clip changed — exit and re-enter"),
     ("clips_session_no_frames", "Editing {name} · no frames"),
     ("clips_session_frame", "Editing {name} · frame {frame} of {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "States for {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: timeline poses (no clip linked)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (offset {offset}, speed {speed})"),
+    ("clips_states_none", "No states keyed — the figure plays its base clip or timeline poses throughout."),
+    ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+    ("clips_states_clear", "Clear state key"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Edit"),
@@ -10610,6 +10819,11 @@ static ID: &[(&str, &str)] = &[
     ("segment_clear_media", "Clear media"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Delete segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Min angle"),
+    ("segment_limit_max", "Max angle"),
+    ("segment_limit_off", "Off"),
+    ("segment_limit_clear", "Clear limits"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX clips"),
     ("fx_no_clips", "No FX clips in this project."),
@@ -10752,6 +10966,15 @@ static ID: &[(&str, &str)] = &[
     ("clips_session_stale", "Editing {name} · clip changed — exit and re-enter"),
     ("clips_session_no_frames", "Editing {name} · no frames"),
     ("clips_session_frame", "Editing {name} · frame {frame} of {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "States for {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: timeline poses (no clip linked)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (offset {offset}, speed {speed})"),
+    ("clips_states_none", "No states keyed — the figure plays its base clip or timeline poses throughout."),
+    ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+    ("clips_states_clear", "Clear state key"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Edit"),
@@ -11322,6 +11545,11 @@ static IT: &[(&str, &str)] = &[
     ("segment_clear_media", "Cancella media"),
     ("segment_add", "+ Segmento"),
     ("segment_delete", "Elimina segmento"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Angolo min."),
+    ("segment_limit_max", "Angolo max."),
+    ("segment_limit_off", "Disattivato"),
+    ("segment_limit_clear", "Cancella limiti"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "Clip FX"),
     ("fx_no_clips", "Nessuna clip FX in questo progetto."),
@@ -11464,6 +11692,15 @@ static IT: &[(&str, &str)] = &[
     ("clips_session_stale", "Modifica di {name} · la clip è cambiata: esci e rientra"),
     ("clips_session_no_frames", "Modifica di {name} · nessun fotogramma"),
     ("clips_session_frame", "Modifica di {name} · fotogramma {frame} di {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "Stati di {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: pose della linea temporale (nessuna clip collegata)"),
+    ("clips_states_key", "Fotogramma {frame}: {clip}"),
+    ("clips_states_key_fx", "Fotogramma {frame}: {clip} (scostamento {offset}, velocità {speed})"),
+    ("clips_states_none", "Nessuno stato impostato — la figura riproduce per intero la sua clip base o le pose della linea temporale."),
+    ("clips_states_key_here", "Chiave alla testina (fotogramma {frame}):"),
+    ("clips_states_clear", "Cancella chiave di stato"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Modifica"),
@@ -12034,6 +12271,11 @@ static KK: &[(&str, &str)] = &[
     ("segment_clear_media", "Clear media"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Delete segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Min angle"),
+    ("segment_limit_max", "Max angle"),
+    ("segment_limit_off", "Off"),
+    ("segment_limit_clear", "Clear limits"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX clips"),
     ("fx_no_clips", "No FX clips in this project."),
@@ -12176,6 +12418,15 @@ static KK: &[(&str, &str)] = &[
     ("clips_session_stale", "Editing {name} · clip changed — exit and re-enter"),
     ("clips_session_no_frames", "Editing {name} · no frames"),
     ("clips_session_frame", "Editing {name} · frame {frame} of {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "States for {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: timeline poses (no clip linked)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (offset {offset}, speed {speed})"),
+    ("clips_states_none", "No states keyed — the figure plays its base clip or timeline poses throughout."),
+    ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+    ("clips_states_clear", "Clear state key"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Edit"),
@@ -12746,6 +12997,11 @@ static NB: &[(&str, &str)] = &[
     ("segment_clear_media", "Clear media"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Delete segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Min angle"),
+    ("segment_limit_max", "Max angle"),
+    ("segment_limit_off", "Off"),
+    ("segment_limit_clear", "Clear limits"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX clips"),
     ("fx_no_clips", "No FX clips in this project."),
@@ -12888,6 +13144,15 @@ static NB: &[(&str, &str)] = &[
     ("clips_session_stale", "Editing {name} · clip changed — exit and re-enter"),
     ("clips_session_no_frames", "Editing {name} · no frames"),
     ("clips_session_frame", "Editing {name} · frame {frame} of {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "States for {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: timeline poses (no clip linked)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (offset {offset}, speed {speed})"),
+    ("clips_states_none", "No states keyed — the figure plays its base clip or timeline poses throughout."),
+    ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+    ("clips_states_clear", "Clear state key"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Edit"),
@@ -13458,6 +13723,11 @@ static NL: &[(&str, &str)] = &[
     ("segment_clear_media", "Clear media"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Delete segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Min angle"),
+    ("segment_limit_max", "Max angle"),
+    ("segment_limit_off", "Off"),
+    ("segment_limit_clear", "Clear limits"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX clips"),
     ("fx_no_clips", "No FX clips in this project."),
@@ -13600,6 +13870,15 @@ static NL: &[(&str, &str)] = &[
     ("clips_session_stale", "Editing {name} · clip changed — exit and re-enter"),
     ("clips_session_no_frames", "Editing {name} · no frames"),
     ("clips_session_frame", "Editing {name} · frame {frame} of {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "States for {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: timeline poses (no clip linked)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (offset {offset}, speed {speed})"),
+    ("clips_states_none", "No states keyed — the figure plays its base clip or timeline poses throughout."),
+    ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+    ("clips_states_clear", "Clear state key"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Edit"),
@@ -14170,6 +14449,11 @@ static PL: &[(&str, &str)] = &[
     ("segment_clear_media", "Clear media"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Delete segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Min angle"),
+    ("segment_limit_max", "Max angle"),
+    ("segment_limit_off", "Off"),
+    ("segment_limit_clear", "Clear limits"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX clips"),
     ("fx_no_clips", "No FX clips in this project."),
@@ -14312,6 +14596,15 @@ static PL: &[(&str, &str)] = &[
     ("clips_session_stale", "Editing {name} · clip changed — exit and re-enter"),
     ("clips_session_no_frames", "Editing {name} · no frames"),
     ("clips_session_frame", "Editing {name} · frame {frame} of {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "States for {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: timeline poses (no clip linked)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (offset {offset}, speed {speed})"),
+    ("clips_states_none", "No states keyed — the figure plays its base clip or timeline poses throughout."),
+    ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+    ("clips_states_clear", "Clear state key"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Edit"),
@@ -14882,6 +15175,11 @@ static PT_BR: &[(&str, &str)] = &[
     ("segment_clear_media", "Limpar mídia"),
     ("segment_add", "+ Segmento"),
     ("segment_delete", "Excluir segmento"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Ângulo mín."),
+    ("segment_limit_max", "Ângulo máx."),
+    ("segment_limit_off", "Desligado"),
+    ("segment_limit_clear", "Limpar limites"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "Clipes FX"),
     ("fx_no_clips", "Nenhum clipe FX neste projeto."),
@@ -15024,6 +15322,15 @@ static PT_BR: &[(&str, &str)] = &[
     ("clips_session_stale", "Editando {name} · o clipe mudou — saia e entre novamente"),
     ("clips_session_no_frames", "Editando {name} · sem quadros"),
     ("clips_session_frame", "Editando {name} · quadro {frame} de {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "Estados de {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: poses da linha do tempo (nenhum clipe vinculado)"),
+    ("clips_states_key", "Quadro {frame}: {clip}"),
+    ("clips_states_key_fx", "Quadro {frame}: {clip} (deslocamento {offset}, velocidade {speed})"),
+    ("clips_states_none", "Nenhum estado definido — a figura reproduz seu clipe base ou as poses da linha do tempo do início ao fim."),
+    ("clips_states_key_here", "Chave no cursor (quadro {frame}):"),
+    ("clips_states_clear", "Limpar chave de estado"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "Arquivo"),
     ("menu_edit", "Editar"),
@@ -15594,6 +15901,11 @@ static RO: &[(&str, &str)] = &[
     ("segment_clear_media", "Clear media"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Delete segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Min angle"),
+    ("segment_limit_max", "Max angle"),
+    ("segment_limit_off", "Off"),
+    ("segment_limit_clear", "Clear limits"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX clips"),
     ("fx_no_clips", "No FX clips in this project."),
@@ -15736,6 +16048,15 @@ static RO: &[(&str, &str)] = &[
     ("clips_session_stale", "Editing {name} · clip changed — exit and re-enter"),
     ("clips_session_no_frames", "Editing {name} · no frames"),
     ("clips_session_frame", "Editing {name} · frame {frame} of {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "States for {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: timeline poses (no clip linked)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (offset {offset}, speed {speed})"),
+    ("clips_states_none", "No states keyed — the figure plays its base clip or timeline poses throughout."),
+    ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+    ("clips_states_clear", "Clear state key"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Edit"),
@@ -16306,6 +16627,11 @@ static RU: &[(&str, &str)] = &[
     ("segment_clear_media", "Очистить медиа"),
     ("segment_add", "+ Сегмент"),
     ("segment_delete", "Удалить сегмент"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Мин. угол"),
+    ("segment_limit_max", "Макс. угол"),
+    ("segment_limit_off", "Выкл."),
+    ("segment_limit_clear", "Сбросить ограничения"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX-клипы"),
     ("fx_no_clips", "В этом проекте нет FX-клипов."),
@@ -16448,6 +16774,15 @@ static RU: &[(&str, &str)] = &[
     ("clips_session_stale", "Редактирование {name} · клип изменился — выйдите и войдите снова"),
     ("clips_session_no_frames", "Редактирование {name} · нет кадров"),
     ("clips_session_frame", "Редактирование {name} · кадр {frame} из {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "Состояния: {name}"),
+    ("clips_states_base", "База: {clip}"),
+    ("clips_states_no_base", "База: позы шкалы времени (клип не привязан)"),
+    ("clips_states_key", "Кадр {frame}: {clip}"),
+    ("clips_states_key_fx", "Кадр {frame}: {clip} (смещение {offset}, скорость {speed})"),
+    ("clips_states_none", "Состояния не заданы — фигура всё время проигрывает базовый клип или позы шкалы времени."),
+    ("clips_states_key_here", "Ключ по курсору (кадр {frame}):"),
+    ("clips_states_clear", "Удалить ключ состояния"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "Файл"),
     ("menu_edit", "Правка"),
@@ -17018,6 +17353,11 @@ static SL: &[(&str, &str)] = &[
     ("segment_clear_media", "Clear media"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Delete segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Min angle"),
+    ("segment_limit_max", "Max angle"),
+    ("segment_limit_off", "Off"),
+    ("segment_limit_clear", "Clear limits"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX clips"),
     ("fx_no_clips", "No FX clips in this project."),
@@ -17160,6 +17500,15 @@ static SL: &[(&str, &str)] = &[
     ("clips_session_stale", "Editing {name} · clip changed — exit and re-enter"),
     ("clips_session_no_frames", "Editing {name} · no frames"),
     ("clips_session_frame", "Editing {name} · frame {frame} of {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "States for {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: timeline poses (no clip linked)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (offset {offset}, speed {speed})"),
+    ("clips_states_none", "No states keyed — the figure plays its base clip or timeline poses throughout."),
+    ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+    ("clips_states_clear", "Clear state key"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Edit"),
@@ -17730,6 +18079,11 @@ static TR: &[(&str, &str)] = &[
     ("segment_clear_media", "Clear media"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Delete segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Min angle"),
+    ("segment_limit_max", "Max angle"),
+    ("segment_limit_off", "Off"),
+    ("segment_limit_clear", "Clear limits"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX clips"),
     ("fx_no_clips", "No FX clips in this project."),
@@ -17872,6 +18226,15 @@ static TR: &[(&str, &str)] = &[
     ("clips_session_stale", "Editing {name} · clip changed — exit and re-enter"),
     ("clips_session_no_frames", "Editing {name} · no frames"),
     ("clips_session_frame", "Editing {name} · frame {frame} of {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "States for {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: timeline poses (no clip linked)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (offset {offset}, speed {speed})"),
+    ("clips_states_none", "No states keyed — the figure plays its base clip or timeline poses throughout."),
+    ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+    ("clips_states_clear", "Clear state key"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Edit"),
@@ -18442,6 +18805,11 @@ static UK: &[(&str, &str)] = &[
     ("segment_clear_media", "Clear media"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Delete segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Min angle"),
+    ("segment_limit_max", "Max angle"),
+    ("segment_limit_off", "Off"),
+    ("segment_limit_clear", "Clear limits"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX clips"),
     ("fx_no_clips", "No FX clips in this project."),
@@ -18584,6 +18952,15 @@ static UK: &[(&str, &str)] = &[
     ("clips_session_stale", "Editing {name} · clip changed — exit and re-enter"),
     ("clips_session_no_frames", "Editing {name} · no frames"),
     ("clips_session_frame", "Editing {name} · frame {frame} of {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "States for {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: timeline poses (no clip linked)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (offset {offset}, speed {speed})"),
+    ("clips_states_none", "No states keyed — the figure plays its base clip or timeline poses throughout."),
+    ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+    ("clips_states_clear", "Clear state key"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Edit"),
@@ -19154,6 +19531,11 @@ static VI: &[(&str, &str)] = &[
     ("segment_clear_media", "Clear media"),
     ("segment_add", "+ Segment"),
     ("segment_delete", "Delete segment"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "Min angle"),
+    ("segment_limit_max", "Max angle"),
+    ("segment_limit_off", "Off"),
+    ("segment_limit_clear", "Clear limits"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "FX clips"),
     ("fx_no_clips", "No FX clips in this project."),
@@ -19296,6 +19678,15 @@ static VI: &[(&str, &str)] = &[
     ("clips_session_stale", "Editing {name} · clip changed — exit and re-enter"),
     ("clips_session_no_frames", "Editing {name} · no frames"),
     ("clips_session_frame", "Editing {name} · frame {frame} of {total}"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "States for {name}"),
+    ("clips_states_base", "Base: {clip}"),
+    ("clips_states_no_base", "Base: timeline poses (no clip linked)"),
+    ("clips_states_key", "Frame {frame}: {clip}"),
+    ("clips_states_key_fx", "Frame {frame}: {clip} (offset {offset}, speed {speed})"),
+    ("clips_states_none", "No states keyed — the figure plays its base clip or timeline poses throughout."),
+    ("clips_states_key_here", "Key at playhead (frame {frame}):"),
+    ("clips_states_clear", "Clear state key"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "File"),
     ("menu_edit", "Edit"),
@@ -19866,6 +20257,11 @@ static ZH_HANS: &[(&str, &str)] = &[
     ("segment_clear_media", "清除媒体"),
     ("segment_add", "+ 段"),
     ("segment_delete", "删除段"),
+    // Joint limits (Wave X, IA-X6-1)
+    ("segment_limit_min", "最小角度"),
+    ("segment_limit_max", "最大角度"),
+    ("segment_limit_off", "关"),
+    ("segment_limit_clear", "清除限制"),
     // FX clips panel (Wave T, IA-T5-1)
     ("fx_title", "特效片段"),
     ("fx_no_clips", "此项目中没有特效片段。"),
@@ -20008,6 +20404,15 @@ static ZH_HANS: &[(&str, &str)] = &[
     ("clips_session_stale", "正在编辑 {name} · 片段已更改——请退出后重新进入"),
     ("clips_session_no_frames", "正在编辑 {name} · 无帧"),
     ("clips_session_frame", "正在编辑 {name} · 第 {frame} 帧,共 {total} 帧"),
+    // Figure states (Wave X, IA-X3-1)
+    ("clips_states_figure", "{name} 的状态"),
+    ("clips_states_base", "基础:{clip}"),
+    ("clips_states_no_base", "基础:时间轴姿态(未链接片段)"),
+    ("clips_states_key", "帧 {frame}:{clip}"),
+    ("clips_states_key_fx", "帧 {frame}:{clip}(偏移 {offset},速度 {speed})"),
+    ("clips_states_none", "未设置状态键 — 人物全程播放其基础片段或时间轴姿态。"),
+    ("clips_states_key_here", "在播放头处设置关键帧(帧 {frame}):"),
+    ("clips_states_clear", "清除状态键"),
     // Menus (Wave U, IA-U3-1)
     ("menu_file", "文件"),
     ("menu_edit", "编辑"),

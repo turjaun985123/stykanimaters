@@ -1528,6 +1528,12 @@ mod tests {
                     y: 0.0,
                     scale: 1.0,
                     angle: 0.0,
+                    opacity: 1.0,
+                    flip_x: false,
+                    flip_y: false,
+                    scale_y: 0.0,
+                    pivot_x: 0.5,
+                    pivot_y: 0.5,
                 })
                 .collect(),
         });
@@ -1844,6 +1850,12 @@ mod tests {
                     y,
                     scale: 1.5,
                     angle: 30.0,
+                    opacity: 1.0,
+                    flip_x: false,
+                    flip_y: false,
+                    scale_y: 0.0,
+                    pivot_x: 0.5,
+                    pivot_y: 0.5,
                 })
                 .collect(),
         });
@@ -2156,6 +2168,12 @@ mod tests {
                     y,
                     scale: 1.25,
                     angle,
+                    opacity: 1.0,
+                    flip_x: false,
+                    flip_y: false,
+                    scale_y: 0.0,
+                    pivot_x: 0.5,
+                    pivot_y: 0.5,
                 })
                 .collect(),
         });

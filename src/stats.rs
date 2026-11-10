@@ -185,6 +185,7 @@ mod tests {
             def: FigureDef::humanoid(),
             hidden: false,
             clip: None,
+            states: Vec::new(),
             locked: false,
             opacity: 1.0,
         }
@@ -359,6 +360,7 @@ mod motion_tests {
             def: FigureDef::humanoid(),
             hidden: false,
             clip: None,
+            states: Vec::new(),
             locked: false,
             opacity: 1.0,
         }
