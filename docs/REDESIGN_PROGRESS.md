@@ -1581,3 +1581,549 @@ or parity tool may alter what an MCP save writes
 beyond what the editor itself writes. The five
 standing decisions stay exactly as they are
 until the user rules on them.
+
+### 6.11 Wave P — the Rune line's own wave: Phase O close-out, core soundness, subtitles arrive (2026-11-10)
+
+Ordered 2026-11-10 (09:34 +06): "run nxt wave
+using 50 agent improve master" — hours after
+master was restored to this line (`0b75051`,
+the Focused Wave close-out), with the Tauri
+line parked on branch `tauri` — untouched by
+this wave (the user deleted that branch
+mid-wave, on the same day; nothing in this
+wave depended on it). Fifty agents, five squads, one
+owner per file, the session integrator wiring
+the shared files (board:
+`~/workspace/wave-p/BOARD.md`; per-agent
+findings: `~/workspace/wave-p/findings/`). The
+themes: close the Phase O "feel & finish"
+charter on this shell; land the core soundness
+fixes the Tauri line proved against this
+shared ancestry (bend permutation,
+missing-audio surfaces, `format_version`);
+bring subtitles to the Rune line; and audit
+MCP/shell parity. Two honesty notes govern
+everything below. First, this section was
+written late in the wave from the findings
+then on disk, and was brought up to date in
+Wave Q's docs pass (Q11) from all 40 findings
+now filed — p1, p2, p3, p4, p6, p7, p8, p9,
+p10, p12, p13, p14, p15, p16, p17, p18, p19,
+p20, p21, p22, p23, p24, p25, p26, p27, p29,
+p30, p32, p34, p35, p36, p37, p38, p39, p40,
+p41, p42, p45, p46, p47. The ten never filed
+(p5, p11, p28, p31, p33, p43, p44, p48, p49,
+p50) are named as such where their topics
+arise; nothing is claimed for them beyond
+what the tree itself shows. The user halted
+the wave at 09:49 +06, before integration;
+Wave Q (20 agents, ordered the same morning)
+finishes the stopped slices and performs the
+wiring this wave filed as integrator actions
+— this update is part of that pass. Second,
+the wave's work sits in the working tree,
+uncommitted: every status below is
+IMPLEMENTED (in tree) or VERIFIED
+ALREADY-LANDED (an audit outcome), and **CI
+is awaiting integration** — the only completed
+master run observed via `gh` is
+**42749543075** (Build, Test & Binary,
+SUCCESS), which covers HEAD `0b75051` itself,
+not Wave P.
+
+**Phase O feel & finish (Squad 1) — mostly
+already here, and now proven so.** The squad's
+recurring result is that the charter's
+premises predate their own remedies. The p05
+overflow plan (O-1..O-9) measured a tree from
+before the UI mission's repairs: P1 (O-1..O-3),
+P2 (O-4..O-6) and P3 (O-7..O-9) verified every
+named row in the tree site by site — the
+settings language grid wraps with its
+load-bearing `.w_full()`, the layers row has
+its two-line anatomy, the draw / graph /
+scene / 3D / FX / playback / pose / camera
+rows all wrap or split inside the 316 pt
+budget — with **zero code changes** except
+O-5's one genuine remainder: `keyframe-actions`
+and `keyframe-clipboard` had no wrap at HEAD
+(the Wave 1 commit message overclaimed them);
+the two `.flex_wrap()` calls (+11 lines,
+`src/rune_sec/keyframe_tools.rs`) are in the
+tree. The §2 scan tool
+(`scripts/overflow_scan.py`) is itself verified
+at spec, self-test green. What remains for
+O-1..O-9 is proof, not code: the §2 scan over
+the next headless dispatch's dumps. P43's
+close-out pass was stopped at the halt with
+partial edits to the script in the tree; the
+extended scan (the scene trees P2/P3/P4
+handed off, plus the subtitle lane's) is
+Wave Q's Q12. P7 and P8 audited every Phase N
+bare line (panels A–M, N–Z, plus Home): all
+already render the kit's
+`design::empty_state`, landed by UI mission
+Wave 4 — audit and proof only, no code. P10's
+motion census found every animated surface
+already on the charter's two spring pairs
+(`pair::SNAP` / `pair::SETTLE` — four explicit
+`.transition(` sites plus the engine default);
+zero conversions; the toggle knob's teleport
+(the pinned Rune rev cannot animate a layout
+offset) and the toast expiry's linear fade
+(Phase N behaviour, charter-preserved) are
+named, not faked. P12's charter sweep closed
+the unowned remainder: the zero-consumer kit
+items were already decided (`toggle` retired,
+`text_muted` kept as the kit's muted-text
+role), the remaining kit classes carry their
+states, the Esc overlay order (palette, then
+menus) is the dispatch's own order and is
+test-pinned, every shortcut hint shown in the
+UI names a real binding, and copy is en-GB
+with mono numerics via the kit stepper. Its
+two open items are integrator actions,
+recorded in the remainders below. The rest of
+the squad has since filed. **P4 —
+interaction states:** four surfaces lacked a
+state the charter requires — command-palette
+result rows and fx-lane rows had no press
+state, scene background swatches no hover or
+press, the legacy timeline chips no press;
+all four fixed in the overlay surfaces only
+(+107 lines, zero keys). Focus remains an
+engine limit, named not faked: the Rune `El`
+has no button focus state to draw. **P6 —
+feedback completeness:** a transitive census
+(333 mutating core ops) found the shell
+already reports nearly everything; the one
+silent class was stage pose and camera drags
+ending without a word — `end_drag` now posts
+the family's recap on a real move only, and
+stays silent on a no-move press. **P9 — Esc
+discipline:** three defects in the shell's
+key routing, all fixed in `src/main.rs` with
+nine pins — the Home rename field was missing
+from the text-focus guard, so stage shortcuts
+fired mid-typing; menu Esc sat below the
+text-field bail and could leave a menu open;
+and the two armed confirm gates had no
+keyboard exit at all, where the new Esc tier
+now disarms them topmost-first. Zero key
+loss. Findings for P5 (inputs / selects /
+steppers) and P11 (the settings-language
+remainder) were never filed — both slices
+were stopped at the halt and are finished in
+Wave Q (Q8, Q9).
+
+**Core soundness (Squad 2).** **P13 — the
+bend corruption is fixed.** `layers::move_figure`
+permuted figures and poses but never
+`frame.bends`, so any layer reorder silently
+re-paired every figure with another figure's
+bend rows — the Tauri Wave J bug class,
+present in this ancestry. The fix pads sparse
+bend tables to the figure count (an absent row
+and an empty row are semantically identical:
+both read as straight) and permutes the rows
+with the figures; five pins cover full,
+sparse, multi-step, bend-free and
+undo-restore cases. One adjacent hazard was
+reported with it (outside P13's surface):
+`EditorCore::move_figure` (editor.rs) swapped
+bend rows only when both indices held rows,
+so a single-step swap across the
+padded-prefix boundary could strand a row.
+**P46 has since fixed it** with the same
+pad-then-swap remedy, and its regression
+suite (`tests/wave_p_e2e.rs`, seven tests)
+pins bend pairing through both move ops at
+every boundary shape. **P14 —
+missing audio now surfaces at open.** Clips
+were never dropped at load; they were
+silently dead at the consumers. One shared
+query (`audio::missing_audio_clips` — unmuted
+clips whose files are absent, in clip order)
+now feeds a runtime `EditorCore::missing_audio`
+report, refreshed at every project swap,
+undo/redo and converter import, and the three
+load statuses name the missing files (a clean
+load's status is byte-identical to before).
+The one definition dispute — whether a muted
+clip's missing file is reported — was settled
+by the parity rule: playback and the export
+mix both treat a muted clip's absence as no
+loss, so it is not reported; **P15 — the
+export side, since filed and completed:**
+missing files now surface on MP4 export too
+— the full and range outcomes carry them
+(`Mp4ExportOutcome::missing_audio`, on the
+same shared query), the editor status and
+the export panel's range arm speak them, and
+the MCP replies gain a `missing_audio` field
+only when non-empty, so an all-present export
+answers byte-identically to before. **P16 + P23 — `format_version`.** The
+field is in the tree (`src/model.rs`:
+`format_version: u32`, serde default
+`FORMAT_VERSION_CURRENT` = 1, beside its doc
+rule — no loader-side version check; fields
+are absorbed by serde defaults, so legacy
+files load as current, a stamp of 0 loads
+untouched, and a newer stamp still loads).
+P16's seven behaviour pins are written
+against the contract; the module they waited
+on (P23's, below) has since landed in the
+tree, so the pins compile against it — CI is
+the proof. **P20 — figure-library rename
+pinned, no divergence:** this tree's rename
+takes zero undo steps by design, the Tauri
+settlement; five new pins cover the refusal
+set and the op level, and the one deliberate
+asymmetry (MCP refuses a missing entry; the
+core op settles silently for a stale slot) is
+pinned on both sides as documented behaviour.
+**P22 — round-trip hardening:** save→load
+pins over a fixture exercising all 24
+top-level `Project` fields, now including the
+subtitle fields; **no lossy field found** —
+the load path is a bare `from_str` with no
+transform on it, and the suite's per-section
+diff format is the evidence mechanism if CI
+ever disagrees. **P21 — media parity: SPLIT
+verdict, STOP taken.** Media *images*
+(segment images + sprites) are settled: one
+evaluated stream (`media::media_items`) feeds
+stage, raster and SVG, and no channel-driven
+visibility / opacity / colour targets exist
+on this tree for any surface to miss.
+Segment *text* diverges: the stage re-derives
+it via `stage_text::text_geometry` from the
+channelled evaluation (`positions_f`), so
+under any graph channel the stage's text sits
+on the channelled segment while both exports
+place it on the un-channelled one; the stage
+also applies carrier style opacity (the
+exported `MediaItem::Text` has no alpha
+field) and honours solo (exports read
+`fig.hidden` only). Per the parity rule P21
+changed no code; the divergence was routed
+to P17 (the export-funnel question — the same
+two-evaluations root). **P17 has since
+settled it:** one rule at each funnel head —
+when `project.channels` is non-empty, poses
+and defs come from `graph::apply_channels`,
+else the raw path runs verbatim — applied in
+`render_frame_at`, `write_frame_svg` and
+`media_items` (the single media funnel, so
+segment text rides the channelled segment on
+every surface now; the stage's own segment
+images and trail lines, which sat on the raw
+segment too, are fixed by the same swap).
+Channel-less projects render byte-identically;
+pins cover the raster, SVG and media forms.
+What remains open from P21's audit is
+narrower: segment-text *alpha* parity —
+`MediaItem::Text` has no alpha field, so that
+one is a media-model change, not a funnel
+fix. **P18 — zero-length parity:** the
+audit's one settled cell (a plain zero-length
+segment paints a disc of radius t/2 in the
+near colour, on all three surfaces) is pinned
+in `tests/wave_p_zero_length.rs` and the
+stage tests; every other cell disagrees
+across raster / SVG / stage, so per the
+parity rule no code changed and the
+disagreement matrix is tabled in p18.md for
+a settlement decision — with its adjacent
+finding that polygon *fill* parity is broken
+at every length on this tree (the stage
+fills polygons; both exporters stroke the
+outline), so the zero-length polygon cell
+should be settled with polygons generally,
+not alone. **P19 — the window-close guard:**
+the bypass is proven, and structural — the
+pinned Rune framework closes unconditionally
+after its `on_close` hook and offers no veto,
+so the fail-closed settlement is
+loss-lessness, not refusal:
+`EditorCore::flush_recovery_on_close` (in the
+tree) writes the recovery snapshot
+immediately whenever counted edits stand
+outside it, closing the 25-edit autosave
+window a close could otherwise drop. The
+hook registration itself is IA-P19-1 (exact
+code in p19.md), applied by Wave Q's Q2; the
+pin file (`tests/wave_p_close_guard.rs`)
+carries one routing pin that is red until
+that wiring lands, deliberately, so the
+bypass cannot be integrated away silently.
+
+**Subtitles arrive (Squad 3) — built against
+contract 1, sequenced on P23.** The contract
+shapes are in the tree where P23 has landed:
+`Project::subtitles` + `Project::subtitle_style`
+(`src/model.rs`, serde defaults reproducing
+the plain default look) beside
+`format_version`. Around them, written
+against the contract's exact API: **P24** —
+SRT discipline pins (8 tests: frame-exact
+round trips at 24 fps, on-grid and off-grid —
+frame 7 exports as `00:00:00,292`; bad blocks
+skipped; zero yield refuses; the parser
+returns file order and the caller sorts; no
+error wording asserted, by design). **P25** —
+WebVTT pins (5 tests: a missing header
+refuses whole-file even for parseable cues;
+STYLE blocks are skipped, not mined; SRT and
+VTT imports of the same cues agree; the empty
+project exports exactly `"WEBVTT\n\n"` and
+refuses re-import). **P27** — SVG emission
+landed in `src/svg.rs` (`append_subtitles`:
+stacked `<text>`, styled, painted last, stage
+coordinates, cue-free output byte-identical),
+with 7 pins fixing the bands — 572/548
+bottom, 28/52 top on an 800×600 stage at
+scale 1.0. **P30** — the MCP file-IO module
+(`src/mcp_subtitle_io.rs`):
+`subtitle_export_srt` / `subtitle_export_vtt`
+/ `subtitle_import_srt` /
+`subtitle_import_vtt`, path-based; imports
+parse before any mutation and report
+`changed: false` with no snapshot when the
+file matches the current cues; census delta
++4 (370 → 374 from P30 alone), with exact IAs
+filed for the `lib.rs` / `mcp.rs` /
+`docs/MCP.md` / gate wiring. The honest
+centre of the squad was sequencing, and it
+has since resolved in the tree: **P23
+landed** — `src/subtitles.rs` (the cue and
+style types, `sort_subtitle_cues`,
+`live_subtitle_cues`, the SRT/VTT converters
+under the contract's refusal discipline, and
+the shared layout helpers the other surfaces
+consume) plus the EditorCore cue ops in
+`src/editor.rs` (add / update / delete /
+style — one undo step each, refusals spending
+nothing). What remained outstanding at the
+halt was registration — the `lib.rs` module
+line and the `all_tools()` extends — which
+Wave Q's Q1 performs. Around the core, the
+rest of the squad landed before the halt:
+**P26** — raster burn-in at the tail of
+`render_frame_at`, riding the one media
+funnel (so every raster format inherits it),
+full style colours honoured, six pins.
+**P29** — the five cue/style MCP tools
+(`src/mcp_subtitle_tools.rs`; handlers never
+snapshot — the core ops spend the step),
+taking the census delta to +9 combined with
+P30. **P32** — the timeline lane
+(`src/rune_sec/subtitle_lane.rs`: cue blocks
+on the clips lane's own span geometry,
+sub-row packing for overlaps, click-to-select
+seeking the cue start), its shell wiring
+filed as IAs for Wave Q. **P34** — the e2e
+suite's legs 1–3 (legacy load, core round
+trip, export presence), with leg 4 (the MCP
+round trip) filed as a drop-in test for
+wiring time. Not landed in this wave: P28's
+stage draw (partial edits in `stage_text.rs`
+/ `stage_view.rs` at the halt; Wave Q's Q6
+completes it), P31's Audio-workspace panel
+(Wave Q's Q7 builds it) and P33's headless
+pixel proof (Wave Q's Q13). Two parity notes
+ride with the squad: the layout maths landed
+inline in `svg.rs` and `export.rs` before
+P23's helpers existed (IA-P27-1 / IA-P26-1
+swap in the shared helpers, output unchanged
+— Wave Q's Q17), so raster↔SVG band parity
+is pinned-by-construction until CI compares
+them; and P47's determinism suite (Squad 5:
+repeat-render, A-B-A and interleave
+byte-identity pins over the raster path, the
+render path audited clean of clocks, RNG and
+parallelism by inspection) records that its
+subtitle sensitivity leg waited on P23 + P26
+— both now in the tree; the leg itself is
+Wave Q follow-through (Q20).
+
+**MCP and shell parity (Squad 4).** **P36 —
+camera parity holds; no gap proven, nothing
+built.** Every GUI camera capability on this
+tree has an MCP twin, including the stale-key
+class the Tauri line tripped on: value writes
+are timeline-bounded on both surfaces (the
+MCP `check_frame` refusal matches GUI
+reachability exactly), while per-key delete
+at a past-end frame is reachable — and
+unbounded — on both. The one nuance is
+documented, not a gap: `set_camera_follow`
+snapshots when the value changes where the
+GUI writes snapshot-free (referred to P41's
+undo sample). **P39 — the live-MCP
+Host/Origin gate is built**
+(`src/live_mcp.rs`). It was absent at HEAD:
+the loopback bind stopped remote machines
+but not a local browser page (a foreign
+`Origin` on a cross-origin fetch, or DNS
+rebinding with a foreign `Host`). Now
+`host_origin_allowed` runs before routing,
+before the body is read, before anything is
+queued — every `Host` value must be a
+loopback authority and every present `Origin`
+a loopback http/https origin, else HTTP 403.
+It is validation, not authentication: no
+token exists, and the module docs keep the
+standing no-auth warning in full. **P40 —
+the unknown-tool contract already holds**
+(Wave 11 ancestry; both transports share the
+one dispatch): `-32602`, `unknown tool:
+{name}`, no `result` member. P40 added the
+one pin at full contract strength — near-miss
+names plus the byte-exact message, with an
+unmoved-state witness. The rest of the squad has since filed.
+**P35 — the census is true:** `docs/MCP.md`'s
+370 verified three ways (the census script,
+the in-tree completeness pin, and a
+schema-level diff of every row — 369 of 370
+exact; the one garbled row, `fig3_set_camera`,
+fixed in the doc). Its IA-2 names the trap
+the new modules set: the census and gate
+extractors read three source files and are
+blind to modules with their own `tools()`, so
+the extractor extension must land with the
+wiring (Wave Q's Q4/Q5). **P37 — particle
+parity:** every stored `ParticleEvent` field
+was panel-editable except one — `seed` had
+an op and an MCP tool but no panel control;
+a seed stepper now sits in the detail block
+(+2 keys, wrapping the full u32 range, one
+undo step per press), and three MCP
+descriptions that named panel controls which
+do not exist were filed as exact-text IAs.
+**P38 — the sprite clamped-delete hazard
+exists here in its worst form:** the MCP
+`sprite_delete_key` read, deleted and
+verified at the *clamped* frame while its
+success reply reported the *requested* one —
+naming frame 999 deleted frame 4's key and
+reported "frame 999". Past-end deletes now
+refuse at both layers, spending nothing, and
+two exact-frame tools join the registry
+(`sprite_move_key`, `sprite_delete_key_at`,
+`src/mcp_sprite_tools.rs`; census +2).
+**P41 — the undo-contract sample:** 13 of 14
+sampled tools compliant and pinned; one
+violation — `figure_set_color` mutates with
+zero undo steps and declares no exception,
+where its sibling `figure_recolor` spends
+one. Its disposition (declare the exception
+or add the step) is Wave Q's Q18, taken from
+the panel caller's shape. **P42 — session
+recovery:** the spurious offer is confirmed,
+with its mechanism — a clean GUI save
+refreshes the snapshot *after* writing the
+file, and the offer condition is pure mtime
+with no content comparison, so a
+byte-identical snapshot is offered as unsaved
+work; the previously caller-less
+`clear_recovery` is now wired to a Discard
+button (+1 key, `home-recovery-discard`). The
+content-comparison gate itself is
+recommended in p42.md, not built — it is a
+user decision, carried into the remainders.
+
+**Docs (P45).** This section, and a README
+correction pass limited to stale claims about
+*this* line: the MCP tool count (65 → **370**,
+the branch's own census in `docs/MCP.md`),
+the Phase C / Phase D framing of the editor
+UI and the "returns with the Phase D
+sections" asides (the `rune_sec` sections —
+FX, audio/waveform, movieclips, Home,
+settings — are in the tree), and the
+real-desktop status (the Rune shell was run
+and screenshot-verified on a real Linux
+desktop on 2026-11-08; `--snap` is exercised
+by the headless workflow on the CI runner).
+The README deliberately says nothing about
+Wave P's subtitles or fixes: none of it is
+integrated or CI-proven yet. (Wave Q's docs
+pass — Q11 — later re-verified every claim in
+this section against the tree and the 19
+findings filed after the first write, and
+updated the README's tool count to the
+in-tree census once Q1's wiring and Q4's
+census package landed there: **381**.)
+
+**Verification — awaiting CI.** Observed via
+`gh`: the latest completed run
+on master is **42749543075** (Build, Test &
+Binary) — **SUCCESS**, on `0b75051`, the
+entering HEAD. No run covers Wave P: the
+wave's changes are uncommitted in the working
+tree, and integration (Wave Q) + push are the
+integrator's next steps. The entering tree's
+own record stands as the baseline: gate
+**10/10 PASS** (`scripts/phase_j_checks.py`,
+re-run locally by P1 and P2 during the wave —
+Python, no compiling; census **827 static +
+113 dynamic = 940 unique keys**, zero lost),
+CI 42578449523 and headless 42579538663 green
+at `0b75051`. Every Wave P test count and
+census figure awaits the integration CI; the
+filed deltas (MCP +4 from P30, +5 from P29,
++2 from P38 = **381** expected) move the
+`docs/MCP.md` counts and gate floors only
+through the integrator's recount — Q4's
+census package has since landed in
+`docs/MCP.md` at 381, and the script
+ratchets are Wave Q's Q5.
+
+**Honest remainders.** (1) Ten
+findings were never filed: p5, p11, p28,
+p31, p33, p43, p44, p48, p49, p50. Their
+slices were stopped at the halt; Wave Q
+finishes them (the stage draw, the subtitles
+panel, the interaction-state and
+settings-language remainders, the headless
+proofs, the gate ratchet, the i18n wiring
+audit, toolbar density, Home thumbnails).
+(2) The subtitles stack is landed but not
+yet whole: the panel, the stage draw's
+completion, the lane/panel shell wiring and
+the registry registration are Wave Q work,
+and several Squad 3 suites are
+contract-written, not behaviour-measured —
+their first CI run is the measurement.
+(3) P18's zero-length disagreement matrix,
+and the polygon-fill divergence beneath it,
+await a settlement decision; the one agreed
+cell is pinned. Segment-text alpha parity
+(P21) likewise awaits a media-model
+decision. (4) P12's IA-1: `docs/PHASE_O.md`
+and QA_RUNE §17 belong to close-out, after
+the headless dispatch — they cannot be
+written truthfully mid-wave, and this
+section does not pretend to be them. P12's
+IA-2 (an Esc arm for the settings card) was
+answered by P9's census in code: the card is
+a toggle panel, not a scrim overlay, and the
+Esc tier treats it as such. (5) Two Wave Q
+dispositions ride with the integration:
+P41's F1 (declare `figure_set_color`'s
+zero-step exception or make it spend one —
+Q18) and P34's leg 4 (Q19). (6) P14's
+follow-up — per-clip missing-file warnings
+in the audio panel, consuming the shared
+query — is Wave Q's Q20, together with
+P47's subtitle determinism leg. (7) The
+standing user decisions from §6.10 are
+untouched and still open: project-swap undo
+semantics, white-on-accent contrast, the two
+"New project" results, the C5 waveform call;
+to them Wave P adds one more — P42's
+recommended recovery content-comparison
+gate, which would end the spurious
+byte-identical recovery offers. And sound
+remains user-verified only.

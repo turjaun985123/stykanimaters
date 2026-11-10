@@ -29,8 +29,9 @@ the `stykanimaters-linux-x86_64` artifact (both binaries —
 SHA256SUMS). Download it from the repo's Actions tab and run
 `./stykanimate-rs`. (The earlier GPUI editor was run and
 screenshot-verified this way on a real Linux desktop; the Rune
-shell's first real-desktop run is still pending — see the
-headless checks below, which are how it is verified meanwhile.)
+shell has been run and screenshot-verified the same way
+(2026-11-08) — the headless checks below are how it is
+verified day to day.)
 
 ## Run it — and check it headlessly
 
@@ -51,9 +52,9 @@ can be rendered and inspected with no display at all:
 Honest status: `--tree` and the in-process `Runtime`
 interaction tests need no GPU; `--snap` renders through the
 real GPU pipeline and needs a wgpu adapter — on a GPU-less
-machine that means a software Vulkan driver, which is
-**unproven on this project's CI runner** at the time of
-writing.
+machine that means a software Vulkan driver — which is
+what the headless CI workflow uses; its snapshot suite runs
+green there.
 
 ## Build from source
 
@@ -106,7 +107,7 @@ present and fall back to a folder-based flow when neither exists.
 - **Editor UI** — a Rune shell (`src/main.rs` +
   `src/stage_view.rs` + `src/chrome_view.rs`, declared as
   modules of the binary; the library stays UI-free). What it
-  has today (Phase C, CI-green): a stage canvas drawing **all
+  has today: a stage canvas drawing **all
   figures** at the displayed frame — per-node colours and
   thickness, shape nodes, head rings, and onion skins with the
   previous shell's exact alpha falloff — with **drag posing**
@@ -125,14 +126,15 @@ present and fall back to a folder-based flow when neither exists.
   zoom and the core status message. Everything shown calls a
   real engine op — there are no placeholder controls.
   The GPUI-era panels (workspaces, tool groups, graph, audio,
-  FX, export centre, Home…) were deleted with GPUI and are
-  being rebuilt section by section in `src/rune_sec/` —
+  FX, export centre, Home…) were deleted with GPUI and have
+  been rebuilt section by section in `src/rune_sec/` —
   figures, segment/style inspectors, camera, scene, easing,
   graph, draw, strokes, FX, audio, clips, library, 3D,
   export, home, menus, command palette, settings, help,
   toasts, keyframes/layers, text, projects and stats panels,
   plus `Runtime` interaction tests and named `--snap` scenes
-  (Phase D, in progress; see docs/GAP-ANALYSIS.md).
+  (the rebuild record is §6 of docs/REDESIGN_PROGRESS.md;
+  remaining gaps in docs/GAP-ANALYSIS.md).
 - **Timeline depth** — per-frame durations and easing (per-frame
   override of the project easing), frame copy/paste, inbetween,
   block shift, range reverse, loop ranges, motion-path display
@@ -177,21 +179,21 @@ present and fall back to a folder-based flow when neither exists.
   per-clip colour gradients (a start colour and an end
   colour), and FX clip presets saved on disk;
   plus continuous **weather** (rain, snow, fireflies, fog, storm)
-  rendered in the rasterizer and every export. (The GUI
-  creation buttons and FX panel were GPUI-era and return with
-  the Phase D sections.)
+  rendered in the rasterizer and every export. (The FX
+  creation buttons and panels are Rune shell sections in
+  `src/rune_sec/`.)
 - **Audio** — clips placed at frames, each with a per-clip
   gain; playback mixes **all** clips audible at the playhead
   at their gains, synced via `ffplay`, and MP4/WebM exports
   mix every clip into the soundtrack at its frame offset and
   gain; per-clip normalise / split
   (including split at silences) / crossfade plus pitch shift
-  and compressor (audio engine and editor ops; the GPUI-era
-  waveform panel returns with the Phase D sections), and a
-  real mixdown export.
+  and compressor (audio engine and editor ops; the audio
+  panel and waveform view are Rune shell sections in
+  `src/rune_sec/`), and a real mixdown export.
 - **Movieclips** — capture a figure's timeline as a clip
-  (the clip-session editing panel returns with the Phase D
-  sections); clip figures play their own
+  (the clip-session editing panel is
+  `src/rune_sec/clips_panel.rs`); clip figures play their own
   animation inside any project with a selectable loop mode —
   **Loop**, **PingPong** or **Once**.
 - **3D mode** (`src/fig3d.rs`) — a real 3D FK rig with Euler
@@ -222,13 +224,14 @@ present and fall back to a folder-based flow when neither exists.
   dialogs, save/load as JSON (`project.styk.json`), and
   **28 languages** (the original's 27 + Bengali) in
   `src/i18n.rs`. These library features survived the Rune
-  migration untouched; the Home panel and settings surfaces
-  that present them return with the Phase D sections.
+  migration untouched, and the Home panel and settings
+  surfaces that present them are Rune shell sections in
+  `src/rune_sec/`.
 
 ## Drive it from an AI agent (MCP)
 
 The `mcp_server` binary speaks MCP (JSON-RPC 2.0 over stdio,
-protocol `2024-11-05`) and exposes **65 tools**: project/figure/
+protocol `2024-11-05`) and exposes **381 tools**: project/figure/
 pose editing, camera (with rotation), graph keys and tangent
 presets, FX clip management and FX presets, weather (including
 storm), audio, drawing (including polygon and star shapes
@@ -293,9 +296,12 @@ configuration snippet live in [docs/MCP.md](docs/MCP.md).
   renders black screenshots), first verified 2026-11-08.
   The Rune shell can render itself offscreen (`--snap` PNG,
   `--tree` element dump) and be driven by in-process
-  `Runtime` tests — but `--snap` on a GPU-less CI runner
-  (software Vulkan) is unproven at the time of writing, and
-  the Rune shell has not yet had its first real-desktop run.
+  `Runtime` tests — `--snap` on the GPU-less CI runner
+  (software Vulkan) is exercised by the headless workflow,
+  and the shell has had its first real-desktop run
+  (user-verified by screenshot and video, 2026-11-08).
+  Desktop remains the gold check for what the headless
+  suite cannot hear — sound above all.
 
 ## Licence
 

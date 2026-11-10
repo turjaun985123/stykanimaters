@@ -186,7 +186,7 @@ jobs:
           probe() { rm -rf ./projects; HOME="$(mktemp -d)" timeout "$@"; }
           mkdir -p headless-out
           missing=0
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error subtitles-populated subtitles-top; do
             probe 60 "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
               > "headless-out/tree-$scene.log" 2>&1
             echo $? > "headless-out/tree-$scene.exit"
@@ -236,7 +236,7 @@ jobs:
           # CWD-relative, so probe() also wipes ./projects
           # before every invocation.
           probe() { rm -rf ./projects; HOME="$(mktemp -d)" timeout "$@"; }
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error subtitles-populated subtitles-top; do
             if [ ! -f "headless-out/tree-$scene.json" ]; then
               probe 60 xvfb-run -a "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
                 > "headless-out/tree-$scene-xvfb.log" 2>&1
@@ -370,6 +370,24 @@ jobs:
           probe 120 "$BIN" --snap headless-out/snap-settings-open-error.png --scene settings-open-error --at 0 \
             > headless-out/snap-settings-open-error.log 2>&1
           echo $? > headless-out/snap-settings-open-error.exit
+          # Wave P (P33): the subtitle stage draw's pixel
+          # proof inputs — the seeded cue under both
+          # anchors. Full window (the census locates the
+          # stage rect in tree-subtitles-populated.json)
+          # plus the stage crops the scene docs name as
+          # the census's band inputs.
+          probe 120 "$BIN" --snap headless-out/snap-subtitles-populated.png --scene subtitles-populated --at 0 \
+            > headless-out/snap-subtitles-populated.log 2>&1
+          echo $? > headless-out/snap-subtitles-populated.exit
+          probe 120 "$BIN" --snap headless-out/snap-subtitles-populated-crop.png --scene subtitles-populated --at 0 --crop stage \
+            > headless-out/snap-subtitles-populated-crop.log 2>&1
+          echo $? > headless-out/snap-subtitles-populated-crop.exit
+          probe 120 "$BIN" --snap headless-out/snap-subtitles-top.png --scene subtitles-top --at 0 \
+            > headless-out/snap-subtitles-top.log 2>&1
+          echo $? > headless-out/snap-subtitles-top.exit
+          probe 120 "$BIN" --snap headless-out/snap-subtitles-top-crop.png --scene subtitles-top --at 0 --crop stage \
+            > headless-out/snap-subtitles-top-crop.log 2>&1
+          echo $? > headless-out/snap-subtitles-top-crop.exit
           # Two Effects-workspace snaps, because the scene
           # names are historical: the scene NAMED fx-selected
           # selects a particle event (State::particle_selected)
@@ -454,6 +472,38 @@ jobs:
               with open(summary, "a") as fh:
                   fh.write("\n### Tree rect probe (Q3)\n\n```\n" + text + "```\n")
           PYEOF
+
+      # Wave P (P33): the subtitle census — the seeded cue
+      # pixel-proven on the stage over the snaps above
+      # (scripts/subtitle_census.py). Fail-soft like every
+      # probe step, strict internal verdict: the transcript
+      # (subtitle-census.txt) rides the artifact upload, and
+      # a FAIL line names the broken assertion.
+      - name: Subtitle census — seeded cue pixel-proven on the stage
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set +e
+          python3 scripts/subtitle_census.py headless-out
+          rc=$?
+          echo $rc > headless-out/subtitle-census.exit
+          exit $rc
+
+      # Wave Q (Q16): the Home thumbnail pixel proof. The
+      # snap step above only uploads snap-home-populated.png;
+      # this probe reads it back against the same run's tree
+      # dump and asserts the three populated rows carry
+      # rendered frame-0 thumbnails (see
+      # scripts/home_thumbnail_probe.py). Fail-soft like
+      # every probe step: the transcript is the result.
+      - name: Home thumbnail probe — do the populated rows carry renders?
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          python3 scripts/home_thumbnail_probe.py \
+            headless-out/snap-home-populated.png \
+            headless-out/tree-home-populated.json \
+            headless-out/home-thumbnail-probe.txt || true
 
       # Q4 (Wave 11): the LIVE control path. Every step
       # above probes the binary's one-shot modes (--tree /
@@ -763,7 +813,7 @@ jobs:
             echo ""
             echo "| Output | Status | Bytes |"
             echo "|---|---|---|"
-            for f in headless-out/tree-default.json headless-out/tree-frame-3.json headless-out/tree-selected.json headless-out/tree-playing.json headless-out/snap-default.png headless-out/snap-stage.png headless-out/vulkaninfo.txt headless-out/rect-probe.txt; do
+            for f in headless-out/tree-default.json headless-out/tree-frame-3.json headless-out/tree-selected.json headless-out/tree-playing.json headless-out/snap-default.png headless-out/snap-stage.png headless-out/vulkaninfo.txt headless-out/rect-probe.txt headless-out/snap-subtitles-populated.png headless-out/subtitle-census.txt; do
               if [ -f "$f" ]; then
                 echo "| $f | PRESENT | $(stat -c%s "$f") |"
               else

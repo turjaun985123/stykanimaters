@@ -491,6 +491,52 @@ extractors; their accounting home is the
 PARITY_CENSUS close-out addendum and check 9's
 two-direction documentation sync.
 
+Wave Q additions (same gate, checks 1/5/9/10 widened):
+
+- Wave P landed the subtitle + sprite MCP modules and
+  Wave Q wires them (Q1). Check 9's extractors — and
+  check 10's surface derivation, which reuses them —
+  now read TWO further families in all_tools()
+  assembly order: subtitle io (the `Tool` literals of
+  src/mcp_subtitle_io.rs's tools(), 4) and subtitle
+  tools (src/mcp_subtitle_tools.rs's tools(), 5),
+  each with the registry family's own verification.
+  The two sprite handlers (src/mcp_sprite_tools.rs)
+  take the domain-file path instead: P38 IA-2 splices
+  their Tool literals into mcp_tools::tools(), so the
+  registry reads 319 and their handlers resolve by
+  leaf name like every earlier domain handler.
+  scripts/mcp_census.py carries the same extension
+  (P35 IA-2 is discharged in both scripts).
+- Check 9 gains a surface FLOOR (MCP_SURFACE_FLOOR,
+  ledgered at the constant): doc sync compares the
+  surface to the doc, so a tool removed together with
+  its catalogue row would pass silently; the floor
+  pins the integrated truth — 381 = 44 built-ins +
+  319 registry + 9 io + 4 subtitle io + 5 subtitle
+  tools, recounted from the tree by Q5 on 2026-11-10.
+  Until the sprite splice lands the surface reads 379
+  and the floor line names the gap (the gate working,
+  per the Phase K UNWIRED precedent).
+- Check 5 prints the two new family counts beside the
+  registry count, so the numbers the docs print are
+  the gate's own reads end to end.
+- Check 1 gains the key floor (KEY_TOTAL_FLOOR,
+  ledgered at the constant): this gate's counter
+  reads 940 total keys at HEAD 0b75051 (827 static +
+  113 dynamic, 59 files) and 949 on the Wave Q tree
+  (836 + 113, 60 files) — +9 static
+  (home-recovery-discard, particles-seed-dn/up,
+  subtitle-lane, the frames-* family in
+  src/rune_sec/frame_ops.rs, step), zero dynamic
+  change, zero lost (check 2 is the per-key proof).
+  The "804 baseline" the Wave P board quotes does not
+  reproduce under this counter — it reads 940 at the
+  same HEAD — so the floor is the counter's own
+  verified number, not the board's. Q7's subtitle
+  panel had not landed at recount time; its keys can
+  only raise the total above the floor.
+
 Approximations are deliberate and documented inline:
 block capture is brace counting over comment/string-
 blanked source (the repo's established scan idiom), and
@@ -673,6 +719,25 @@ def entry_field(chunk: str) -> str | None:
 # ----------------------------------------------------------------
 # Check 1 — inventory (rune_inventory.py's logic)
 # ----------------------------------------------------------------
+
+# Wave Q key floor (Q5's recount, 2026-11-10): check 1's
+# total may not fall below the verified Wave P+Q tree.
+# This gate's own counter reads 940 total keys at HEAD
+# 0b75051 (827 static + 113 dynamic, 59 files) and 949
+# on the Wave Q tree (836 + 113, 60 files): +9 static,
+# zero dynamic change, zero lost (check 2 proves the
+# zero per key). The nine: home-recovery-discard (P42),
+# particles-seed-dn / particles-seed-up (P37),
+# subtitle-lane (P32), frames-arrange / frames-clipboard
+# / frames-dur / frames-path (src/rune_sec/frame_ops.rs)
+# and step. The "804 baseline" the Wave P board quotes
+# does not reproduce under this counter — it reads 940
+# at the same HEAD — so the floor is set to what this
+# counter verifies, per Q5's brief. Q7's subtitle panel
+# had not landed at recount time; its keys can only
+# raise the total. Ratchet UP with a new ledger line
+# when a wave's recount rises; never lower silently.
+KEY_TOTAL_FLOOR = 949
 
 
 def inventory_counts() -> tuple[int, int, int, int]:
@@ -1069,6 +1134,27 @@ def count_claims() -> list[tuple[str, int, str]]:
     else:
         n = 0
     claims.append(("MCP registry tools", n, '`Tool { name:` entries inside pub fn tools() in mcp_tools.rs'))
+
+    # Wave Q: the two subtitle families' own counts,
+    # read with the registry claim's idiom from their
+    # own files — the docs print the family split
+    # (registry 319 / io 9 / subtitle io 4 / subtitle
+    # tools 5 beside the 44 built-ins), so the gate
+    # prints every number the docs must match.
+    for rel, label in (
+        ("src/mcp_subtitle_tools.rs", "MCP subtitle tools"),
+        ("src/mcp_subtitle_io.rs", "MCP subtitle IO tools"),
+    ):
+        sub_src = blank_code(read(rel))
+        m = re.search(r"pub fn tools\s*\(\)[^{]*\{", sub_src)
+        if m:
+            inner, _ = brace_block(sub_src, sub_src.index("{", m.start()))
+            n = len(re.findall(r"Tool\s*\{\s*name\s*:", inner))
+        else:
+            n = 0
+        claims.append(
+            (label, n, f"`Tool {{ name:` entries inside pub fn tools() in {rel.rsplit('/', 1)[1]}")
+        )
 
     icon_raw = read("src/rune_sec/icon_data.rs")
     m = re.search(r"pub const ICON_NAMES[^=]*=\s*&\[", icon_raw)
@@ -1498,6 +1584,7 @@ LITERAL_CONST_EXCEPTIONS = {
     ("inspector_segment.rs", "PALETTE"): "palette DATA (segment colour picker)",
     ("inspector_style.rs", "STYLE_PRESETS"): "preset DATA (named style presets applied to user strokes)",
     ("particles_panel.rs", "PARTICLE_PALETTE"): "palette DATA (particle colour picker)",
+    ("subtitle_panel.rs", "SUBTITLE_PALETTE"): "palette DATA (subtitle caption colour picker; Wave Q integration)",
     ("text_tool.rs", "TEXT_PALETTE"): "palette DATA (text colour picker)",
     ("scene_panel.rs", "BACKGROUND_SWATCHES"): "palette DATA (stage background presets)",
     ("scene_panel.rs", "BG_PRESETS"): "palette DATA (stage background presets)",
@@ -2037,10 +2124,17 @@ def _mcp_builtins() -> tuple[list[str], list[str]]:
         )
         return [], problems
     body = blanked[span[0] : span[1]]
-    # The assembly must still extend BOTH other
+    # The assembly must still extend the other
     # families, or their tools silently leave the
     # surface while their own censuses stay green.
-    for ext, fam in (("mcp_tools::tools()", "registry"), ("mcp_io::tools()", "io")):
+    # (Wave Q: the two subtitle extends join the two
+    # original ones — Q1 landed both in all_tools().)
+    for ext, fam in (
+        ("mcp_tools::tools()", "registry"),
+        ("mcp_io::tools()", "io"),
+        ("mcp_subtitle_io::tools()", "subtitle io"),
+        ("mcp_subtitle_tools::tools()", "subtitle tools"),
+    ):
         if ext not in body:
             problems.append(
                 f"  built-ins: all_tools() no longer extends {ext} — the "
@@ -2070,6 +2164,24 @@ def _mcp_builtins() -> tuple[list[str], list[str]]:
     return names, problems
 
 
+# Wave Q surface floor (Q5's recount, 2026-11-10 — the
+# derivation is ledgered in this script's header, Wave Q
+# section): the MCP surface may not silently shrink
+# below the integrated Wave P+Q truth, even if
+# docs/MCP.md were edited down to match a smaller
+# surface (doc sync alone cannot see that). 381 = 44
+# built-ins + 319 registry (317 at the Wave P opening +
+# sprite_move_key / sprite_delete_key_at, P38 IA-2's
+# splice into mcp_tools::tools()) + 9 io + 4 subtitle
+# io (mcp_subtitle_io::tools()) + 5 subtitle tools
+# (mcp_subtitle_tools::tools()). Until the sprite
+# splice lands the surface reads 379 and this floor
+# names the gap. Ratchet UP with a new ledger line when
+# a wave adds tools; lower it only for a named,
+# deliberate removal.
+MCP_SURFACE_FLOOR = 381
+
+
 def check_mcp_surface() -> tuple[bool, list[str]]:
     lines: list[str] = []
     ok = True
@@ -2088,12 +2200,24 @@ def check_mcp_surface() -> tuple[bool, list[str]]:
     io_tools, problems = _mcp_registry_family("src/mcp_io.rs", "io (src/mcp_io.rs)")
     for p in problems:
         fail(p)
+    subtitle_io, problems = _mcp_registry_family(
+        "src/mcp_subtitle_io.rs", "subtitle io (src/mcp_subtitle_io.rs)"
+    )
+    for p in problems:
+        fail(p)
+    subtitle_tools, problems = _mcp_registry_family(
+        "src/mcp_subtitle_tools.rs", "subtitle tools (src/mcp_subtitle_tools.rs)"
+    )
+    for p in problems:
+        fail(p)
 
     lines.append(
         f"  family census (all_tools() assembly order): built-ins {len(builtin_names)} "
         f"(constructors in src/mcp.rs), registry {len(registry)} "
         f"(Tool literals in mcp_tools::tools()), io {len(io_tools)} "
-        f"(Tool literals in mcp_io::tools())"
+        f"(Tool literals in mcp_io::tools()), subtitle io {len(subtitle_io)} "
+        f"(Tool literals in mcp_subtitle_io::tools()), subtitle tools "
+        f"{len(subtitle_tools)} (Tool literals in mcp_subtitle_tools::tools())"
     )
 
     # Handler integrity: every registry / IO handler
@@ -2136,7 +2260,12 @@ def check_mcp_surface() -> tuple[bool, list[str]]:
         return sites
 
     resolved = 0
-    for family, entries in (("registry", registry), ("io", io_tools)):
+    for family, entries in (
+        ("registry", registry),
+        ("io", io_tools),
+        ("subtitle io", subtitle_io),
+        ("subtitle tools", subtitle_tools),
+    ):
         for name, handler in entries:
             if handler == "|":
                 fail(
@@ -2164,7 +2293,7 @@ def check_mcp_surface() -> tuple[bool, list[str]]:
                 )
     if resolved:
         lines.append(
-            f"  handler integrity: {resolved} registry/io handlers each resolve "
+            f"  handler integrity: {resolved} registry/io/subtitle handlers each resolve "
             "to exactly one fn definition in src/"
         )
 
@@ -2178,6 +2307,8 @@ def check_mcp_surface() -> tuple[bool, list[str]]:
         ("built-ins", builtin_names),
         ("registry", [n for n, _ in registry]),
         ("io", [n for n, _ in io_tools]),
+        ("subtitle io", [n for n, _ in subtitle_io]),
+        ("subtitle tools", [n for n, _ in subtitle_tools]),
     ]
     owner: dict[str, str] = {}
     surface: list[str] = []
@@ -2202,8 +2333,28 @@ def check_mcp_surface() -> tuple[bool, list[str]]:
     surface_set = set(surface)
     lines.append(
         f"  surface: {len(surface)} tools, {len(surface_set)} unique names "
-        "(built-ins, then registry, then io — the all_tools() order)"
+        "(built-ins, then registry, then io, then subtitle io, then "
+        "subtitle tools — the all_tools() order)"
     )
+
+    # Surface floor (Wave Q): doc sync below compares
+    # the surface against the doc, so a tool removed
+    # TOGETHER with its catalogue row would pass it —
+    # the floor is what makes the surface unable to
+    # shrink silently (check 9's founding purpose).
+    if len(surface) < MCP_SURFACE_FLOOR:
+        fail(
+            f"  surface floor: {len(surface)} tools is below the Wave Q "
+            f"floor of {MCP_SURFACE_FLOOR} (ledger at MCP_SURFACE_FLOOR) — "
+            "a tool has left the surface, or a Wave P+Q splice the floor "
+            "counts has not landed yet (until P38 IA-2's sprite splice "
+            "lands in mcp_tools::tools(), the surface reads 379)"
+        )
+    else:
+        lines.append(
+            f"  surface floor: {len(surface)} tools >= the Wave Q floor "
+            f"of {MCP_SURFACE_FLOOR} (ledger at MCP_SURFACE_FLOOR)"
+        )
 
     # Doc sync: docs/MCP.md's catalogue (the tables
     # under `## Catalogue`, first cell of each row)
@@ -2529,7 +2680,23 @@ def check_parity() -> tuple[bool, list[str]]:
     io_tools, problems = _mcp_registry_family("src/mcp_io.rs", "io (src/mcp_io.rs)")
     for p in problems:
         fail(p)
-    surface = set(builtin_names) | {n for n, _ in registry} | {n for n, _ in io_tools}
+    subtitle_io, problems = _mcp_registry_family(
+        "src/mcp_subtitle_io.rs", "subtitle io (src/mcp_subtitle_io.rs)"
+    )
+    for p in problems:
+        fail(p)
+    subtitle_tools, problems = _mcp_registry_family(
+        "src/mcp_subtitle_tools.rs", "subtitle tools (src/mcp_subtitle_tools.rs)"
+    )
+    for p in problems:
+        fail(p)
+    surface = (
+        set(builtin_names)
+        | {n for n, _ in registry}
+        | {n for n, _ in io_tools}
+        | {n for n, _ in subtitle_io}
+        | {n for n, _ in subtitle_tools}
+    )
 
     commands, problems = _palette_commands()
     for p in problems:
@@ -2538,7 +2705,8 @@ def check_parity() -> tuple[bool, list[str]]:
     lines.append(
         f"  derived from source: {len(commands)} palette commands "
         f"(command_palette.rs), {len(surface)} MCP tools (check 9's "
-        "family extractors: built-ins + registry + io)"
+        "family extractors: built-ins + registry + io + subtitle io "
+        "+ subtitle tools)"
     )
     if not command_set or not surface:
         lines.append("  parity cannot be assessed on an empty derivation — see above")
@@ -2667,8 +2835,14 @@ def main() -> int:
     s, d, t, nf = inventory_counts()
     report(
         "1. INVENTORY",
-        t > 0 and nf > 0,
-        [f"static keys: {s}", f"dynamic patterns: {d}", f"total unique keys: {t}", f"files scanned: {nf}"],
+        t >= KEY_TOTAL_FLOOR and nf > 0,
+        [
+            f"static keys: {s}",
+            f"dynamic patterns: {d}",
+            f"total unique keys: {t}",
+            f"files scanned: {nf}",
+            f"floor: >= {KEY_TOTAL_FLOOR} total unique keys (Wave Q ledger at KEY_TOTAL_FLOOR)",
+        ],
     )
 
     ok, lines = check_key_diff(base)

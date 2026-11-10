@@ -12,7 +12,15 @@ not the source gate (the dumps are CI artifacts).
 
 Usage:
     python3 scripts/overflow_scan.py <tree.json> [tree.json ...]
+    python3 scripts/overflow_scan.py --dir <dump-dir>
+    python3 scripts/overflow_scan.py --scan-set
     python3 scripts/overflow_scan.py --self-test
+
+--dir scans every tree-*.json in a dumps directory and
+additionally checks the Wave Q scan set below: a required
+tree absent from the directory is a failed pass (reported
+MISSING), because the surfaces it carries were not proven.
+--scan-set prints that set and exits.
 
 Prints per-file hits, worst first, as
     (element key, parent card, overflow pt, rules fired)
@@ -177,6 +185,129 @@ clean, and one planted escape per shape -- a stepper
 button, a saved row's Delete -- is caught by the
 content and card rules.
 
+Wave P audit -- the changed surfaces of Squads 1-2
+against the full tree census. The headless harness
+produces 32 trees: the 29 registered scenes at the
+default 1440x900 plus default / default-light /
+three-d at 1280x720 (headless.yml tree steps). This
+wave changed no scene and no panel mount; its
+surfaces ride existing trees, and every one of them
+is judged by rules 1-3 (rule 4 for the timeline
+card) exactly as it lands in the dump:
+
+- O-1 settings language grid (settings_popover):
+  trees settings-open, settings-open-light,
+  settings-open-error. The grid's chips are
+  descendants of the `settings-card` alias, which
+  exempts only the card element itself -- the chips
+  were always real hits and still are.
+- O-3 layers rows (layers_panel, LEFT): every
+  Animate tree (default, frame-3, selected, playing,
+  loop-range, clips-populated, dopesheet-keys,
+  library-populated, sprites-populated, the overlay
+  scenes over Animate, and the 1280 default pair).
+  The two-line row anatomy had no fixture; one is
+  added below.
+- O-4 draw cluster (Draw): draw-open,
+  strokes-populated. O-5 graph + keyframe rows
+  (Graph): graph-open, graph-duplicates (keyframe
+  tools also ride every Animate tree). O-6 scene
+  weather segments (Scene section): the Animate
+  trees and effects-open. All three are ordinary
+  side-column rows; rules 1-2 already judge them.
+- O-7 three_d_panel wraps (Build3D): three-d,
+  three-d-stage, three-d-1280, build-open.
+- O-8 fx nudge split (Effects): fx-split-mid is the
+  tree whose selection mounts the two-line
+  `fx-nudge` anatomy; no fixture modelled it -- one
+  is added below. The playback wraps (Playback
+  section) ride the Animate trees and audio-open;
+  loop-range carries the loop row's set state.
+- O-9 pose row (Animate trees) and camera rows:
+  the camera PANEL rides the Animate and Build3D
+  trees, but no scene plants a camera key, so the
+  key row (`cam-delete-key`) is in NO tree -- see
+  the unproven list below.
+- Empty states (P7/P8): the kit `empty_state`
+  component (centred glyph + wrapped message) had
+  no fixture; one is added below, modelled on the
+  camera panel's no-keys state as rendered in the
+  default tree, with the historical defect as its
+  planted escape (the clips panel's unwrapped
+  message measured 442 pt in a 316 pt card, +63
+  past the edge -- design.rs). The states that DO
+  render headlessly: camera (default), project
+  list (default / export-open / home -- the probes
+  wipe ./projects, so the list is empty), segment
+  inspector (default), stroke inspector
+  (draw-open), text tool (draw-open), 3D
+  sub-sections (build-open), Home library (home),
+  fx presets (effects-open).
+- Interaction states (P4/P5): kit controls' REST
+  and INERT geometry is in every tree and judged;
+  hover / pressed / focus renditions are planted by
+  no scene and appear in no dump, so no rect exists
+  for the scan to judge (unproven list).
+- Squad 2's fixes are core logic (bend permutation,
+  missing-audio surfacing, format_version, export
+  funnels): no side-column render surface. The one
+  visible trace, P14's status text, rides the
+  centre status strip, where only the window rule
+  applies -- as it does to every element.
+
+No rule needed generalising, and none was weakened;
+the exemption list is unchanged. Named here so the
+debrief does not mistake absence for coverage --
+the surfaces NO tree carries, which this scan
+therefore cannot judge: the camera key row (no
+scene plants a camera key); the settings card in
+the longest language (no scene sets a language --
+P11's surface); the figure-inspector empty state
+(every scene keeps the demo figures); the fx
+filter empty state and the Home search-no-match
+state (no scene types a query); hover / pressed /
+focus renditions of kit controls.
+
+The self-test pins the four newly modelled shapes
+the same way as the earlier waves: conforming trees
+scan clean at both window sizes, and one planted
+escape per shape is caught at the measured
+overflow.
+
+Wave Q scan set -- the named proof set for the Wave P
+surfaces (P43's pass, finished by Q12). The section 2
+method scans EVERY dump a dispatch produces; the set
+below (SCAN_SET in the code) is the subset the debrief
+must be able to point at by name. The hand-offs that
+named them: P2 (draw-open, graph-duplicates, default),
+P3 (three-d, three-d-stage, fx-split-mid, loop-range,
+default), P4 (palette-open, fx-selected, effects-open,
+default). audio-open joins them as the Subtitles
+panel's carrier (the panel mounts in the Audio
+workspace -- P31, built by Wave Q's Q7; the O-8
+playback wraps ride it too).
+
+The subtitle lane trees are REQUIRED: `subtitles-populated`
+and `subtitles-top` are registered scenes in the tree
+(src/rune_sec/scenes.rs, planted by the P33 work) and
+are the lane's only carriers, since the lane renders
+only when a cue exists. They were PENDING until the
+integrator applied IA-Q12-1 (Wave Q integration,
+2026-11-10): headless.yml's tree loops now dump both,
+so a CI artifact missing them fails the pass.
+
+Which rules judge the subtitle surfaces, for the
+debrief: the stage draw is centre-column canvas paint
+-- no element exists for it in any dump (scenes.rs
+fact 32), so its proof is Q13's pixel census, not this
+scan. The timeline lane rides inside the timeline
+card, so rule 4 judges it (vertical fit of the card's
+subtree; its cue blocks are scroll content,
+horizontally exempt like the clips lane's spans). The
+Subtitles panel is an ordinary right-column card in
+the Audio workspace, judged by rules 1-2 in
+audio-open.
+
 Checks considered and NOT added (they would
 false-positive or judge what rects cannot show):
 
@@ -234,6 +365,8 @@ Exemptions (closed list -- anything else is a hit):
 """
 
 import json
+import os
+import re
 import sys
 
 TOL = 0.5
@@ -256,6 +389,94 @@ CARD_ALIAS_KEYS = {"settings-toggle", "settings-card"}
 # Horizontal-scroll subtrees, by path segment (key). Closed
 # list; see module docstring.
 SCROLL_SEGMENTS = {"timeline"}
+
+# The Wave Q scan set (see module docstring): the named
+# proof set for the Wave P surfaces. Each entry is
+# (tree dump basename, status, what the tree proves).
+# "required" trees are produced by headless.yml today --
+# a --dir pass that lacks one is INCOMPLETE, not clean.
+# "pending" trees are named before the harness produces
+# them (the subtitle scenes are registered but the
+# workflow does not dump them yet -- IA-Q12-1); a --dir
+# pass reports them PENDING without failing, and notes
+# it when one shows up so the entry can be promoted.
+SCAN_SET = [
+    ("tree-default.json", "required",
+     "O-5 keyframe rows + O-6 wx-kind segments (P2); O-8 playback "
+     "wraps + O-9 pose/camera rows (P3); Scene-panel bg-swatch "
+     "state overlays, tree values (P4)"),
+    ("tree-draw-open.json", "required",
+     "O-4 draw cluster wraps (P2); stroke + text-tool empty "
+     "states (Wave P audit)"),
+    ("tree-graph-duplicates.json", "required",
+     "O-5 graph rows (P2)"),
+    ("tree-three-d.json", "required",
+     "O-7 three_d_panel wraps (P3)"),
+    ("tree-three-d-stage.json", "required",
+     "O-7 wraps on the stage variant (P3)"),
+    ("tree-fx-split-mid.json", "required",
+     "O-8 two-line fx-nudge anatomy (P3)"),
+    ("tree-loop-range.json", "required",
+     "O-8 loop row in its set state (P3)"),
+    ("tree-palette-open.json", "required",
+     "command-palette result-row press overlays, tree values (P4)"),
+    ("tree-fx-selected.json", "required",
+     "fx clip-row press overlays, tree values (P4)"),
+    ("tree-effects-open.json", "required",
+     "P4's fx companion tree; O-6 weather segments + fx-presets "
+     "empty state ride it (Wave P audit)"),
+    ("tree-audio-open.json", "required",
+     "Subtitles panel carrier (Audio workspace, P31/Q7); O-8 "
+     "playback wraps ride it (Wave P audit)"),
+    ("tree-subtitles-populated.json", "required",
+     "subtitle lane in the timeline card (rule 4) with a cue "
+     "live; dumped by headless.yml since IA-Q12-1 landed "
+     "(Wave Q integration)"),
+    ("tree-subtitles-top.json", "required",
+     "same lane carrier under the Top style position (IA-Q12-1)"),
+]
+
+
+def required_trees():
+    return [name for name, status, _ in SCAN_SET if status == "required"]
+
+
+def pending_trees():
+    return [name for name, status, _ in SCAN_SET if status == "pending"]
+
+
+def set_gaps(present):
+    """(missing required, absent pending) for a set of
+    tree dump basenames found in a dumps directory."""
+    missing = [n for n in required_trees() if n not in present]
+    absent = [n for n in pending_trees() if n not in present]
+    return missing, absent
+
+
+def harness_tree_names():
+    """Tree dump basenames .github/workflows/headless.yml
+    produces, or None when the workflow is not readable
+    (the scan also runs over downloaded artifacts, away
+    from the checkout). Parsed from the workflow's --tree
+    literals and its `for scene in ...` loops, not listed
+    by hand, so the self-test's cross-check cannot drift
+    from the workflow silently."""
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..", ".github", "workflows", "headless.yml",
+    )
+    try:
+        with open(path) as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    names = set()
+    for m in re.finditer(r"--tree \"?headless-out/(tree-[a-z0-9-]+\.json)", text):
+        names.add(m.group(1))
+    for m in re.finditer(r"for scene in ([a-z0-9\- ]+); do", text):
+        for scene in m.group(1).split():
+            names.add("tree-%s.json" % scene)
+    return names
 
 
 def segments(path):
@@ -471,9 +692,19 @@ def scan_file(path):
 # (d) the Wave 12 populated-scene fixtures (home-populated,
 # strokes-populated) stay silent on conforming trees -- rows
 # below the window's bottom edge included -- and catch one
-# planted row escape per scene, and (e) the Wave 13 fixtures
+# planted row escape per scene, (e) the Wave 13 fixtures
 # (sprites-panel rows, library rows with 44 pt thumbnails
-# and saved-row button lines) do the same for their shapes.
+# and saved-row button lines) do the same for their shapes,
+# and (f) the Wave P fixtures (layers two-line rows, the
+# settings language grid under its alias card, the fx
+# two-line nudge anatomy, the kit empty state) do the same
+# for the surfaces Squads 1-2 changed, and (g) the Wave Q
+# scan set: names unique and well-formed, the pending
+# entries exactly the two subtitle trees, the gap
+# computation separating missing-required from
+# absent-pending, and -- when the checkout's headless.yml
+# is readable -- every required tree harness-produced and
+# no pending tree produced yet.
 # ------------------------------------------------------------------
 
 def _el(path, rect, key=None):
@@ -837,6 +1068,218 @@ def _library_populated_fixture(win_w, win_h, del_dx=0.0):
     }
 
 
+def _layers_rows_fixture(win_w, win_h, inc_dx=0.0):
+    """A minimal layers-panel tree (Wave P, p05 O-3):
+    the `layers-panel` card root in the LEFT column
+    holding two-line `layer-row-{fi}` rows.
+
+    Anatomy follows the shipped two-line restructure
+    (layers_panel.rs `layer_row`): line 1 is the
+    colour dot (`layer-dot-{fi}`), the name and the
+    opacity stepper (`layer-op-dec-{fi}` / readout /
+    `layer-op-inc-{fi}`); line 2 is the reorder
+    cluster (`layer-bottom-`, `layer-down-`,
+    `layer-up-`, `layer-top-{fi}`) with the
+    joint-count readout trailing. Card x=16, width
+    300, 12 pt padding, so content is x=28, width
+    276, right edge 304; the row's own px(8) puts its
+    inner right edge at 296, where the opacity +
+    button ends. Row 1 sits below the window's bottom
+    edge -- legitimate, the left column scrolls
+    vertically. inc_dx shifts row 0's opacity +
+    button right: the planted escape (the pre-fix
+    single line measured +134 in this panel).
+    """
+    base = "#0/main-row/side-left/layers-panel"
+    return {
+        "elements": [
+            _el("#0", [0.0, 0.0, win_w, win_h]),
+            _el("#0/main-row", [16.0, 141.0, win_w - 32.0, win_h - 157.0]),
+            _el("#0/main-row/side-left", [16.0, 157.0, 300.0, 1000.0]),
+            _el(base, [16.0, 500.0, 300.0, 400.0], "layers-panel"),
+            # Row 0, line 1: dot, name, opacity stepper
+            # ending at the row's inner edge (296).
+            _el(base + "/layer-row-0", [28.0, 512.0, 276.0, 58.0], "layer-row-0"),
+            _el(base + "/layer-row-0/#0/layer-dot-0",
+                [36.0, 518.0, 14.0, 14.0], "layer-dot-0"),
+            _el(base + "/layer-row-0/#0/#1",
+                [58.0, 518.0, 140.0, 15.0]),  # the layer name
+            _el(base + "/layer-row-0/#0/layer-op-dec-0",
+                [206.0, 514.0, 26.0, 25.0], "layer-op-dec-0"),
+            _el(base + "/layer-row-0/#0/#2",
+                [238.0, 519.0, 28.0, 15.0]),  # the opacity readout
+            _el(base + "/layer-row-0/#0/layer-op-inc-0",
+                [270.0 + inc_dx, 514.0, 26.0, 25.0], "layer-op-inc-0"),
+            # Row 0, line 2: the reorder cluster and the
+            # joint-count readout.
+            _el(base + "/layer-row-0/#1/layer-bottom-0",
+                [36.0, 545.0, 26.0, 25.0], "layer-bottom-0"),
+            _el(base + "/layer-row-0/#1/layer-down-0",
+                [66.0, 545.0, 26.0, 25.0], "layer-down-0"),
+            _el(base + "/layer-row-0/#1/layer-up-0",
+                [96.0, 545.0, 26.0, 25.0], "layer-up-0"),
+            _el(base + "/layer-row-0/#1/layer-top-0",
+                [126.0, 545.0, 26.0, 25.0], "layer-top-0"),
+            _el(base + "/layer-row-0/#1/#4",
+                [160.0, 550.0, 60.0, 15.0]),  # "6 joints"
+            # Row 1: below the window's bottom edge.
+            _el(base + "/layer-row-1", [28.0, 950.0, 276.0, 58.0], "layer-row-1"),
+            _el(base + "/layer-row-1/#0/layer-op-inc-1",
+                [270.0, 964.0, 26.0, 25.0], "layer-op-inc-1"),
+        ]
+    }
+
+
+def _settings_language_fixture(win_w, win_h, chip_dx=0.0):
+    """A minimal settings-card tree (Wave P, p05 O-1):
+    the `settings` wrapper in the RIGHT column (the
+    scan's card root for this column slot), the
+    `settings-card` alias inside it, and the language
+    grid's wrapped chip rows.
+
+    Geometry follows the shipped card: wrapper
+    x=W-356, width 340; content x=W-344, width 316,
+    right edge W-28. Each `settings-lang-row-{i}`
+    wraps, so every chip (`settings-lang-{code}`)
+    ends inside the content edge -- the widest
+    single chip in the real grid is 181 pt, so no
+    chip needs the full row. The alias exempts the
+    settings-card ELEMENT only; the chips are
+    ordinary descendants and stay judgable. chip_dx
+    shifts one chip right: the planted escape, the
+    pre-fix class in which `settings-lang-he` left
+    the window entirely.
+    """
+    card_x = win_w - 356.0
+    cx = card_x + 12.0   # content x (W-344)
+    edge = win_w - 28.0  # content right edge
+    base = "#0/main-row/side-right/settings"
+    return {
+        "elements": [
+            _el("#0", [0.0, 0.0, win_w, win_h]),
+            _el("#0/main-row", [16.0, 141.0, win_w - 32.0, win_h - 157.0]),
+            _el("#0/main-row/side-right", [card_x, 157.0, 340.0, 1100.0]),
+            _el(base, [card_x, 157.0, 340.0, 700.0], "settings"),
+            _el(base + "/settings-card",
+                [card_x, 190.0, 340.0, 660.0], "settings-card"),
+            _el(base + "/settings-card/settings-lang-grid",
+                [cx, 400.0, 316.0, 56.0], "settings-lang-grid"),
+            # Wrapped row 0: two chips, inside the edge.
+            _el(base + "/settings-card/settings-lang-grid/settings-lang-row-0",
+                [cx, 400.0, 316.0, 25.0], "settings-lang-row-0"),
+            _el(base + "/settings-card/settings-lang-grid/settings-lang-row-0/settings-lang-en",
+                [cx, 400.0, 68.0, 25.0], "settings-lang-en"),
+            _el(base + "/settings-card/settings-lang-grid/settings-lang-row-0/settings-lang-de",
+                [cx + 74.0, 400.0, 68.0, 25.0], "settings-lang-de"),
+            # Wrapped row 1: the widest chip (181 pt)
+            # alone, ending inside the edge; the planted
+            # escape when chip_dx > 0.
+            _el(base + "/settings-card/settings-lang-grid/settings-lang-row-1",
+                [cx, 431.0, 316.0, 25.0], "settings-lang-row-1"),
+            _el(base + "/settings-card/settings-lang-grid/settings-lang-row-1/settings-lang-he",
+                [edge - 181.0 + chip_dx, 431.0, 181.0, 25.0], "settings-lang-he"),
+        ]
+    }
+
+
+def _fx_nudge_fixture(win_w, win_h, dur_dx=0.0):
+    """A minimal fx-inspector tree (Wave P, p05 O-8):
+    the `fx-section` card root in the RIGHT column,
+    the `fx-inspector` column and the two-line
+    `fx-nudge` anatomy the split produced.
+
+    Anatomy follows fx_clips.rs `nudge_row`: line 1
+    is the nudge cluster (`fx-nudge-l10`, `fx-nudge-l`,
+    the readout, `fx-nudge-r`, `fx-nudge-r10`); line
+    2 is the duration pair (`fx-dur-dn`, the readout,
+    `fx-dur-up`). Card x=W-356, width 340, content
+    x=W-344, width 316, right edge W-28; `fx-dur-up`
+    ends exactly at the content edge -- pre-split it
+    sat at the window edge (343.5 pt in a 316 pt
+    budget). dur_dx shifts it right: the planted
+    escape, the split regressing to one line.
+    """
+    card_x = win_w - 356.0
+    cx = card_x + 12.0   # content x (W-344)
+    edge = win_w - 28.0  # content right edge
+    base = "#0/main-row/side-right/fx-section"
+    return {
+        "elements": [
+            _el("#0", [0.0, 0.0, win_w, win_h]),
+            _el("#0/main-row", [16.0, 141.0, win_w - 32.0, win_h - 157.0]),
+            _el("#0/main-row/side-right", [card_x, 157.0, 340.0, 1100.0]),
+            _el(base, [card_x, 300.0, 340.0, 400.0], "fx-section"),
+            _el(base + "/fx-inspector", [cx, 340.0, 316.0, 200.0], "fx-inspector"),
+            _el(base + "/fx-inspector/fx-nudge",
+                [cx, 380.0, 316.0, 58.0], "fx-nudge"),
+            # Line 1: the nudge cluster.
+            _el(base + "/fx-inspector/fx-nudge/#0/fx-nudge-l10",
+                [cx, 380.0, 44.0, 25.0], "fx-nudge-l10"),
+            _el(base + "/fx-inspector/fx-nudge/#0/fx-nudge-l",
+                [cx + 50.0, 380.0, 26.0, 25.0], "fx-nudge-l"),
+            _el(base + "/fx-inspector/fx-nudge/#0/#2",
+                [cx + 82.0, 385.0, 90.0, 15.0]),  # the start readout
+            _el(base + "/fx-inspector/fx-nudge/#0/fx-nudge-r",
+                [cx + 178.0, 380.0, 26.0, 25.0], "fx-nudge-r"),
+            _el(base + "/fx-inspector/fx-nudge/#0/fx-nudge-r10",
+                [cx + 210.0, 380.0, 44.0, 25.0], "fx-nudge-r10"),
+            # Line 2: the duration pair, + ending
+            # exactly at the content edge.
+            _el(base + "/fx-inspector/fx-nudge/#1/#0",
+                [cx, 413.0, 40.0, 15.0]),  # the "Dur" label
+            _el(base + "/fx-inspector/fx-nudge/#1/fx-dur-dn",
+                [cx + 120.0, 408.0, 52.0, 25.0], "fx-dur-dn"),
+            _el(base + "/fx-inspector/fx-nudge/#1/#2",
+                [cx + 178.0, 413.0, 60.0, 15.0]),  # the duration readout
+            _el(base + "/fx-inspector/fx-nudge/#1/fx-dur-up",
+                [edge - 52.0 + dur_dx, 408.0, 52.0, 25.0], "fx-dur-up"),
+        ]
+    }
+
+
+def _empty_state_fixture(win_w, win_h, spill=False):
+    """A minimal kit empty-state tree (Wave P, P7/P8):
+    the `camera-panel` card root in the RIGHT column
+    rendering design::empty_state for its empty key
+    list -- the state the default tree carries.
+
+    Anatomy follows design.rs `empty_state`: a
+    w_full centred column with 12 pt of vertical air,
+    the 20 pt glyph, and the message WRAPPED at the
+    content width (two centred lines here). Card
+    x=W-356, width 340, content x=W-344, width 316,
+    right edge W-28. With spill=True the message is
+    instead ONE unwrapped 442 pt line, centred, so
+    it spills 63 pt past BOTH sides of the content
+    box -- the historical defect this component's
+    `.wrap().w_full()` exists to prevent (the clips
+    panel's bare line, measured in the mission
+    audits; see design.rs).
+    """
+    card_x = win_w - 356.0
+    cx = card_x + 12.0   # content x (W-344)
+    base = "#0/main-row/side-right/camera-panel"
+    elements = [
+        _el("#0", [0.0, 0.0, win_w, win_h]),
+        _el("#0/main-row", [16.0, 141.0, win_w - 32.0, win_h - 157.0]),
+        _el("#0/main-row/side-right", [card_x, 157.0, 340.0, 1100.0]),
+        _el(base, [card_x, 157.0, 340.0, 300.0], "camera-panel"),
+        _el(base + "/camera-header", [cx, 169.0, 316.0, 25.0], "camera-header"),
+        # The empty-state column and its centred glyph.
+        _el(base + "/#4", [cx, 202.0, 316.0, 76.0]),
+        _el(base + "/#4/#0", [cx + 148.0, 214.0, 20.0, 20.0]),  # the glyph
+    ]
+    if spill:
+        elements.append(
+            _el(base + "/#4/empty-msg", [cx - 63.0, 242.0, 442.0, 15.0]))
+    else:
+        elements.append(
+            _el(base + "/#4/#1", [cx + 38.0, 242.0, 240.0, 15.0]))  # line 1
+        elements.append(
+            _el(base + "/#4/#2", [cx + 58.0, 259.0, 200.0, 15.0]))  # line 2
+    return {"elements": elements}
+
+
 def self_test():
     failures = []
 
@@ -1014,10 +1457,165 @@ def self_test():
     check(abs(by_key.get("library-delete-3", {}).get("overflow", 0) - 16.0) < 1e-9,
           "library-populated: overflow measures 16.0 pt")
 
+    # Wave P: the surfaces Squads 1-2 changed. Conforming
+    # trees are silent at both window sizes -- including
+    # the layers row below the window's bottom edge and
+    # the edge-exact children (the opacity + button at
+    # the layers row's inner edge, fx-dur-up at the
+    # content edge, the settings card alias at W-16).
+    for win_w, win_h in ((1440.0, 900.0), (1280.0, 720.0)):
+        hits = scan_tree(_layers_rows_fixture(win_w, win_h))
+        check(len(hits) == 0,
+              "wave-p layers W=%d: conforming two-line rows are clean (got %d hit(s))"
+              % (win_w, len(hits)))
+        hits = scan_tree(_settings_language_fixture(win_w, win_h))
+        check(len(hits) == 0,
+              "wave-p settings-lang W=%d: conforming wrapped grid is clean (got %d hit(s))"
+              % (win_w, len(hits)))
+        hits = scan_tree(_fx_nudge_fixture(win_w, win_h))
+        check(len(hits) == 0,
+              "wave-p fx-nudge W=%d: conforming two-line nudge is clean (got %d hit(s))"
+              % (win_w, len(hits)))
+        hits = scan_tree(_empty_state_fixture(win_w, win_h))
+        check(len(hits) == 0,
+              "wave-p empty-state W=%d: conforming kit empty state is clean (got %d hit(s))"
+              % (win_w, len(hits)))
+
+    # One planted escape per shape, caught at the
+    # measured overflow.
+    hits = scan_tree(_layers_rows_fixture(1440.0, 900.0, inc_dx=30.0))
+    by_key = {h["key"]: h for h in hits}
+    check(len(hits) == 1 and "layer-op-inc-0" in by_key,
+          "wave-p layers: opacity + button pushed past the card is caught")
+    check("content" in by_key.get("layer-op-inc-0", {}).get("rules", "")
+          and "card" in by_key.get("layer-op-inc-0", {}).get("rules", ""),
+          "wave-p layers: the escape names the content and card rules")
+    check(abs(by_key.get("layer-op-inc-0", {}).get("overflow", 0) - 22.0) < 1e-9,
+          "wave-p layers: overflow measures 22.0 pt")
+
+    hits = scan_tree(_settings_language_fixture(1440.0, 900.0, chip_dx=41.0))
+    by_key = {h["key"]: h for h in hits}
+    check(len(hits) == 1 and "settings-lang-he" in by_key,
+          "wave-p settings-lang: chip pushed past the window is caught")
+    check("content" in by_key.get("settings-lang-he", {}).get("rules", "")
+          and "card" in by_key.get("settings-lang-he", {}).get("rules", "")
+          and "window" in by_key.get("settings-lang-he", {}).get("rules", ""),
+          "wave-p settings-lang: the escape names the content, card and window rules")
+    check(abs(by_key.get("settings-lang-he", {}).get("overflow", 0) - 41.0) < 1e-9,
+          "wave-p settings-lang: overflow measures 41.0 pt")
+
+    hits = scan_tree(_fx_nudge_fixture(1440.0, 900.0, dur_dx=18.0))
+    by_key = {h["key"]: h for h in hits}
+    check(len(hits) == 1 and "fx-dur-up" in by_key,
+          "wave-p fx-nudge: duration + button pushed past the card is caught")
+    check("content" in by_key.get("fx-dur-up", {}).get("rules", "")
+          and "card" in by_key.get("fx-dur-up", {}).get("rules", ""),
+          "wave-p fx-nudge: the escape names the content and card rules")
+    check(abs(by_key.get("fx-dur-up", {}).get("overflow", 0) - 18.0) < 1e-9,
+          "wave-p fx-nudge: overflow measures 18.0 pt")
+
+    hits = scan_tree(_empty_state_fixture(1440.0, 900.0, spill=True))
+    by_key = {h["key"]: h for h in hits}
+    check(len(hits) == 1 and "(unkeyed empty-msg)" in by_key,
+          "wave-p empty-state: unwrapped 442 pt message is caught")
+    check("content" in by_key.get("(unkeyed empty-msg)", {}).get("rules", "")
+          and "card" in by_key.get("(unkeyed empty-msg)", {}).get("rules", ""),
+          "wave-p empty-state: the spill names the content and card rules")
+    check(abs(by_key.get("(unkeyed empty-msg)", {}).get("overflow", 0) - 63.0) < 1e-9,
+          "wave-p empty-state: overflow measures 63.0 pt (the historical measurement)")
+
+    # Wave Q: the named scan set (see SCAN_SET). The set
+    # is only as good as its bookkeeping: a duplicated or
+    # misnamed entry would let a debrief claim coverage
+    # it does not have.
+    names = [n for n, _, _ in SCAN_SET]
+    check(len(names) == len(set(names)),
+          "scan set: tree names are unique")
+    check(all(n.startswith("tree-") and n.endswith(".json") for n in names),
+          "scan set: every entry is a tree-*.json dump name")
+    # IA-Q12-1 landed at Wave Q integration (2026-11-10):
+    # headless.yml dumps both subtitle trees, so both
+    # SCAN_SET entries were promoted to "required" and the
+    # pending set is now empty by design.
+    check(pending_trees() == [],
+          "scan set: pending entries are exactly none (IA-Q12-1 promoted both subtitle trees)")
+    missing, absent = set_gaps(set(names))
+    check(missing == [] and absent == [],
+          "scan set: a directory holding every entry has no gaps")
+    missing, absent = set_gaps(set())
+    check(missing == required_trees() and absent == pending_trees(),
+          "scan set: an empty directory misses every required tree")
+    missing, absent = set_gaps(set(required_trees()))
+    check(missing == [] and absent == pending_trees(),
+          "scan set: pending absence is not a required gap")
+
+    # Cross-check against the harness itself when the
+    # checkout is at hand: a required tree the workflow
+    # never produces would fail every debrief forever,
+    # and a "pending" tree the workflow already produces
+    # is a promotion waiting to happen.
+    produced = harness_tree_names()
+    if produced is not None:
+        check(all(n in produced for n in required_trees()),
+              "scan set: every required tree is produced by headless.yml")
+        check(all(n not in produced for n in pending_trees()),
+              "scan set: pending trees are not yet produced by headless.yml")
+
     if failures:
         print("SELF-TEST: %d failure(s)" % len(failures))
         return 1
     print("SELF-TEST: all checks passed")
+    return 0
+
+
+def print_scan_set():
+    for name, status, what in SCAN_SET:
+        print("%-32s %-8s %s" % (name, status, what))
+    return 0
+
+
+def scan_dir(dump_dir):
+    """Scan every tree-*.json in a dumps directory, then
+    check the Wave Q scan set against what was found."""
+    import glob
+
+    files = sorted(glob.glob(os.path.join(dump_dir, "tree-*.json")))
+    if not files:
+        print("OVERFLOW SCAN: no tree-*.json dumps in %s" % dump_dir)
+        return 2
+    total = 0
+    for path in files:
+        hits = scan_file(path)
+        total += len(hits)
+        print("%s: %d hit(s)" % (path, len(hits)))
+        for hit in hits:
+            print(
+                "  %-28s card=%-18s +%.1f pt  [%s] right=%.1f"
+                % (hit["key"], hit["card"], hit["overflow"], hit["rules"], hit["right"])
+            )
+    present = {os.path.basename(p) for p in files}
+    proves = {name: what for name, _, what in SCAN_SET}
+    missing, absent_pending = set_gaps(present)
+    for name in missing:
+        print("MISSING (required) %s -- %s" % (name, proves[name]))
+    for name in absent_pending:
+        print("PENDING %s -- %s" % (name, proves[name]))
+    for name in pending_trees():
+        if name in present:
+            print(
+                "NOTE %s present -- promote its SCAN_SET entry to required"
+                % name
+            )
+    if total:
+        print("OVERFLOW SCAN: %d hit(s) -- NOT CLEAN" % total)
+    if missing:
+        print(
+            "OVERFLOW SCAN: scan set INCOMPLETE (%d required tree(s) missing)"
+            % len(missing)
+        )
+    if total or missing:
+        return 1
+    print("OVERFLOW SCAN: CLEAN (0 hits, scan set complete)")
     return 0
 
 
@@ -1027,6 +1625,13 @@ def main(argv):
         return 2
     if argv[1] == "--self-test":
         return self_test()
+    if argv[1] == "--scan-set":
+        return print_scan_set()
+    if argv[1] == "--dir":
+        if len(argv) < 3:
+            print(__doc__)
+            return 2
+        return scan_dir(argv[2])
     total = 0
     for path in argv[1:]:
         hits = scan_file(path)
