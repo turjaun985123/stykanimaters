@@ -116,7 +116,10 @@ present and fall back to a folder-based flow when neither exists.
   inspector turns the stage into a rigging surface: every
   figure draws at its rest pose and stage drags drive the same
   FK/IK solvers against the rest angles, the write-back
-  clamped through each node's joint limits. *Set rest from
+  clamped through each node's joint limits; per-node
+  steppers in the same section also step a rest angle
+  numerically (5° steps through the same clamp, one undo
+  step per effective press). *Set rest from
   current pose* adopts the pose at the current frame as the
   figure's new rest pose — with rebase (the default), every
   authored angle (frame poses, the frames of clips authored
@@ -163,12 +166,18 @@ present and fall back to a folder-based flow when neither exists.
   **graph engine** (Hermite channels for root X/Y, joint angles,
   segment lengths and per-node bends — a bend channel is keyed
   and edited in the graph panel like any other, and the stage,
-  the rasterizer and SVG follow it — with shortest-path angle wrap,
+  the rasterizer and SVG follow it, segment lines and the
+  images attached to them alike (the media funnel reads the
+  same channelled rows) — with shortest-path angle wrap,
   Catmull-Rom auto-tangents, tangent presets — Smooth, EaseIn,
   EaseOut, EaseInOut, Linear — with preview curves, time-mirror
   and value-scale channel transforms, and a multi-channel
   overlay painted in the panel) applied live
-  and editable in a visual graph panel. Motion statistics are
+  and editable in a visual graph panel. Bend values read out
+  in radians in the panel, the panel's Reduce applies its
+  tolerance in radians on a bend channel, and baking the
+  channels writes bend channels into the frames' bend tables
+  alongside the poses. Motion statistics are
   computed alongside the project statistics.
 - **Camera** — per-frame keys (centre, zoom **and rotation**) with
   interpolation; camera mode pans by dragging; a follow target can
@@ -186,9 +195,11 @@ present and fall back to a folder-based flow when neither exists.
   image, on stage, in the rasterizer and in SVG exports, while
   text stays on the straight chord — and an attached image
   carries a local transform (offset along and across the
-  segment, scale, rotation, mirror flip), edited with steppers
-  in the segment inspector or set through the MCP attach
-  tools — figure
+  segment, scale, rotation, mirror flip) and a stored
+  opacity — the transform is edited with steppers in the
+  segment inspector or set through the MCP attach tools,
+  the opacity is set through the attach tools or arrives
+  with a layered import — figure
   presets (humanoid, quadruped, mini), and a local figure library
   (`./library/*.json` plus built-ins). Saved figures store their
   exact display name inside the library file — the filename stays
@@ -243,7 +254,11 @@ present and fall back to a folder-based flow when neither exists.
   clips mid-timeline: **animation states** key a clip change at
   a frame, with its own offset and playback speed, taking over
   from the phase-locked base link at that frame. States are
-  authored in the clips panel or over MCP; clips can be
+  authored in the clips panel or over MCP — the panel's
+  states section (one row per key, with its offset and
+  playback-speed steppers) is covered by a dedicated
+  headless scene that plants a state key on the selected
+  figure and dumps the rendered element tree; clips can be
   assigned to a figure, unlinked, and created from a frame
   range, a compatibility guard checks a clip against a figure
   before retargeting, and deleting or moving a clip remaps its
@@ -266,9 +281,13 @@ present and fall back to a folder-based flow when neither exists.
     keys — opacity, horizontal/vertical flips, per-axis scale
     and pivot — through import, editing and `.stknds` export;
     in the editor a sprite can be clicked on the stage to
-    select it, re-pointed at another asset without losing its
-    keys, reordered in draw order, and navigated from its own
-    dopesheet lane.
+    select it and dragged to move it — the drag authors or
+    moves its key at the current frame through the sprite-key
+    op (position only; the key's opacity, flips, pivot and
+    scale ride through untouched, and a completed drag is
+    exactly one undo step) — re-pointed at another asset
+    without losing its keys, reordered in draw order, and
+    navigated from its own dopesheet lane.
     Image assets import from PNG or JPEG files, detected by
     content rather than by file name. A **layered set** imports
     too: a SpriteLoop package folder (`spriteloop.import.json`
@@ -279,9 +298,11 @@ present and fall back to a folder-based flow when neither exists.
     parts matched by name to a node's segment dress it as
     segment media, and every unmatched or invisible part
     becomes a free sprite — no part is dropped. (A part's
-    opacity rides its sprite; on an attached part it has no
-    segment-media home yet and is counted in the import report
-    instead of being stored.) The import is one undo step,
+    opacity is kept either way: on a free part it rides its
+    sprite key; on an attached part it is stored on the
+    segment media itself and renders with it, and the import
+    report counts the attached parts that arrived with an
+    opacity below full.) The import is one undo step,
     from the command palette or the `import_layered_set` MCP
     tool.
   - *Export:* `.piv` v2/v3/v4/v5, `.stk`, `.nodes`, `.stknds`,
@@ -303,7 +324,16 @@ present and fall back to a folder-based flow when neither exists.
     (the whole timeline in every format, in one call) accept
     a scale as well: it scales only the bundle's PNG sequence
     member, every other member is unaffected, and an invalid
-    scale refuses the call before anything is written.
+    scale refuses the call before anything is written. A
+    bundle also accepts an optional alpha (over MCP): the
+    images bundle's PNG sequence and spritesheet members then
+    export with a transparent background and per-pixel
+    coverage alpha — the PNG member still riding the bundle
+    scale — while the JPEG and SVG members and the whole
+    video bundle are written exactly as without it, and the
+    reply records alpha on the call and on each member, true
+    only where the member was actually written with alpha.
+    Panel bundles have no alpha form and stay opaque.
     Exports also have optional progress hooks in the library:
     PNG/JPEG sequence exports can report each frame as it is
     rendered and written, with the final event marking the
@@ -318,8 +348,13 @@ present and fall back to a folder-based flow when neither exists.
     as separate readouts, every number taken from the hooks'
     own events — while the formats with no progress contract
     (SVG, GIF, APNG, spritesheets and contact sheets) still
-    run synchronously, as do the export bundles in the panel;
-    and over MCP
+    run synchronously; the export bundles in the panel run as
+    background jobs too now, under one combined bundle
+    progress line — frames completed across all members
+    against a total allocated before the first member runs,
+    the SVG and spritesheet members banking their frames at
+    completion — and the finish writes the same recap the
+    synchronous bundle wrote; and over MCP
     stdio, a tool call carrying a progress token streams
     `notifications/progress` while the export runs (encode
     counts for video, render counts for sequences, and for
@@ -343,7 +378,7 @@ present and fall back to a folder-based flow when neither exists.
   (`src/projects.rs`), a recovery snapshot and
   session-continuity helpers (`src/shell.rs`), native open/save
   dialogs, save/load as JSON (`project.styk.json`), and
-  **28 languages** (the original's 27 + Bengali; 692 UI
+  **28 languages** (the original's 27 + Bengali; 694 UI
   strings in each language's table) in `src/i18n.rs`.
   These library features survived the Rune
   migration untouched, and the Home panel and settings

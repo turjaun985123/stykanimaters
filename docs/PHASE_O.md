@@ -473,7 +473,9 @@ the first 16/16-complete dispatch (Wave W,
 W12), and upgraded again to the Wave W
 integration dispatch (Wave X, X15), and
 upgraded again to the Wave Y closing
-dispatch (Wave Z, Z12); the Wave X
+dispatch (Wave Z, Z12), and upgraded
+again to the Wave Z closing dispatch
+(Wave AA, AA12); the Wave X
 integration dispatch was checked in full and
 not taken (Wave Y, Y15 — its scan reads NOT
 CLEAN; see the upgrade notes below).** Original source:
@@ -566,7 +568,7 @@ both dispatches). Every O-1…O-9 measurement
 reproduces exactly — the fourth consecutive
 dispatch to do so.
 
-Current source: **Headless Rune probe run
+Previous source: **Headless Rune probe run
 `42798031914`**, completed **SUCCESS** on
 `a37f2aa03368e9272e10692449f901e662e4dfb5`
 (`a37f2aa`, the Wave Y integrated tree at its
@@ -597,6 +599,39 @@ upward (the Wave X+Y panel surface; the
 upgrade notes carry the list). Every
 O-1…O-9 measurement reproduces exactly —
 the sixth consecutive dispatch to do so.
+
+Current source: **Headless Rune probe run
+`42803945367`**, completed **SUCCESS** on
+`232f43953b5d0f683c796c5483836d282da34484`
+(`232f439`, the Wave Z integrated tree at
+its CI close; the build beside it,
+`42803905598`, completed **SUCCESS** with
+test totals summed from its own log at
+**4,295 passed, 0 failed**), artifact
+`headless-probe-output` (227 files, 38
+`tree-*.json` dumps). Its scan reads
+`OVERFLOW SCAN: CLEAN (0 hits, scan set
+complete)` — the contract now standing at
+19 required trees (the Wave Z states
+carrier promoted since the last citation)
+— its `subtitle-census.txt` reads
+`SUBTITLE CENSUS: PASS` (19 PASS, 0 FAIL),
+both Home markers read `PASS`, its Home
+thumbnail probe reads
+`HOME THUMBNAIL PROBE: PASS` (pairwise
+ink-coverage distances 0 / 51 / 48; the
+band geometry leg within tolerance at
+112×83/84), and its live-MCP probe reads
+`MCP PROBE: PASS` — all read from the
+artifact itself, not from the workflow
+conclusion. Every figure below was
+re-measured in these dumps: all 37 counts
+reproduce exactly, and the table gains the
+one row the Wave Z scene added,
+`tree-states-populated.json`, required and
+CLEAN at 1306 elements. Every O-1…O-9
+measurement reproduces exactly — the
+seventh consecutive dispatch to do so.
 Per §2's output shape each
 scene's hit list is empty, so the table records
 the verdict per scene:
@@ -633,6 +668,7 @@ the verdict per scene:
 | tree-settings-open-light.json | 1440×900 | 1379 | — | 0 | CLEAN |
 | tree-settings-open.json | 1440×900 | 1379 | — | 0 | CLEAN |
 | tree-sprites-populated.json | 1440×900 | 1262 | required | 0 | CLEAN |
+| tree-states-populated.json | 1440×900 | 1306 | required | 0 | CLEAN |
 | tree-strokes-populated.json | 1440×900 | 514 | — | 0 | CLEAN |
 | tree-subtitles-populated.json | 1440×900 | 1223 | required | 0 | CLEAN |
 | tree-subtitles-speaker.json | 1440×900 | 1223 | required | 0 | CLEAN |
@@ -912,6 +948,62 @@ added, none lost — the sprite edit rows
 scale-y) and `fig-setup-mode`. Every
 O-1…O-9 measurement reproduces exactly —
 the **sixth** consecutive dispatch to do so —
+so the per-item table's measured column
+stands unchanged.
+
+**Upgrade notes (Wave AA, AA12).** The
+citation upgrades to the Wave Z closing
+dispatch `42803945367`, above — the first
+dispatch carrying the Wave Z states scene,
+and the fourth consecutive dispatch whose
+scan reads CLEAN. What verified on its
+artifact, read first-hand: scan
+`OVERFLOW SCAN: CLEAN (0 hits, scan set
+complete)` under the contract as it now
+stands — 19 required trees, the Wave Z
+states carrier
+(`tree-states-populated.json`, IA-Y17-2)
+promoted since the last citation, its row
+added to the table: required, CLEAN, 1306
+elements, carrying the state-row form the
+clips carrier could not show
+(`clip-states-section`, `clip-state-row-0`,
+`clip-state-clear-0`); `SUBTITLE CENSUS:
+PASS` (19 PASS, 0 FAIL); both Home markers
+`PASS`; the thumbnail probe PASS live again
+(pairwise distances 0 / 51 / 48 against the
+floor of 12; legacy legs at control shares
+0.008 / 0.004, rows 0.333/0.337/0.339, ink
+115/115/59; the band geometry leg spreads
+within tolerance 1 at 112×83/84);
+`MCP PROBE: PASS`. The build beside it,
+`42803905598` on the same commit, completed
+**SUCCESS**, its test totals summed from
+its own log at **4,295 passed, 0 failed**.
+The measurer was calibrated before any
+number was trusted (X15's discipline): run
+against the previous citation's artifact
+(`42798031914`, downloaded fresh), all 37
+per-tree counts and windows and every
+O-1…O-9 subtree right edge reproduce the
+table exactly, so the stillness below is
+the new artifact's fact. (A rescan of that
+older artifact under the current contract
+reads `scan set INCOMPLETE` for exactly one
+reason — it predates the Wave Z scene and
+cannot contain its tree; every dump present
+reads 0, the V19 provenance-gap shape, not
+a hit.) Per-tree counts: **no number
+moved** — all 37 reproduce, as at the W12
+upgrade; the `tree-default.json` key diff
+against the previously cited artifact is
+exactly zero keys added, none lost. The
+defect the last upgrade closed stands
+closed: `sprite-z-front` ends at **1194.5**
+and the `sprite-z-row` subtree at 1412.0,
+as on the cited frame. Every O-1…O-9
+measurement reproduces exactly — the
+**seventh** consecutive dispatch to do so —
 so the per-item table's measured column
 stands unchanged.
 

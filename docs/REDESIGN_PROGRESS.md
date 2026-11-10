@@ -11328,3 +11328,1032 @@ Settled counts at the close: MCP 392, i18n 694 ×28 (693
 135, scenes 35, SCAN_SET 19 required / 0 pending. Wave AA
 (the panel catches up with the engine) was boarded
 before this close and launches on this HEAD.
+
+### 6.21 Wave AA — the panel
+catches up with the engine:
+inspector opacity, bundle
+cancel, dopesheet channel
+marks; the Wave Z frame closed
+(2026-11-10)
+
+Ordered 2026-11-10 (the standing
+continuous order; the board was
+written while Wave Z integrated,
+so this wave launched the moment
+Wave Z closed): twenty agents,
+one owner per file, integrator
+surfaces via filed actions
+(board: `~/workspace/wave-aa/BOARD.md`;
+findings:
+`~/workspace/wave-aa/findings/`).
+The board's base is the Wave Z
+closing HEAD `0d32fa8` (MCP 392,
+i18n 694 × 28 — Z13's corrected
+693 plus IA-Z8-1's one key,
+element keys at the 1017 floor,
+palette 135, scenes 35,
+SCAN_SET 19 required / 0
+pending); `src/i18n.rs` and
+`src/rune_sec/i18n_wire.rs` are
+frozen to this wave's agents,
+all key work arriving via IA.
+
+**Record-time caveat.** This
+section was first written in the
+wave's first minutes, when no
+sibling findings had landed;
+before it closed, sixteen
+sibling findings arrived (AA2–
+AA12, AA14, AA15, AA17, AA18,
+AA19) and their paragraphs
+below were upgraded from board
+summaries to findings digests,
+with the frame corrected where
+AA19's run-by-run assembly
+superseded this seat's first
+pass. The seats still out at
+close (AA1, AA13, AA16) keep
+their
+**board summaries, marked as
+such** — assignments and binding
+constraints, not digests of work
+done. Every Wave AA status is
+IMPLEMENTED until Wave AA's
+integration CI.
+
+**The Wave Z integration
+ledger.** Five slices on
+`5031700`, in order: (1)
+`fe1f183` — core: Z1's
+bend-channel media routing, Z5's
+segment-media opacity home
+(serde-defaulted `opacity` on
+`SegmentMedia::Image`, skipped
+on write at 1.0 so opaque
+projects serialise
+byte-identically), Z11's bend
+bake, Z9's library round-trip
+pins. (2) `a245db1` — shell:
+Z3's stage sprite dragging, Z4's
+setup rest steppers, Z8's panel
+bundle progress job (new element
+key `xc-progress-bundle`), Z2's
+states-populated scene, Z11's
+bend readouts. (3) `4a4a47a` —
+MCP: Z6's bundle alpha contract,
+IA-Z5-1's layered-import report
+rename (`attached_opacity_dropped`
+→ `attached_opacity_stored`,
+compile-required) and IA-Z5-2's
+attach `opacity` argument,
+IA-Z11-1's reduce comment. (4)
+`7db7902` — i18n + infra:
+IA-Z8-1's `export_bundle_progress`
+key inserted into all 28 tables
+beside `export_render_progress`,
+IA-Z13-1's 693-count prose
+corrections, floor ratchets to
+1017 keys / 392 tools (Z13),
+SCAN_SET 19 required / 0 pending
+(Z2/Z14), IA-Z15-1's help comment.
+(5) `f20a95a` — docs: Z17's
+README truth pass 7, Z15's MCP
+sync, Z12's PHASE_O §10 citation
+upgrade, Z18's QA_RUNE §19.9,
+Z20's §6.20 record. Gate PASS
+10/10 and census clean at 392 on
+the integrated tree, re-verified
+by this seat on the clean
+`0d32fa8` tree.
+
+**The Wave Z CI frame — four
+rounds plus two docs-close
+rounds** (assembled from the
+runs themselves by AA19 and
+adopted here; this seat's
+independent `gh` spot-checks
+agree). **Round 1** (`f20a95a`):
+build 42801198015 FAILURE — one
+error, bin target only: E0004,
+the single-format worker's match
+missed Z8's bundle `JobKind`
+variants; headless 42801233213
+FAILURE at the same compile in
+its own build step (no dumps
+exist for it — a missing input,
+not a probe defect). Fix
+`6ebc4d6`: the bundle arms return
+a dispatch error (bundle jobs
+run through their own
+plan-driven worker; the arm is
+never reached). **Round 2**
+(`6ebc4d6`): build 42802395799
+FAILURE — 16 errors in the lib
+*test* target only: Z1's media
+tests used `Channel` /
+`ChannelTarget` / `Key` without
+the graph import, Z6's
+bundle-alpha test called
+`.dimensions()` without
+`GenericImageView`. Fix
+`2676132`: the two imports. The
+round's headless (42802422399)
+was **CANCELLED in its setup
+step** when round 3 superseded
+it — no headless verdict exists
+for that tree, and none is
+claimed (AA19's correction to
+the interim record, adopted).
+**Round 3** (`2676132`): build
+42803084984 FAILURE — the lib
+suite reported 1,771 passed / 2
+failed (the step stops at the
+first failing target; no
+whole-run total exists), both
+failures pre-existing media
+tests pinning the node-media
+JSON shape from before the
+stored opacity field; headless
+42803118202 SUCCESS — the first
+green dispatch on a Wave Z tree,
+38 dumps, the states tree's
+first appearance. Fix `232f439`:
+the two pins learn the IA-Z5-2
+shape (`"opacity": 1.0`).
+**Round 4** (`232f439`): build
+42803905598 **SUCCESS — 4,295
+tests, 0 failed** (log-summed);
+headless 42803945367 **SUCCESS**,
+transcripts verified (SUBTITLE
+CENSUS PASS, HOME THUMBNAIL
+PROBE PASS, MCP PROBE PASS, both
+Home markers), 38 dumps with
+`tree-states-populated.json`
+among them, artifact overflow
+scan CLEAN — the fourth
+consecutive CLEAN dispatch.
+**Docs-close rounds:** §6.20's
+remainder (3) is settled — the
+`5031700` pair both SUCCESS
+(build 42798924312: 4,248 passed
+/ 0 failed, identical to the Y
+close as a docs-only delta
+predicts; headless 42798957551:
+all fail-soft PASS, 37 dumps —
+the 38th is the states tree,
+which lands exactly at round 3).
+The `0d32fa8` close pair (build
+42804787786, headless
+42804827398) was in flight at
+this record's write time; its
+verdicts belong to the next
+record. No product behaviour
+changed in any fix round — every
+failure sat in a compile or test
+target, round by round.
+
+**AA1 — inspector media-opacity
+control: BUILT** (findings
+digest, reconciled at
+integration). §6.20 (2)'s panel
+reach closed: the Media
+section's transform block gains
+a fifth stepper row — Opacity
+(`seg-media-opacity-dn`/`-up`) —
+viewing and editing Z5's stored
+field through the new
+`adjust_media_opacity` op
+(validate → one snapshot →
+mutate → status: exactly one
+undo step per effective press,
+clamp presses silent). The
+sanitisation is the funnel's
+own rule (`sanitise_media_opacity`:
+non-finite → 1.0, clamped
+0..=1), so the row shows exactly
+what renders, and a changing
+press repairs a corrupt store.
+Deliberately NOT folded into
+`MediaTransformState`: Reset
+must spare a stored opacity
+(Z5's preservation guarantee) —
+a pin proves it. Nine new tests.
+IA-AA1-1 landed at integration:
+`segment_media_opacity` /
+"Sprite opacity" inserted in
+all 28 tables after
+`segment_media_rotate` — the
+catalogue is **695 ×28** from
+this wave. This is the
+stored-field control, **not**
+the panel alpha toggle (a
+standing user decision,
+untouched).
+
+**AA2 — panel bundle cancel:
+AUDITED — NOT BUILT.** The
+board's condition failed on the
+evidence: the W1 mechanism is
+one-way by design — both
+channels run worker → UI, the
+worker handle is discarded at
+spawn, the core progress
+callbacks return `()` and cannot
+stop the member that is running
+(or reach the hook-less SVG /
+spritesheet members at all). The
+one in-file improvisation (a
+flag checked between members)
+fails the board's own terms
+three ways: it skips only
+unstarted members, it has no
+honest "cancelling…" state to
+show under the status-written-
+once rule, and a member skipped
+at the user's request fits
+neither bucket of the class-C
+recap — writing it under
+"failed:" would be a known
+falsehood in the record. So no
+control was wired and no string
+filed; panel/MCP parity holds by
+both sides having no cancel. A
+real contract needs a core stop
+signal, a class-C ruling on a
+third recap bucket (the user's),
+and a readout rule — filed as
+remainders, not improvised.
+
+**AA3 — dopesheet channel marks:
+BUILT.** Z11's equal absence is
+closed at the sheet: NO graph
+channel of any target marked the
+dopesheet (pose rows derive from
+stored poses, and a channel key
+writes no pose — a figure
+animated purely from the Graph
+panel left no trace). The new
+derivation takes the frames
+holding a key in ANY channel of
+the figure — RootX, RootY,
+Angle, Length, Bend at parity —
+through `graph_key_frame`
+imported from the marker row
+(never re-typed, so sheet and
+marker row cannot disagree on
+which frame a key sits on;
+fractional keys round, stale
+channels mark nothing), and the
+cell renders the marker row's
+own `●` in its graph colour,
+composing losslessly with the
+pose/state glyphs (all three
+kinds visible at once; lone-mark
+cells byte-unchanged; no new
+element keys — scripted 3/4 →
+3/4). A channel-keyed but
+unposed figure now gets rows
+instead of the empty state. Six
+pins. The mark is per-frame and
+target-blind by design — the
+sheet says a channel turns here;
+naming targets stays the Graph
+panel's job.
+
+**AA4 — keyframe-tools channel
+scope: the skip is BY DESIGN,
+now documented and pinned.**
+The audit cleared every other
+surface first-hand: the
+graph_keys library addresses any
+channel (by index or by
+(figure, target)), its MCP
+handlers likewise, and the graph
+panel's delete/shift act on the
+DRAWN channel — any target. The
+one skip is the keyframe-tools
+SECTION, whose single-target ops
+resolve (selected figure, Angle
+(selected node)). That scope is
+its Phase D charter, restated by
+every later addition, ruled on
+by the Wave 10 scope-honesty
+audit, and stated in situ by its
+own button ("Key angle here");
+the generic reach sits adjacent
+by construction (the Graph panel
+mounts directly above it). The
+considered widenings break real
+semantics (one-channel clipboard,
+per-channel collision rules,
+traced-write-set honesty), so
+nothing was widened: the module
+docs of both files now carry the
+scope rule and its audit trail,
+and one pin proves the section's
+ops never touch the joint's Bend
+or Length channels. Scope
+changes only by a future board
+call.
+
+**AA5 — Bend(0) authoring call:
+BUILT.** §6.20 (2)'s call lands
+as a refusal, and the refusal is
+the codebase's own: frame bends
+on the origin are already
+refused everywhere with one
+sentence ("The origin has no
+segment to bend." — panel
+`cycle_bend`, the inspector
+steppers, MCP `set_bend`), and
+the two bend-capable graph
+doors were the leftover hole.
+Panel `key_bend` and MCP
+`tool_graph_key` now refuse
+node 0 with that exact sentence
+before any snapshot — no phantom
+undo step, both `"bend:0"` forms
+refused, `bend:1` untouched.
+Saved projects cannot break:
+no load/save path validates
+channel targets, an existing
+Bend(0) channel stays selectable,
+movable, deletable and
+transformable — only authoring
+NEW keys stops. One pin per
+door. Angle(0)/Length(0) are
+equally inert and stay
+authorable — a different board
+call (remainder). IA-AA5-1
+(docs sentence) was applied
+verbatim by AA15.
+
+**AA6 — render schema alpha
+drift: DONE, one line.** §6.20
+(7) closed: the schema now names
+'apng' beside 'png_sequence' and
+'spritesheet'. Two corrections
+ride with it: the `render` tool
+lives in `src/mcp_io.rs` (io
+family), not `src/mcp_tools.rs`
+as the board phrased it — the
+edit went to the schema's actual
+home, in the seat's declared
+region spirit — and docs/MCP.md
+needed no edit: its render row
+already carried the APNG-inclusive
+sentence (the docs were ahead of
+the schema, not behind it). The
+prose side was truthful all
+along: `tool_render` dispatches
+`apng` + alpha to the alpha
+encoders. Census re-verified by
+the seat: 392, 16/16 PASS.
+
+**AA7 — states-populated
+overflow verification: VERIFIED
+CLEAN.** §6.20 (1)'s conditions
+met in full on the closing
+dispatch (42803945367), measured
+from a fresh artifact download:
+38 dumps, `tree-states-populated.json`
+among them, the scan over the
+artifact reading 0 hits on every
+dump and "CLEAN (0 hits, scan
+set complete)" — 19/19 required.
+The state row sits inside its
+card: the states section rests
+12.0 inside the card on both
+sides with 128.0 of card below,
+its right edge 0.5 inside the
+1412.5 scan edge; the row is
+full-width flush with the
+section by design (+0.00, never
+past), the tightest stepper
+holding 24.5 of headroom. The
+clips-panel repair contingency
+does not trigger; AA12 was free
+to cite this frame.
+
+**AA8 — sprite-drag stage polish
+audit: one gap built, three
+cleared.** The proven gap was
+accidental drag: any pointer
+travel, however small, committed
+a real key — one or two units of
+hand jitter spent an undo step
+and, at a keyless frame,
+materialised a stored key the
+user never meant to author. The
+gesture gains a press-relative
+jitter gate (`DRAG_THRESHOLD`
+2.0 stage units): below it
+nothing is written at all (the
+subtlety the subtitle lane's
+lazy snapshot already practised);
+crossing it applies the full
+press-relative delta, no jump,
+no subtraction drift. Two pins.
+The other probes cleared on
+evidence: fractional frames
+cannot underlie a grab (the
+fractional display exists only
+while playing, and arming is
+refused while playing); playback
+starting mid-gesture leaves the
+project coherent and no sibling
+gesture guards it either, so a
+sprite-only guard would diverge;
+the overlap pick is taken once
+at press and never re-picked, so
+nothing can steal a gesture.
+
+**AA9 — rest-stepper + drag
+coherence audit: COHERENT, with
+one seam filed as a decision.**
+Every `rest_angle` writer was
+enumerated tree-wide. Stepper
+and Setup drag provably end at
+the same composition
+(`clamp_angle` after `norm_deg`,
+the drag applying it inside the
+solve and again, idempotently,
+at write-back); panel set-rest
+and MCP `set_rest_pose` are
+structurally one op (one core
+implementation, identical
+validation and snapshot
+accounting) — parity cannot
+drift without a second
+implementation being written.
+The one real disagreement:
+`set_rest_from_pose` normalises
+but does NOT clamp, so a pose
+captured after limits were
+tightened stores a rest outside
+its own arc, and the next
+stepper press is direction-blind
+until the value re-enters.
+Unconsidered seam, not design;
+the fix lives in model.rs and
+its direction is a genuine
+product call, so it is filed as
+**IA-AA9-1 (DECISION)** —
+remainder (8) below — not built
+unilaterally. Nothing else
+built; the seat touched no file.
+
+**AA10 — bundle-job progress
+truth audit: NO MISMATCH; the
+one unpinned seam now pinned.**
+The three surfaces tell the same
+story by construction — one
+shared core tracker
+(`BundleProgress`: allocation
+before the first member, clamped
+monotonic advances, silent
+banking, the terminal fired iff
+every member succeeded), verbatim
+field mappings at both hops
+(panel slot, MCP wire), and
+manifest alpha flags matching
+the (scale × alpha) routing
+member for member, recorded on
+success and error objects alike.
+Every candidate skew (member
+order, banking divergence,
+failed-member terminal, MP4's
+double phase, alpha video) was
+checked and cleared against the
+X11/Z6/Z8 pins. The one seam no
+pin covered — the manifest's
+per-member FRAME counts, alpha
+vs opaque — gains two pins
+(images and video) in mcp_io's
+tests; no production code
+changed. One observation, not an
+IA: the totals arithmetic exists
+twice (core-inline and the
+panel's helper), each side
+independently pinned to the same
+values, so a drift fails a pin
+before it can desync the story.
+
+**AA11 — media-opacity surface
+sweep: CONSISTENT; the drop is
+total; two doc sentences
+built.** There is exactly one
+media-shape emitter
+(`segment_media_json`) and every
+data surface routes through it —
+`get_node`, `clip_get_node_media`,
+`clip_list`, both attach replies,
+the clear reply — with the
+registry and docs enumerations
+in step (IA-Z5-2 verified in
+both files), attach replies
+firing on opacity alone, and the
+layered-import report carrying
+`attached_opacity_stored` into
+the MCP reply under its own key.
+Raw reads report the stored
+value unsanitised by house style
+(the funnel sanitises at
+render); the panel label names
+identity, not payload — its
+silence is its standing shape,
+and the missing panel stepper is
+AA1's build, not duplicated
+here. The .stk/.piv drop was
+verified total field by field:
+the shared figure writer never
+reads `node.media` at all, and
+v5 — which carries the media's
+identity and bytes — applies
+NONE of the five payload fields
+(nothing baked into blob alpha
+or anchors). The two proven
+gaps were documentary: the drops
+were total in code but unstated
+where a reader looks, so the
+exporter docs gained the
+sentences.
+
+**AA12 — citations: the §10
+upkeep — TAKEN.** PHASE_O §10's
+citation now stands on the Wave
+Z closing dispatch (42803945367),
+by Z12's method with the
+measurer calibrated first-hand
+against the previously cited
+artifact (every per-tree count
+and O-1…O-9 edge reproduced
+before the new frame was
+trusted). The quietest upgrade
+in the table's history: on the
+new artifact **no shared number
+moved** — all 37 shared trees
+reproduce exactly, the O-1…O-9
+streak reaches seven consecutive
+dispatches, the z-row stands
+(front 1194.5, subtree 1412.0),
+and the `tree-default` key diff
+is +0/−0. The table gains its
+one growth row — the states
+carrier (1306 elements, 0 hits,
+required under the 19-tree set)
+— and a corollary is recorded:
+rescan the previously cited
+artifact under the current
+contract and it reads INCOMPLETE
+for exactly one reason (it
+predates the scene) — a
+provenance gap, not a hit.
+IA-AA12-1 filed for the QA
+pointer; AA18's §19.10 carries
+the matching fact.
+
+**AA13 — gate/census
+maintenance: DONE** (findings
+digest, reconciled at
+integration). Clean detached
+worktree of `0d32fa8`: gate
+PASS 10/10, census 392, every
+count structurally verified —
+element keys **1019** (889
+static + 130 dynamic; the delta
+vs `5031700` is exactly Z4's
+two rest-stepper patterns, zero
+lost; `xc-progress-bundle`
+exists in source but rides
+outside the counter as a
+tuple-carried key, the standing
+F6 artefact — AA17's 1018 was
+the gate's check-1 line on the
+moving tree before every seat
+had landed), i18n **694 ×28**
+at the baseline (695 after
+IA-AA1-1), palette 135, scenes
+35, SCAN_SET 19/0. Floor
+ratchet landed: `KEY_TOTAL_FLOOR`
+1017 → **1019**, proven in the
+clean worktree before it was
+applied to the live file;
+`MCP_SURFACE_FLOOR` stays 392.
+The header drift AA17 recorded
+(693 against the gate's count)
+was discharged at integration
+with IA-AA16-2: both frozen-file
+headers now read 695.
+
+**AA14 — overflow/headless
+maintenance: VERIFIED, no
+edits.** The machinery survived
+integration exactly to spec,
+re-derived two ways (module
+import and CLI, set-equal):
+SCAN_SET **19 required / 0
+pending**; `scenes()` 35; both
+headless loops 35, set-equal to
+the registry, to each other, and
+each individually producing
+every required tree; 35 loop
+trees + 3 plain-loop-only 720p
+literals = the **38 dumps** the
+closing dispatch in fact
+produced; self-test all green,
+no stale counts in either owned
+file. The boundary is stated for
+the record: AA14 owns the
+instrument and the set, AA7 owns
+the artifact verdict, AA12 owns
+the citation — a CLEAN line
+cited downstream can be trusted
+because the instrument was
+checked, not assumed.
+
+**AA15 — MCP docs sync: sweep
+clean, one sentence applied.**
+The escaped-pipe-aware sweep
+against the settled census:
+**392 doc rows, one per census
+tool** — zero duplicates, zero
+missing, zero phantom, zero
+misplaced; the description
+screen flagged no row; Z15's
+Wave Z repairs all intact. The
+Required / Optional columns were
+re-derived from source for every
+Wave Z changed row (Z15's
+remainder, discharged): both
+attach rows carry `opacity`,
+`export_bundle` carries `scale` /
+`alpha`, both media-shape
+enumerations name `opacity`, and
+the layered-import rename is
+closed on the docs side (the
+old name survives only as a
+historical comment). IA-AA5-1
+applied verbatim — the
+`graph_key` row gains AA5's
+bend:0 refusal sentence — and
+AA6's schema-side fix needed no
+doc action. No IAs produced; the
+standing note stands (remainder
+(10)): re-run this sweep on the
+integrated tree before close.
+
+**AA16 — i18n usage hygiene,
+second pass: DONE, zero
+removals** (findings digest,
+reconciled at integration).
+Structural parse of the
+694-key baseline: 532 live-direct
+(the 532nd is
+`export_bundle_progress`, wired
+at Wave Z integration), 154
+live-dynamic, 7 reserved, **1
+wire**, 0 remove. The wire key
+is `status_ready` — a correction
+to the record: it has never had
+a consumer (zero `tr()`
+credits, in no resolver
+mechanism); its English value
+is displayed constantly as the
+core's initial status string,
+rendered raw, so it classifies
+WIRE under the standing bar,
+not REMOVE — §6.20's implied
+live-direct count for it does
+not stand. IA-AA16-1 (wire it /
+remove it / reserve it) was
+decided at integration for the
+seat's recommended option C:
+**reserved as kept-by-decision**
+— no code change; the user may
+revisit. IA-AA16-2's header fix
+landed with IA-AA1-1's (695).
+
+**AA17 — README truth pass 8:
+done, nine edits.** Every Wave Z
+surface is now claimed on its
+closed CI frame, each claim
+sourced from its Z-finding and
+re-checked against the landed
+tree: the string count corrected
+692 → **694** (gate check 4's own
+structural count), bend-channel
+media and bend polish in the
+Timeline passage, sprite dragging
+and rest steppers in Import /
+Posing, stored layered opacity —
+claimed for the attach tools and
+layered import only, **no panel
+claim** (AA1 is pass 9's claim) —
+bundle alpha scoped to MCP with
+panel bundles stated opaque, the
+panel bundle jobs on W1's
+mechanism, and the states scene's
+coverage in Movieclips. All prior
+flags carried verbatim (LICENSE
+still absent — F2 stands on
+Cargo.toml alone) and the
+deliberate non-claims listed:
+no panel opacity control, no
+bundle cancel, no chain-spanning
+media, no library states, no
+limit sweep. No IAs.
+
+**AA18 — QA_RUNE alignment:
+§19.10 appended.** The §19 line
+now stands against Wave Z's
+closing frame, X15/Y15/Z18's
+method, every figure re-derived
+from the run log or the
+downloaded artifact: 4,295
+log-summed, 38 dumps with the
+states dump genuinely populated,
+every transcript PASS with its
+load-bearing numbers, the scan
+CLEAN as the **fourth
+consecutive** — with the chain's
+third link (42803118202)
+re-verified first-hand in this
+pass, links 1–2 standing on
+Z12/Z18's verification.
+**IA-Z12-1 is consumed and
+discharged**: PHASE_O §10's
+upgrade landed in Wave Z, §19.10
+records it as fact, and
+IA-AA12-1's matching pointer is
+carried by the same entry —
+§19.10 names this frame as the
+newest CLEAN frame and records
+§10's advance to it (taken by
+AA12 in this wave). The §10
+advance itself was AA12's call;
+this seat took none of it.
+
+**AA19 — rehearsal support: the
+frame, from the runs.** Every
+status, total and transcript in
+the frame above was read from
+the runs' own logs, nothing
+transcribed from §6.20 or the
+close note — and where the
+interim record disagreed, the
+runs won: the round-2 headless
+was **cancelled in setup**, not
+failed (the frame now says so).
+Log-summed totals throughout:
+4,248 (Y docs-close), 4,295 (Z
+close); the 37 → 38 dump step
+located exactly at round 3,
+where the states tree first
+exists; round 3's lib-suite-only
+total stated as such rather than
+inflated into a whole-run figure.
+The `0d32fa8` docs-close pair
+was still in flight at its write
+time too — remainder (3) stands
+for both records.
+
+**AA20 — this section** (§6.21
+record + integration-eve
+rehearsal, below). First written
+at launch from the board, the
+git history and first-hand `gh` /
+instrument checks, then revised
+in place as sixteen sibling
+findings landed — each upgraded
+paragraph names its seat's own
+verdict, and the three seats
+still out remain marked board
+summaries under the caveat
+above, for the integrator to
+reconcile (remainder (2)).
+
+**Integration-eve rehearsal.**
+Two readings, honestly labelled.
+**Baseline** (this seat, on the
+clean tree at `0d32fa8` before
+any seat diff existed): gate
+`phase_j_checks.py` **PASS
+10/10**; `mcp_census.py` clean —
+**MCP 392, palette 135**.
+**Settled counts**, since
+measured by sibling instruments
+on this tree and mutually
+consistent: element keys **1018**
+(gate check 1, AA17 — the 1017
+floor plus `xc-progress-bundle`),
+i18n **694 × 28** (gate check 4,
+AA17; AA14's SCAN_SET 19/0 and
+scenes 35 re-derived two
+independent ways), census **392**
+(AA15 twice — clean base and
+landed tree; AA6 once; this seat
+and AA10 on the shared tree).
+**Moving-tree readings** (the
+Z14 caution applies — they
+measure a tree other seats were
+still editing): AA10's filing
+read gate + census PASS over the
+shared tree carrying every
+in-flight AA diff; this seat's
+closing census read likewise
+clean. No count dropped against
+the baseline in any reading.
+Per-seat diff comparison: the
+sixteen landed seats' diffs sit
+in their declared files/regions
+per their findings (AA2/AA9/AA14
+deliberately empty; AA6 one line
+in mcp_io.rs; AA15 one docs
+sentence; AA5 two regions + two
+pins), and AA15's census-side
+sweep over the same tree found
+zero missing/phantom/misplaced
+rows — the comparison the
+integrator must still re-run
+seat by seat on the integrated
+tree, against these counts, not
+against expectations.
+Classification rule for
+integration, stated so it cannot
+drift: a Wave AA failure is
+**pending-IA** if it disappears
+when the filed IAs are applied
+exactly as filed — IA-AA5-1
+already applied verbatim by AA15
+is this class's discharged
+example; the live cases are
+AA1's inspector string reaching
+`src/i18n.rs` + the wire through
+the integrator, and AA16's
+removals, which exist only as
+IAs — and a **regression**
+otherwise, including failures in
+files no seat owned, count drops
+against the settled counts
+above, and any class-C sentence
+altered. IA-AA9-1 is **neither**:
+a decision IA (model.rs
+semantics) that produces no
+failure either way until someone
+rules on it. At this record's
+close there are **zero failures
+to classify**: no integration
+run exists yet. A paragraph
+above marked "board summary" is
+never evidence in the
+integrator's comparison — the
+seat's findings and diff are.
+
+**Remainders.** (1) **The Wave AA
+integration CI + its first
+headless dispatch.** Everything
+above is an assignment or a
+baseline until that CI; the
+dispatch must produce **38
+dumps** with
+`tree-states-populated.json`
+among them, and the debrief scan
+over that artifact must read
+19/19 required present with its
+hit verdict stated from the scan
+output itself — never a
+workflow-log grep. Overflow
+repair, if any, belongs to the
+owning panel seat — no exemption,
+no threshold move. (2) **This
+record's remaining board
+summaries.** Sixteen seats were
+reconciled against their landed
+findings before this section
+closed (AA19's log-summed totals
+were adopted into the frame,
+including its round-2
+cancellation correction). The
+three still marked "board
+summary" (AA1, AA13, AA16) must
+be reconciled by the integrator
+when their findings land; where
+a finding contradicts its
+paragraph, the finding wins and
+the discrepancy is recorded in
+the next section, not silently
+patched here. (3) **The
+`0d32fa8` docs-close round**
+(build 42804787786, headless
+42804827398) was in flight at
+this record's write time; its
+verdicts — docs only, no product
+behaviour — are recorded by the
+next record, not asserted here.
+(4) **Chain-spanning media**
+(Z7): the design is complete and
+the seam verified; the build
+awaits the user's answers to the
+design's nine questions (Q1–Q9
+in z7.md, defaults stated).
+Nothing is improvised meanwhile.
+(5) **Figure-library states**
+(Z9) and **the limit-preset
+sweep** (Z10) still await user
+briefs — the clips-in-library
+format change and joint-role
+metadata respectively. Per-node
+presets (Y12) stand. (6) **The
+panel alpha toggle** remains the
+standing user decision, unbuilt;
+AA1's stored-opacity control is
+a different field and does not
+prejudice it. Bundle alpha is
+MCP-side (Z6) with panel bundles
+progress-only (Z8), and **panel
+bundle cancel is now settled as
+not built** (AA2's audit): it
+becomes buildable only with all
+three of a core stop signal in
+the progress contracts (threaded
+through export.rs, svg, the
+spritesheet entry and the MCP
+driver), a class-C ruling adding
+a cancelled bucket to the bundle
+recap (the user's — the standing
+exclusions forbid the seat from
+rewording it), and a readout
+rule for pressed-but-not-yet-
+effective. Until then "no cancel
+path exists in the contracts,
+and no fake button was added"
+remains the true sentence.
+(7) All standing user decisions
+from §6.20's list stand untouched
+by this wave: accent contrast,
+panel splitter, File-menu Save
+As, the two-"New project"
+results, `tab_visits_controls`
+OFF, project-swap undo, skew,
+whole-figure pose transform, MCP
+write_recovery, waveform badge,
+GIF import, panel export-scale
+control, subtitle-stack cap/wrap,
+S1's surviving i18n discrepancies,
+the export class-C sentences
+(machine-read), serialised
+vocabularies in English, the
+Settings-card Esc / menu-open
+non-Esc key leak (PHASE_O §9) and
+the figure-inspector
+stale-selection copy (PHASE_O §4)
+pending a product ruling, and the
+absent LICENSE file (a flag,
+never an edit). Sound remains
+user-verified only. The SpriteLoop
+GAP list stays exhausted except
+what user briefs still own —
+chain-spanning media (4) is the
+largest of those, fully designed
+and priced. (8) **IA-AA9-1 — the
+set-rest clamp decision.** Whether
+`Project::set_rest_from_pose`
+clamps its capture through joint
+limits is an integrator/user
+ruling (model.rs): clamp and all
+three rest writers share one rule,
+at the cost of set-rest no longer
+reproducing an out-of-arc pose
+exactly; or keep norm-only as a
+deliberate extension of "limits
+bind solvers, not stores", with
+the direction-blind stepper press
+standing as its known symptom.
+AA9's findings carry the one-site
+diff and the pin for the YES
+branch; no panel or MCP change is
+needed either way. (9) **The
+`src/i18n.rs` header prose.** The
+header still reads "the same 693
+keys" while the gate's structural
+count is 694 — IA-Z13-1's prose
+was written before IA-Z8-1's key
+landed (AA17's observation). The
+file is frozen to agents; the
+one-line correction (693 → 694)
+is the integrator's, alongside
+any Wave AA key work. (10) **The
+MCP catalogue's standing
+verification debt** (AA15, after
+Z15): the census + escaped-pipe
+sweep must be re-run on the
+integrated tree before the wave
+closes, and the Required /
+Optional columns — re-derived
+this wave only for the changed
+rows — still await an exhaustive
+schema-by-schema pass over all
+392 rows; neither is a defect,
+both are how the catalogue stays
+honest.
