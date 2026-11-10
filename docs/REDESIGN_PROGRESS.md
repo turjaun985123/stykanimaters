@@ -13459,3 +13459,45 @@ briefs still own —
 chain-spanning media (§6.21
 (4)) is the largest of those,
 fully designed and priced.
+
+**Wave AB close (integrator,
+2026-11-10).** CI round 1
+(build 42812652116) failed in
+the lib TEST target only — 10
+scope errors: AB7's totals pin
+sat in a module whose selective
+imports did not name
+`bundle_member_totals` /
+`BundleKind`, and AB11's
+`core_with_bend_zero` helper
+existed only in the sibling
+test module that does not hold
+two of its pins. Fixed in
+`4edd39b` (import list extended;
+sibling module given its own
+helper copy per the file's
+standing pattern); no product
+code touched. **Round 2 GREEN:
+build 42813405873 SUCCESS —
+4,339 tests passed, 0 failed
+(+22 over Wave AA's 4,317,
+exactly AB19's rehearsed
+arithmetic); headless
+42813458176 SUCCESS — every
+transcript PASS (subtitle
+census, Home thumbnail probe
+content-faithful at coverage
+distances 0 / 48, both Home
+markers, live MCP probe), 38
+dumps, and the downloaded
+artifact's overflow scan CLEAN
+— the seventh consecutive
+scanned-CLEAN dispatch.**
+Counts at close: MCP 392, i18n
+695 ×28, element keys 1019
+(floor), palette 135, scenes
+35, SCAN_SET 19/0. IA-AB7-1 and
+IA-AB6-1 were discharged inside
+the integration push itself.
+Wave AC launches on this
+closing frame.
