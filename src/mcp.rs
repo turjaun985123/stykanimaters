@@ -488,8 +488,39 @@ impl McpServer {
             (Some(token), Some(notify)) => {
                 let token = token.clone();
                 let notify = notify.clone();
+                // The encoder's `-progress` feed can restate
+                // its final count (the closing block repeats
+                // the last frame), and a progress stream must
+                // never repeat or go backwards: suppress any
+                // report that does not advance the count
+                // within the same total. A changed total (a
+                // new phase or bundle member) always
+                // forwards. Pinned by
+                // `tokened_video_range_streams_encode_progress`
+                // (CI round 2 of Wave W caught the duplicate:
+                // the stream was [(2,2), (2,2)]).
+                let last = std::sync::Mutex::new(None::<(usize, usize)>);
                 Some(std::sync::Arc::new(move |report| {
-                    notify(progress_notification(&token, report));
+                    let advanced = match last.lock() {
+                        Ok(mut last) => {
+                            let advanced = match *last {
+                                Some((p, t)) => {
+                                    report.total != t || report.progress > p
+                                }
+                                None => true,
+                            };
+                            if advanced {
+                                *last = Some((report.progress, report.total));
+                            }
+                            advanced
+                        }
+                        // A poisoned lock must not swallow
+                        // progress: fail open and forward.
+                        Err(_) => true,
+                    };
+                    if advanced {
+                        notify(progress_notification(&token, report));
+                    }
                 }))
             }
             _ => None,
