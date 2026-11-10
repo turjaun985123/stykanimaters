@@ -449,7 +449,7 @@ pub fn inspector_data(core: &EditorCore, selected: Option<usize>) -> Option<FxIn
 /// translated here).
 pub fn clip_readout(core: &EditorCore, entry: &FxClipEntry) -> String {
     let mut line = i18n_wire::tr(core, "fx_readout")
-        .replace("{kind}", kind_label(core, fx_edit::kind_name(entry.clip.kind)))
+        .replace("{kind}", &kind_label(core, fx_edit::kind_name(entry.clip.kind)))
         .replace("{first}", &frame_label(entry.clip.start + 1.0))
         .replace("{duration}", &frame_label(entry.clip.duration));
     if entry.hidden {
