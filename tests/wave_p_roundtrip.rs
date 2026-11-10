@@ -547,7 +547,7 @@ fn full_fixture_round_trip_is_lossless_per_section() {
         "\"subtitle_style\"",
         "\"format_version\"",
         "\"Ünïcode cue — ♪\"",
-        "\"ünïcode-♪.ogg\"",
+        "\"audio/ünïcode-♪.ogg\"",
     ] {
         assert!(
             text1.contains(marker),
