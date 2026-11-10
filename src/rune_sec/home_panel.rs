@@ -3005,6 +3005,15 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
     if home.recovery_offer_live(&s.core) {
         card = card.child(recovery_banner(s, t));
     }
+    // The sort button's label is bound here: `btn`'s
+    // element borrows its label for the element's whole
+    // life, so a `&tr(...)` temporary would be dropped
+    // while borrowed (E0716, Wave V CI round 1).
+    let sort_label = if home.sort_by_name {
+        i18n_wire::tr(&s.core, "home_sort_name")
+    } else {
+        i18n_wire::tr(&s.core, "home_sort_recent")
+    };
     card = card.child(
         row()
             .key("home-search-row")
@@ -3048,11 +3057,7 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
             ))
             .child(btn(
                 "home-sort",
-                if home.sort_by_name {
-                    &i18n_wire::tr(&s.core, "home_sort_name")
-                } else {
-                    &i18n_wire::tr(&s.core, "home_sort_recent")
-                },
+                &sort_label,
                 home.sort_by_name,
                 t,
                 |s: &mut State| {
@@ -3061,17 +3066,20 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
             )),
     );
     if shown.is_empty() {
+        // Same E0716 shape as the sort label above:
+        // `empty_state`'s element borrows its text.
+        let empty_label = if home.search.text.is_empty() {
+            i18n_wire::tr(&s.core, "home_empty_library")
+        } else {
+            i18n_wire::tr(&s.core, "home_empty_search")
+        };
         card = card.child(design::empty_state(
             if home.search.text.is_empty() {
                 "folder-open"
             } else {
                 "magnifying-glass"
             },
-            if home.search.text.is_empty() {
-                &i18n_wire::tr(&s.core, "home_empty_library")
-            } else {
-                &i18n_wire::tr(&s.core, "home_empty_search")
-            },
+            &empty_label,
             t,
         ));
     } else {
