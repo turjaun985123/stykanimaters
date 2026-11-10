@@ -51,6 +51,24 @@ THE DISCIPLINE (the Wave L subtitle census, carried over)
     in the element). No pixel row is ever hardcoded. In crop
     mode the crop IS the stage element, so the rect is the
     image itself and the same fit maths applies.
+  * CAPTURE SCALE (the integrator's fix after headless runs
+    42759195547 and 42764348922 both concluded green while
+    this census's transcript failed): tree rects are in
+    window POINTS; the snaps are in capture PIXELS, and the
+    harness captures at a device scale the tree dump itself
+    declares (top-level "scale", 2.0 in the CI runs — snaps
+    2880x1800 against a 1440x900-point window). Every rect
+    read from a dump is converted ONCE, by the ratio
+    snap_width / window_width (the dump's accessibility
+    bounds; its "scale" field is the fallback), before any
+    band or block is sampled. Sampling point coordinates
+    in the pixel image reads the stage's upper-left
+    quadrant and every leg reports zero — the failure
+    signature of both runs above. The stage-agreement gate
+    covers the SEEDED family (populated/speaker: same
+    project, same lane-visible geometry); the default
+    scene's stage element is taller (it carries no subtitle
+    lane) and its rect is reported, never gated.
   * The load-bearing comparison is the ANCHOR PAIR
     (populated vs top): identical state, one style field
     apart, so every differing pixel is subtitle paint by
@@ -442,6 +460,28 @@ def stage_rect_from_tree(path):
     return element_rect_from_tree(path, "stage")
 
 
+def tree_scale(path, img_w):
+    """The capture scale converting tree-dump POINTS to snap
+    PIXELS: the snap's pixel width over the dump's window
+    width (the accessibility root bounds — the measurement,
+    not a claim). The dump's own top-level "scale" field is
+    the fallback when it carries no bounds; 1.0 when it
+    carries neither. Returns (scale, source) so the
+    transcript names the contract it used."""
+    try:
+        with open(path) as fh:
+            tree = json.load(fh)
+    except Exception:
+        return 1.0, "default (dump unreadable)"
+    bounds = (tree.get("accessibility") or {}).get("bounds") or []
+    if img_w and len(bounds) >= 4 and bounds[2] > 0:
+        return img_w / float(bounds[2]), "snap width / window bounds"
+    declared = tree.get("scale")
+    if isinstance(declared, (int, float)) and declared > 0:
+        return float(declared), "the dump's declared scale"
+    return 1.0, "default (no bounds or scale in the dump)"
+
+
 # ----------------------------------------------------------------
 # Pixel metrics (rows are RGB bytes, 3 bytes per pixel)
 # ----------------------------------------------------------------
@@ -652,23 +692,40 @@ def run_census(directory):
     img_w, img_h = wb, hb
 
     # ---- the stage rect: from the frame's own tree dump in
-    # full mode; the image itself in crop mode.
+    # full mode; the image itself in crop mode. Full-mode
+    # rects are window POINTS; the snaps are capture PIXELS
+    # (see CAPTURE SCALE in the module docstring) — the
+    # seeded rect is converted once, here, and every band
+    # and block below samples pixel space.
+    snap_scale = 1.0
     if mode == "full":
         rect = stage_rect_from_tree(os.path.join(directory, TREE_SEEDED))
         rect_base = stage_rect_from_tree(os.path.join(directory, TREE_BASELINE))
-        if rect is not None and rect_base is not None:
-            drift = max(abs(a - b) for a, b in zip(rect, rect_base))
-            report(f"stage rect (seeded tree) {rect}; (default tree) "
-                   f"{rect_base}; max drift {drift:.1f} px")
-            check(drift <= 1.0, "stage rect agrees across the two tree dumps",
+        rect_speaker = stage_rect_from_tree(os.path.join(directory, TREE_SPEAKER))
+        snap_scale, scale_source = tree_scale(
+            os.path.join(directory, TREE_SEEDED), img_w)
+        report(f"capture scale {snap_scale:.3f} (from {scale_source}): "
+               f"tree rects are window points, snap pixels are "
+               f"{snap_scale:.3f}x points")
+        if rect is not None and rect_speaker is not None:
+            drift = max(abs(a - b) for a, b in zip(rect, rect_speaker))
+            report(f"stage rect (seeded tree) {rect}; (speaker tree) "
+                   f"{rect_speaker}; max drift {drift:.1f} pt")
+            check(drift <= 1.0,
+                  "stage rect agrees across the seeded tree dumps",
                   f"drift={drift:.1f}")
-        elif rect is None:
+        if rect_base is not None:
+            report(f"stage rect (default tree) {rect_base} — reported "
+                   f"only: the default scene carries no subtitle lane, "
+                   f"so its stage element is not the seeded geometry")
+        if rect is None:
             rect = rect_base
         check(rect is not None, "stage rect located in a tree dump",
               f"no element keyed 'stage' with a rect in {TREE_SEEDED} "
               f"or {TREE_BASELINE}")
         if rect is None:
             return lines, failures
+        rect = tuple(v * snap_scale for v in rect)
     else:
         rect = (0.0, 0.0, float(img_w), float(img_h))
         report("crop mode: the stage rect is the crop itself")
@@ -680,7 +737,7 @@ def run_census(directory):
     bottom_r, top_r, mid_r, fit = band_rects(rect, img_w, img_h)
     _dx0, dy0, _dx1, dy1, _f = drawn_stage(rect)
     drawn_h = dy1 - dy0
-    report(f"stage rect {rect}; fit {fit:.3f} px/unit; drawn height "
+    report(f"stage rect (snap pixels) {rect}; fit {fit:.3f} px/unit; drawn height "
            f"{drawn_h:.0f} px; bottom band rows {bottom_r[2]}..{bottom_r[3]}, "
            f"top band rows {top_r[2]}..{top_r[3]}")
     check(drawn_h >= MIN_STAGE_H_PX, "drawn stage is tall enough to prove a band",
@@ -791,13 +848,15 @@ def run_census(directory):
                   f"drift={drift:.1f}")
             # The populated dump's rect is the canonical
             # region (the drift check above bounds how far
-            # the speaker block can sit from it); rounded
-            # outward and clamped to the image, the band
-            # idiom.
-            bx0 = max(0, int(math.floor(block_pop[0])))
-            by0 = max(0, int(math.floor(block_pop[1])))
-            bx1 = min(img_w, int(math.ceil(block_pop[0] + block_pop[2])))
-            by1 = min(img_h, int(math.ceil(block_pop[1] + block_pop[3])))
+            # the speaker block can sit from it); converted
+            # from points to capture pixels by the snap
+            # scale, rounded outward and clamped to the
+            # image, the band idiom.
+            block_px = tuple(v * snap_scale for v in block_pop)
+            bx0 = max(0, int(math.floor(block_px[0])))
+            by0 = max(0, int(math.floor(block_px[1])))
+            bx1 = min(img_w, int(math.ceil(block_px[0] + block_px[2])))
+            by1 = min(img_h, int(math.ceil(block_px[1] + block_px[3])))
             lane_diff = diff_count(rows_speaker, rows_bottom,
                                    bx0, bx1, by0, by1)
             ink_spk, ink_spk_min, ink_spk_max = near_white_extent(
@@ -1080,6 +1139,76 @@ def _self_test():
         _lines, fails = run_census(td)
         expect(any("pixel-identical" in f for f in fails),
                "census fails on a mid-stage difference in the pair")
+
+    # The capture-scale contract (the integrator's fix):
+    # the same honest geometry at device scale 2.0 — trees
+    # carry point rects plus the dump's "scale" and window
+    # bounds, snaps are painted in doubled PIXELS. Under
+    # the pre-fix contract (points sampled as pixels) every
+    # leg below reads the wrong quadrant and reports zero,
+    # so this set passing pins the conversion.
+    with tempfile.TemporaryDirectory() as td2:
+        PW, PH = W * 2, H * 2
+        tree2 = {"scale": 2.0,
+                 "accessibility": {"bounds": [0, 0, W, H]},
+                 "elements": tree["elements"]}
+        lane_tree2 = {"scale": 2.0,
+                      "accessibility": {"bounds": [0, 0, W, H]},
+                      "elements": lane_tree["elements"]}
+        with open(os.path.join(td2, TREE_SEEDED), "w") as fh:
+            json.dump(lane_tree2, fh)
+        with open(os.path.join(td2, TREE_SPEAKER), "w") as fh:
+            json.dump(lane_tree2, fh)
+        with open(os.path.join(td2, TREE_BASELINE), "w") as fh:
+            json.dump(tree2, fh)
+
+        _sx0, dy0p, _sx1, dy1p, fitp = drawn_stage(
+            tuple(v * 2.0 for v in RECT))
+        bandp = BAND_UNITS * fitp
+
+        def blank2(fill=BG):
+            return [bytes(fill) * PW for _ in range(PH)]
+
+        def build2(bottom_cue, top_cue):
+            rows = blank2()
+            paint(rows, 660, 780, 360, 600, FIG)
+            if bottom_cue:
+                paint(rows, 440, 1000, int(dy1p - bandp) + 12,
+                      int(dy1p) - 4, WHITE)
+            if top_cue:
+                paint(rows, 440, 1000, int(dy0p) + 4,
+                      int(dy0p + bandp) - 12, WHITE)
+            return rows
+
+        def lane2(rows, x1):
+            # LANE_BLOCK in pixels is (240, 832, 332, 36);
+            # ink inset 8 px, vertically centred.
+            paint(rows, 248, x1, 840, 860, WHITE)
+
+        bottom2 = build2(True, False)
+        lane2(bottom2, 480)   # the uncredited label's run
+        top2 = build2(False, True)
+        base2 = build2(False, False)
+        speaker2 = build2(False, False)
+        # The credited extent: 444 units at fitp = 444 px,
+        # centred on the drawn stage's centre column (720).
+        paint(speaker2, 498, 942, int(dy1p - bandp) + 12,
+              int(dy1p) - 4, WHITE)
+        lane2(speaker2, 564)  # the credited label's run
+        _write_png(os.path.join(td2, SEEDED_BOTTOM_FULL),
+                   PW, PH, bottom2, color=2)
+        _write_png(os.path.join(td2, SEEDED_TOP_FULL),
+                   PW, PH, top2, color=2)
+        _write_png(os.path.join(td2, BASELINE_FULL),
+                   PW, PH, base2, color=2)
+        _write_png(os.path.join(td2, SEEDED_SPEAKER_FULL),
+                   PW, PH, speaker2, color=2)
+        lines2, fails2 = run_census(td2)
+        expect(not fails2,
+               f"census passes on the synthetic honest set at "
+               f"capture scale 2 (failures: {fails2})")
+        expect(any("capture scale 2.000" in l for l in lines2),
+               "census reports the capture scale it converted by")
 
     print("SELF-TEST: " + ("PASS" if not failures else
                            f"FAIL ({len(failures)})"))
