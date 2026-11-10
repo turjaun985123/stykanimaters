@@ -4437,7 +4437,7 @@ mod tests {
         panel
             .meta_cache
             .borrow_mut()
-            .insert(path.clone(), (SystemTime::UNIX_EPOCH, 1, 1, 0));
+            .insert(path.clone(), (SystemTime::UNIX_EPOCH, 1, 1, 0, 0));
         panel
             .thumb_cache
             .borrow_mut()
