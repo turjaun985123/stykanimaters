@@ -367,8 +367,6 @@ fn apply_parts(
     let mut dressed: Vec<bool> = vec![false; node_keys.len()];
     for part in ready {
         let asset_index = core.project.assets.len();
-        core.project.assets.push(part.asset);
-        report.assets_added += 1;
         let target = if part.visible {
             node_keys.iter().enumerate().find_map(|(ni, key)| {
                 if !dressed[ni] && part.match_keys.iter().any(|k| k == key) {
@@ -380,6 +378,15 @@ fn apply_parts(
         } else {
             None
         };
+        // The sprite key borrows the part's geometry, so it
+        // is computed before the asset moves into the table.
+        let key = if target.is_none() {
+            Some(sprite_key(&part, canvas, stage))
+        } else {
+            None
+        };
+        core.project.assets.push(part.asset);
+        report.assets_added += 1;
         match target {
             Some(ni) => {
                 dressed[ni] = true;
@@ -391,10 +398,9 @@ fn apply_parts(
                 report.attached.push(part.name);
             }
             None => {
-                let key = sprite_key(&part, canvas, stage);
                 core.project.sprites.push(SpriteInstance {
                     asset: asset_index,
-                    keys: vec![key],
+                    keys: vec![key.expect("sprite key computed for a degrading part")],
                 });
                 report.sprites.push(part.name);
             }
