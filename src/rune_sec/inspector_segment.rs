@@ -54,11 +54,18 @@
 //!   (`model::evaluate` and `positions_f` never see
 //!   them); renderers fetch the interpolated
 //!   `Project::bends_at` and arc the drawn segment
-//!   through `model::bend_mid`. And unlike the pose
-//!   angle, NO graph channel can override a bend —
-//!   `ChannelTarget` (graph.rs:33) has only RootX /
-//!   RootY / Angle / Length, so the stored bend is
-//!   always the rendered bend. The origin has no parent
+//!   through `model::bend_mid`. Since Wave Y (P-7) a
+//!   graph channel CAN override a bend —
+//!   `ChannelTarget::Bend(ni)` — exactly as an
+//!   `Angle(ni)` channel overrides the pose angle the
+//!   Rotate bullet describes: the steppers and this
+//!   panel's readouts work on the STORED bend (the
+//!   authoring value), while the rendered bend is the
+//!   channelled evaluation (`apply_channels`' bend
+//!   rows) whenever a Bend channel exists for the
+//!   figure. (This bullet claimed the opposite until
+//!   Wave Z's Z11 audit — the premise ended with P-7.)
+//!   The origin has no parent
 //!   segment and cannot bend (`cycle_bend` refuses it),
 //!   so the row is omitted for the root, like the Length
 //!   row. Steps are 1°/5° for the same reason the Rotate
@@ -605,8 +612,10 @@ pub const BEND_LIMIT_RAD: f32 = 0.7;
 /// Bend the selected node's segment at the current frame
 /// by `delta_rad` radians — the storage unit of
 /// `Frame.bends` (see the module docs for the storage,
-/// the clamp and why bends, unlike angles, have no graph
-/// override). Same discipline as `rotate_selected`:
+/// the clamp, and the Bend channel that — since Wave Y
+/// P-7, like the Angle channel for poses — overrides
+/// this stored value at render). Same discipline as
+/// `rotate_selected`:
 /// validate → ONE `snapshot()` → write → status, so one
 /// press is exactly one undo step; refusals are
 /// status-only. The bend table is sparse, so the write
@@ -674,7 +683,13 @@ pub fn bend_selected(core: &mut EditorCore, delta_rad: f32) {
 /// NOT the renderers' interpolated
 /// `Project::bends_at`: the steppers and `cycle_bend`
 /// also work on the stored value, so every bend surface
-/// in the panel agrees. The origin qualifies (its
+/// in the panel agrees. Nor is it the channelled value:
+/// since Wave Y (P-7) a `Bend(ni)` graph channel
+/// overrides the stored bend at render (see the module
+/// docs) — the channelled number is the Graph panel's
+/// readout, while this stored read stays the value the
+/// steppers step FROM, so the panel never disagrees
+/// with its own writes. The origin qualifies (its
 /// stored bend is definitionally 0 — nothing can write
 /// it). This is the value behind the panel's
 /// `seg-bend-readout` line.
@@ -1166,7 +1181,7 @@ pub fn attach_asset(core: &mut EditorCore, asset: usize) {
         .and_then(|f| f.def.nodes.get(ni))
     {
         Some(node) => (
-            node.media == Some(SegmentMedia::Image { asset, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
+            node.media == Some(SegmentMedia::Image { asset, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }),
             matches!(node.media, Some(SegmentMedia::Text { .. })),
         ),
         None => {
@@ -1190,7 +1205,7 @@ pub fn attach_asset(core: &mut EditorCore, asset: usize) {
         .get_mut(fi)
         .and_then(|f| f.def.nodes.get_mut(ni))
     {
-        node.media = Some(SegmentMedia::Image { asset, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+        node.media = Some(SegmentMedia::Image { asset, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 });
     }
     core.status = if replaced_text {
         format!(
@@ -3327,14 +3342,14 @@ playback_speed: 1.0,
         let assets = vec![asset("hero.png"), asset("cape.png")];
         assert_eq!(media_label(&core, &None, &assets), "No media attached");
         assert_eq!(
-            media_label(&core, &Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }), &assets),
+            media_label(&core, &Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }), &assets),
             "Sprite: cape.png"
         );
         // A stored index past the table reads as
         // missing — never a panic, never an invented
         // name.
         assert_eq!(
-            media_label(&core, &Some(SegmentMedia::Image { asset: 7, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }), &assets),
+            media_label(&core, &Some(SegmentMedia::Image { asset: 7, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }), &assets),
             "Sprite: asset 8 (missing)"
         );
         assert_eq!(
@@ -3392,7 +3407,7 @@ playback_speed: 1.0,
         // index resolved, the readout naming the asset.
         let mut core = core_with_assets(Some(1), &["hero.png", "cape.png"]);
         core.project.figures[core.selected_figure].def.nodes[1].media =
-            Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+            Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 });
         let st = segment_state(&core).unwrap();
         assert_eq!(st.asset_names, ["hero.png", "cape.png"]);
         assert_eq!(st.attached_asset, Some(1));
@@ -3409,7 +3424,7 @@ playback_speed: 1.0,
         let mut core = core_with_assets(Some(1), &["hero.png"]);
         assert_eq!(segment_state(&core).unwrap().media, None);
         core.project.figures[core.selected_figure].def.nodes[1].media =
-            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 });
         let st = segment_state(&core).unwrap();
         assert_eq!(st.attached_asset, Some(0));
         assert_eq!(st.media_label, "Sprite: hero.png");
@@ -3425,7 +3440,7 @@ playback_speed: 1.0,
         attach_asset(&mut core, 1);
         assert_eq!(
             core.project.figures[fi].def.nodes[1].media,
-            Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
+            Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }),
             "the CHOSEN asset is attached, not an import-folder pick"
         );
         assert_eq!(core.undo_depth(), depth + 1, "one snapshot per press");
@@ -3489,6 +3504,7 @@ playback_speed: 1.0,
                 scale: t.scale,
                 angle_offset: t.angle_offset,
                 flip: t.flip,
+                opacity: 1.0,
             });
     }
 
@@ -3720,7 +3736,7 @@ playback_speed: 1.0,
         attach_asset(&mut core, 0);
         assert_eq!(
             core.project.figures[fi].def.nodes[1].media,
-            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false })
+            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 })
         );
         assert!(
             core.status.contains("replacing its text label"),
@@ -3742,7 +3758,7 @@ playback_speed: 1.0,
         });
         assert_eq!(attached_asset(&core), None, "a label is not a sprite");
         core.project.figures[fi].def.nodes[1].media =
-            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 });
         assert_eq!(attached_asset(&core), Some(0));
         assert_eq!(attached_asset(&EditorCore::new()), None, "no selection");
         assert_eq!(

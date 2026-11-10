@@ -311,6 +311,24 @@
 //! panel is seeded, and no cache is primed — the
 //! probe's process is fresh, so the first render
 //! reads the trimmed file through both real paths.
+//!
+//! The Wave Z scene closes the state-row coverage
+//! gap IA-Y17-2 filed: no scene planted a figure
+//! WITH animation-state keys (Wave X, P-1), so the
+//! clips panel's states section rendered its
+//! state-row form (row + clear button + steppers)
+//! in no headless tree — `clips-populated`, the
+//! section's only carrier, plants its clips on a
+//! figure carrying no keys, so its section shows
+//! the "none" line. `states-populated` is that
+//! scene's state plus ONE state key authored on
+//! figure 0 through the panel's own authoring op,
+//! `EditorCore::set_state_key` — frame 0, the
+//! second clip — so the key is in force at the
+//! parked playhead and the section renders the
+//! row form (fact 37). No direct write: the op
+//! exists, so the module's discipline needs no
+//! new exception.
 
 use crate::State;
 
@@ -822,6 +840,44 @@ fn scene_clips_populated(s: &mut State) {
         }
         s.core.enter_clip(0);
     }
+}
+
+/// `"states-populated"` — `clips-populated`'s exact
+/// state (Animate workspace, two clips built from
+/// the demo figure, the second renamed, an edit
+/// session open on the first) plus ONE animation-
+/// state key authored on figure 0 through
+/// `EditorCore::set_state_key` — the op the clips
+/// panel's keying strip and the MCP state tools
+/// share: frame 0, pointing at the second clip, so
+/// the key is in force at the parked frame-0
+/// playhead. Until this scene existed, NO headless
+/// tree contained the states section's state-row
+/// form (IA-Y17-2): the section's only carrier,
+/// `clips-populated`, plants no keys, so its
+/// section renders the "none" line; this scene's
+/// tree holds `clip-state-row-0` with its clear
+/// button and steppers (fact 37). The key goes
+/// through the op, not a direct `states` write —
+/// the op exists, so no named exception is
+/// needed; its guards (the clip exists, the rig
+/// is compatible, the speed is finite) all pass
+/// by construction, the clip having been built
+/// from this very figure. On an empty project the
+/// plant is the op's guarded refusal and the
+/// scene is `clips-populated`'s no-op: total,
+/// like every scene in this table.
+fn scene_states_populated(s: &mut State) {
+    scene_clips_populated(s);
+    s.core.set_state_key(
+        0,
+        stykanimate_rs::model::StateKey {
+            frame: 0,
+            clip: 1,
+            offset: 0,
+            speed: 1.0,
+        },
+    );
 }
 
 /// `"dopesheet-keys"` — the Animate workspace with real
@@ -1687,6 +1743,7 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
         ("subtitles-speaker", scene_subtitles_speaker),
         ("home-missing-audio", scene_home_missing_audio),
         ("home-scan-fallback", scene_home_scan_fallback),
+        ("states-populated", scene_states_populated),
     ]
 }
 
@@ -2038,6 +2095,25 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
 ///    stats for a length) and a frame count of 0
 ///    — where fact 35's light-read line carries
 ///    both a size and the file's real frame count.
+/// 37. Under `--scene states-populated` (Wave Z):
+///    elements keyed `clip-state-row-0` and
+///    `clip-state-clear-0` exist — the states
+///    section's state-row form (one row per state
+///    key on the selected figure, with its clear
+///    button; the row's offset/speed steppers ride
+///    the same row) inside the populated clips
+///    panel's `clip-states-section`. No earlier
+///    tree contains the row form (IA-Y17-2): the
+///    section's only other carrier,
+///    `clips-populated`, plants no state keys, so
+///    its section renders the "none" line instead.
+///    The scene is `clips-populated`'s state plus
+///    one key authored on figure 0 through
+///    `EditorCore::set_state_key` (frame 0, the
+///    second clip), in force at the parked
+///    playhead; the rest of the inventory is
+///    `clips-populated`'s, session section
+///    included.
 pub fn layout_assertions() -> Vec<&'static str> {
     vec![
         "exactly one element keyed \"stage\"",
@@ -2076,6 +2152,7 @@ pub fn layout_assertions() -> Vec<&'static str> {
         "under --scene subtitles-speaker: the element inventory is identical to the subtitles-populated tree's, lane included (only the planted cue's text and speaker field differ — see fact 34)",
         "under --scene home-missing-audio: elements keyed \"home-row-0\" and \"home-totals\" exist and the element keyed \"home-proj-meta-0\" has text ending \"· 1 audio clip missing\" (the missing-audio marker on the seeded row's light-read meta line — see fact 35)",
         "under --scene home-scan-fallback: elements keyed \"home-row-0\" and \"home-totals\" exist and the element keyed \"home-proj-meta-0\" has text ending \"· 1 audio clip missing\" (the missing-audio marker on the seeded row's scan-fallback meta line — the seeded file is hand-trimmed of its frames key, so the light read refuses it and the scan's line renders — see fact 36)",
+        "under --scene states-populated: elements keyed \"clip-state-row-0\" and \"clip-state-clear-0\" exist (the states section's state-row form over one planted state key — see fact 37)",
     ]
 }
 
@@ -2089,14 +2166,15 @@ mod tests {
         scene_home_populated, scene_home_scan_fallback,
         scene_library_populated, scene_loop_range, scene_menu_open, scene_palette_open,
         scene_settings_open, scene_settings_open_light, scene_sprites_populated,
-        scene_strokes_populated, scene_subtitles_populated, scene_subtitles_speaker,
+        scene_states_populated, scene_strokes_populated, scene_subtitles_populated,
+        scene_subtitles_speaker,
         scene_subtitles_top, scene_three_d, scene_three_d_stage, scenes,
     };
     use crate::init;
     use crate::rune_sec::workspaces::Workspace;
 
     /// The scene table is the headless contract:
-    /// thirty-four scenes, each name unique (a duplicate
+    /// thirty-five scenes, each name unique (a duplicate
     /// would shadow the later entry in `with_scene`'s
     /// lookup), with the Phase J scenes in their display
     /// positions, the two Phase K scenes appended after
@@ -2119,12 +2197,13 @@ mod tests {
     /// after those, the Wave S speaker scene
     /// (subtitles-speaker) appended after those, the
     /// Wave T home-missing-audio scene appended after
-    /// those, and the Wave U home-scan-fallback scene
-    /// last.
+    /// those, the Wave U home-scan-fallback scene
+    /// appended after those, and the Wave Z
+    /// states-populated scene last.
     #[test]
-    fn scene_table_has_thirtyfour_uniquely_named_scenes() {
+    fn scene_table_has_thirtyfive_uniquely_named_scenes() {
         let table = scenes();
-        assert_eq!(table.len(), 34, "thirty-four scenes are registered");
+        assert_eq!(table.len(), 35, "thirty-five scenes are registered");
         let mut names: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
         let total = names.len();
         names.sort_unstable();
@@ -2160,6 +2239,7 @@ mod tests {
         assert_eq!(table[31].0, "subtitles-speaker");
         assert_eq!(table[32].0, "home-missing-audio");
         assert_eq!(table[33].0, "home-scan-fallback");
+        assert_eq!(table[34].0, "states-populated");
     }
 
     /// The export scene reaches the Export workspace through
@@ -2536,6 +2616,37 @@ mod tests {
             s.core.clip_edit.as_ref().map(|session| session.clip),
             Some(0),
             "the edit session is open on the first clip"
+        );
+    }
+
+    /// The states-populated scene (Wave Z) is
+    /// clips-populated's state plus ONE state key on
+    /// figure 0 — authored through `set_state_key`,
+    /// at frame 0 on the second clip, so it is in
+    /// force at the parked playhead — the state
+    /// behind layout fact 37, and the first scene
+    /// whose tree contains the states section's
+    /// state-row form (IA-Y17-2).
+    #[test]
+    fn states_populated_scene_plants_one_state_key_in_force() {
+        let mut s = init();
+        scene_states_populated(&mut s);
+        assert_eq!(s.workspace, Workspace::Animate);
+        assert_eq!(s.core.project.clips.len(), 2, "two clips are built");
+        assert_eq!(
+            s.core.clip_edit.as_ref().map(|session| session.clip),
+            Some(0),
+            "the edit session is open on the first clip"
+        );
+        let fig = &s.core.project.figures[0];
+        assert_eq!(fig.states.len(), 1, "one state key is planted");
+        assert_eq!(fig.states[0].frame, 0, "the key sits at frame 0");
+        assert_eq!(fig.states[0].clip, 1, "the key points at the second clip");
+        assert_eq!(
+            stykanimate_rs::model::active_state_key(fig, s.core.playhead)
+                .map(|key| key.clip),
+            Some(1),
+            "the key is in force at the parked playhead"
         );
     }
 

@@ -431,6 +431,40 @@
 //! was the only remaining per-project-channel element
 //! growth in the panel.
 //!
+//! ## Wave Z bend polish (Z11)
+//!
+//! The bend-channel audit of this panel (on Y1's core +
+//! Y2's plumbing) found everything structural already
+//! generic — selector pin, channel list, drags, interp,
+//! transforms — and three places where the panel treated
+//! a bend channel's RADIANS as if they were degrees or
+//! stage units:
+//!
+//! - **Readouts.** The header readout, [`value_line`] and
+//!   the stats range formatted every value at `{:.1}` —
+//!   a 0.35 rad bend printed as "0.3"/"0.4" and a 0.04 rad
+//!   bend as "0.0" (straight). Bend values now print
+//!   through [`channel_value_text`] / [`stat_line_bend`]
+//!   at two decimals with the unit named; every other
+//!   target's text is byte-identical.
+//! - **Reduce.** The Reduce button's tolerance was 0.5
+//!   in channel units — 0.5 rad on a bend channel, most
+//!   of its range, so Reduce emptied bend curves.
+//!   [`reduce_tolerance`] converts the half-degree for
+//!   Bend; other targets are unchanged.
+//! - **Empty state.** The no-keys line always advised
+//!   "Key angle", including on the Bend chip; it now
+//!   names the picked target's own authoring path
+//!   ([`empty_channel_hint`]).
+//!
+//! Deliberately NOT changed (audit verdicts, recorded in
+//! the Z11 findings): bend drags stay unclamped like
+//! every non-angle target (the model stores bends raw;
+//! the ±0.7 discipline is the segment inspector's
+//! authoring convention), and `auto_fit` keeps its
+//! key-padded fit for bend channels (a fixed ±0.7 fit
+//! would clip legitimately stored out-of-cycle bends).
+//!
 //! ## State the shell must provide
 //!
 //! `State` needs one field (integrator wires it):
@@ -526,8 +560,29 @@ fn pack(c: Color) -> u32 {
 /// for angle channels, stage units for root/length): interior
 /// keys whose removal moves the curve by at most this much are
 /// dropped. Deliberately conservative — it removes
-/// near-duplicates, not shape.
+/// near-duplicates, not shape. Bend channels reduce through
+/// [`reduce_tolerance`], which converts this same half-degree
+/// into radians — 0.5 in a bend channel's own units would be
+/// 0.5 rad, most of the ±0.7 authoring range (Wave Z, Z11).
 pub const REDUCE_TOLERANCE: f32 = 0.5;
+
+/// The tolerance [`apply_reduce_at`] reduces one channel
+/// with, by target (Wave Z, Z11): [`REDUCE_TOLERANCE`] as-is
+/// for every target except Bend, whose values are RADIANS —
+/// there the same half-degree of slack is
+/// `REDUCE_TOLERANCE.to_radians()` (≈0.0087 rad), so Reduce
+/// drops a bend channel's near-duplicate keys and keeps its
+/// shape, exactly as it treats an angle channel's keys in
+/// degrees. Before this conversion the panel's Reduce on a
+/// bend channel dropped every interior key whose removal
+/// moved the curve by up to 0.5 rad — in practice all of
+/// them.
+pub fn reduce_tolerance(target: ChannelTarget) -> f32 {
+    match target {
+        ChannelTarget::Bend(_) => REDUCE_TOLERANCE.to_radians(),
+        _ => REDUCE_TOLERANCE,
+    }
+}
 /// Grab radius for key handles on the curve canvas, in
 /// points. The handles DRAW at radius 4.5; the pick radius is
 /// deliberately more forgiving.
@@ -654,6 +709,52 @@ pub fn channel_label(target: ChannelTarget) -> String {
         ChannelTarget::Angle(n) => format!("Angle {n}"),
         ChannelTarget::Length(n) => format!("Length {n}"),
         ChannelTarget::Bend(n) => format!("Bend {n}"),
+    }
+}
+
+/// Display text for one channel value in the panel's
+/// readouts (the header readout's tail and [`value_line`]),
+/// by target (Wave Z, Z11): degrees and stage units read
+/// honestly at one decimal, but a Bend channel's values are
+/// RADIANS in a ±0.7 authoring range — at one decimal a
+/// 0.35 rad bend (half of `cycle_bend`'s cycle) printed as
+/// "0.3"/"0.4" by rounding luck and a 0.04 rad bend printed
+/// as "0.0", indistinguishable from straight. Bend values
+/// therefore print at two decimals with their unit named —
+/// the precision and unit `key_bend`'s own status line
+/// already used ("bend = {value:.2} rad"). Every other
+/// target's text is byte-identical to the historical
+/// `{v:.1}`.
+pub fn channel_value_text(target: ChannelTarget, v: f32) -> String {
+    match target {
+        ChannelTarget::Bend(_) => format!("{v:.2} rad"),
+        _ => format!("{v:.1}"),
+    }
+}
+
+/// The empty-state line shown under the canvas while the
+/// effective target has no channel (Wave Z, Z11): it names
+/// the authoring action THAT target actually has in this
+/// panel. Angle and Bend each have a Key button here
+/// ("Key angle" / "Key bend"); before this split the line
+/// always said "Key angle", so a user who had picked the
+/// Bend chip was told to press a button that keys a
+/// different channel. Root and Length have no Key button in
+/// this panel at all — their first key honestly comes from
+/// MCP `graph_key`, which upserts any target's channel.
+pub fn empty_channel_hint(target: ChannelTarget) -> String {
+    match target {
+        ChannelTarget::Angle(_) => {
+            "No graph keys on this channel yet — select a joint on the stage, then Key angle."
+                .to_string()
+        }
+        ChannelTarget::Bend(_) => {
+            "No graph keys on this channel yet — select a joint on the stage, then Key bend."
+                .to_string()
+        }
+        _ => "No graph keys on this channel yet — this panel keys Angle and Bend; \
+              its first key comes from MCP graph_key."
+            .to_string(),
     }
 }
 
@@ -921,6 +1022,21 @@ pub fn stat_line(stat: &ChannelStat) -> String {
     )
 }
 
+/// [`stat_line`] for a Bend channel (Wave Z, Z11): the
+/// range is RADIANS (see [`channel_value_text`]), so it
+/// prints at two decimals with the unit named once at the
+/// end — a ±0.35 rad channel reads "-0.35..0.35 rad", not
+/// the "-0.3..0.4" the one-decimal form produced. Chosen
+/// per channel by [`stat_rows`], which has the channel
+/// itself; [`stat_line`] stays the form for every other
+/// target.
+pub fn stat_line_bend(stat: &ChannelStat) -> String {
+    format!(
+        "{} · {}: {} keys, {:.2}..{:.2} rad",
+        stat.figure_name, stat.target_label, stat.keys, stat.min, stat.max
+    )
+}
+
 /// The joint-limit suffix for one channel's readout
 /// lines (Wave Y, Y12): `joint limits {min}..{max}`
 /// when the channel targets `Angle(n)` and that node
@@ -961,9 +1077,10 @@ pub fn joint_limit_note(core: &EditorCore, ch: &Channel) -> Option<String> {
 
 /// The stats block's rows: one `(line, is_drawn)` per
 /// channel in the project, in project order — the lines
-/// from [`stat_line`] over `graph_keys::channel_stats`,
-/// with [`joint_limit_note`]'s suffix appended for a
-/// limited Angle channel (Wave Y, Y12).
+/// from [`stat_line`] over `graph_keys::channel_stats`
+/// ([`stat_line_bend`] for a Bend channel's radian range,
+/// Wave Z Z11), with [`joint_limit_note`]'s suffix
+/// appended for a limited Angle channel (Wave Y, Y12).
 /// `channel_stats` walks `core.project.channels` in order,
 /// so a row's position IS its channel index, and the drawn
 /// channel's row is the one at [`effective_channel_index`]
@@ -988,7 +1105,16 @@ pub fn stat_rows(core: &EditorCore, sel: &GraphPanelState) -> Vec<(String, bool)
             // range — the row position IS the channel
             // index (see the doc above), so the channel
             // itself resolves directly.
-            let mut line = stat_line(stat);
+            // Wave Z (Z11): a Bend channel's row formats
+            // its radian range through stat_line_bend
+            // instead — the one-decimal stat_line form
+            // cannot express a ±0.7 range honestly.
+            let mut line = match core.project.channels.get(i) {
+                Some(ch) if matches!(ch.target, ChannelTarget::Bend(_)) => {
+                    stat_line_bend(stat)
+                }
+                _ => stat_line(stat),
+            };
             if let Some(ch) = core.project.channels.get(i) {
                 if let Some(note) = joint_limit_note(core, ch) {
                     line = format!("{line} · {note}");
@@ -1080,10 +1206,12 @@ pub fn stat_display_rows(core: &EditorCore, sel: &GraphPanelState) -> Vec<StatDi
 
 /// The drawn channel's value at the playhead, as the
 /// panel's `graph-value` readout line (Phase L): "Value
-/// at frame {current+1}: {v:.1}" — the frame 1-based, the
+/// at frame {current+1}: {v}" — the frame 1-based, the
 /// value the REAL evaluation (`Channel::value_at`) at the
-/// current frame, to one decimal like the header
-/// readout's tail. Resolves through
+/// current frame, formatted by [`channel_value_text`]
+/// (one decimal like the header readout's tail; a Bend
+/// channel's radians at two decimals with the unit named,
+/// Wave Z Z11). Resolves through
 /// [`effective_channel_index`], so a picked duplicate
 /// reports ITS value, never its twin's. `None` when no
 /// channel is drawn (the builder then shows no line).
@@ -1095,9 +1223,9 @@ pub fn value_line(core: &EditorCore, sel: &GraphPanelState) -> Option<String> {
     let idx = effective_channel_index(core, sel)?;
     let ch = &core.project.channels[idx];
     let mut line = format!(
-        "Value at frame {}: {:.1}",
+        "Value at frame {}: {}",
         core.current + 1,
-        ch.value_at(core.current as f32)
+        channel_value_text(ch.target, ch.value_at(core.current as f32))
     );
     if let Some(note) = joint_limit_note(core, ch) {
         line = format!("{line} · {note}");
@@ -1364,12 +1492,12 @@ pub fn apply_scale_at(core: &mut EditorCore, idx: usize, factor: f32) {
 }
 
 /// Reduce the `(selected figure, target)` channel with
-/// [`REDUCE_TOLERANCE`] (`graph::reduce_keys` drops interior
-/// keys that contribute at most the tolerance and always
-/// keeps the endpoints). No such channel: status only, no
-/// snapshot. The target resolves through [`channel_index`]
-/// (FIRST match); [`apply_reduce_at`] is the index form
-/// for a picked row (Phase J).
+/// its [`reduce_tolerance`] (`graph::reduce_keys` drops
+/// interior keys that contribute at most the tolerance
+/// and always keeps the endpoints). No such channel:
+/// status only, no snapshot. The target resolves through
+/// [`channel_index`] (FIRST match); [`apply_reduce_at`]
+/// is the index form for a picked row (Phase J).
 pub fn apply_reduce(core: &mut EditorCore, target: ChannelTarget) {
     let Some(idx) = channel_index(core, target) else {
         core.status = format!(
@@ -1382,18 +1510,21 @@ pub fn apply_reduce(core: &mut EditorCore, target: ChannelTarget) {
     apply_reduce_at(core, idx);
 }
 
-/// Reduce the channel AT `idx` with [`REDUCE_TOLERANCE`] —
-/// the index form of [`apply_reduce`]. A stale index:
+/// Reduce the channel AT `idx` with its target's
+/// tolerance ([`reduce_tolerance`] — [`REDUCE_TOLERANCE`]
+/// itself except for Bend channels, whose radian values
+/// take the half-degree converted, Wave Z Z11) — the
+/// index form of [`apply_reduce`]. A stale index:
 /// status only, no snapshot.
 pub fn apply_reduce_at(core: &mut EditorCore, idx: usize) {
-    if core.project.channels.get(idx).is_none() {
+    let Some(target) = core.project.channels.get(idx).map(|ch| ch.target) else {
         core.status = "No graph channel to reduce.".to_string();
         return;
-    }
+    };
     core.snapshot();
     let removed = stykanimate_rs::graph::reduce_keys(
         &mut core.project.channels[idx],
-        REDUCE_TOLERANCE,
+        reduce_tolerance(target),
     );
     core.status = format!("Reduced graph channel: removed {removed} key(s).");
 }
@@ -1916,11 +2047,11 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
 
     let readout = match ch {
         Some(ch) => format!(
-            "{} · {} keys · frame {} = {:.1}",
+            "{} · {} keys · frame {} = {}",
             channel_label(target),
             ch.keys.len(),
             core.current + 1,
-            ch.value_at(core.current as f32)
+            channel_value_text(target, ch.value_at(core.current as f32))
         ),
         None => format!("{} · no keys yet", channel_label(target)),
     };
@@ -2343,9 +2474,12 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
         );
     }
     if ch.is_none() {
+        // The hint names the authoring action the TARGET
+        // actually has (empty_channel_hint, Wave Z Z11):
+        // "Key angle" was wrong advice on the Bend chip.
         panel = panel.child(design::empty_state(
             "chart-line",
-            "No graph keys on this channel yet — select a joint on the stage, then Key angle.",
+            &empty_channel_hint(target),
             t,
         ));
     }
@@ -3719,6 +3853,150 @@ mod tests {
             value_line(&core, &st).as_deref(),
             Some("Value at frame 1: 2.0")
         );
+    }
+
+    #[test]
+    fn channel_value_text_gives_bend_radians_their_precision() {
+        // Wave Z (Z11): bend values are radians in a ±0.7
+        // range — two decimals with the unit named, the
+        // precision key_bend's status already used. At the
+        // old one-decimal form 0.35 printed as "0.3"/"0.4"
+        // and 0.04 as "0.0" (straight).
+        assert_eq!(channel_value_text(ChannelTarget::Bend(2), 0.35), "0.35 rad");
+        assert_eq!(channel_value_text(ChannelTarget::Bend(2), 0.04), "0.04 rad");
+        assert_eq!(channel_value_text(ChannelTarget::Bend(2), -0.7), "-0.70 rad");
+        // Every other target keeps the historical form.
+        assert_eq!(channel_value_text(ChannelTarget::Angle(2), 170.0), "170.0");
+        assert_eq!(channel_value_text(ChannelTarget::Length(2), 42.0), "42.0");
+        assert_eq!(channel_value_text(ChannelTarget::RootX, 20.0), "20.0");
+    }
+
+    #[test]
+    fn value_line_reads_a_bend_channel_in_radians() {
+        // Wave Z (Z11): the drawn bend channel's playhead
+        // value reads in radians at bend precision — a
+        // small real bend no longer reads as straight.
+        let mut core = EditorCore::new();
+        core.project.channels = vec![channel(
+            ChannelTarget::Bend(1),
+            vec![Key::flat(0.0, 0.35), Key::flat(4.0, 0.35)],
+        )];
+        core.goto(0);
+        assert_eq!(
+            value_line(&core, &GraphPanelState::default()).as_deref(),
+            Some("Value at frame 1: 0.35 rad")
+        );
+        core.project.channels = vec![channel(
+            ChannelTarget::Bend(1),
+            vec![Key::flat(0.0, 0.04)],
+        )];
+        assert_eq!(
+            value_line(&core, &GraphPanelState::default()).as_deref(),
+            Some("Value at frame 1: 0.04 rad")
+        );
+    }
+
+    #[test]
+    fn stat_rows_read_a_bend_range_in_radians() {
+        // Wave Z (Z11): a bend channel's stats row carries
+        // its radian range at two decimals with the unit;
+        // the neighbouring angle row keeps its form.
+        let mut core = EditorCore::new();
+        core.project.channels = vec![
+            channel(
+                ChannelTarget::Bend(1),
+                vec![Key::flat(0.0, -0.35), Key::flat(4.0, 0.7)],
+            ),
+            channel(ChannelTarget::Angle(1), vec![Key::flat(0.0, 10.0)]),
+        ];
+        let rows = stat_rows(&core, &GraphPanelState::default());
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows[0].0.contains("Bend 1: 2 keys, -0.35..0.70 rad"),
+            "bend row: {}",
+            rows[0].0
+        );
+        assert!(
+            rows[1].0.contains("Angle 1: 1 keys, 10.0..10.0"),
+            "angle row unchanged: {}",
+            rows[1].0
+        );
+        // The direct formatter agrees with the row form.
+        let s = stat("Styk", "Bend 3", 2, -0.35, 0.7);
+        assert_eq!(stat_line_bend(&s), "Styk · Bend 3: 2 keys, -0.35..0.70 rad");
+    }
+
+    #[test]
+    fn reduce_tolerance_converts_the_half_degree_for_bend() {
+        // Wave Z (Z11): the panel's 0.5 tolerance is a
+        // half-DEGREE for angle channels; a bend channel
+        // stores radians, so its tolerance is the same
+        // half-degree converted — not 0.5 rad.
+        assert_eq!(reduce_tolerance(ChannelTarget::Angle(1)), REDUCE_TOLERANCE);
+        assert_eq!(reduce_tolerance(ChannelTarget::Length(1)), REDUCE_TOLERANCE);
+        assert_eq!(reduce_tolerance(ChannelTarget::RootX), REDUCE_TOLERANCE);
+        let bend = reduce_tolerance(ChannelTarget::Bend(1));
+        assert!(
+            (bend - 0.5f32.to_radians()).abs() < 1e-6,
+            "bend tolerance {bend}"
+        );
+        assert!(bend < 0.01, "bend tolerance is small in radians: {bend}");
+    }
+
+    #[test]
+    fn apply_reduce_keeps_a_bend_channels_shape() {
+        // Wave Z (Z11): a peaked bend key deviates 0.3 rad
+        // from the straight line between its neighbours —
+        // under the old unit-blind 0.5 tolerance Reduce
+        // dropped it (and with it the whole arc); under
+        // the converted half-degree tolerance it stays.
+        let mut core = EditorCore::new();
+        core.project.channels = vec![channel(
+            ChannelTarget::Bend(1),
+            vec![
+                Key::flat(0.0, 0.0),
+                Key::flat(2.0, 0.3),
+                Key::flat(4.0, 0.0),
+            ],
+        )];
+        apply_reduce(&mut core, ChannelTarget::Bend(1));
+        assert_eq!(core.project.channels[0].keys.len(), 3);
+        assert!(core.status.contains("removed 0 key"), "{}", core.status);
+        // A near-collinear bend key (deviation ≈0.001 rad,
+        // under the converted tolerance) still reduces.
+        core.project.channels = vec![channel(
+            ChannelTarget::Bend(1),
+            vec![
+                Key::flat(0.0, 0.0),
+                Key::flat(2.0, 0.101),
+                Key::flat(4.0, 0.2),
+            ],
+        )];
+        apply_reduce(&mut core, ChannelTarget::Bend(1));
+        assert_eq!(core.project.channels[0].keys.len(), 2);
+        assert!(core.status.contains("removed 1 key"), "{}", core.status);
+    }
+
+    #[test]
+    fn empty_channel_hint_names_the_targets_own_key_button() {
+        // Wave Z (Z11): the no-keys line advises the action
+        // the picked target actually has — "Key bend" on a
+        // Bend target (it used to say "Key angle" for
+        // every target), the historical line for Angle,
+        // and the honest MCP route for Root/Length, which
+        // have no Key button in this panel.
+        assert_eq!(
+            empty_channel_hint(ChannelTarget::Angle(2)),
+            "No graph keys on this channel yet — select a joint on the stage, then Key angle."
+        );
+        assert_eq!(
+            empty_channel_hint(ChannelTarget::Bend(2)),
+            "No graph keys on this channel yet — select a joint on the stage, then Key bend."
+        );
+        let root = empty_channel_hint(ChannelTarget::RootX);
+        assert!(root.contains("MCP graph_key"), "root hint: {root}");
+        let len = empty_channel_hint(ChannelTarget::Length(2));
+        assert!(len.contains("MCP graph_key"), "length hint: {len}");
     }
 
     /// A core whose project carries two channels with the

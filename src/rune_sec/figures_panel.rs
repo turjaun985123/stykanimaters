@@ -1742,7 +1742,7 @@ mod tests {
         let plain = model::FigureDef {
             nodes: nodes.clone(),
         };
-        nodes[1].media = Some(model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+        nodes[1].media = Some(model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 });
         nodes[2].media = Some(model::SegmentMedia::Text {
             content: "hi".into(),
             size: 12.0,
@@ -1791,7 +1791,7 @@ mod tests {
                     .position(|nd| nd.parent.is_some())
                     .expect("the demo def has a parented node");
                 clip_def.nodes[ni].media =
-                    Some(model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+                    Some(model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 });
             }
             core.project.clips.push(model::ClipDef {
                 name: "clip".into(),

@@ -85,18 +85,24 @@
 //! Two bundle buttons sit under the categories: "Export
 //! all images" (PNG + JPEG + SVG + spritesheet) and "Export
 //! all video" (MP4 + WebM). A bundle is a composition of the
-//! same full `EditorCore` ops the single-format buttons call
-//! in "All frames" mode, run in `plan_bundle` order. Bundles
+//! same full exports the single-format buttons run in "All
+//! frames" mode, run in `plan_bundle` order. Bundles
 //! deliberately ignore the range toggle: every bundle
 //! member has a range exporter, but a bundle that silently
 //! wrote only the loop-range frames would not match its
 //! "Export all" label — the bundle rows' notes say
-//! "always export in full" instead. Each op sets
-//! `core.status` as it runs; when the bundle finishes, the
-//! handler overwrites the status with one recap line (built
-//! by `bundle_recap` from the ops actually called, naming
-//! any that failed) and stores the same line in the panel
-//! recap.
+//! "always export in full" instead. Since Wave Z (Z8) a
+//! bundle runs as a background job like the contracted
+//! single formats (see the "Export jobs" section below):
+//! the worker runs each member's hooked entry over a
+//! cloned project — the plain entries the `EditorCore`
+//! ops call are those entries with no callback — under
+//! the core bundle-progress tracker (Wave X, X11), and
+//! when the job finishes, the finish path writes one
+//! recap line to the status and the panel recap (built
+//! by `bundle_recap` from the members actually run,
+//! naming any that failed) — the same last word the
+//! synchronous handler had.
 //!
 //! The recap line under the bundles shows the last export —
 //! bundle or single — as "Exported <name> → <destination>".
@@ -291,13 +297,40 @@
 //! press in the panel is a no-op: one export at a
 //! time, the contract the blocking calls enforced by
 //! construction. The formats with no phase contract
-//! (SVG, GIF, APNG, sheet, contact, the project
-//! formats and the bundles) keep their synchronous
-//! paths. The readout's labels ride IA-W1-1
+//! (SVG, GIF, APNG, sheet, contact and the project
+//! formats) keep their synchronous paths. The readout's
+//! labels ride IA-W1-1
 //! (`export_progress_working`, `export_render_progress`,
 //! `export_encode_progress`, `export_encode_finished`);
 //! until the integrator inserts them the wire falls
 //! back to the key text, the Q7 pattern.
+//!
+//! Wave Z (Z8) puts the two bundles on the same job
+//! mechanism: a bundle press spawns a worker that runs
+//! the plan's members in order over the cloned project,
+//! each member through the hooked entry whose plain
+//! form the member's `EditorCore` op calls, under the
+//! core `BundleProgress` tracker (Wave X, X11) — one
+//! combined count, its total the sum of the members'
+//! totals allocated before the first member runs, so
+//! the count can never reset or run backwards at a
+//! member boundary. The tracker's events write into
+//! the job's third slot — the bundle slot, kept apart
+//! from the two phase slots exactly as the phases are
+//! kept apart from each other: a bundle count is its
+//! own core contract, not a phase, and no code path
+//! adds it to a phase counter. The readout shows the
+//! one bundle line (`xc-progress-bundle`, IA-Z8-1's
+//! `export_bundle_progress`); the SVG and spritesheet
+//! members have no phase contract of their own, so
+//! during them the line holds at the last true count
+//! and their frames land when they complete — the
+//! tracker's documented behaviour, not an estimate.
+//! The finish writes the bundle recap to the status
+//! and the recap together, as the synchronous handler
+//! did; a member's failure never stops the bundle —
+//! every member is attempted, and the recap names the
+//! failures, exactly as before.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -585,7 +618,9 @@ fn export_dir() -> PathBuf {
 /// One media export operation a bundle (or a single-format
 /// button) can run. Each variant maps to exactly one
 /// `EditorCore` op — the same call the format's own button
-/// makes in "All frames" mode (see `run_export_op`).
+/// makes in "All frames" mode; a bundle job's worker runs
+/// the member's hooked entry instead (see
+/// `run_bundle_job`), at the same destination.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ExportOp {
     Png,
@@ -654,6 +689,44 @@ pub fn plan_bundle(kind: BundleKind) -> Vec<ExportOp> {
             ExportOp::Spritesheet,
         ],
         BundleKind::Video => vec![ExportOp::Mp4, ExportOp::Webm],
+    }
+}
+
+impl BundleKind {
+    /// The bundle's name as progress-readout slot data —
+    /// the `{name}` the working line interpolates while
+    /// a bundle job has no event yet. Like
+    /// `ExportOp::name()`, this is data the templates
+    /// interpolate, not a label site: it stays English
+    /// and is not translated.
+    pub fn name(self) -> &'static str {
+        match self {
+            BundleKind::Images => "images bundle",
+            BundleKind::Video => "video bundle",
+        }
+    }
+}
+
+/// Each bundle member's frame total in run order — the
+/// allocation the core `BundleProgress` tracker is
+/// constructed with, computed before the first member
+/// runs (Wave Z, Z8; the allocation rule is X11's):
+/// the images members each write one file per authored
+/// frame, so each share is the authored frame count;
+/// the video members report against the sampled-times
+/// count, so each share is
+/// `export::sampled_frame_total`. Pure: reads the
+/// project only.
+pub fn bundle_member_totals(
+    kind: BundleKind,
+    project: &stykanimate_rs::model::Project,
+) -> Vec<usize> {
+    match kind {
+        BundleKind::Images => vec![project.frames.len(); 4],
+        BundleKind::Video => {
+            let member = stykanimate_rs::export::sampled_frame_total(project);
+            vec![member, member]
+        }
     }
 }
 
@@ -783,47 +856,20 @@ pub fn bundle_recap(kind: BundleKind, failed: &[ExportOp]) -> String {
     recap
 }
 
-/// Run one planned op — exactly the call the format's
-/// single-format button makes in "All frames" mode — and
-/// report whether the op signalled failure.
-fn run_export_op(s: &mut State, op: ExportOp) -> bool {
-    match op {
-        ExportOp::Png => s.core.export_png(),
-        ExportOp::Jpeg => s.core.export_jpeg_dir(),
-        ExportOp::Svg => s.core.export_svg(),
-        ExportOp::Spritesheet => s.core.export_sheet(),
-        ExportOp::ContactSheet => run_contact_full(&mut s.core),
-        ExportOp::Gif => s.core.export_gif(),
-        ExportOp::Apng => s.core.export_apng_file(),
-        ExportOp::Mp4 => s.core.export_mp4(),
-        ExportOp::Webm => s.core.export_webm(),
-    }
-    export_failed(&s.core)
-}
-
-/// Run a whole bundle: every op in `plan_bundle` order,
-/// always the full ops (bundles ignore the range toggle —
-/// see the module docs). Each op overwrites `core.status`
-/// as it runs; when the bundle finishes, this handler has
-/// the last word: it overwrites the status with the bundle
-/// recap and stores the same line as the panel recap, so
-/// both show the summary rather than whichever op ran last.
+/// A bundle button press (Wave Z, Z8): start the
+/// bundle's background job — the whole body of the
+/// handler now, exactly as the contracted formats'
+/// presses are `start_export_job`. The members run on
+/// the worker in `plan_bundle` order, always the full
+/// exports (bundles ignore the range toggle — see the
+/// module docs), and `finish_export_job` has the last
+/// word the synchronous handler had: the bundle recap
+/// overwrites the status and is stored as the panel
+/// recap, so both show the summary rather than
+/// whichever member ran last. While any job runs the
+/// press is a no-op (one export at a time, W1).
 fn run_bundle(s: &mut State, kind: BundleKind) {
-    // One export at a time (Wave W, W1): a bundle press
-    // while a background job runs is a no-op — a bundle
-    // includes formats the job may be writing.
-    if export_job_active(s) {
-        return;
-    }
-    let mut failed: Vec<ExportOp> = Vec::new();
-    for op in plan_bundle(kind) {
-        if run_export_op(s, op) {
-            failed.push(op);
-        }
-    }
-    let recap = bundle_recap(kind, &failed);
-    s.core.status = recap.clone();
-    s.export_recap = recap;
+    start_bundle_job(s, kind);
 }
 
 // ---- Export jobs (Wave W, W1) -----------------------------
@@ -843,6 +889,16 @@ fn run_bundle(s: &mut State, kind: BundleKind) {
 // sentences the synchronous paths produced (see
 // `finish_export_job`), so the machine-read class-C text
 // never carries a progress claim.
+//
+// Wave Z (Z8) extends the same mechanism to the two
+// bundles: a third slot carries the core bundle
+// contract's events (Wave X, X11), written ONLY by the
+// tracker's callback on the bundle worker. The bundle
+// slot is not a third phase and is never merged with
+// the phase slots — a bundle job's readout is the one
+// bundle line, a single-format job's readout is its
+// phase lines, and neither job shape reads the other's
+// slots.
 
 /// How long `main::poll` waits before re-waking while an
 /// export job is active, so an otherwise idle window
@@ -850,9 +906,10 @@ fn run_bundle(s: &mut State, kind: BundleKind) {
 /// heartbeat's cadence.
 pub const JOB_WAKE: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// One phase's progress slot, shared between the
-/// contract callback (the only writer) and the UI
-/// thread (reader). The callback copies each event's
+/// One progress slot — a phase's, or a bundle job's
+/// (Wave Z, Z8) — shared between the contract callback
+/// (the only writer) and the UI thread (reader). The
+/// callback copies each event's
 /// fields verbatim — nothing is computed, estimated or
 /// interpolated — so every number the panel shows is a
 /// number the contract delivered. `seen` separates
@@ -878,6 +935,21 @@ impl PhaseProgress {
 
     fn store_encode(&self, ev: stykanimate_rs::export::EncodeProgressEvent) {
         self.done.store(ev.encoded_frames, Ordering::SeqCst);
+        self.total.store(ev.total_frames, Ordering::SeqCst);
+        self.finished.store(ev.finished, Ordering::SeqCst);
+        self.seen.store(true, Ordering::SeqCst);
+    }
+
+    /// The bundle slot's writer (Wave Z, Z8): the core
+    /// bundle tracker's callback copies each
+    /// `BundleProgressEvent`'s fields verbatim, exactly
+    /// as the phase writers copy theirs — the bundle
+    /// total was allocated before the first member ran
+    /// and the tracker guarantees the counts never run
+    /// backwards, so the slot needs no arithmetic of its
+    /// own.
+    fn store_bundle(&self, ev: stykanimate_rs::export::BundleProgressEvent) {
+        self.done.store(ev.completed_frames, Ordering::SeqCst);
         self.total.store(ev.total_frames, Ordering::SeqCst);
         self.finished.store(ev.finished, Ordering::SeqCst);
         self.seen.store(true, Ordering::SeqCst);
@@ -918,15 +990,36 @@ enum JobKind {
     Mp4Range(usize, usize),
     WebmFull,
     WebmRange(usize, usize),
+    /// The two bundles (Wave Z, Z8): a job whose worker
+    /// runs the whole plan, not one format.
+    BundleImages,
+    BundleVideo,
 }
 
 impl JobKind {
+    /// The single format a job exports. The bundle
+    /// kinds never reach the code that asks this — the
+    /// finish path and the readout branch on
+    /// `bundle_kind` first — so they map to their first
+    /// member purely to keep the match total.
     fn op(self) -> ExportOp {
         match self {
             JobKind::PngFull | JobKind::PngRange(..) => ExportOp::Png,
             JobKind::JpegFull | JobKind::JpegRange(..) => ExportOp::Jpeg,
             JobKind::Mp4Full | JobKind::Mp4Range(..) => ExportOp::Mp4,
             JobKind::WebmFull | JobKind::WebmRange(..) => ExportOp::Webm,
+            JobKind::BundleImages => ExportOp::Png,
+            JobKind::BundleVideo => ExportOp::Mp4,
+        }
+    }
+
+    /// The bundle a job runs, if it is a bundle job
+    /// (Wave Z, Z8).
+    fn bundle_kind(self) -> Option<BundleKind> {
+        match self {
+            JobKind::BundleImages => Some(BundleKind::Images),
+            JobKind::BundleVideo => Some(BundleKind::Video),
+            _ => None,
         }
     }
 
@@ -952,6 +1045,14 @@ enum ExportJobResult {
     Frames(usize),
     Mp4(stykanimate_rs::export::Mp4ExportOutcome),
     Webm(stykanimate_rs::export::Mp4ExportOutcome),
+    /// A finished bundle (Wave Z, Z8): the members that
+    /// failed, in plan order — the exact input
+    /// `bundle_recap` took from the synchronous handler.
+    /// A bundle job's worker always produces this shape
+    /// (a member's failure is data, never the job's
+    /// `Err`); the job-level `Err` is reserved for a
+    /// worker that produced nothing at all.
+    Bundle(Vec<ExportOp>),
 }
 
 /// What the worker sends back: the entry's result, with
@@ -964,26 +1065,33 @@ type ExportJobOutcome = Result<ExportJobResult, String>;
 /// A running export job, held in `State::export_job`.
 /// The worker owns the project clone and the sending
 /// end of the outcome channel; everything the UI thread
-/// touches is here: the two phase slots and the last
-/// snapshots it showed (for repaint-on-change).
+/// touches is here: the two phase slots, the bundle
+/// slot (Wave Z, Z8 — written only by a bundle job's
+/// tracker callback; a single-format job never touches
+/// it) and the last snapshots it showed (for
+/// repaint-on-change).
 pub struct ExportJob {
     kind: JobKind,
     dest: PathBuf,
     render: Arc<PhaseProgress>,
     encode: Arc<PhaseProgress>,
+    bundle: Arc<PhaseProgress>,
     outcome: mpsc::Receiver<ExportJobOutcome>,
     shown_render: PhaseSnapshot,
     shown_encode: PhaseSnapshot,
+    shown_bundle: PhaseSnapshot,
 }
 
 /// The unit of work a job's worker runs: the cloned
-/// project plus the two phase slots, returning the
-/// outcome to send back. Production passes `run_job`
-/// bound to the kind and destination; the pins pass a
+/// project plus the three progress slots, returning
+/// the outcome to send back. Production passes
+/// `run_job` bound to the kind and destination (or
+/// `run_bundle_job` for a bundle); the pins pass a
 /// test worker, so no pin ever writes an export file.
 type JobWork = Box<
     dyn FnOnce(
             &stykanimate_rs::model::Project,
+            &PhaseProgress,
             &PhaseProgress,
             &PhaseProgress,
         ) -> ExportJobOutcome
@@ -1133,18 +1241,21 @@ fn begin_job(
 ) {
     let render = Arc::new(PhaseProgress::default());
     let encode = Arc::new(PhaseProgress::default());
+    let bundle = Arc::new(PhaseProgress::default());
     let (tx, rx) = mpsc::channel::<ExportJobOutcome>();
     s.export_job = Some(ExportJob {
         kind,
         dest,
         render: Arc::clone(&render),
         encode: Arc::clone(&encode),
+        bundle: Arc::clone(&bundle),
         outcome: rx,
         shown_render: PhaseSnapshot::default(),
         shown_encode: PhaseSnapshot::default(),
+        shown_bundle: PhaseSnapshot::default(),
     });
     std::thread::spawn(move || {
-        let outcome = work(&project, &render, &encode);
+        let outcome = work(&project, &render, &encode, &bundle);
         let _ = tx.send(outcome);
     });
 }
@@ -1178,8 +1289,144 @@ fn start_export_job(s: &mut State, op: ExportOp) -> bool {
         kind,
         dest,
         project,
-        Box::new(move |project, render, encode| {
+        Box::new(move |project, render, encode, _bundle| {
             run_job(kind, project, &work_dest, render, encode)
+        }),
+    );
+    true
+}
+
+/// What a bundle press resolves to: the job kind for
+/// the bundle and the destination root the members
+/// build their paths from (`export_dir()` — the JPEG
+/// member's `out/jpeg` is the same CWD-relative path
+/// the `EditorCore` op uses). Pure: no thread, no
+/// filesystem.
+fn bundle_job_spec(kind: BundleKind) -> (JobKind, PathBuf) {
+    let job_kind = match kind {
+        BundleKind::Images => JobKind::BundleImages,
+        BundleKind::Video => JobKind::BundleVideo,
+    };
+    (job_kind, export_dir())
+}
+
+/// The bundle worker body (Wave Z, Z8): run the plan's
+/// members in order over the cloned project, each
+/// through the hooked entry whose plain form the
+/// member's `EditorCore` op calls, at the op's own
+/// destination, under a core `BundleProgress` tracker
+/// allocated from `bundle_member_totals` before the
+/// first member runs. The tracker's callback writes
+/// ONLY into the job's bundle slot; the phase slots
+/// are not touched (the tracker consumes the members'
+/// phase events itself). Every member is attempted —
+/// a failure is recorded and the bundle continues, as
+/// the synchronous handler did — and the tracker is
+/// finished after the last member: its terminal event
+/// fires only if every member succeeded, the member
+/// contracts' own rule one level up. Failure here is
+/// the member entries' `Err`, the same signal the
+/// `EditorCore` ops turned into their failure statuses
+/// (the statuses `export_failed` read); the worker
+/// needs no status line of its own. Runs entirely off
+/// the UI thread; touches no shell state.
+fn run_bundle_job(
+    kind: BundleKind,
+    project: &stykanimate_rs::model::Project,
+    dest: &Path,
+    bundle: &PhaseProgress,
+) -> ExportJobOutcome {
+    use stykanimate_rs::export;
+    let bundle_cb = |ev: export::BundleProgressEvent| bundle.store_bundle(ev);
+    let tracker = export::BundleProgress::new(
+        &bundle_member_totals(kind, project),
+        Some(&bundle_cb),
+    );
+    let mut failed: Vec<ExportOp> = Vec::new();
+    match kind {
+        BundleKind::Images => {
+            let member_cb = tracker.render_callback(0);
+            let result = export::export_png_sequence_with_render_progress(
+                project,
+                dest,
+                Some(&member_cb),
+            );
+            tracker.complete_member(result.is_ok());
+            if result.is_err() {
+                failed.push(ExportOp::Png);
+            }
+            let member_cb = tracker.render_callback(1);
+            let result = export::export_jpeg_sequence_with_render_progress(
+                project,
+                &PathBuf::from("out").join("jpeg"),
+                Some(&member_cb),
+            );
+            tracker.complete_member(result.is_ok());
+            if result.is_err() {
+                failed.push(ExportOp::Jpeg);
+            }
+            // SVG and the spritesheet have no phase
+            // contract of their own: no translator —
+            // their frames bank when they complete
+            // (the tracker's documented behaviour).
+            let result = stykanimate_rs::svg::export_svg(project, &dest.join("svg"));
+            tracker.complete_member(result.is_ok());
+            if result.is_err() {
+                failed.push(ExportOp::Svg);
+            }
+            let result = export::export_spritesheet(project, &dest.join("spritesheet.png"));
+            tracker.complete_member(result.is_ok());
+            if result.is_err() {
+                failed.push(ExportOp::Spritesheet);
+            }
+        }
+        BundleKind::Video => {
+            let member_cb = tracker.encode_callback(0);
+            let result = export::export_mp4_with_encode_progress(
+                project,
+                &dest.join("animation.mp4"),
+                Some(&member_cb),
+            );
+            tracker.complete_member(result.is_ok());
+            if result.is_err() {
+                failed.push(ExportOp::Mp4);
+            }
+            let member_cb = tracker.encode_callback(1);
+            let result = export::export_webm_with_encode_progress(
+                project,
+                &dest.join("animation.webm"),
+                Some(&member_cb),
+            );
+            tracker.complete_member(result.is_ok());
+            if result.is_err() {
+                failed.push(ExportOp::Webm);
+            }
+        }
+    }
+    tracker.finish();
+    Ok(ExportJobResult::Bundle(failed))
+}
+
+/// Begin the background job for a bundle — the body of
+/// `run_bundle` now. Returns false, changing nothing,
+/// when a job is already active: one export at a time,
+/// as `start_export_job` (a bundle includes PNG and
+/// MP4, so it can no more overlap a running job than
+/// another bundle could overlap it).
+fn start_bundle_job(s: &mut State, kind: BundleKind) -> bool {
+    if s.export_job.is_some() {
+        return false;
+    }
+    let (job_kind, dest) = bundle_job_spec(kind);
+    let work_dest = dest.clone();
+    let project = s.core.project.clone();
+    begin_job(
+        s,
+        job_kind,
+        dest,
+        project,
+        Box::new(move |project, _render, _encode, bundle| {
+            run_bundle_job(kind, project, &work_dest, bundle)
         }),
     );
     true
@@ -1219,9 +1466,13 @@ pub fn poll_export_job(s: &mut State) -> (bool, bool) {
             let job = s.export_job.as_mut().expect("job checked present");
             let render = job.render.snapshot();
             let encode = job.encode.snapshot();
-            let changed = render != job.shown_render || encode != job.shown_encode;
+            let bundle = job.bundle.snapshot();
+            let changed = render != job.shown_render
+                || encode != job.shown_encode
+                || bundle != job.shown_bundle;
             job.shown_render = render;
             job.shown_encode = encode;
+            job.shown_bundle = bundle;
             (changed, true)
         }
     }
@@ -1251,6 +1502,27 @@ fn job_failure_status(op: ExportOp, reason: &str) -> String {
 /// does not change) —
 /// then `note_single`, as the actions called it.
 fn finish_export_job(s: &mut State, job: &ExportJob, result: ExportJobOutcome) {
+    // A bundle job (Wave Z, Z8) finishes the way the
+    // synchronous bundle handler did: the recap — built
+    // from the members that failed — is written to the
+    // status AND stored as the panel recap, the summary
+    // having the last word over any member's own
+    // wording. A job-level `Err` (a worker that died
+    // before reporting, or a result shape the worker
+    // never pairs with a bundle kind) means no member
+    // outcome was reported at all, so every member
+    // counts as failed — the recap claims nothing was
+    // exported, which is the only honest summary.
+    if let Some(kind) = job.kind.bundle_kind() {
+        let failed = match result {
+            Ok(ExportJobResult::Bundle(failed)) => failed,
+            _ => plan_bundle(kind),
+        };
+        let recap = bundle_recap(kind, &failed);
+        s.core.status = recap.clone();
+        s.export_recap = recap;
+        return;
+    }
     let op = job.kind.op();
     s.core.status = match result {
         Err(e) => job_failure_status(op, &e),
@@ -1356,15 +1628,47 @@ fn encode_progress_line(core: &EditorCore, snap: PhaseSnapshot) -> String {
     }
 }
 
+/// The readout's bundle line (Wave Z, Z8): the stored
+/// bundle event's own numbers through the catalogue
+/// template. The bundle terminal closes the whole
+/// bundle, so — like the render line — the final
+/// event's numbers (`done == total`) are the line
+/// until the same tick's outcome replaces the readout
+/// with the recap; no finished wording is needed, and
+/// none is claimed. While a member with no contract
+/// (SVG, spritesheet) runs, no new event arrives and
+/// the line holds at the last true count.
+fn bundle_progress_line(core: &EditorCore, snap: PhaseSnapshot) -> String {
+    i18n_wire::tr(core, "export_bundle_progress")
+        .replace("{done}", &snap.done.to_string())
+        .replace("{total}", &snap.total.to_string())
+}
+
 /// The progress readout's lines for the active job,
 /// each with its element key, built only from the
-/// stored phase snapshots: a seen render phase shows
-/// its line, a seen encode phase shows its line, and
+/// stored snapshots: a seen render phase shows its
+/// line, a seen encode phase shows its line, and
 /// before either phase has reported, one working line
 /// names the format (`ExportOp::name()` is slot data,
 /// the recaps' discipline). The two phases are never
-/// combined into one figure.
+/// combined into one figure. A bundle job (Wave Z,
+/// Z8) reads its own slot instead: one bundle line
+/// from the stored bundle events, or the working line
+/// naming the bundle before the first event — the
+/// bundle count is a separate core contract, so a
+/// bundle job shows no phase line and a phase job no
+/// bundle line.
 pub fn job_lines(core: &EditorCore, job: &ExportJob) -> Vec<(&'static str, String)> {
+    if let Some(kind) = job.kind.bundle_kind() {
+        let bundle = job.bundle.snapshot();
+        if bundle.seen {
+            return vec![("xc-progress-bundle", bundle_progress_line(core, bundle))];
+        }
+        return vec![(
+            "xc-progress-working",
+            i18n_wire::tr(core, "export_progress_working").replace("{name}", kind.name()),
+        )];
+    }
     let mut lines = Vec::new();
     let render = job.render.snapshot();
     if render.seen {
@@ -2453,9 +2757,11 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         // reported, built only from the stored contract
         // events (`job_lines`) — a phase with no event
         // yet shows no number, and the two phases are
-        // never combined into one figure. The block
-        // exists only while a job runs, so an idle
-        // panel's tree is unchanged.
+        // never combined into one figure. A bundle job
+        // (Wave Z, Z8) shows its one bundle line from
+        // the bundle slot instead. The block exists
+        // only while a job runs, so an idle panel's
+        // tree is unchanged.
         let mut progress = col().key("xc-progress").gap(2.0);
         for (key, line) in job_lines(core, job) {
             progress = progress.child(
@@ -3444,7 +3750,8 @@ mod tests {
         // Wave W (W1, IA-W1-1): the progress readout's
         // keys — the working line and the two phase
         // templates in stored form (slots included),
-        // plus the encode-finished sentence. Like the
+        // plus the encode-finished sentence; Wave Z
+        // (Z8, IA-Z8-1) adds the bundle template. Like the
         // template half of the pin above, this passes
         // only once the integrator inserts the keys
         // (the Q7 pattern): until then `tr` falls back
@@ -3455,6 +3762,12 @@ mod tests {
             ("export_render_progress", "Rendering {done} of {total} frames"),
             ("export_encode_progress", "Encoding {done} of {total} frames"),
             ("export_encode_finished", "Encode finished"),
+            // Wave Z (Z8, IA-Z8-1): the bundle line's
+            // template, in stored form.
+            (
+                "export_bundle_progress",
+                "Exporting bundle {done} of {total} frames",
+            ),
         ] {
             assert!(
                 crate::rune_sec::i18n_wire::key_in_table(key),
@@ -3494,7 +3807,7 @@ mod tests {
     /// `result` as its outcome.
     fn blocked_job(s: &mut State, kind: JobKind, result: ExportJobOutcome) -> mpsc::Sender<()> {
         let (release_tx, release_rx) = mpsc::channel::<()>();
-        let work: JobWork = Box::new(move |_project, _render, _encode| {
+        let work: JobWork = Box::new(move |_project, _render, _encode, _bundle| {
             let _ = release_rx.recv();
             result
         });
@@ -3508,7 +3821,7 @@ mod tests {
         let mut s = crate::init();
         let (signal_tx, signal_rx) = mpsc::channel::<()>();
         let (release_tx, release_rx) = mpsc::channel::<()>();
-        let work: JobWork = Box::new(move |_project, render, _encode| {
+        let work: JobWork = Box::new(move |_project, render, _encode, _bundle| {
             let _ = signal_rx.recv();
             render.store_render(stykanimate_rs::export::RenderProgressEvent {
                 rendered_frames: 2,
@@ -3632,7 +3945,7 @@ mod tests {
     fn phases_stay_separate_in_the_slots_and_the_lines() {
         let mut s = crate::init();
         let (release_tx, release_rx) = mpsc::channel::<()>();
-        let work: JobWork = Box::new(move |_project, render, encode| {
+        let work: JobWork = Box::new(move |_project, render, encode, _bundle| {
             render.store_render(stykanimate_rs::export::RenderProgressEvent {
                 rendered_frames: 2,
                 total_frames: 5,
@@ -3689,7 +4002,7 @@ mod tests {
     fn encode_terminal_reads_as_encode_finished_only() {
         let mut s = crate::init();
         let (release_tx, release_rx) = mpsc::channel::<()>();
-        let work: JobWork = Box::new(move |_project, _render, encode| {
+        let work: JobWork = Box::new(move |_project, _render, encode, _bundle| {
             encode.store_encode(stykanimate_rs::export::EncodeProgressEvent {
                 encoded_frames: 9,
                 total_frames: 9,
@@ -3767,9 +4080,11 @@ mod tests {
             dest: PathBuf::from("out-test"),
             render: Arc::new(PhaseProgress::default()),
             encode: Arc::new(PhaseProgress::default()),
+            bundle: Arc::new(PhaseProgress::default()),
             outcome: rx,
             shown_render: PhaseSnapshot::default(),
             shown_encode: PhaseSnapshot::default(),
+            shown_bundle: PhaseSnapshot::default(),
         });
         assert_eq!(poll_export_job(&mut s), (true, false));
         assert!(s.export_job.is_none());
@@ -3800,5 +4115,228 @@ mod tests {
         // Uncontracted formats are never jobbed.
         assert!(job_spec(&s, ExportOp::Svg).is_none());
         assert!(job_spec(&s, ExportOp::Gif).is_none());
+    }
+
+    // ---- Bundle jobs (Wave Z, Z8) ----
+    // The bundle seats of the same machinery, driven by
+    // test workers through the same seam: no pin runs a
+    // real member entry or writes an export file.
+
+    #[test]
+    fn bundle_job_spec_maps_kinds_and_the_destination_root() {
+        let (kind, dest) = bundle_job_spec(BundleKind::Images);
+        assert_eq!(kind, JobKind::BundleImages);
+        assert_eq!(dest, export_dir());
+        let (kind, dest) = bundle_job_spec(BundleKind::Video);
+        assert_eq!(kind, JobKind::BundleVideo);
+        assert_eq!(dest, export_dir());
+        // The kind round-trips to its bundle, and no
+        // single-format kind claims one.
+        assert_eq!(JobKind::BundleImages.bundle_kind(), Some(BundleKind::Images));
+        assert_eq!(JobKind::BundleVideo.bundle_kind(), Some(BundleKind::Video));
+        assert_eq!(JobKind::Mp4Full.bundle_kind(), None);
+        assert_eq!(JobKind::PngRange(0, 1).bundle_kind(), None);
+    }
+
+    #[test]
+    fn bundle_member_totals_are_allocated_before_any_member_runs() {
+        let mut s = crate::init();
+        // Images: one share per member, each the
+        // authored frame count, in plan order.
+        let n = s.core.project.frames.len();
+        assert_eq!(
+            bundle_member_totals(BundleKind::Images, &s.core.project),
+            vec![n; 4]
+        );
+        // Video: two equal shares, each the core's
+        // sampled-times total (the encode contract's
+        // own count — the lib fn is the oracle; its
+        // arithmetic is X11's pins).
+        let member = stykanimate_rs::export::sampled_frame_total(&s.core.project);
+        assert_eq!(
+            bundle_member_totals(BundleKind::Video, &s.core.project),
+            vec![member, member]
+        );
+        // A longer timeline scales the images shares
+        // frame for frame.
+        let target = n + 2;
+        while s.core.project.frames.len() < target {
+            let frame = s.core.project.frames[0].clone();
+            s.core.project.frames.push(frame);
+        }
+        assert_eq!(
+            bundle_member_totals(BundleKind::Images, &s.core.project),
+            vec![target; 4]
+        );
+    }
+
+    #[test]
+    fn bundle_job_finish_writes_the_recap_to_status_and_recap() {
+        let mut s = crate::init();
+        let release = blocked_job(
+            &mut s,
+            JobKind::BundleImages,
+            Ok(ExportJobResult::Bundle(vec![ExportOp::Svg])),
+        );
+        release.send(()).expect("worker listening");
+        poll_until_finished(&mut s);
+        // The synchronous handler's last word, verbatim:
+        // the recap IS the status, and the same line is
+        // the stored recap — the failed member named,
+        // the rest claimed with their destinations.
+        let recap = bundle_recap(BundleKind::Images, &[ExportOp::Svg]);
+        assert_eq!(
+            recap,
+            "Exported PNG → ./export/, JPEG → out/jpeg/, sheet → ./export/spritesheet.png; failed: SVG"
+        );
+        assert_eq!(s.core.status, recap);
+        assert_eq!(s.export_recap, recap);
+    }
+
+    #[test]
+    fn bundle_job_with_every_member_succeeding_recaps_the_whole_plan() {
+        let mut s = crate::init();
+        let release = blocked_job(
+            &mut s,
+            JobKind::BundleVideo,
+            Ok(ExportJobResult::Bundle(Vec::new())),
+        );
+        release.send(()).expect("worker listening");
+        poll_until_finished(&mut s);
+        let recap = bundle_recap(BundleKind::Video, &[]);
+        assert_eq!(recap, "Exported MP4 → ./export/animation.mp4, WebM → ./export/animation.webm");
+        assert_eq!(s.core.status, recap);
+        assert_eq!(s.export_recap, recap);
+    }
+
+    #[test]
+    fn bundle_worker_that_never_reports_fails_every_member() {
+        let mut s = crate::init();
+        let (tx, rx) = mpsc::channel::<ExportJobOutcome>();
+        drop(tx);
+        s.export_job = Some(ExportJob {
+            kind: JobKind::BundleImages,
+            dest: PathBuf::from("out-test"),
+            render: Arc::new(PhaseProgress::default()),
+            encode: Arc::new(PhaseProgress::default()),
+            bundle: Arc::new(PhaseProgress::default()),
+            outcome: rx,
+            shown_render: PhaseSnapshot::default(),
+            shown_encode: PhaseSnapshot::default(),
+            shown_bundle: PhaseSnapshot::default(),
+        });
+        assert_eq!(poll_export_job(&mut s), (true, false));
+        assert!(s.export_job.is_none());
+        // No member outcome was reported, so the recap
+        // claims nothing: every member named as failed,
+        // in the bundle's own voice — never a success
+        // and never a single-format failure sentence.
+        let recap = bundle_recap(BundleKind::Images, &plan_bundle(BundleKind::Images));
+        assert_eq!(recap, "Exported nothing; failed: PNG, JPEG, SVG, sheet");
+        assert_eq!(s.core.status, recap);
+        assert_eq!(s.export_recap, recap);
+    }
+
+    #[test]
+    fn bundle_slot_drives_its_own_line_and_stays_out_of_the_phases() {
+        let mut s = crate::init();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let work: JobWork = Box::new(move |_project, render, _encode, bundle| {
+            bundle.store_bundle(stykanimate_rs::export::BundleProgressEvent {
+                completed_frames: 3,
+                total_frames: 8,
+                finished: false,
+            });
+            // A stray phase store on a bundle job moves
+            // only its own slot — the readout must not
+            // surface it (a bundle job has no phase
+            // lines) and the bundle count must not move.
+            render.store_render(stykanimate_rs::export::RenderProgressEvent {
+                rendered_frames: 2,
+                total_frames: 5,
+                finished: false,
+            });
+            let _ = release_rx.recv();
+            Ok(ExportJobResult::Bundle(Vec::new()))
+        });
+        let project = s.core.project.clone();
+        begin_job(
+            &mut s,
+            JobKind::BundleImages,
+            PathBuf::from("out-test"),
+            project,
+            work,
+        );
+        // The bundle store is a snapshot change: the
+        // poll asks for a repaint while the job runs.
+        let mut drained = (false, true);
+        for _ in 0..2000 {
+            drained = poll_export_job(&mut s);
+            if drained.0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(drained, (true, true));
+        let job = s.export_job.as_ref().expect("job running");
+        // Each slot kept its own event's numbers.
+        let bundle = job.bundle.snapshot();
+        assert_eq!((bundle.done, bundle.total, bundle.seen), (3, 8, true));
+        assert_eq!(job.render.snapshot().done, 2);
+        // The readout is exactly the one bundle line,
+        // built from the bundle snapshot — no phase
+        // line, no merged figure.
+        let lines = job_lines(&s.core, job);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].0, "xc-progress-bundle");
+        assert_eq!(lines[0].1, bundle_progress_line(&s.core, bundle));
+        release_tx.send(()).expect("worker listening");
+        poll_until_finished(&mut s);
+    }
+
+    #[test]
+    fn bundle_job_before_any_event_shows_the_working_line() {
+        let mut s = crate::init();
+        let release = blocked_job(
+            &mut s,
+            JobKind::BundleVideo,
+            Ok(ExportJobResult::Bundle(Vec::new())),
+        );
+        let job = s.export_job.as_ref().expect("job running");
+        let lines = job_lines(&s.core, job);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].0, "xc-progress-working");
+        assert_eq!(
+            lines[0].1,
+            crate::rune_sec::i18n_wire::tr(&s.core, "export_progress_working")
+                .replace("{name}", "video bundle")
+        );
+        release.send(()).expect("worker listening");
+        poll_until_finished(&mut s);
+    }
+
+    #[test]
+    fn bundle_press_is_a_no_op_while_a_job_runs() {
+        let mut s = crate::init();
+        let release = blocked_job(
+            &mut s,
+            JobKind::BundleImages,
+            Ok(ExportJobResult::Bundle(Vec::new())),
+        );
+        // A second bundle press refuses, and so does a
+        // contracted single-format press: the running
+        // job is untouched either way.
+        assert!(!start_bundle_job(&mut s, BundleKind::Video));
+        assert!(!start_export_job(&mut s, ExportOp::Png));
+        s.core.status = "sentinel".to_string();
+        run_bundle(&mut s, BundleKind::Video);
+        assert_eq!(s.core.status, "sentinel");
+        release.send(()).expect("worker listening");
+        poll_until_finished(&mut s);
+        // The original bundle job wrote the finish.
+        assert_eq!(
+            s.core.status,
+            bundle_recap(BundleKind::Images, &[])
+        );
     }
 }

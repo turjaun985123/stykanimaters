@@ -99,6 +99,75 @@
 //! `main.rs::stage_drag` calls [`sprite_pick_at`] on a
 //! joint miss and writes the hit into the Sprites panel's
 //! selection.
+//!
+//! ## Dragging (Wave Z, Z3)
+//!
+//! The same press that picks a sprite also arms a drag:
+//! [`sprite_drag_down`] records the grab, [`sprite_drag_move`]
+//! follows the pointer, [`sprite_drag_up`] settles. The
+//! gesture's shape is the house one (the graph canvas's
+//! drag, the subtitle lane's chip drag): the pointer moves
+//! the sprite by its DELTA from the press point — the
+//! sprite never jumps to the cursor, whatever its pivot —
+//! and the write lands at the authored frame,
+//! `core.current`, the frame every other key editor in
+//! the shell writes at (the Sprites panel's doctrine).
+//!
+//! The undo discipline is the seat's contract — exactly
+//! one undo step per drag, through the sprite-key op
+//! family, enrichment preserved:
+//!
+//! - During the gesture the target key is written IN
+//!   PLACE (replace/insert at the drag frame, the op's
+//!   own placement rule) with NO snapshot and NO status —
+//!   `drag_to`'s live half: the stage redraws from the
+//!   project, so the sprite follows the pointer, and the
+//!   live key is exactly the key the commit will store.
+//! - On a clean release the pre-drag key list (recorded
+//!   at the grab) is restored in place and the final key
+//!   is committed through `EditorCore::set_sprite_key_full`
+//!   — the op takes the gesture's ONE snapshot against
+//!   the restored pre-drag project and posts its own
+//!   status sentence. The committed key is built from
+//!   the panel's `base_key` (an exact key at the frame
+//!   wins verbatim, so its enrichment — including a
+//!   stored follow-`scale` sentinel — survives untouched;
+//!   at a keyless frame the base is the sample, whose
+//!   `scale_y` the write materialises to the sampled
+//!   effective value, `base_key`'s documented behaviour)
+//!   with only `x` / `y` shifted by the pointer delta.
+//! - On a cancelled release the recorded pre-drag key
+//!   list is restored in place and nothing is committed:
+//!   no snapshot was ever taken, so the gesture's net
+//!   undo cost is zero and the project is byte-identical
+//!   to before the press. `main.rs::stage_drag`'s own
+//!   cancel-undo never sees this gesture (it keys on
+//!   `core.dragging` / draw mode, neither of which a
+//!   sprite drag sets), so the two never double-restore.
+//! - A press that never moves the sprite — or moves it
+//!   out and back to the exact start — is a click: the
+//!   X5 selection is its whole effect, no key is written
+//!   and no undo step is spent (the panel's Add-key
+//!   refusal of a phantom step, applied to a gesture).
+//!
+//! The record lives in this module's `thread_local`
+//! (the subtitle lane's `CUE_DRAG` precedent): gesture
+//! state with the gesture's own lifetime, needing no
+//! new shell `State` field. Arming is refused while the
+//! core is playing (`begin_drag`'s own refusal — the
+//! display frame advances under a playing grab) and on a
+//! stale sprite index; the pick that precedes it still
+//! selects either way. If the record stops naming its
+//! sprite mid-gesture (index out of range, or the
+//! instance there now uses a different asset — the lane's
+//! identity rule), the gesture is abandoned: nothing
+//! further is written, restored or committed, and the
+//! world that rewrote the sprite table owns what happens
+//! next. A record somehow left over from an earlier
+//! gesture (its Up never arrived) is settled as a cancel
+//! before a new grab arms.
+
+use std::cell::RefCell;
 
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::media::{self, MediaItem};
@@ -489,6 +558,267 @@ pub fn sprite_pick_at(core: &EditorCore, p: V2) -> Option<usize> {
     sprite_at_point(&sprite_quads_at(core), p)
 }
 
+/// One stage sprite drag in flight (see the module docs,
+/// "Dragging"): everything the settle needs, captured at
+/// the grab — the sprite's identity (index + the asset it
+/// used then), the press point the pointer delta is
+/// measured from, the authored frame the write lands at,
+/// the `base_key` the committed key is built from, and
+/// the instance's pre-drag key list, which the cancel
+/// path restores and the commit path restores-then-ops
+/// over.
+#[derive(Clone, Debug)]
+pub struct SpriteDrag {
+    /// Index into `Project.sprites`.
+    pub sprite: usize,
+    /// The instance's asset at grab time — the identity
+    /// check (the lane's rule): if the instance at
+    /// `sprite` no longer uses this asset, the record no
+    /// longer names the sprite the user grabbed.
+    pub asset: usize,
+    /// The press point, in stage coordinates.
+    pub press: V2,
+    /// The authored frame (`core.current` at the grab)
+    /// the drag writes at.
+    pub frame: usize,
+    /// `sprites_panel::base_key` at `frame`, captured at
+    /// the grab: the exact key verbatim, else the sample
+    /// (its `scale_y` materialised, the documented
+    /// behaviour), else the stage-centre default. Only
+    /// `x` / `y` ever change on it.
+    pub base: InstanceKey,
+    /// The instance's key list at the grab, verbatim.
+    pub orig_keys: Vec<InstanceKey>,
+}
+
+thread_local! {
+    /// The sprite drag in flight, if any. A
+    /// `thread_local` keeps the record out of the shell's
+    /// `State` (the subtitle lane's `CUE_DRAG`
+    /// precedent); the shell's three drag phases call
+    /// the `sprite_drag_*` functions below, which own
+    /// the slot.
+    static SPRITE_DRAG: RefCell<Option<SpriteDrag>> = const { RefCell::new(None) };
+}
+
+/// Whether a sprite drag is currently armed (the shell
+/// routes its Move phase on this; the tests pin the
+/// gesture's lifecycle on it).
+pub fn sprite_drag_active() -> bool {
+    SPRITE_DRAG.with(|cell| cell.borrow().is_some())
+}
+
+/// Field-wise key equality (`InstanceKey` carries no
+/// `PartialEq`): every one of the eleven fields equal.
+/// The values compared here are copies and sums of
+/// copies of stored data, so exact comparison is the
+/// honest test — a drag target computed from a zero
+/// delta IS the base, bit for bit.
+fn key_eq(a: &InstanceKey, b: &InstanceKey) -> bool {
+    a.frame == b.frame
+        && a.x == b.x
+        && a.y == b.y
+        && a.scale == b.scale
+        && a.angle == b.angle
+        && a.opacity == b.opacity
+        && a.flip_x == b.flip_x
+        && a.flip_y == b.flip_y
+        && a.scale_y == b.scale_y
+        && a.pivot_x == b.pivot_x
+        && a.pivot_y == b.pivot_y
+}
+
+/// Whether `record` still names its sprite: the index is
+/// in range and the instance there still uses the asset
+/// it used at the grab.
+fn drag_identity_holds(core: &EditorCore, record: &SpriteDrag) -> bool {
+    core.project
+        .sprites
+        .get(record.sprite)
+        .is_some_and(|inst| inst.asset == record.asset)
+}
+
+/// Restore `record`'s pre-drag key list onto its sprite,
+/// in place — the cancel path's whole write, and the
+/// commit path's first half. No snapshot, no status:
+/// undo history is the committing op's business, and a
+/// cancel must leave it untouched.
+fn restore_orig_keys(core: &mut EditorCore, record: &SpriteDrag) {
+    if let Some(inst) = core.project.sprites.get_mut(record.sprite) {
+        inst.keys = record.orig_keys.clone();
+    }
+}
+
+/// The key the drag would store for pointer point `p`:
+/// the recorded base with `x` / `y` shifted by the
+/// pointer's delta from the press point. `None` when the
+/// result would be non-finite (a wild pointer conversion)
+/// — such an application writes nothing, since the
+/// committing op would refuse the same values.
+fn drag_target(record: &SpriteDrag, p: V2) -> Option<InstanceKey> {
+    let key = InstanceKey {
+        x: record.base.x + (p[0] - record.press[0]),
+        y: record.base.y + (p[1] - record.press[1]),
+        ..record.base
+    };
+    (key.x.is_finite() && key.y.is_finite()).then_some(key)
+}
+
+/// Write `key` onto sprite `sprite`'s key list IN PLACE:
+/// replace the key stored at `key.frame` (exact frame
+/// equality — the sprite ops' own placement rule), or
+/// insert it at its sorted position. No snapshot, no
+/// status — the live half of the gesture; the commit at
+/// release is what history records. Returns true when
+/// the stored list actually changed.
+fn write_key_live(core: &mut EditorCore, sprite: usize, key: InstanceKey) -> bool {
+    let Some(inst) = core.project.sprites.get_mut(sprite) else {
+        return false;
+    };
+    match inst.keys.iter().position(|k| k.frame == key.frame) {
+        Some(pos) => {
+            if key_eq(&inst.keys[pos], &key) {
+                false
+            } else {
+                inst.keys[pos] = key;
+                true
+            }
+        }
+        None => {
+            let pos = inst.keys.partition_point(|k| k.frame < key.frame);
+            inst.keys.insert(pos, key);
+            true
+        }
+    }
+}
+
+/// Point the grabbed sprite at the drag target for
+/// pointer point `p` (the Move phase's application, and
+/// the release's final one): a live, snapshot-less write
+/// of the target key. If the record no longer names its
+/// sprite the gesture is abandoned — the record is
+/// dropped and nothing is written (see the module docs).
+fn sprite_drag_apply(core: &mut EditorCore, p: V2) {
+    let record = SPRITE_DRAG.with(|cell| cell.borrow().clone());
+    let Some(record) = record else {
+        return;
+    };
+    if !drag_identity_holds(core, &record) {
+        SPRITE_DRAG.with(|cell| *cell.borrow_mut() = None);
+        return;
+    }
+    if let Some(key) = drag_target(&record, p) {
+        write_key_live(core, record.sprite, key);
+    }
+}
+
+/// Arm a drag on sprite `sprite`, grabbed at stage point
+/// `p` — called by `main.rs::stage_drag`'s Down phase
+/// immediately after the X5 pick writes the selection, so
+/// the press that selects is the press that can drag.
+/// Takes no snapshot and sets no status (a grab is not an
+/// edit). Arming is refused — the pick alone stands —
+/// while the core is playing or the index is stale. A
+/// leftover record from an earlier gesture is settled as
+/// a cancel first, so no gesture's live writes can leak
+/// into this one.
+pub fn sprite_drag_down(core: &mut EditorCore, sprite: usize, p: V2) {
+    if let Some(old) = SPRITE_DRAG.with(|cell| cell.borrow_mut().take()) {
+        if drag_identity_holds(core, &old) {
+            restore_orig_keys(core, &old);
+        }
+    }
+    if core.playing {
+        return;
+    }
+    let Some(inst) = core.project.sprites.get(sprite) else {
+        return;
+    };
+    let frame = core.current;
+    let record = SpriteDrag {
+        sprite,
+        asset: inst.asset,
+        press: p,
+        frame,
+        base: crate::rune_sec::sprites_panel::base_key(core, inst, frame as f32),
+        orig_keys: inst.keys.clone(),
+    };
+    SPRITE_DRAG.with(|cell| *cell.borrow_mut() = Some(record));
+}
+
+/// The drag's Move phase: apply the target for stage
+/// point `p` live (see [`sprite_drag_apply`]). Returns
+/// true when a drag is armed — the shell then does NOT
+/// fall through to the pose drag, which a sprite grab
+/// never started (`begin_drag` missed, by construction
+/// of the pick branch that armed this).
+pub fn sprite_drag_move(core: &mut EditorCore, p: V2) -> bool {
+    if !sprite_drag_active() {
+        return false;
+    }
+    sprite_drag_apply(core, p);
+    // The apply may have abandoned the gesture (identity
+    // lost); the grab still owned this Move either way.
+    true
+}
+
+/// The drag's Up phase, at release point `p`. Cancelled:
+/// the pre-drag key list is restored in place — the
+/// gesture leaves the project byte-identical and spends
+/// no undo step. Clean release: the release position
+/// applies once more; then, if the gesture's net effect
+/// on the key list is nil (a click, or an excursion that
+/// returned to the exact start), the live writes are
+/// simply restored away and nothing is committed;
+/// otherwise the pre-drag list is restored and the final
+/// key is committed through
+/// `EditorCore::set_sprite_key_full`, whose snapshot —
+/// taken against the restored project — is the drag's
+/// exactly one undo step, and whose status sentence is
+/// the gesture's recap. No record: nothing happens (the
+/// release belongs to some other gesture).
+pub fn sprite_drag_up(core: &mut EditorCore, p: V2, cancelled: bool) {
+    if !sprite_drag_active() {
+        return;
+    }
+    if cancelled {
+        if let Some(record) = SPRITE_DRAG.with(|cell| cell.borrow_mut().take()) {
+            if drag_identity_holds(core, &record) {
+                restore_orig_keys(core, &record);
+            }
+        }
+        return;
+    }
+    sprite_drag_apply(core, p);
+    let Some(record) = SPRITE_DRAG.with(|cell| cell.borrow_mut().take()) else {
+        return;
+    };
+    if !drag_identity_holds(core, &record) {
+        return;
+    }
+    let Some(inst) = core.project.sprites.get(record.sprite) else {
+        return;
+    };
+    if inst.keys.len() == record.orig_keys.len()
+        && inst
+            .keys
+            .iter()
+            .zip(record.orig_keys.iter())
+            .all(|(a, b)| key_eq(a, b))
+    {
+        // Net-nil gesture: the live list already equals
+        // the pre-drag list, so there is nothing to
+        // restore and nothing to commit.
+        return;
+    }
+    let Some(final_key) = drag_target(&record, p) else {
+        restore_orig_keys(core, &record);
+        return;
+    };
+    restore_orig_keys(core, &record);
+    core.set_sprite_key_full(record.sprite, record.frame, final_key);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,7 +951,7 @@ mod tests {
         // describe.
         let mut project = project_with_sprites();
         project.figures[0].def.nodes[1].media =
-            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 });
         let items = media::media_items(&project, 0.0);
         let image_count = items
             .iter()
@@ -677,7 +1007,7 @@ mod tests {
         // Rune has no bitmap primitive; the placeholder is
         // the stage treatment, real pixels are export-only.
         let mut project =
-            project_with_clip_def_media(Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }));
+            project_with_clip_def_media(Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }));
         project.figures[0].opacity = 0.5;
         project.clips[0].def.nodes[1].style.opacity = 0.5;
         let items = media::media_items(&project, 0.0);
@@ -713,7 +1043,7 @@ mod tests {
         // the sprite pass).
         let mut project = project_with_sprites();
         let mut clip_def = project.figures[0].def.clone();
-        clip_def.nodes[1].media = Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+        clip_def.nodes[1].media = Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 });
         let pose = project.frames[0].poses[0].clone();
         project.clips.push(ClipDef {
             name: "clip".into(),
@@ -976,5 +1306,203 @@ mod tests {
             sprite_prims_at(&core, Some(1)),
             sprite_prims(&core.project, 0.0, Some(1)),
         );
+    }
+
+    /// The serialised key list of sprite `sprite` — the
+    /// byte-level identity the drag tests compare before /
+    /// after a gesture (`InstanceKey` has no `PartialEq`).
+    fn keys_json(core: &EditorCore, sprite: usize) -> String {
+        serde_json::to_string(&core.project.sprites[sprite].keys)
+            .expect("sprite keys serialise")
+    }
+
+    #[test]
+    fn sprite_drag_moves_by_pointer_delta_and_commits_one_undo_step() {
+        // Wave Z (Z3): the press lands at (310,195) — inside
+        // sprite 0's quad but offset from its key position
+        // (300,200) — and travels to (340,215): the sprite
+        // must move by the DELTA (30,20), never jump to the
+        // pointer.
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+        let before = keys_json(&core, 0);
+        assert!(!sprite_drag_active());
+        sprite_drag_down(&mut core, 0, [310.0, 195.0]);
+        assert!(sprite_drag_active());
+        // The grab alone is not an edit.
+        assert_eq!(core.undo_depth(), 0);
+        assert_eq!(keys_json(&core, 0), before);
+        // Live half: the stored key follows the pointer,
+        // still with no snapshot spent.
+        assert!(sprite_drag_move(&mut core, [340.0, 215.0]));
+        let live = core.sprite_key_at(0, 0).expect("a key at frame 0");
+        assert!(close([live.x, live.y], [330.0, 220.0]), "live {live:?}");
+        assert_eq!(core.undo_depth(), 0, "live writes spend no snapshot");
+        // Release: exactly one undo step, committed through
+        // the op (its status sentence is the recap).
+        sprite_drag_up(&mut core, [340.0, 215.0], false);
+        assert!(!sprite_drag_active());
+        assert_eq!(core.undo_depth(), 1, "one undo step per drag");
+        assert_eq!(core.status, "Sprite 1 key set at frame 1.");
+        let key = core.sprite_key_at(0, 0).expect("a key at frame 0");
+        assert!(close([key.x, key.y], [330.0, 220.0]), "committed {key:?}");
+        assert_eq!(key.scale, 10.0);
+        assert_eq!(key.angle, 0.0);
+        // The other key is untouched, and the one undo
+        // restores the pre-drag list byte for byte.
+        let end = core.sprite_key_at(0, 2).expect("a key at frame 2");
+        assert!(close([end.x, end.y], [340.0, 200.0]));
+        assert_eq!(end.angle, 90.0);
+        core.undo();
+        assert_eq!(keys_json(&core, 0), before);
+    }
+
+    #[test]
+    fn sprite_drag_preserves_the_exact_keys_enrichment_verbatim() {
+        // The committed key is the grabbed key with only
+        // x/y shifted: opacity, flips, an EXPLICIT scale_y
+        // and the pivot all ride through set_sprite_key_full
+        // untouched.
+        let mut core = EditorCore::new();
+        let mut project = project_with_sprites();
+        project.sprites[0].keys[0] = InstanceKey {
+            opacity: 0.5,
+            flip_x: true,
+            scale_y: 3.0,
+            pivot_x: 0.25,
+            pivot_y: 0.75,
+            ..project.sprites[0].keys[0]
+        };
+        core.project = project;
+        sprite_drag_down(&mut core, 0, [300.0, 200.0]);
+        assert!(sprite_drag_move(&mut core, [315.0, 190.0]));
+        sprite_drag_up(&mut core, [315.0, 190.0], false);
+        let key = core.sprite_key_at(0, 0).expect("a key at frame 0");
+        assert!(close([key.x, key.y], [315.0, 190.0]), "{key:?}");
+        assert_eq!(key.opacity, 0.5);
+        assert!(key.flip_x);
+        assert!(!key.flip_y);
+        assert_eq!(key.scale_y, 3.0, "an explicit scale_y is not the sentinel");
+        assert_eq!((key.pivot_x, key.pivot_y), (0.25, 0.75));
+        assert_eq!(core.undo_depth(), 1);
+    }
+
+    #[test]
+    fn sprite_drag_at_a_keyless_frame_authors_from_the_sample() {
+        // Frame 1 has no key: the drag authors one there
+        // from the sampled transform (320,200 / 45 degrees
+        // between the frame-0 and frame-2 keys), and the
+        // sampled follow-`scale` sentinel MATERIALISES to
+        // the effective value on write — base_key's
+        // documented behaviour, preserved.
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+        core.goto(1);
+        assert!(core.sprite_key_at(0, 1).is_none());
+        sprite_drag_down(&mut core, 0, [320.0, 200.0]);
+        assert!(sprite_drag_move(&mut core, [330.0, 190.0]));
+        sprite_drag_up(&mut core, [330.0, 190.0], false);
+        let key = core.sprite_key_at(0, 1).expect("the drag authored a key");
+        assert_eq!(key.frame, 1.0);
+        assert!(close([key.x, key.y], [330.0, 190.0]), "{key:?}");
+        assert!((key.angle - 45.0).abs() < 0.01, "sampled angle {key:?}");
+        assert_eq!(key.scale, 10.0);
+        assert_eq!(
+            key.scale_y, 10.0,
+            "the follow sentinel materialises to the sampled effective scale_y"
+        );
+        assert_eq!(core.project.sprites[0].keys.len(), 3);
+        assert_eq!(core.undo_depth(), 1);
+    }
+
+    #[test]
+    fn sprite_drag_cancel_restores_the_pre_drag_state() {
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+        let before = keys_json(&core, 0);
+        let status = core.status.clone();
+        sprite_drag_down(&mut core, 0, [300.0, 200.0]);
+        assert!(sprite_drag_move(&mut core, [360.0, 260.0]));
+        // The live half really did move the stored key…
+        let live = core.sprite_key_at(0, 0).expect("a key at frame 0");
+        assert!(close([live.x, live.y], [360.0, 260.0]));
+        // …and the cancel puts it back, byte for byte,
+        // with no snapshot spent and no status posted.
+        sprite_drag_up(&mut core, [360.0, 260.0], true);
+        assert!(!sprite_drag_active());
+        assert_eq!(keys_json(&core, 0), before);
+        assert_eq!(core.undo_depth(), 0);
+        assert_eq!(core.status, status);
+    }
+
+    #[test]
+    fn sprite_click_and_returned_excursion_write_nothing() {
+        // A press with no travel is the X5 click: selection
+        // only (done by the caller), no key, no undo step.
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+        let before = keys_json(&core, 0);
+        sprite_drag_down(&mut core, 0, [300.0, 200.0]);
+        sprite_drag_up(&mut core, [300.0, 200.0], false);
+        assert_eq!(keys_json(&core, 0), before);
+        assert_eq!(core.undo_depth(), 0);
+        // An excursion that returns to the exact start is
+        // likewise net-nil: no phantom undo step (the
+        // panel's Add-key discipline, applied to a gesture).
+        sprite_drag_down(&mut core, 0, [300.0, 200.0]);
+        assert!(sprite_drag_move(&mut core, [350.0, 240.0]));
+        assert!(sprite_drag_move(&mut core, [300.0, 200.0]));
+        sprite_drag_up(&mut core, [300.0, 200.0], false);
+        assert_eq!(keys_json(&core, 0), before);
+        assert_eq!(core.undo_depth(), 0);
+    }
+
+    #[test]
+    fn sprite_drag_refused_while_playing_and_on_a_stale_index() {
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+        let before = keys_json(&core, 0);
+        core.playing = true;
+        sprite_drag_down(&mut core, 0, [300.0, 200.0]);
+        assert!(!sprite_drag_active(), "no grab while playing");
+        assert!(!sprite_drag_move(&mut core, [360.0, 260.0]));
+        sprite_drag_up(&mut core, [360.0, 260.0], false);
+        core.playing = false;
+        sprite_drag_down(&mut core, 9, [300.0, 200.0]);
+        assert!(!sprite_drag_active(), "no grab on a stale index");
+        assert_eq!(keys_json(&core, 0), before);
+        assert_eq!(core.undo_depth(), 0);
+    }
+
+    #[test]
+    fn sprite_drag_abandons_when_the_sprite_changes_under_it() {
+        // The lane's identity rule: the instance at the
+        // grabbed index is re-pointed at another asset
+        // mid-gesture (an external rewrite) — the record
+        // no longer names the grabbed sprite, so the
+        // gesture writes, restores and commits nothing.
+        let mut core = EditorCore::new();
+        let mut project = project_with_sprites();
+        project.assets.push(ImageAsset {
+            name: "other.png".into(),
+            png: tiny_png(),
+        });
+        core.project = project;
+        sprite_drag_down(&mut core, 0, [300.0, 200.0]);
+        core.project.sprites[0].asset = 1;
+        let midway = keys_json(&core, 0);
+        assert!(sprite_drag_move(&mut core, [360.0, 260.0]), "the Move was owned");
+        assert!(!sprite_drag_active(), "…and the gesture abandoned itself");
+        sprite_drag_up(&mut core, [360.0, 260.0], false);
+        assert_eq!(keys_json(&core, 0), midway);
+        assert_eq!(core.undo_depth(), 0);
+        // The table emptied under a grab: Move/Up are
+        // harmless no-ops, nothing panics, nothing writes.
+        sprite_drag_down(&mut core, 0, [300.0, 200.0]);
+        core.project.sprites.clear();
+        assert!(sprite_drag_move(&mut core, [10.0, 10.0]));
+        sprite_drag_up(&mut core, [10.0, 10.0], false);
+        assert!(core.project.sprites.is_empty());
+        assert_eq!(core.undo_depth(), 0);
     }
 }

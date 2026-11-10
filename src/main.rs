@@ -469,6 +469,15 @@ fn stage_drag(s: &mut State, d: &mut Drag) {
                 if let Some(sprite) = stage_sprites::sprite_pick_at(core, p) {
                     s.sprites_panel.selected = Some(sprite);
                     s.stroke_selected = None;
+                    // Wave Z (Z3): the press that selects
+                    // also arms a drag on the sprite — a
+                    // Move from here moves it (writes land
+                    // through the sprite-key op family at
+                    // release; see stage_sprites' Dragging
+                    // docs). Arming is refused while playing,
+                    // inside sprite_drag_down; the pick
+                    // above stands either way.
+                    stage_sprites::sprite_drag_down(core, sprite, p);
                 } else {
                     // Pick the nearest stroke instead —
                     // the selection the stage highlight
@@ -486,11 +495,20 @@ fn stage_drag(s: &mut State, d: &mut Drag) {
         Phase::Move => {
             if core.draw_mode {
                 core.draw_to(p);
-            } else {
+            } else if !stage_sprites::sprite_drag_move(core, p) {
                 core.drag_to(p);
             }
         }
         Phase::Up => {
+            // Wave Z (Z3): settle a sprite drag first.
+            // It never set `core.dragging` or draw mode,
+            // so the cancel guard below neither sees it
+            // nor undoes for it — its own settle commits
+            // through the sprite-key op (one undo step)
+            // or restores the pre-drag keys on cancel.
+            // No record: a no-op, and the release belongs
+            // to the pose/camera/draw paths below.
+            stage_sprites::sprite_drag_up(core, p, d.cancelled());
             // Wave Q (Q2; P6's filed observation): a
             // cancelled gesture — Escape, focus loss, the
             // pointer taken away (`Drag::cancelled`, whose

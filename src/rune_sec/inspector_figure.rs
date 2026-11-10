@@ -168,6 +168,32 @@
 //!   through `i18n_wire::tr` under keys IA-Y8-3 files for
 //!   the integrator's catalogue insertion (`src/i18n.rs`
 //!   is integrator-only), the X3 pattern.
+//! * Rest-angle steppers (Wave Z, Z4) → one stepper
+//!   row per node of the selected figure inside the
+//!   Setup section, mounted only while the mode is on,
+//!   between the note and the set-rest actions (keys
+//!   `fig-setup-rest-{i}-dn` / `fig-setup-rest-{i}-up`,
+//!   dynamic in the swatch key's form): the node's name
+//!   (fitted by [`fit_header_name`] — node names are
+//!   unbounded project data in a fixed-width slot), the
+//!   −/+ steppers stepping its rest angle by
+//!   [`REST_STEP`] through [`step_rest_angle`], and the
+//!   kit mono readout of the stored angle
+//!   ([`format_deg`], the segment panel's one angle
+//!   formatter). The steppers are the numeric
+//!   counterpart of the setup drags: the write passes
+//!   through [`rest_angle_stepped`] — normalised, then
+//!   clamped through the node's joint limits
+//!   (`NodeDef::clamp_angle`, Wave X's X6) — the same
+//!   clamped write-back the drag arms apply, so a
+//!   numeric edit and a drag leave the rig in the same
+//!   state. One snapshot per effective press (one undo
+//!   step); a press the clamp makes a no-op is silent
+//!   and its button renders inert, both computed from
+//!   the same helper. No new catalogue strings: the
+//!   labels are node names (project data) and the
+//!   status follows the panels' English-literal status
+//!   convention, like `adjust_joint_limit`'s.
 //!
 //! When the project has no figures — or the selection is
 //! stale — the panel renders its header over the kit's
@@ -226,11 +252,13 @@
 use rune::tok::{type_, Theme};
 use rune::{row, text, Color, El, TextEdit, Tx};
 use stykanimate_rs::editor::EditorCore;
+use stykanimate_rs::model::{norm_deg, NodeDef};
 
 use crate::chrome_view::{btn, danger_btn};
 use crate::rune_sec::design;
 use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::icon_btn;
+use crate::rune_sec::inspector_segment::format_deg;
 use crate::stage_view::hex_color;
 use crate::State;
 
@@ -280,6 +308,35 @@ pub struct InspectorFigureState {
     /// the core field IA-Y8-1 adds beside `draw_mode`,
     /// this panel's toggle being its only writer.
     pub setup_mode: bool,
+    /// Per-node rest data for the Setup section's
+    /// rest-angle steppers (Wave Z, Z4): one entry per
+    /// node of the selected figure's definition, in
+    /// definition order. Read fresh from the definition
+    /// in `figure_state`, like every other field here.
+    pub rest_nodes: Vec<RestNodeState>,
+}
+
+/// One node's row in the Setup section's rest-angle
+/// stepper table (Wave Z, Z4): everything the row
+/// renders, computed once from the node's definition.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RestNodeState {
+    /// Node name from the definition — project data,
+    /// the row's label (never catalogue copy).
+    pub name: String,
+    /// The node's stored rest angle, degrees.
+    pub angle: f32,
+    /// One − press would change the stored angle: the
+    /// stepped value [`rest_angle_stepped`] computes
+    /// differs from the stored one. False exactly when
+    /// the joint-limit clamp (or the ±180° wrap) makes
+    /// the press a no-op, so the button renders inert
+    /// and the op stays silent — button and op read the
+    /// same computation and cannot disagree.
+    pub dn_live: bool,
+    /// One + press would change the stored angle
+    /// ([`RestNodeState::dn_live`]'s twin).
+    pub up_live: bool,
 }
 
 /// Whole-percentage opacity for display (`1.0 → 100`),
@@ -305,6 +362,17 @@ pub fn figure_state(core: &EditorCore) -> Option<InspectorFigureState> {
         hidden: fig.hidden,
         locked: fig.locked,
         setup_mode: core.setup_mode,
+        rest_nodes: fig
+            .def
+            .nodes
+            .iter()
+            .map(|node| RestNodeState {
+                name: node.name.clone(),
+                angle: node.rest_angle,
+                dn_live: rest_angle_stepped(node, -REST_STEP) != node.rest_angle,
+                up_live: rest_angle_stepped(node, REST_STEP) != node.rest_angle,
+            })
+            .collect(),
     })
 }
 
@@ -1013,6 +1081,88 @@ pub fn set_rest_from_current_pose(core: &mut EditorCore, rebase: bool) -> bool {
     true
 }
 
+/// Step size for the Setup section's rest-angle
+/// steppers, degrees — the segment inspector's
+/// joint-limit step (its `LIMIT_STEP`), so the shell
+/// speaks one step language for angles everywhere.
+pub const REST_STEP: f32 = 5.0;
+
+/// The rest angle one stepper press would store for
+/// `node`: the stepped value normalised to (−180, 180]
+/// and passed through the node's own joint limits
+/// ([`NodeDef::clamp_angle`], Wave X's X6) — the same
+/// clamped write-back Y8's setup-drag arms apply, so a
+/// numeric edit and a drag can never leave the rig in
+/// different states. Pure: the op writes through it and
+/// the rows' StepForms read it (via
+/// [`RestNodeState::dn_live`] / `up_live`), so the
+/// button and the op cannot disagree (the kit's
+/// doctrine). With no limits the normalisation is the
+/// whole story: an unlimited joint's stored rest angle
+/// stays on the (−180, 180] circle however far it is
+/// stepped.
+pub fn rest_angle_stepped(node: &NodeDef, delta: f32) -> f32 {
+    node.clamp_angle(norm_deg(node.rest_angle + delta))
+}
+
+/// Step the selected figure's node `ni` rest angle by
+/// `delta` degrees (Wave Z, Z4) — the write behind the
+/// Setup section's per-node rest-angle steppers, the
+/// numeric counterpart of Y8's setup drags. The core
+/// has no rest-angle op, so — exactly as the segment
+/// inspector's `adjust_joint_limit` writes the limit
+/// fields the core has no op for — this writes the
+/// definition directly in the core ops' own pattern:
+/// validate → ONE `snapshot()` → mutate → status, so
+/// one press is exactly one undo step. The stored
+/// value is [`rest_angle_stepped`]: normalised and
+/// clamped through the node's joint limits, the
+/// write-back Y8's drag arms use. A press the clamp
+/// makes a no-op (stepping at a joint limit) is
+/// SILENT — no write, no status, no undo step — the
+/// Straighten rule, and the row renders that direction
+/// inert from the same computation. Refusals (a stale
+/// figure or node) are status-only, no snapshot.
+/// Returns whether a step was written.
+///
+/// Every node takes a press, the root included: its
+/// rest angle is real data (`FigureDef::rest_pose`
+/// seeds `Pose::angles[0]` from it — it orients the
+/// whole rest stance), unlike a joint limit, which X6
+/// refuses on the origin because its angle is never
+/// SOLVED. Stored frame poses are never touched: a
+/// rest edit re-reads the animation against the new
+/// rig, which is exactly what setup mode is for.
+pub fn step_rest_angle(core: &mut EditorCore, ni: usize, delta: f32) -> bool {
+    let fi = core.selected_figure;
+    let Some(fig) = core.project.figures.get(fi) else {
+        core.status = "No such figure.".into();
+        return false;
+    };
+    let Some(node) = fig.def.nodes.get(ni) else {
+        core.status = format!("Figure {} has no segment {} to step.", fi + 1, ni);
+        return false;
+    };
+    let cur = node.rest_angle;
+    let next = rest_angle_stepped(node, delta);
+    if next == cur {
+        return false;
+    }
+    core.snapshot();
+    // Validated above; the `if let` is unreachable
+    // armour, not an expected path.
+    if let Some(node) = core
+        .project
+        .figures
+        .get_mut(fi)
+        .and_then(|f| f.def.nodes.get_mut(ni))
+    {
+        node.rest_angle = next;
+    }
+    core.status = format!("Segment {} rest angle set to {}.", ni, format_deg(next));
+    true
+}
+
 /// The scale row: label and the 90% / 110% buttons that
 /// resize the whole selected figure through
 /// [`scale_selected_figure`] (which reads the selection at
@@ -1155,6 +1305,62 @@ fn setup_note(s: &State, t: &Theme) -> El {
         .font(type_::LABEL)
         .color(t.text_secondary)
         .truncate()
+}
+
+/// One node's row in the Setup section's rest-angle
+/// stepper table (Wave Z, Z4): the node's name fitted
+/// to the header's budget ([`fit_header_name`] — node
+/// names are unbounded project data in a fixed-width
+/// label slot; the full name stays in the definition),
+/// the −/+ steppers stepping its rest angle by
+/// [`REST_STEP`] through [`step_rest_angle`], and the
+/// kit's mono readout of the stored angle
+/// ([`format_deg`]) between them — the ring row's
+/// anatomy. A direction the joint-limit clamp makes a
+/// no-op renders inert (the view-state's
+/// `dn_live` / `up_live`, computed by the op's own
+/// [`rest_angle_stepped`]). The keys are per-node
+/// dynamic keys in the swatch key's form; the press
+/// captures the node index and the op reads the
+/// selection at press time, like the scale row.
+fn setup_rest_stepper_row(rn: &RestNodeState, ni: usize, t: &Theme) -> El {
+    row()
+        .w_full()
+        .center_y()
+        .gap(8.0)
+        .child(
+            text(&fit_header_name(&rn.name))
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .grow(1.0),
+        )
+        .child(design::step_btn(
+            &format!("fig-setup-rest-{ni}-dn"),
+            "−",
+            if rn.dn_live {
+                design::StepForm::Live
+            } else {
+                design::StepForm::Noop
+            },
+            t,
+            move |s: &mut State| {
+                step_rest_angle(&mut s.core, ni, -REST_STEP);
+            },
+        ))
+        .child(design::stepper_value(&format_deg(rn.angle), t))
+        .child(design::step_btn(
+            &format!("fig-setup-rest-{ni}-up"),
+            "+",
+            if rn.up_live {
+                design::StepForm::Live
+            } else {
+                design::StepForm::Noop
+            },
+            t,
+            move |s: &mut State| {
+                step_rest_angle(&mut s.core, ni, REST_STEP);
+            },
+        ))
 }
 
 /// One of the setup section's two set-rest actions,
@@ -1324,6 +1530,12 @@ pub fn inspector_figure(s: &State, t: &Theme) -> El {
     panel = panel.child(setup_toggle_row(s, &st, t));
     if st.setup_mode {
         panel = panel.child(setup_note(s, t));
+        // The per-node rest-angle steppers (Wave Z,
+        // Z4): the numeric counterpart of the setup
+        // drags, one row per node of the definition.
+        for (ni, rn) in st.rest_nodes.iter().enumerate() {
+            panel = panel.child(setup_rest_stepper_row(rn, ni, t));
+        }
         panel = panel.child(setup_set_rest_row(s, t, false));
         panel = panel.child(setup_set_rest_row(s, t, true));
     }
@@ -1443,6 +1655,135 @@ mod tests {
         let depth = core.undo_depth();
         assert!(!set_rest_from_current_pose(&mut core, true));
         assert!(!set_rest_from_current_pose(&mut core, false));
+        assert_eq!(core.status, "No such figure.");
+        assert_eq!(core.undo_depth(), depth);
+    }
+
+    #[test]
+    fn figure_state_reports_rest_nodes() {
+        // Wave Z (Z4): the stepper table's view-state
+        // is the definition itself, read fresh — one
+        // row per node, names and stored rest angles in
+        // definition order, at the demo rest pose every
+        // node steps both ways. Park the elbow on its
+        // +160° limit and the + form reads inert at
+        // once, from the op's own computation.
+        let mut core = EditorCore::new();
+        let st = figure_state(&core).expect("demo figure");
+        let def = &core.project.figures[core.selected_figure].def;
+        assert_eq!(st.rest_nodes.len(), def.nodes.len());
+        for (rn, node) in st.rest_nodes.iter().zip(def.nodes.iter()) {
+            assert_eq!(rn.name, node.name);
+            assert_eq!(rn.angle, node.rest_angle);
+            assert!(
+                rn.dn_live && rn.up_live,
+                "node {} at rest steps both ways",
+                rn.name
+            );
+        }
+        core.project.figures[0].def.nodes[4].rest_angle = 160.0;
+        let st = figure_state(&core).expect("demo figure");
+        assert!(!st.rest_nodes[4].up_live, "elbow at its limit: + inert");
+        assert!(st.rest_nodes[4].dn_live);
+    }
+
+    #[test]
+    fn rest_angle_stepped_matches_the_drag_write_back() {
+        // Wave Z (Z4): the stepper's value is the
+        // setup drag's write-back — normalise, then the
+        // node's own clamp — pinned at the helper so
+        // the op, the rows' forms and this expectation
+        // cannot drift apart.
+        let core = EditorCore::new();
+        let def = &core.project.figures[0].def;
+        // Unlimited chest on the half-circle: wraps.
+        assert_eq!(rest_angle_stepped(&def.nodes[1], REST_STEP), -175.0);
+        // Elbow inside its limits: the plain step.
+        assert_eq!(rest_angle_stepped(&def.nodes[4], REST_STEP), 9.0);
+        assert_eq!(rest_angle_stepped(&def.nodes[4], -REST_STEP), -1.0);
+    }
+
+    #[test]
+    fn step_rest_angle_steps_one_node_in_one_undo_step() {
+        // Wave Z (Z4): one press = one snapshot = one
+        // undo step, writing only that node's rest
+        // angle — the other nodes' rest angles and the
+        // stored frame poses are untouched.
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        let before = core.project.figures[fi].def.rest_angles();
+        let poses_before = serde_json::to_string(&core.project.frames).unwrap();
+        let depth = core.undo_depth();
+        assert!(step_rest_angle(&mut core, 3, REST_STEP));
+        let after = core.project.figures[fi].def.rest_angles();
+        assert_eq!(after[3], before[3] + REST_STEP);
+        for (i, (b, a)) in before.iter().zip(after.iter()).enumerate() {
+            if i != 3 {
+                assert_eq!(b, a, "node {i} rest angle moved");
+            }
+        }
+        assert_eq!(core.undo_depth(), depth + 1, "one press, one undo step");
+        assert_eq!(
+            serde_json::to_string(&core.project.frames).unwrap(),
+            poses_before,
+            "a rest edit must not rewrite stored poses"
+        );
+        assert_eq!(core.status, "Segment 3 rest angle set to 123.0°.");
+    }
+
+    #[test]
+    fn step_rest_angle_clamps_through_joint_limits() {
+        // Wave Z (Z4): the write-back is X6-clamped,
+        // the drag arms' rule — the elbow (limits
+        // −10..160) stepped past its max lands exactly
+        // on it, and a further press is a silent no-op:
+        // no write, no status change, no undo step.
+        // Same at the min.
+        let mut core = EditorCore::new();
+        core.project.figures[0].def.nodes[4].rest_angle = 158.0;
+        let depth = core.undo_depth();
+        assert!(step_rest_angle(&mut core, 4, REST_STEP));
+        assert_eq!(core.project.figures[0].def.nodes[4].rest_angle, 160.0);
+        assert_eq!(core.undo_depth(), depth + 1);
+        let status = core.status.clone();
+        assert!(!step_rest_angle(&mut core, 4, REST_STEP));
+        assert_eq!(core.project.figures[0].def.nodes[4].rest_angle, 160.0);
+        assert_eq!(core.undo_depth(), depth + 1, "a clamped press snapshotted");
+        assert_eq!(core.status, status, "a clamped press reported itself");
+        core.project.figures[0].def.nodes[4].rest_angle = -8.0;
+        assert!(step_rest_angle(&mut core, 4, -REST_STEP));
+        assert_eq!(core.project.figures[0].def.nodes[4].rest_angle, -10.0);
+        assert!(!step_rest_angle(&mut core, 4, -REST_STEP));
+        assert_eq!(core.project.figures[0].def.nodes[4].rest_angle, -10.0);
+    }
+
+    #[test]
+    fn step_rest_angle_normalises_an_unlimited_joint() {
+        // Wave Z (Z4): no limits — the stepped value
+        // is stored on the (−180, 180] circle: stepping
+        // the unlimited upper-arm past the half-circle
+        // wraps instead of accumulating.
+        let mut core = EditorCore::new();
+        core.project.figures[0].def.nodes[3].rest_angle = 178.0;
+        assert!(step_rest_angle(&mut core, 3, REST_STEP));
+        assert_eq!(core.project.figures[0].def.nodes[3].rest_angle, -177.0);
+        core.project.figures[0].def.nodes[3].rest_angle = -178.0;
+        assert!(step_rest_angle(&mut core, 3, -REST_STEP));
+        assert_eq!(core.project.figures[0].def.nodes[3].rest_angle, 177.0);
+    }
+
+    #[test]
+    fn step_rest_angle_refuses_stale_indices() {
+        // Wave Z (Z4): refusals are status-only, no
+        // snapshot — the panel's guard shape (the
+        // set-rest guard's wording for the figure, the
+        // segment panel's form for the node).
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        assert!(!step_rest_angle(&mut core, 999, REST_STEP));
+        assert_eq!(core.status, "Figure 1 has no segment 999 to step.");
+        core.selected_figure = 999;
+        assert!(!step_rest_angle(&mut core, 0, REST_STEP));
         assert_eq!(core.status, "No such figure.");
         assert_eq!(core.undo_depth(), depth);
     }
@@ -1712,7 +2053,8 @@ playback_speed: 1.0,
         // Wave Y (Y8): the same panel with setup mode
         // on — the toggle reads on and the setup
         // section (note + both set-rest actions)
-        // mounts.
+        // mounts. Wave Z (Z4): the per-node rest-angle
+        // stepper rows mount between them.
         let mut setup_state = with_figures;
         setup_state.core.setup_mode = true;
         let _ = inspector_figure(&setup_state, &t);

@@ -1945,6 +1945,49 @@ mod tests {
     }
 
     #[test]
+    fn apply_library_pose_keeps_states_limits_and_out_of_limit_angles() {
+        // Wave Z (Z9, library state round-trip audit): the
+        // pose library stores a Pose only, so applying one
+        // writes ONLY the target frame's pose row — the
+        // figure's animation states (Wave X, P-1, on the
+        // instance) and its joint limits (P-4, on the def)
+        // are not the library's data and must survive an
+        // apply untouched, and the applied angles land
+        // verbatim even past a limit (limits bind solving,
+        // never stored poses — P-4's standing rule).
+        let dir = temp_library("z9-apply");
+        let mut c = core();
+        let states = vec![stykanimate_rs::model::StateKey {
+            frame: 1,
+            clip: 0,
+            offset: 2,
+            speed: 1.5,
+        }];
+        c.project.figures[0].states = states.clone();
+        let mut pose = selected_pose(&c).unwrap().clone();
+        pose.angles[4] = 170.0; // past the elbow preset max (+160)
+        save_pose_library_in(&dir, &pose, "Styk").unwrap();
+        apply_library_pose_in(&mut c, &dir, "Styk");
+        assert!(
+            c.status.contains("applied to figure"),
+            "unexpected status: {}",
+            c.status
+        );
+        assert_eq!(
+            selected_pose(&c).unwrap().angles,
+            pose.angles,
+            "the over-limit angle lands verbatim, unclamped"
+        );
+        assert_eq!(
+            c.project.figures[0].states, states,
+            "the figure's state keys survive a pose apply"
+        );
+        assert_eq!(c.project.figures[0].def.nodes[4].min_angle, Some(-10.0));
+        assert_eq!(c.project.figures[0].def.nodes[4].max_angle, Some(160.0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn apply_library_pose_refuses_a_mismatched_rig() {
         let dir = temp_library("mismatch");
         let mut c = core();
