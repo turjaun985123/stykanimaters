@@ -177,7 +177,23 @@ present and fall back to a folder-based flow when neither exists.
   in radians in the panel, the panel's Reduce applies its
   tolerance in radians on a bend channel, and baking the
   channels writes bend channels into the frames' bend tables
-  alongside the poses. Motion statistics are
+  alongside the poses. The dopesheet marks channel keys
+  too: every channel target — root X/Y, joint angle,
+  segment length and bend — marks its figure's lane with
+  the timeline marker row's ● glyph, on the same rounded
+  frame the marker row and the graph panel's seek use,
+  composing with the pose and state marks in the same
+  cell, so a figure animated purely from the graph panel
+  shows its keys in the sheet and gets its rows instead
+  of the "No keyframes yet" empty state. Keying a bend
+  channel on the origin node is refused at both authoring
+  doors — the graph panel's Key bend button and MCP
+  `graph_key` both answer "The origin has no segment to
+  bend.", the refusal the frame-bend controls already
+  made, and no undo step is spent; a bend channel an
+  existing project already carries on the origin still
+  loads, saves unchanged, and keeps its keys movable and
+  deletable — only new keys are refused. Motion statistics are
   computed alongside the project statistics.
 - **Camera** — per-frame keys (centre, zoom **and rotation**) with
   interpolation; camera mode pans by dragging; a follow target can
@@ -197,9 +213,17 @@ present and fall back to a folder-based flow when neither exists.
   carries a local transform (offset along and across the
   segment, scale, rotation, mirror flip) and a stored
   opacity — the transform is edited with steppers in the
-  segment inspector or set through the MCP attach tools,
-  the opacity is set through the attach tools or arrives
-  with a layered import — figure
+  segment inspector or set through the MCP attach tools;
+  the opacity is edited in the same inspector too (a
+  percent stepper in 0.05 steps beside the transform
+  steppers, showing the sanitised value every surface
+  renders at — a non-finite stored value reads as full
+  opacity — with one undo step per effective press and a
+  press at the limit a silent no-op), set through the
+  attach tools, or arrives with a layered import — and
+  the two stay independent: transform edits and the
+  transform Reset leave a stored opacity untouched, and
+  an opacity edit never touches the transform — figure
   presets (humanoid, quadruped, mini), and a local figure library
   (`./library/*.json` plus built-ins). Saved figures store their
   exact display name inside the library file — the filename stays
@@ -285,7 +309,10 @@ present and fall back to a folder-based flow when neither exists.
     moves its key at the current frame through the sprite-key
     op (position only; the key's opacity, flips, pivot and
     scale ride through untouched, and a completed drag is
-    exactly one undo step) — re-pointed at another asset
+    exactly one undo step, while a press that travels less
+    than two stage units is a plain click that writes
+    nothing, authors no key at a keyless frame and spends
+    no undo step) — re-pointed at another asset
     without losing its keys, reordered in draw order, and
     navigated from its own dopesheet lane.
     Image assets import from PNG or JPEG files, detected by
@@ -378,7 +405,7 @@ present and fall back to a folder-based flow when neither exists.
   (`src/projects.rs`), a recovery snapshot and
   session-continuity helpers (`src/shell.rs`), native open/save
   dialogs, save/load as JSON (`project.styk.json`), and
-  **28 languages** (the original's 27 + Bengali; 694 UI
+  **28 languages** (the original's 27 + Bengali; 695 UI
   strings in each language's table) in `src/i18n.rs`.
   These library features survived the Rune
   migration untouched, and the Home panel and settings

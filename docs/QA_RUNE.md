@@ -1398,3 +1398,96 @@ citation now stands on this frame
 SCAN_SET contract, the CLEAN streak at
 seven consecutive dispatches (§10's own
 upgrade notes carry the measurements).
+
+### 19.11 Wave AA closing frame — aligned (Wave AB, AB18)
+
+§19.10's addendum is verified against the
+citation it pointed at: AA12's upgrade did
+land in PHASE_O §10 on `42803945367`, and
+the figures §10 records for that frame —
+227 files, 38 dumps, CLEAN under the
+19-tree contract, census 19 PASS / 0 FAIL,
+thumbnail distances 0 / 51 / 48 at band
+112×83/84, MCP probe PASS, the build
+beside it at 4,295 passed — match
+§19.10's first-hand numbers point for
+point. One wording in the addendum wants
+separating out: its "CLEAN streak at
+seven" runs two streaks together. The
+seven is §10's own count — consecutive
+dispatches reproducing the O-1…O-9
+measurements exactly; the scanned-CLEAN
+streak at that frame stood at four
+(§19.10's chain). The two are kept
+distinct here. AB12 has since taken the
+next upkeep: §10's current source is the
+frame of this entry, its O-measurement
+streak at eight, and §10's figures for
+the new frame agree with the verification
+below.
+
+The Wave AA closing frame, verified from
+the artifacts and logs first-hand: Build,
+Test & Binary `42808061488` and Headless
+Rune probe `42808095941`, both **SUCCESS**
+on `3ef1207` (the Wave AA integration
+HEAD; the round history — an E0027
+compile round and an exact-text pin
+round, green at round 3 — is §6.21's and
+the close commit's record, not re-derived
+here). Build totals summed from the run's
+own log: **4,317 passed, 0 failed** (56
+`test result:` lines). The headless
+artifact holds 227 files, **38 tree
+dumps** — the same 38 names as the Wave Z
+frame's artifact, `tree-states-populated.json`
+among them and still populated (the
+clip-state row renders in it; its `.exit`
+reads 0). The transcripts read: subtitle
+census **PASS** (19 PASS assertions,
+0 FAIL), both Home markers **PASS**
+(missing-audio, scan-fallback), MCP probe
+**PASS** (exit 0), and the Home thumbnail
+probe **PASS** in full, at the Wave Y/Z
+frames' own numbers — the geometry leg
+holds (thumbnail band 112×83/84, spreads
+within tolerance 1), the populated
+pairwise ink-coverage distances read
+0 / 51 / 48 against the floor of 12, the
+missing-audio thumbnail reads 0 from the
+singleton row and 48 from the pair, and
+the legacy legs stand (control shares
+0.008 / 0.004; rows 0.333 / 0.337 / 0.339;
+ink 115 / 115 / 59). The overflow scan
+over the artifact reads **CLEAN (0 hits,
+scan set complete)** — the **sixth
+consecutive scanned-CLEAN dispatch**,
+the chain in full: `42792705307`,
+`42798031914`, `42803118202`,
+`42803945367`, `42807209856`,
+`42808095941`. Wave AA round 2's dispatch
+`42807209856`, re-scanned from its own
+artifact for this entry (227 files, 38
+dumps, CLEAN), is the fifth link; the
+earlier links stand as §19.10 recorded
+them. Wave AA's one visible change in
+these trees is the one §10's table
+already records: AA3's dopesheet channel
+marks render in the loop scene — the ●
+glyph stands beside the pose ◆ in
+`tree-loop-range.json`, whose element
+count §10's measurer puts at 1254 (from
+1250). The sprite Draw-order geometry
+§19.9 closed still holds:
+`sprite-z-row` / `sprite-z-back` /
+`sprite-z-front` render in
+`tree-default.json`, `sprite-z-front` on
+the wrapped second line with right edge
+1194.5 and the row's subtree ending at
+1412.0 — identical to the Wave Y and
+Wave Z closing frames. This frame is the
+newest CLEAN frame on record and is
+§10's current citation source (AB12's
+upkeep, landed beside this entry).
+§19.6's remaining rows stand as their
+own waves' records left them.

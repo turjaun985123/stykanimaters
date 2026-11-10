@@ -475,7 +475,9 @@ integration dispatch (Wave X, X15), and
 upgraded again to the Wave Y closing
 dispatch (Wave Z, Z12), and upgraded
 again to the Wave Z closing dispatch
-(Wave AA, AA12); the Wave X
+(Wave AA, AA12), and upgraded again
+to the Wave AA closing dispatch
+(Wave AB, AB12); the Wave X
 integration dispatch was checked in full and
 not taken (Wave Y, Y15 — its scan reads NOT
 CLEAN; see the upgrade notes below).** Original source:
@@ -600,7 +602,7 @@ upgrade notes carry the list). Every
 O-1…O-9 measurement reproduces exactly —
 the sixth consecutive dispatch to do so.
 
-Current source: **Headless Rune probe run
+Previous source: **Headless Rune probe run
 `42803945367`**, completed **SUCCESS** on
 `232f43953b5d0f683c796c5483836d282da34484`
 (`232f439`, the Wave Z integrated tree at
@@ -632,6 +634,41 @@ one row the Wave Z scene added,
 CLEAN at 1306 elements. Every O-1…O-9
 measurement reproduces exactly — the
 seventh consecutive dispatch to do so.
+
+Current source: **Headless Rune probe run
+`42808095941`**, completed **SUCCESS** on
+`3ef120765acb81a0d84ab4b3babf7e6d857ec1d0`
+(`3ef1207`, the Wave AA integrated tree at
+its CI close; the build beside it,
+`42808061488`, completed **SUCCESS** with
+test totals summed from its own log at
+**4,317 passed, 0 failed**), artifact
+`headless-probe-output` (227 files, 38
+`tree-*.json` dumps). Its scan reads
+`OVERFLOW SCAN: CLEAN (0 hits, scan set
+complete)` — the contract standing at 19
+required trees, unchanged since the last
+citation — its `subtitle-census.txt` reads
+`SUBTITLE CENSUS: PASS` (19 PASS, 0 FAIL),
+both Home markers read `PASS`, its Home
+thumbnail probe reads
+`HOME THUMBNAIL PROBE: PASS` (pairwise
+ink-coverage distances 0 / 51 / 48; the band
+geometry leg within tolerance at 112×83/84),
+and its live-MCP probe reads
+`MCP PROBE: PASS` — all read from the
+artifact itself, not from the workflow
+conclusion. Every figure below was
+re-measured in these dumps: 37 of the 38
+counts reproduce exactly; the one move is
+`tree-loop-range.json`, 1250 → **1254**
+elements (AA3's dopesheet channel marks —
+the loop scene's two channel-keyed cells
+now carry the ● glyph beside the pose ◆;
+the upgrade notes carry the anatomy).
+Every O-1…O-9 measurement reproduces
+exactly — the eighth consecutive dispatch
+to do so.
 Per §2's output shape each
 scene's hit list is empty, so the table records
 the verdict per scene:
@@ -659,7 +696,7 @@ the verdict per scene:
 | tree-home-missing-audio.json | 1440×900 | 334 | required | 0 | CLEAN |
 | tree-home-scan-fallback.json | 1440×900 | 333 | required | 0 | CLEAN |
 | tree-library-populated.json | 1440×900 | 1214 | — | 0 | CLEAN |
-| tree-loop-range.json | 1440×900 | 1250 | required | 0 | CLEAN |
+| tree-loop-range.json | 1440×900 | 1254 | required | 0 | CLEAN |
 | tree-menu-open.json | 1440×900 | 1223 | — | 0 | CLEAN |
 | tree-palette-open.json | 1440×900 | 1279 | required | 0 | CLEAN |
 | tree-playing.json | 1440×900 | 1215 | — | 0 | CLEAN |
@@ -1006,6 +1043,62 @@ measurement reproduces exactly — the
 **seventh** consecutive dispatch to do so —
 so the per-item table's measured column
 stands unchanged.
+
+**Upgrade notes (Wave AB, AB12).** The
+citation upgrades to the Wave AA closing
+dispatch `42808095941`, above — the fifth
+consecutive dispatch whose scan reads
+CLEAN and the first carrying Wave AA's
+panel surface. What verified on its
+artifact, read first-hand: scan
+`OVERFLOW SCAN: CLEAN (0 hits, scan set
+complete)` under the contract as it now
+stands — 19 required trees, unchanged
+since the last citation; `SUBTITLE CENSUS:
+PASS` (19 PASS, 0 FAIL); both Home markers
+`PASS`; the thumbnail probe PASS live
+again (pairwise distances 0 / 51 / 48
+against the floor of 12; legacy legs at
+control shares 0.008 / 0.004, rows
+0.333/0.337/0.339, ink 115/115/59; the band
+geometry leg spreads within tolerance 1 at
+112×83/84); `MCP PROBE: PASS`. The build
+beside it, `42808061488` on the same
+commit, completed **SUCCESS**, its test
+totals summed from its own log at **4,317
+passed, 0 failed**. The measurer was
+calibrated before any number was trusted
+(X15's discipline): run against the
+previous citation's artifact
+(`42803945367`, downloaded fresh), all 38
+per-tree counts and windows and every
+O-1…O-9 subtree right edge reproduce the
+table exactly (the O-1 chip filter counts
+exactly the 28 language chips once the
+`settings-lang-grid` and
+`settings-lang-row-N` containers are
+excluded), so the one movement below is
+the new artifact's fact. Per-tree counts
+moved in exactly one tree:
+`tree-loop-range.json` 1250 → 1254 — the
+four added elements are AA3's channel
+marks in the dopesheet lane: cells
+`dope-cell-0-1` and `dope-cell-0-3` each
+gain a gap-2 row carrying ◆ (pose) and ●
+(channel), the coincidence composition
+AA3 designed, inside the timeline card —
+the scan reads them CLEAN. The
+`tree-default.json` key diff against the
+previously cited artifact is exactly zero
+keys added, none lost. The defect the
+Wave Z upgrade closed stands closed:
+`sprite-z-front` ends at **1194.5** and
+the `sprite-z-row` subtree at 1412.0, as
+on the cited frame. Every O-1…O-9
+measurement reproduces exactly — the
+**eighth** consecutive dispatch to do
+so — so the per-item table's measured
+column stands unchanged.
 
 **CI, stated once and exactly.** The last completed
 master CI run before Wave R was on `0b75051`
