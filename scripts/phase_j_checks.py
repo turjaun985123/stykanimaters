@@ -811,7 +811,15 @@ def entry_field(chunk: str) -> str | None:
 # floor is set to what this counter verifies: 984.
 # Floor raised 983 -> 984. Wave X's own key growth is
 # PENDING arithmetic in x16.md, never floored here.
-KEY_TOTAL_FLOOR = 984
+# Wave Y ratchet (Y16's recount, 2026-11-10): on the
+# clean Wave X integration HEAD (d44098f, git archive
+# scratch tree) this counter reads 995 total (871 static
+# + 124 dynamic, 61 files) — the 984 floor plus Wave X's
+# counted growth of 11 (zero lost proven by check 2 at
+# Wave X integration). Tuple-carried keys remain outside
+# this counter (F6's artefact, above). Floor raised
+# 984 -> 995 so Wave Y starts from the integrated truth.
+KEY_TOTAL_FLOOR = 995
 
 
 def inventory_counts() -> tuple[int, int, int, int]:
@@ -2253,7 +2261,14 @@ def _mcp_builtins() -> tuple[list[str], list[str]]:
 # names the gap. Ratchet UP with a new ledger line when
 # a wave adds tools; lower it only for a named,
 # deliberate removal.
-MCP_SURFACE_FLOOR = 381
+# Wave Y ratchet (Y16's recount, 2026-11-10): on the
+# clean Wave X integration HEAD (d44098f, git archive
+# scratch tree) the surface reads 390 = 44 built-ins +
+# 328 registry (319 + X3's seven state tools + X5's
+# sprite_set_asset / sprite_reorder splice) + 9 io +
+# 4 subtitle io + 5 subtitle tools, doc sync exact.
+# Floor raised 381 -> 390.
+MCP_SURFACE_FLOOR = 390
 
 
 def check_mcp_surface() -> tuple[bool, list[str]]:
@@ -2418,15 +2433,14 @@ def check_mcp_surface() -> tuple[bool, list[str]]:
     # shrink silently (check 9's founding purpose).
     if len(surface) < MCP_SURFACE_FLOOR:
         fail(
-            f"  surface floor: {len(surface)} tools is below the Wave Q "
+            f"  surface floor: {len(surface)} tools is below the "
             f"floor of {MCP_SURFACE_FLOOR} (ledger at MCP_SURFACE_FLOOR) — "
-            "a tool has left the surface, or a Wave P+Q splice the floor "
-            "counts has not landed yet (until P38 IA-2's sprite splice "
-            "lands in mcp_tools::tools(), the surface reads 379)"
+            "a tool has left the surface, or a splice the floor "
+            "counts has not landed yet"
         )
     else:
         lines.append(
-            f"  surface floor: {len(surface)} tools >= the Wave Q floor "
+            f"  surface floor: {len(surface)} tools >= the floor "
             f"of {MCP_SURFACE_FLOOR} (ledger at MCP_SURFACE_FLOOR)"
         )
 
@@ -2526,6 +2540,9 @@ PARITY_MAP: dict[str, list[str]] = {
     "save-copy": ["save_project_copy"],
     "cycle-project": ["list_projects", "load_project"],
     "open-project": ["load_project"],
+    # Wave Y (Y6): the layered-set import command and
+    # its registry tool are the same importer call.
+    "import-layered-set": ["import_layered_set"],
     # Figures (hide / solo / lock are the `layers`
     # tool's figure flags — its handler writes the
     # same fields the toggle ops write)

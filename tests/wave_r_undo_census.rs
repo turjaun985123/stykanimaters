@@ -5,11 +5,11 @@
 //! MUTATING MCP tool spends exactly ONE undo step (one
 //! `EditorCore::snapshot` on its path); read-only tools spend
 //! none; refusals spend none. This suite extends the sample to
-//! the ENTIRE surface — all 390 tools, classified by handler
+//! the ENTIRE surface — all 392 tools, classified by handler
 //! behaviour (static call-path trace + handler reads), not by
 //! name:
 //!
-//!   MUTATING (209)   — a leg per tool below: fresh demo core,
+//!   MUTATING (211)   — a leg per tool below: fresh demo core,
 //!                      invoke the handler through
 //!                      `mcp::all_tools()`, assert the result
 //!                      is Ok and the undo depth moves by
@@ -353,6 +353,28 @@ fn s_two_sprites(core: &mut EditorCore) {
     must(core, "sprite_add", json!({ "asset": 0 }));
 }
 
+// Wave Y (Y7): set_rest_pose needs the current pose OFF
+// the rest pose, or the op is an honest no-op — pose
+// every frame from the rest angles with one node moved.
+fn s_rest_displaced(core: &mut EditorCore) {
+    let mut angles = core.project.figures[0].def.rest_angles();
+    if angles.len() > 5 {
+        angles[5] += 30.0;
+    }
+    must(core, "pose_apply_all_frames", json!({ "figure": 0, "angles": angles }));
+}
+
+// Wave Y (Y6): a layered-set folder fixture on disk —
+// one part that attaches by stem (head) and one that
+// degrades to a sprite (cape).
+fn s_layered_folder(core: &mut EditorCore) {
+    let _ = core;
+    let dir = tmp_path("wave_r_census_layered");
+    std::fs::create_dir_all(&dir).expect("layered fixture dir");
+    write_png(&format!("{dir}/head.png"));
+    write_png(&format!("{dir}/cape.png"));
+}
+
 fn s_camera_key(core: &mut EditorCore) {
     must(
         core,
@@ -535,6 +557,7 @@ fn a_legs() -> Vec<Leg> {
         Leg { name: "figure_ground", group: "core", setup: s_none, args: |_| json!({}) },
         Leg { name: "copy_pose_between", group: "core", setup: s_add_figure, args: |_| json!({ "from_figure": 0, "to_figure": 1 }) },
         Leg { name: "reset_pose", group: "core", setup: s_none, args: |_| json!({}) },
+        Leg { name: "set_rest_pose", group: "core", setup: s_rest_displaced, args: |_| json!({ "figure": 0 }) },
         Leg { name: "pose_apply_all_frames", group: "core", setup: s_none, args: |c| {
             let n = c.project.figures[0].def.nodes.len();
             let mut angles = vec![0.0; n];
@@ -718,6 +741,7 @@ fn a_legs() -> Vec<Leg> {
         // Wave X (X5): the sprite small-win pair.
         Leg { name: "sprite_set_asset", group: "misc", setup: s_sprite_two_assets, args: |_| json!({ "sprite": 0, "asset": 1 }) },
         Leg { name: "sprite_reorder", group: "misc", setup: s_two_sprites, args: |_| json!({ "sprite": 0, "to": 1 }) },
+        Leg { name: "import_layered_set", group: "misc", setup: s_layered_folder, args: |_| json!({ "path": tmp_path("wave_r_census_layered"), "figure": 0 }) },
         // ---- fig3 bakes, libraries, subtitles ----
         Leg { name: "fig3_bake", group: "misc", setup: s_fig3, args: |_| json!({}) },
         Leg { name: "fig3_bake_animation", group: "misc", setup: |c| { s_fig3(c); must(c, "fig3_rotate", json!({ "axis": 0, "degrees": 25 })); must(c, "fig3_mark_b", json!({})); must(c, "fig3_rotate", json!({ "axis": 0, "degrees": -10 })); }, args: |_| json!({ "frames": 3 }) },
@@ -1392,8 +1416,8 @@ fn census_covers_every_tool_exactly_once() {
 
     assert_eq!(
         mutating.len(),
-        209,
-        "209 mutating tools (legs may repeat a tool with different args)"
+        211,
+        "211 mutating tools (legs may repeat a tool with different args)"
     );
     assert_eq!(exceptions.len(), 21, "21 declared exceptions");
     assert_eq!(non_mutating.len(), 160, "160 non-mutating tools");

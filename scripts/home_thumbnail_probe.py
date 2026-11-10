@@ -176,6 +176,28 @@ Pair gate -- content fidelity across scenes (Wave V, V7;
   coordinate sets in band space, so the legitimate
   1 px strip-height difference is not a premise.
 
+  Wave Y (Y10) second leg -- band geometry. Band-relative
+  masks erase absolute geometry by construction: a
+  thumbnail rendering the right strokes at the wrong
+  scale, cropped, or shifted within its slot would pass
+  the ink legs, and the legacy floors (bg share, ink
+  count) cannot see it either. But the constructions fix
+  the geometry too: all four projects share the demo
+  stage (960x720) and the same 56 pt slot, so the four
+  bands must AGREE -- origin within the strip, width,
+  height. Measured on the real sets (runs 42778622657
+  and 42774207670, identical numbers): every band is
+  112 px wide at origin (0, 78); heights are 83, 84, 83,
+  83 -- a max spread of 1 px, the half-point row's extra
+  strip pixel landing in the band's height. The leg
+  therefore requires every component's spread <=
+  BAND_GEOM_TOL = 1 (the measured variance; the same
+  1 px phase quantum the coverage distance absorbs).
+  The failure signals it guards are far larger: a 1 pt
+  placement slip is 2 px at this scale, and an
+  aspect/scale error in the thumbnail render moves the
+  band height by tens of px.
+
 Usage:
     python3 scripts/home_thumbnail_probe.py \
         headless-out/snap-home-populated.png \
@@ -234,6 +256,17 @@ CONTROL_BG_CEIL = 0.06
 # different content measures 48..51 (see docstring). The floor
 # is ~1/4 of the weakest different-content signal.
 INK_UNMATCHED_FLOOR = 12
+# Pair gate, second leg (Wave Y, Y10): the four thumbnails'
+# band geometry (origin within the strip, width, height)
+# must agree to within this many capture pixels. Measured
+# on the real sets (runs 42778622657, 42774207670; identical
+# numbers): origin spread 0, width spread 0, height spread
+# 1 -- the half-point row's extra strip pixel lands in the
+# band's height. Tolerance 1 is that measured variance, the
+# same 1 px phase quantum the coverage distance absorbs;
+# a 1 pt placement slip is 2 px at this scale and an
+# aspect/scale error moves the height by tens of px.
+BAND_GEOM_TOL = 1
 ROW_KEYS = ("home-row-0", "home-row-1", "home-row-2")
 MISSING_ROW_KEYS = ("home-row-0",)
 CONTROL_KEY = "home-totals"
@@ -589,10 +622,13 @@ def analyse_pair(pop_bytes, pop_tree, miss_bytes, miss_tree):
     miss = miss_strips.get(MISSING_ROW_KEYS[0])
     gate = None  # None = PASS, else (verdict, reason lines)
     masks = None
+    bands = None
+    geom_fail = False
     if any(s is None for s in pop) or miss is None:
         gate = ("UNPROVEN", ["a row strip could not be extracted "
                              "(see the sections above)"])
     else:
+        bands = [thumb_band(s) for s in pop] + [thumb_band(miss)]
         masks = [ink_mask(s) for s in pop] + [ink_mask(miss)]
         if any(m is None for m in masks):
             gate = ("UNPROVEN",
@@ -600,6 +636,25 @@ def analyse_pair(pop_bytes, pop_tree, miss_bytes, miss_tree):
                      "the strips (no exact stage-background pixels) — "
                      "the band premise does not hold for this snap"])
     if gate is None:
+        # Second leg (Wave Y, Y10): band geometry agreement.
+        # All four seeded projects share the demo stage and
+        # the same slot, so their bands must coincide to
+        # within the measured 1 px phase variance — a
+        # mis-scaled, cropped or shifted thumbnail keeps its
+        # band-relative ink mask and passes the ink legs,
+        # but moves its band. Transcript first; the FAIL is
+        # applied after the ink legs so both legs always
+        # report.
+        geom = [(b[0], b[1], b[2] - b[0], b[3] - b[1]) for b in bands]
+        spreads = [max(g[i] for g in geom) - min(g[i] for g in geom)
+                   for i in range(4)]
+        lines.append(
+            "thumbnail band geometry: "
+            + ", ".join(f"origin ({g[0]},{g[1]}) size {g[2]}x{g[3]}"
+                        for g in geom)
+            + f" — spreads origin {spreads[0]}/{spreads[1]}, size "
+              f"{spreads[2]}/{spreads[3]} (tolerance {BAND_GEOM_TOL})")
+        geom_fail = any(s > BAND_GEOM_TOL for s in spreads)
         pop_masks, miss_mask = masks[:3], masks[3]
         d01 = ink_unmatched(pop_masks[0], pop_masks[1])
         d02 = ink_unmatched(pop_masks[0], pop_masks[2])
@@ -644,6 +699,19 @@ def analyse_pair(pop_bytes, pop_tree, miss_bytes, miss_tree):
                          "populated singleton's content — either the demo "
                          "content changed in one scene or thumbnails are "
                          "not content-faithful"])
+        if geom_fail and gate[0] == "PASS":
+            gate = ("FAIL",
+                    ["the four thumbnail bands disagree in geometry "
+                     "(a spread above exceeds the tolerance) — the "
+                     "seeded projects share one stage size and one "
+                     "slot, so a thumbnail rendered at the wrong "
+                     "scale, cropped or shifted within its slot is "
+                     "the remaining explanation; the band-relative "
+                     "ink legs cannot see it"])
+        elif geom_fail:
+            lines.append("FAIL  the four thumbnail bands also disagree "
+                         "in geometry (a spread above exceeds the "
+                         "tolerance)")
     gate_verdict, gate_lines = gate
     lines.extend(("FAIL  " if gate_verdict == "FAIL" else "") + line
                  for line in gate_lines)
@@ -754,10 +822,16 @@ def self_test():
                 if not (rx + 8 <= x < rx + 8 + 56 and ry + 2 <= y < ry + 78):
                     continue
                 kind = kinds.get(k)
-                if kind is None or not (ry + 12 <= y < ry + 12 + 42):
+                # Kind S = kind B shifted 4 px down within
+                # its slot (Wave Y geometry-leg fixture):
+                # strokes and block move together, so its
+                # band-relative ink mask is B's exactly.
+                dy = 4 if kind == "S" else 0
+                if kind is None or not (ry + 12 + dy <= y < ry + 12 + dy + 42):
                     return CARD
-                if kind in ("B", "B2", "B3") and rx + 36 <= x < rx + 52 \
-                        and ry + 20 <= y < ry + 44:
+                if (kind in ("B", "B2", "B3") or kind == "S") \
+                        and rx + 36 <= x < rx + 52 \
+                        and ry + 20 + dy <= y < ry + 44 + dy:
                     return (255, 93, 93, 255)
                 if kind == "B3" and rx + 56 <= x < rx + 58 \
                         and ry + 16 <= y < ry + 18:
@@ -766,7 +840,7 @@ def self_test():
                     if ry + 30 <= y < ry + 32:
                         return (232, 232, 236, 255)
                     return STAGE_BG + (255,)
-                if abs((x - (rx + 8)) - (y - (ry + 12))) \
+                if abs((x - (rx + 8)) - (y - (ry + 12 + dy))) \
                         < (3 if kind == "B2" else 2):
                     return (232, 232, 236, 255)
                 return STAGE_BG + (255,)
@@ -847,6 +921,51 @@ def self_test():
     verdict, code, lines = analyse_pair(murk_png, tree, miss_png, miss_tree)
     assert verdict == "FAIL" and code == 1, lines
     print("self-test PASS: near-miss pair (coverage distance 4) -> FAIL")
+
+    # --- Wave Y second leg (band geometry). A pair member
+    # whose thumbnail is painted 4 px lower in its slot
+    # (kind S) keeps B's band-relative ink mask exactly:
+    # assert the ink pattern is the passing one (the
+    # pre-Y10 gate PASSes this fixture), then require the
+    # geometry leg to FAIL it on the moved band origin.
+    shift_png = encode_png(W, H, make_painter(
+        rects, {"home-row-0": "B", "home-row-1": "S", "home-row-2": "A"}))
+    _w, _h, sh_rows = decode_png(shift_png)
+    t0 = strip_pixels(sh_rows, _w, _h, rects["home-row-0"], 1.0, 1.0)
+    t1 = strip_pixels(sh_rows, _w, _h, rects["home-row-1"], 1.0, 1.0)
+    assert ink_unmatched(ink_mask(t0), ink_mask(t1)) == 0
+    b0, b1 = thumb_band(t0), thumb_band(t1)
+    assert b1[1] - b0[1] == 4, (b0, b1)
+    verdict, code, lines = analyse_pair(shift_png, tree, miss_png, miss_tree)
+    assert verdict == "FAIL" and code == 1, lines
+    print("self-test PASS: shifted pair member (ink distance 0, band "
+          "origin +4) -> FAIL")
+
+    # A strip whose thumbnail area carries ink over a
+    # NEAR-background wash (every channel 1 above the stage
+    # colour: inside BG_TOL for the legacy floors, never
+    # exactly STAGE_BG) passes the non-blank sections but
+    # gives the gate no band to anchor on -> UNPROVEN, the
+    # fail-soft verdict, never a FAIL. Pins the Wave X
+    # UNPROVEN branch, unexercised until now.
+    NEAR_BG = (STAGE_BG[0] + 1, STAGE_BG[1] + 1, STAGE_BG[2] + 1, 255)
+
+    def washed(x, y):
+        for k in ROW_KEYS:
+            rx, ry, _rw, rh = rects[k]
+            if rx + 8 <= x < rx + 8 + 56 and ry + 12 <= y < ry + 12 + 42:
+                if abs((x - (rx + 8)) - (y - (ry + 12))) < 2:
+                    return (232, 232, 236, 255)
+                if k == "home-row-2":
+                    return NEAR_BG
+                return STAGE_BG + (255,)
+        return CARD
+
+    verdict, code, lines = analyse_pair(
+        encode_png(W, H, washed), tree, miss_png, miss_tree)
+    assert verdict == "UNPROVEN" and code == 2, lines
+    print("self-test PASS: near-bg singleton strip (no exact stage-bg) "
+          "-> UNPROVEN")
     return 0
 
 
@@ -930,7 +1049,8 @@ def main(argv):
         if summary:
             with open(summary, "a") as fh:
                 fh.write("\n### Home thumbnail probe (Wave Q, Q16; pair "
-                         "gate Wave V, V7; redesigned Wave X, X10)\n\n```\n"
+                         "gate Wave V, V7; redesigned Wave X, X10; band "
+                         "geometry leg Wave Y, Y10)\n\n```\n"
                          + text + "```\n")
     return code
 

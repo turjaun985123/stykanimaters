@@ -450,6 +450,92 @@ wiring had been filed at this pass's final
 check; any that lands later is the
 integrator's to apply with this note's counts.
 
+Wave Y maintenance (Y17): the audit at the
+Wave X integration HEAD (d44098f) re-verified
+the harness mechanics -- both tree loops parse
+to 34 names, set-equal to the `scenes()`
+registry and to each other, and the harness
+produces 37 tree dumps -- and then audited
+the Wave X surfaces for carriers, which X17's
+pass could not do (X3/X5 had not yet filed).
+Two additions, both REQUIRED from the start
+on the S2/T12/U12 terms -- the trees were
+already produced by both loops, and Y17
+verified the surfaces in the Wave X closing
+artifact (run 42784024319) before naming
+them: `clips-populated`, the named-state
+section's only carrier (clip-states-section
+and its keying strip ride the populated clips
+panel), and `sprites-populated`, the
+dopesheet sprite lane's only carrier
+(dope-sprite-row-* ride its two planted
+instances). X5's SCAN_SET deferral to this
+seat is discharged by the second addition.
+The scan set now has 18 entries, all required
+and still no pending entries; `scenes()`
+still lists 34 names, and the harness still
+produces 37 tree dumps. The alpha export
+entries (X8) owe no entry: they are core /
+MCP only, no panel surface exists (the panel
+toggle is a flagged user decision, not
+built), so no tree can carry them. One
+coverage gap stands, filed as IA-Y17-2: no
+scene plants a figure WITH state keys, so
+the states section's state-row form (row +
+clear button) is in no dump. A pending entry
+was NOT added for it -- the pending side
+stays empty by design (the self-test pins
+it), and the S2 pattern names the tree
+required in the same integration that lands
+its scene.
+
+The same audit's scan over that artifact is
+NOT CLEAN, recorded plainly: 40 hits, one
+family, in 20 of the 37 dumps -- X5's sprite
+draw-order row. `sprite-z-front` (rect right
+1426.0) escapes the right column's 1412.5
+content edge by 14.0 pt and its own card's
+right edge by 2.0 pt, and its unkeyed label
+child (right 1416.0) by 4.0 pt; the row's
+children sum wider than the 316 pt content
+width, and Rune does not clip. The family
+rides every dump whose right column mounts
+the sprite panel's edit area, tree-default
+.json among them -- so the required set's
+clean contract fails on that dispatch.
+Earlier waves' CLEAN verdicts stand (they
+were measured on pre-X5 artifacts; the row
+is new in Wave X), but the Wave X dispatch's
+own CLEAN line was not artifact-measured --
+Y15's audit reached the same 40-hit verdict
+independently, and the scan is a debrief
+instrument no CI step runs. No
+exemption was added and no rule weakened:
+the escape is the defect family this scan
+exists for. The repair belongs to the panel
+(src/rune_sec/sprites_panel.rs -- Wave Y's
+Y14 seat) and is filed as IA-Y17-1; the two
+entries above stay required either way,
+since required governs presence, not
+cleanliness.
+
+The Y10 boundary in headless.yml this wave,
+as X10 drew it against X17: Y10 owns the pair
+region of scripts/home_thumbnail_probe.py
+and the Home thumbnail probe step as invoked,
+plus the snap step's `home-missing-audio`
+capture block (per X17's statement of
+record); everything else in the workflow --
+the tree loops, the census and marker steps,
+the live-MCP probe, upload and summary -- is
+this pass's, and home_thumbnail_probe.py
+itself is not touched by it. F7's live-MCP
+probe repair (the step seeds the stored
+live_mcp pref before launching) was verified
+standing in the workflow at this pass, not
+re-applied. No other Wave X finding names
+workflow wiring in this region.
+
 Checks considered and NOT added (they would
 false-positive or judge what rects cannot show):
 
@@ -550,7 +636,11 @@ SCROLL_SEGMENTS = {"timeline"}
 # its workflow dumps in the same integration. The Home
 # scan-fallback tree (Wave U) joined on the same terms
 # again -- IA-U12-1 landed its workflow dumps in the
-# same integration.
+# same integration. The clips-populated and sprites-populated
+# trees (Wave Y) joined on the same terms again -- both were
+# already produced by both loops, and Y17 verified the Wave X
+# surfaces they carry in the Wave X closing artifact before
+# naming them.
 SCAN_SET = [
     ("tree-default.json", "required",
      "O-5 keyframe rows + O-6 wx-kind segments (P2); O-8 playback "
@@ -596,6 +686,15 @@ SCAN_SET = [
      "frames key) whose audio file is missing — the row's light "
      "read refuses the file, so its meta line is the scan "
      "fallback carrying the missing-audio marker (Wave U, IA-U12-1)"),
+    ("tree-clips-populated.json", "required",
+     "clips panel populated: two-clip pool with loop-mode row and "
+     "the Wave X named-state section (clip-states-section + keying "
+     "strip, rules 1-2); the section's only carrier tree "
+     "(Wave Y, Y17)"),
+    ("tree-sprites-populated.json", "required",
+     "Sprites panel populated rows + edit area and the Wave X "
+     "dopesheet sprite lane (dope-sprite-row-*, rule 4) over two "
+     "keyed instances; the lane's only carrier tree (Wave Y, Y17)"),
 ]
 
 

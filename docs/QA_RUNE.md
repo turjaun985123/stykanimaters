@@ -1229,3 +1229,49 @@ the Wave W integration dispatch `42774207670`
 later than it foresaw; the upgrade and the
 pair gate's UNPROVEN verdict are recorded
 there).
+
+### 19.8 Wave X integration frame — aligned (Wave Y, Y15)
+
+PHASE_O §10 checked the Wave X integration
+dispatch end to end and did **not** upgrade
+the scan-table citation. The frame, verified
+from the artifacts and logs first-hand:
+Headless Rune probe `42784024319` completed
+**SUCCESS** on `d44098f` (224 files, 37 tree
+dumps) — subtitle census PASS (19/0), both
+Home markers PASS — and Build, Test & Binary
+`42784003685` on the same commit completed
+**SUCCESS**, 4,158 passed / 0 failed summed
+from its own log. But the overflow scan over
+the headless artifact reads **40 hits, NOT
+CLEAN**: one new family — X5's sprite
+Draw-order row (`sprite-z-front` +14.0 pt
+[content+card], its unkeyed child +4.0 pt) in
+the 20 dumps whose sprite panel renders its
+edit rows, SCAN_SET-required
+`tree-default.json` among them. The citation
+therefore stays on `42774207670`; §19.7's
+pointer stands and §17's row, which closes on
+§10's evidence, is unaffected. Two threads in
+this doc do close on the new run's
+transcripts. The Home thumbnail pair gate
+reads **PASS live** (populated ink-coverage
+distances 0 / 51 / 48 against the floor of
+12; the missing-audio thumbnail at 0 from the
+singleton row and 48 from the pair): the
+UNPROVEN standing verdict §19.7 recorded is
+superseded, and R6's lineage — W7's
+re-derived legacy legs, X10's redesigned
+fidelity gate — ends in a live pass. And the
+live-MCP probe reads **PASS** (exit 0), its
+first pass since W4's explicit-enable flip,
+on F7's probe-side repair (the stored `true`
+seeded in the probe's HOME). The sprite-panel
+overflow is a product defect on the Wave X
+tree, not a citation matter: it is recorded
+in PHASE_O §10's Wave Y upgrade notes as the
+citation's blocker and stands open until a
+dispatch's scan reads CLEAN again; every
+O-1…O-9 measurement re-measured on the new
+dumps reproduces exactly (fifth consecutive
+dispatch).

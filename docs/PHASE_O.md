@@ -471,7 +471,11 @@ discharged (Wave S, S8) — refreshed against a
 newer dispatch (Wave V, V19), upgraded to
 the first 16/16-complete dispatch (Wave W,
 W12), and upgraded again to the Wave W
-integration dispatch (Wave X, X15).** Original source:
+integration dispatch (Wave X, X15); the
+Wave X integration dispatch was checked in
+full and not taken (Wave Y, Y15 — its scan
+reads NOT CLEAN; see the upgrade notes
+below).** Original source:
 **Headless Rune probe run `42759195547`**,
 completed **SUCCESS** on
 `59cb0bec36b80648c9f9fe0dfd7d30cd6266d5c3`
@@ -730,6 +734,82 @@ geometry moved"), so the probe's verdict is
 identity legs issued no verdict. No threshold
 was loosened to reach this reading; the gate's
 redesign is Wave X's X10 slice.
+
+**Upgrade notes (Wave Y, Y15).** The Wave X
+integration dispatch — Headless Rune probe run
+`42784024319`, completed **SUCCESS** on
+`d44098f` (the Wave X integrated tree),
+artifact `headless-probe-output` (224 files,
+37 `tree-*.json` dumps) — was checked end to
+end by X15's method, and the citation does
+**not** upgrade to it. What verified on its
+artifact, read first-hand: its
+`subtitle-census.txt` reads
+`SUBTITLE CENSUS: PASS` (19 PASS, 0 FAIL) and
+both Home markers read `PASS`; and two
+transcripts pass live for the first time. The
+Home thumbnail probe reads
+`HOME THUMBNAIL PROBE: PASS` — the pair gate
+live at last under X10's redesign (populated
+pairwise ink-coverage distances 0 / 51 / 48
+against the different-content floor of 12;
+the missing-audio thumbnail at distance 0
+from the singleton row and 48 from the pair;
+the legacy legs at control shares 0.008 /
+0.004, every row over its floors). The
+live-MCP probe reads `MCP PROBE: PASS`
+(exit 0) — its first pass since W4 flipped
+the live-MCP default to explicit-enable, on
+F7's probe-side repair (the probe's HOME now
+seeds the stored `true` it exercises). The
+build beside it, `42784003685` on the same
+commit, completed **SUCCESS**, its test
+totals summed from its own log at **4,158
+passed, 0 failed**. What did not verify:
+`scripts/overflow_scan.py --dir` over the
+artifact reads `OVERFLOW SCAN: 40 hit(s) --
+NOT CLEAN`. The hits are one family in one
+card, identical in 20 dumps: X5's new
+Draw-order row in the sprite panel
+(`sprite-z-row`, Wave X) — its
+`sprite-z-front` button ends at right edge
+1426.0, **+14.0 pt [content+card]** past the
+1412.5 tolerance edge, and the button's
+unkeyed child ends at 1416.0 (+4.0 pt
+[content]). SCAN_SET-required
+`tree-default.json` is among the 20, so the
+16/16 contract does not hold on this dispatch
+and the table above stays sourced from
+`42774207670` — the same script over that
+artifact still reads CLEAN, re-verified in
+this pass. Nothing in the family touches a
+Phase O row: every O-1…O-9 measurement,
+re-measured in the new dumps, reproduces
+exactly — the **fifth** consecutive dispatch
+to do so. Per-tree element counts did move,
+all upward, in exactly the 20 dumps that
+carry the hit family (the scenes whose sprite
+panel renders its edit rows): the default
+family 1161 → 1169, subtitles family
+1169 → 1177, settings family +8 each,
+dopesheet-keys, library-populated, loop-range,
+menu-open and palette-open +8 each,
+clips-populated 1224 → 1241, selected
+1334 → 1358, sprites-populated 1174 → 1213 —
+Wave X's new panel surface (the
+`tree-default.json` key diff is exactly
+`sprite-z-row` / `sprite-z-back` /
+`sprite-z-front` added, none lost); the other
+17 counts reproduce. Those numbers are
+recorded here, not in the table: the table
+keeps the counts of the run it cites, and the
+next upgrade re-measures from its own
+artifact, as every generation has. The z-row
+now owes what every repaired row before it
+paid — a wrap or a narrower anatomy — and the
+citation upgrades to the first later dispatch
+whose scan reads CLEAN with these transcripts
+beside it.
 
 **CI, stated once and exactly.** The last completed
 master CI run before Wave R was on `0b75051`

@@ -106,6 +106,13 @@ present and fall back to a folder-based flow when neither exists.
   per-limb bend direction); dragging any other joint rotates its
   segment (FK aim); dragging the hips moves the figure; a mirror
   op flips the current pose (the 3D session mirrors poses too).
+  Per-node **joint limits** (an optional min/max relative angle)
+  bind both solvers and the graph's angle channels — IK clamps
+  the mid joint first and recomputes its position from the
+  clamped angle, so segment lengths stay exact — and the
+  humanoid preset ships with anatomical limits. Stored poses
+  are never rewritten: a limit bites only when a solver or a
+  channel produces the angle.
 - **Editor UI** — a Rune shell (`src/main.rs` +
   `src/stage_view.rs` + `src/chrome_view.rs`, declared as
   modules of the binary; the library stays UI-free). What it
@@ -154,10 +161,15 @@ present and fall back to a folder-based flow when neither exists.
   track a figure. The editor and every exporter render through
   the same camera, rotation included.
 - **Figure building** — add/delete segments (children-first, root
-  protected), length/thickness editing, per-segment colour
+  protected), length/thickness and joint-limit editing,
+  per-segment colour
   override and styles (taper, caps, gradients, opacity), shape
   segments (lines, circles, regular polygons 3–6 sides), sprite
-  and text segments (built-in 3×5 bitmap font for text), figure
+  and text segments (built-in 3×5 bitmap font for text) — an
+  image on a segment follows its bend arc (split at the arc
+  midpoint, each half sampling its own half of the image) on
+  stage, in the rasterizer and in SVG exports, while text stays
+  on the straight chord — figure
   presets (humanoid, quadruped, mini), and a local figure library
   (`./library/*.json` plus built-ins). Saved figures store their
   exact display name inside the library file — the filename stays
@@ -208,7 +220,15 @@ present and fall back to a folder-based flow when neither exists.
   (the clip-session editing panel is
   `src/rune_sec/clips_panel.rs`); clip figures play their own
   animation inside any project with a selectable loop mode —
-  **Loop**, **PingPong** or **Once**.
+  **Loop**, **PingPong** or **Once**. A figure can also switch
+  clips mid-timeline: **animation states** key a clip change at
+  a frame, with its own offset and playback speed, taking over
+  from the phase-locked base link at that frame. States are
+  authored in the clips panel or over MCP; clips can be
+  assigned to a figure, unlinked, and created from a frame
+  range, a compatibility guard checks a clip against a figure
+  before retargeting, and deleting or moving a clip remaps its
+  state keys in the same edit.
 - **3D mode** (`src/fig3d.rs`) — a real 3D FK rig with Euler
   per-joint rotation, orbit camera and perspective projection,
   living in an editing session: pose A/B, animated bakes into
@@ -223,6 +243,13 @@ present and fall back to a folder-based flow when neither exists.
     figures, and Stick Nodes animation containers
     `.nodemc`/`.stknds` (sprites/texts modelled as keyframed
     tracks with real pixel extraction; joins baked at import).
+    Sprite instances from those containers keep their enriched
+    keys — opacity, horizontal/vertical flips, per-axis scale
+    and pivot — through import, editing and `.stknds` export;
+    in the editor a sprite can be clicked on the stage to
+    select it, re-pointed at another asset without losing its
+    keys, reordered in draw order, and navigated from its own
+    dopesheet lane.
     Image assets import from PNG or JPEG files, detected by
     content rather than by file name.
   - *Export:* `.piv` v2/v3/v4/v5, `.stk`, `.nodes`, `.stknds`,
@@ -236,7 +263,11 @@ present and fall back to a folder-based flow when neither exists.
     raster exports (PNG sequence, GIF,
     MP4, WebM, APNG, JPEG sequence and spritesheets) also
     accept an optional output scale — a true re-render at
-    the scaled size, not a resample. The export bundles
+    the scaled size, not a resample. PNG sequences and
+    spritesheets also have a transparent-alpha variant in the
+    library and over MCP: the background fill is skipped and
+    edges carry premultiplied coverage alpha, at any output
+    scale. The export bundles
     (the whole timeline in every format, in one call) accept
     a scale as well: it scales only the bundle's PNG sequence
     member, every other member is unaffected, and an invalid
@@ -254,15 +285,18 @@ present and fall back to a folder-based flow when neither exists.
     live progress in the panel — the render and encode phases
     as separate readouts, every number taken from the hooks'
     own events — while the formats with no progress contract
-    (SVG, GIF, APNG, spritesheets, contact sheets and the
-    export bundles) still run synchronously; and over MCP
+    (SVG, GIF, APNG, spritesheets and contact sheets) still
+    run synchronously, as do the export bundles in the panel;
+    and over MCP
     stdio, a tool call carrying a progress token streams
     `notifications/progress` while the export runs (encode
-    counts for video, render counts for sequences). The live
+    counts for video, render counts for sequences, and for
+    `export_bundle` one combined bundle count — frames
+    completed across all members against a total allocated
+    before the first member runs, so a single token never
+    sees the count run backwards). The live
     HTTP bridge cannot stream, so tokened calls there run
-    exactly as untokened ones, and `export_bundle` sends no
-    progress at all — deliberately, since per-member counters
-    would run backwards under a single token.
+    exactly as untokened ones.
   - *Subtitles:* cues import and export as SRT and WebVTT;
     speaker credits ride WebVTT voice tags (SRT has no speaker
     syntax, and an SRT export reports how many credits it
@@ -292,7 +326,9 @@ pose editing, camera (with rotation), graph keys and tangent
 presets, FX clip management and FX presets, weather (including
 storm), audio, drawing (including polygon and star shapes
 and stroke simplification),
-3D sessions, movieclips,
+3D sessions, movieclips, animation states and clip
+retargeting, joint limits, sprite draw order and enriched
+sprite keys,
 per-frame bends, pose mirroring, graph tangent smoothing,
 import/export in every supported format (including MP4/WebM
 frame-range formats), and

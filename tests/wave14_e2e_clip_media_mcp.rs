@@ -852,7 +852,7 @@ fn clip_media_attach_read_and_export_session() {
     let (_, project) = saved_project(&mut mcp, &dir, "attached.styk.json");
     assert_eq!(
         project.clips[0].def.nodes[MEDIA_NODE as usize].media,
-        Some(SegmentMedia::Image { asset: 0 }),
+        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
         "the saved clip def carries the image media"
     );
     assert_eq!(
@@ -1127,7 +1127,7 @@ fn clip_media_survives_save_and_reload_in_a_fresh_server() {
     let (_, project) = saved_project(&mut mcp, &dir, "resaved.styk.json");
     assert_eq!(
         project.clips[0].def.nodes[MEDIA_NODE as usize].media,
-        Some(SegmentMedia::Image { asset: 0 }),
+        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
         "the resaved clip def carries the media"
     );
 
