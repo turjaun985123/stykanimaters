@@ -709,24 +709,14 @@ fn append_subtitles(
     project: &Project,
     cues: &[&crate::subtitles::SubtitleCue],
 ) {
-    const BASE_FONT_SIZE: f32 = 20.0;
-    const BASE_LINE_HEIGHT: f32 = 24.0;
-    const EDGE_MARGIN: f32 = 16.0;
     let style = project.subtitle_style;
-    // The style's font scale, sanitised at read the way the
-    // core sanitises its other per-project scales (cf.
-    // `Project::head_ring_radius`): a non-finite value falls
-    // back to 1.0 and any finite value is clamped into the
-    // style's [0.5, 3.0] range, so a hand-edited or corrupt
-    // project file can never produce an invisible or absurd
-    // subtitle.
-    let font_scale = if style.font_scale.is_finite() {
-        style.font_scale.clamp(0.5, 3.0)
-    } else {
-        1.0
-    };
-    let font_size = BASE_FONT_SIZE * font_scale;
-    let line_height = BASE_LINE_HEIGHT * font_scale;
+    // The shared layout helpers directly (Wave S, IA-S20-1):
+    // this writer previously restated their constants and
+    // the sanitisation rule inline — arithmetically
+    // identical and pinned equal; the restatement is
+    // retired so the layout has exactly one home.
+    let font_scale = style.sanitised().font_scale;
+    let font_size = crate::subtitles::subtitle_font_size(style);
     let fill = hex(style.text_color);
     let stroke = hex(style.box_color);
     // The outline width scales with the font so a scaled
@@ -750,23 +740,14 @@ fn append_subtitles(
                 lines.len(),
                 i,
                 style.position,
-            ) as f32;
-            // Centre of this line: its block sits
-            // EDGE_MARGIN from the anchored edge and the
-            // `from_edge` offset steps it one line height
+            );
+            // Centre of this line, from the shared helper
+            // the stage and the raster also use: the block
+            // sits one edge margin from the anchored edge and
+            // the `from_edge` offset steps it one line height
             // further in; `dominant-baseline="central"`
             // centres the glyph box on this y.
-            let y = match style.position {
-                crate::subtitles::SubtitlePosition::Bottom => {
-                    project.stage[1]
-                        - EDGE_MARGIN
-                        - from_edge * line_height
-                        - line_height / 2.0
-                }
-                crate::subtitles::SubtitlePosition::Top => {
-                    EDGE_MARGIN + from_edge * line_height + line_height / 2.0
-                }
-            };
+            let y = crate::subtitles::subtitle_line_center_y(style, project.stage[1], from_edge);
             *svg += &format!(
                 "<text x=\"{:.1}\" y=\"{:.1}\" font-family=\"sans-serif\" font-size=\"{:.1}\" fill=\"{}\" stroke=\"{}\" stroke-width=\"{}\" paint-order=\"stroke\" text-anchor=\"middle\" dominant-baseline=\"central\">{}</text>\n",
                 cx,

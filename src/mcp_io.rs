@@ -690,34 +690,84 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
         }
         "gif" => {
             ensure_parent(path_ref)?;
-            match range {
-                Some((f, t)) => crate::export::export_gif_range(project, f, t, path_ref),
-                None => crate::export::export_gif(project, path_ref),
+            // Wave S (S5): an optional 'scale' argument routes
+            // to S4's true-scaled GIF entries; absent, the
+            // unscaled calls run unchanged.
+            let scale = args.get("scale").and_then(Value::as_f64);
+            match (range, scale) {
+                (Some((f, t)), Some(s)) => {
+                    crate::export::export_gif_range_scaled(project, f, t, path_ref, s as f32)
+                }
+                (Some((f, t)), None) => crate::export::export_gif_range(project, f, t, path_ref),
+                (None, Some(s)) => {
+                    crate::export::export_gif_scaled(project, path_ref, s as f32)
+                }
+                (None, None) => crate::export::export_gif(project, path_ref),
             }
         }
         "mp4" => {
             ensure_parent(path_ref)?;
-            crate::export::export_mp4(project, path_ref).map(|outcome| {
+            // Wave S (S5): an optional 'scale' argument routes
+            // to the true-scaled MP4 entry (the audio mux is
+            // untouched); absent, the unscaled call runs
+            // unchanged.
+            let scale = args.get("scale").and_then(Value::as_f64);
+            let result = match scale {
+                Some(s) => crate::export::export_mp4_scaled(project, path_ref, s as f32),
+                None => crate::export::export_mp4(project, path_ref),
+            };
+            result.map(|outcome| {
                 mp4_missing_audio = outcome.missing_audio;
                 outcome.frames
             })
         }
         "webm" => {
             ensure_parent(path_ref)?;
-            crate::export::export_webm(project, path_ref)
+            // Wave S (S5): 'scale' routes to the true-scaled
+            // WebM entry; absent, the unscaled call runs
+            // unchanged.
+            let scale = args.get("scale").and_then(Value::as_f64);
+            match scale {
+                Some(s) => crate::export::export_webm_scaled(project, path_ref, s as f32),
+                None => crate::export::export_webm(project, path_ref),
+            }
         }
         "apng" => {
             ensure_parent(path_ref)?;
-            match range {
-                Some((f, t)) => crate::export::export_apng_range(project, f, t, path_ref),
-                None => crate::export::export_apng(project, path_ref),
+            // Wave S (S5): 'scale' routes to S4's true-scaled
+            // APNG entries; absent, the unscaled calls run
+            // unchanged.
+            let scale = args.get("scale").and_then(Value::as_f64);
+            match (range, scale) {
+                (Some((f, t)), Some(s)) => {
+                    crate::export::export_apng_range_scaled(project, f, t, path_ref, s as f32)
+                }
+                (Some((f, t)), None) => {
+                    crate::export::export_apng_range(project, f, t, path_ref)
+                }
+                (None, Some(s)) => {
+                    crate::export::export_apng_scaled(project, path_ref, s as f32)
+                }
+                (None, None) => crate::export::export_apng(project, path_ref),
             }
         }
         "spritesheet" => {
             ensure_parent(path_ref)?;
-            match range {
-                Some((f, t)) => crate::export::export_sheet_range(project, f, t, path_ref),
-                None => crate::export::export_spritesheet(project, path_ref),
+            // Wave S (S5): 'scale' routes to S4's true-scaled
+            // sheet entries; absent, the unscaled calls run
+            // unchanged.
+            let scale = args.get("scale").and_then(Value::as_f64);
+            match (range, scale) {
+                (Some((f, t)), Some(s)) => {
+                    crate::export::export_sheet_range_scaled(project, f, t, path_ref, s as f32)
+                }
+                (Some((f, t)), None) => {
+                    crate::export::export_sheet_range(project, f, t, path_ref)
+                }
+                (None, Some(s)) => {
+                    crate::export::export_sheet_scaled(project, path_ref, s as f32)
+                }
+                (None, None) => crate::export::export_spritesheet(project, path_ref),
             }
         }
         "svg" => {
@@ -733,11 +783,25 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
         "jpeg" => {
             // export_jpeg_sequence writes frame-NNNN.jpg files into
             // a directory (creating it); `path` names that directory.
-            match range {
-                Some((f, t)) => {
+            // Wave T (T7): an optional 'scale' argument routes to
+            // the true-scaled sequence entries; absent, the
+            // unscaled calls run unchanged.
+            let scale = args.get("scale").and_then(Value::as_f64);
+            match (range, scale) {
+                (Some((f, t)), Some(s)) => crate::export::export_jpeg_sequence_range_scaled(
+                    project,
+                    f,
+                    t,
+                    path_ref,
+                    s as f32,
+                ),
+                (Some((f, t)), None) => {
                     crate::export::export_jpeg_sequence_range(project, f, t, path_ref)
                 }
-                None => crate::export::export_jpeg_sequence(project, path_ref),
+                (None, Some(s)) => {
+                    crate::export::export_jpeg_sequence_scaled(project, path_ref, s as f32)
+                }
+                (None, None) => crate::export::export_jpeg_sequence(project, path_ref),
             }
         }
         "png_sequence" => {
@@ -977,6 +1041,32 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
     if project.frames.is_empty() {
         return Err("project has no frames to render".to_string());
     }
+    // Wave T (T8): a present 'scale' is validated BEFORE
+    // anything is written — the bundle writes its members in
+    // place (no staging directory), so a bad scale left for
+    // the PNG member's own check to find (the Wave R routing
+    // below) would surface as one failed member AFTER the
+    // other members were already written: a partial bundle
+    // behind a successful call. The rule and its sentence are
+    // check_export_scale's, applied to the f32 the member
+    // would receive; null counts as absent (the house `get`
+    // idiom), a non-number refuses in the helpers' voice.
+    let bundle_scale: Option<f32> = match args.get("scale") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let f = v
+                .as_f64()
+                .ok_or_else(|| "argument 'scale' must be a number".to_string())?;
+            let s = f as f32;
+            if s.is_finite() && s > 0.0 {
+                Some(s)
+            } else {
+                return Err(format!(
+                    "export scale must be a positive finite number, got {s}"
+                ));
+            }
+        }
+    };
     let dir = Path::new(&path);
     std::fs::create_dir_all(dir)
         .map_err(|e| format!("could not create directory {path}: {e}"))?;
@@ -986,10 +1076,9 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
     let stem = crate::projects::file_stem_for(&project.name)
         .unwrap_or_else(|| "project".to_string());
     let engine = |r: std::io::Result<usize>| r.map_err(|e| e.to_string());
-    // Wave R (R10 via IA-R10-1): an optional 'scale' argument
+    // Wave R (R10 via IA-R10-1): the 'scale' validated above
     // scales the bundle's PNG sequence member (a true
     // re-render at that scale); absent, it renders at 1.0.
-    let bundle_scale = args.get("scale").and_then(Value::as_f64);
     let members: Vec<BundleMember> = if kind == "images" {
         let png_dir = dir.join("png");
         let jpeg_dir = dir.join("jpeg");
@@ -1000,9 +1089,7 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
                 name: "png_sequence",
                 target: png_dir.display().to_string(),
                 result: engine(match bundle_scale {
-                    Some(s) => {
-                        crate::export::export_png_sequence_scaled(project, &png_dir, s as f32)
-                    }
+                    Some(s) => crate::export::export_png_sequence_scaled(project, &png_dir, s),
                     None => crate::export::export_png_sequence(project, &png_dir),
                 }),
                 missing_audio: Vec::new(),
@@ -1156,7 +1243,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "render",
-            description: "Render the animation. Formats: 'png' renders ONE frame (arg 'frame', default current; arg 'scale', default 1.0 = stage size, a true re-render at that scale) to a PNG file; 'gif', 'mp4' (needs ffmpeg), 'webm', 'apng' and 'spritesheet' render the whole timeline to the file at 'path'; 'svg', 'jpeg' and 'png_sequence' write one file per frame into the DIRECTORY at 'path' (created if needed). The sequence/animation formats 'gif', 'apng', 'spritesheet', 'svg', 'jpeg' and 'png_sequence' accept an optional frame range: args 'from_frame' and 'to_frame' (0-based, inclusive, given together; the Wave 11 spellings 'from'/'to' are still accepted for the same bounds; a bound past the end of the timeline is refused rather than clamped; echoed in the reply under the spelling used). Video ranges are export_file's mp4_range/webm_range. Parent directories are created for file targets. CONTENT — the raster formats (png, png_sequence, gif, mp4, webm, apng, spritesheet, jpeg) draw the full frame: camera (pan/zoom/rotation), figures with segment styling (cap, taper, colour gradient, segment opacity AND figure opacity) and bent segments, drawing strokes, FX/particles and weather, with sprite instances, text instances and segment media (images/text attached to segments) composited in. 'mp4' also muxes the project's audio when an unmuted clip's file exists (and fails if that mux fails); 'webm' never carries audio — the WebM path has no audio support. 'svg' is the vector writer: it draws figures (segment taper, gradients, segment opacity AND figure opacity, bent segments arced through the bend midpoint), strokes (a pressured stroke as per-segment lines at its baked widths), FX/particles and weather through the same camera, and it emits sprite instances, text instances and segment media (images embedded once per asset as PNG data with a placement matrix; an image item's figure×style opacity rides as an opacity attribute). One divergence from the raster remains: SVG text is a monospace font run where the raster stamps 3×5 bitmap glyphs (the content and centre agree; the advance width does not).",
+            description: "Render the animation. Formats: 'png' renders ONE frame (arg 'frame', default current; arg 'scale', default 1.0 = stage size, a true re-render at that scale) to a PNG file; 'gif', 'mp4' (needs ffmpeg), 'webm', 'apng' and 'spritesheet' render the whole timeline to the file at 'path'; 'svg', 'jpeg' and 'png_sequence' write one file per frame into the DIRECTORY at 'path' (created if needed). The sequence/animation formats 'gif', 'apng', 'spritesheet', 'svg', 'jpeg' and 'png_sequence' accept an optional frame range: args 'from_frame' and 'to_frame' (0-based, inclusive, given together; the Wave 11 spellings 'from'/'to' are still accepted for the same bounds; a bound past the end of the timeline is refused rather than clamped; echoed in the reply under the spelling used). Video ranges are export_file's mp4_range/webm_range. An optional 'scale' (default 1.0) multiplies the output size for 'png', 'png_sequence', 'gif', 'mp4', 'webm', 'apng', 'spritesheet' and 'jpeg' — a true re-render at that scale, never an upscale (the MP4 audio mux is unaffected); 'svg' does not take a scale. Parent directories are created for file targets. CONTENT — the raster formats (png, png_sequence, gif, mp4, webm, apng, spritesheet, jpeg) draw the full frame: camera (pan/zoom/rotation), figures with segment styling (cap, taper, colour gradient, segment opacity AND figure opacity) and bent segments, drawing strokes, FX/particles and weather, with sprite instances, text instances and segment media (images/text attached to segments) composited in. 'mp4' also muxes the project's audio when an unmuted clip's file exists (and fails if that mux fails); 'webm' never carries audio — the WebM path has no audio support. 'svg' is the vector writer: it draws figures (segment taper, gradients, segment opacity AND figure opacity, bent segments arced through the bend midpoint), strokes (a pressured stroke as per-segment lines at its baked widths), FX/particles and weather through the same camera, and it emits sprite instances, text instances and segment media (images embedded once per asset as PNG data with a placement matrix; an image item's figure×style opacity rides as an opacity attribute). One divergence from the raster remains: SVG text is a monospace font run where the raster stamps 3×5 bitmap glyphs (the content and centre agree; the advance width does not).",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -1167,7 +1254,7 @@ pub fn tools() -> Vec<Tool> {
                     "to": { "type": "integer", "minimum": 0, "description": "Last frame of an inclusive range (with 'from'); sequence/animation formats only" },
                     "from_frame": { "type": "integer", "minimum": 0, "description": "First frame of an inclusive range (with 'to_frame'); sequence/animation formats only" },
                     "to_frame": { "type": "integer", "minimum": 0, "description": "Last frame of an inclusive range (with 'from_frame'); sequence/animation formats only" },
-                    "scale": { "type": "number", "exclusiveMinimum": 0, "description": "Output scale relative to the stage size (default 1.0): format 'png' is a true re-render at that scale, and format 'png_sequence' renders its sequence at that scale" }
+                    "scale": { "type": "number", "exclusiveMinimum": 0, "description": "Output scale relative to the stage size (default 1.0), a true re-render at that scale: formats 'png', 'png_sequence', 'gif', 'mp4', 'webm', 'apng', 'spritesheet' and 'jpeg' accept it" }
                 },
                 "required": ["path", "format"]
             }),
@@ -1175,13 +1262,13 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "export_bundle",
-            description: "Export a whole bundle of formats into the DIRECTORY at 'path' in one call (the export panel's two bundle buttons). kind 'images': a PNG sequence (png/ subdir), a JPEG sequence (jpeg/), one SVG per frame (svg/) and a spritesheet (spritesheet.png). kind 'video': '<project>.mp4' and '<project>.webm'. Member content matches the render tool per format: the image members are full raster frames (composited media included) and the SVG member matches the render tool's SVG (media included; text as font glyphs is its standing divergence); the mp4 member muxes usable project audio, the webm member is silent. Bundles always cover the WHOLE timeline — they deliberately ignore frame ranges, matching the panel. An optional 'scale' (default 1.0) scales the PNG sequence member (a true re-render at that scale). Every member is attempted: the reply lists each member with ok + frame count, or ok:false + the failure's reason; member failures never fail the call itself.",
+            description: "Export a whole bundle of formats into the DIRECTORY at 'path' in one call (the export panel's two bundle buttons). kind 'images': a PNG sequence (png/ subdir), a JPEG sequence (jpeg/), one SVG per frame (svg/) and a spritesheet (spritesheet.png). kind 'video': '<project>.mp4' and '<project>.webm'. Member content matches the render tool per format: the image members are full raster frames (composited media included) and the SVG member matches the render tool's SVG (media included; text as font glyphs is its standing divergence); the mp4 member muxes usable project audio, the webm member is silent. Bundles always cover the WHOLE timeline — they deliberately ignore frame ranges, matching the panel. An optional 'scale' (default 1.0) scales the 'images' bundle's PNG sequence member (a true re-render at that scale); every other member is unaffected, and an invalid scale (not a positive finite number) refuses the call before anything is written. Every member is attempted: the reply lists each member with ok + frame count, or ok:false + the failure's reason; member failures never fail the call itself.",
             schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Destination directory (created if needed)" },
                     "kind": { "type": "string", "enum": ["images", "video"], "description": "Which bundle to export" },
-                    "scale": { "type": "number", "exclusiveMinimum": 0, "description": "Output scale for the PNG sequence member relative to the stage size (default 1.0)" }
+                    "scale": { "type": "number", "exclusiveMinimum": 0, "description": "Output scale for the PNG sequence member relative to the stage size (default 1.0); an invalid value refuses the call before anything is written" }
                 },
                 "required": ["path", "kind"]
             }),
@@ -1920,6 +2007,189 @@ mod tests {
     }
 
     #[test]
+    fn render_scale_routes_the_video_and_animation_formats() {
+        // Wave S (S5): with 'scale' present, the render arms
+        // for mp4/webm/gif/apng/spritesheet route to the
+        // true-scaled entries (video: S5's; animation: S4's) —
+        // each writes a real file over the whole timeline and
+        // replies in the unscaled shape (no scale echo). 0.5
+        // keeps the demo-stage renders cheap; the routing is
+        // scale-value-independent.
+        let dir = temp_dir("scale-routes");
+        let mut core = range_core();
+        for (format, file) in [
+            ("mp4", "scaled.mp4"),
+            ("webm", "scaled.webm"),
+            ("gif", "scaled.gif"),
+            ("apng", "scaled.apng"),
+            ("spritesheet", "scaled.png"),
+        ] {
+            let target = dir.join(file);
+            let out = call(
+                "render",
+                &mut core,
+                json!({ "path": target.to_string_lossy(), "format": format, "scale": 0.5 }),
+            )
+            .unwrap_or_else(|e| panic!("scaled {format} render failed: {e}"));
+            assert_eq!(out["frames"], 5, "{format} frame count");
+            assert!(
+                out.get("scale").is_none(),
+                "{format} reply must not echo scale: {out}"
+            );
+            let bytes = std::fs::read(&target).unwrap();
+            assert!(!bytes.is_empty(), "scaled {format} wrote an empty file");
+            if format == "mp4" {
+                assert_eq!(&bytes[4..8], b"ftyp", "scaled mp4 is not an MP4 container");
+            }
+            if format == "webm" {
+                assert_eq!(
+                    &bytes[0..4],
+                    &[0x1A, 0x45, 0xDF, 0xA3],
+                    "scaled webm is not an EBML/WebM file"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_scale_combines_with_ranges_on_the_animation_formats() {
+        // Wave S (S5): range + scale together route to the
+        // range_scaled entries — exactly the range's frames,
+        // echoed under the caller's spelling as always.
+        let dir = temp_dir("scale-range");
+        let mut core = range_core();
+        let target = dir.join("ranged.gif");
+        let out = call(
+            "render",
+            &mut core,
+            json!({ "path": target.to_string_lossy(), "format": "gif", "from_frame": 1, "to_frame": 3, "scale": 0.5 }),
+        )
+        .expect("ranged scaled gif render failed");
+        assert_eq!(out["frames"], 3);
+        assert_eq!(out["from_frame"], 1);
+        assert_eq!(out["to_frame"], 3);
+        assert!(std::fs::metadata(&target).unwrap().len() > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_scale_routes_jpeg_sequence() {
+        // Wave T (T7): with 'scale' present, the render arm for
+        // 'jpeg' routes to the true-scaled sequence entries —
+        // full and ranged — and replies in the unscaled shape
+        // (directory echo, no scale echo).
+        let dir = temp_dir("scale-jpeg");
+        let mut core = range_core();
+        core.project.stage = [96.0, 72.0];
+        // Full timeline at 0.5.
+        let target = dir.join("seq");
+        let out = call(
+            "render",
+            &mut core,
+            json!({ "path": target.to_string_lossy(), "format": "jpeg", "scale": 0.5 }),
+        )
+        .expect("scaled jpeg render failed");
+        assert_eq!(out["frames"], 5);
+        assert_eq!(out["directory"], json!(target.to_string_lossy().into_owned()));
+        assert!(out.get("scale").is_none(), "reply must not echo scale: {out}");
+        let img = image::open(target.join("frame-0001.jpg")).unwrap();
+        assert_eq!((img.width(), img.height()), (48, 36), "0.5x JPEG frame dims");
+        // Range + scale together route to the range_scaled entry.
+        let ranged = dir.join("ranged");
+        let out = call(
+            "render",
+            &mut core,
+            json!({ "path": ranged.to_string_lossy(), "format": "jpeg", "from_frame": 1, "to_frame": 3, "scale": 2.0 }),
+        )
+        .expect("ranged scaled jpeg render failed");
+        assert_eq!(out["frames"], 3);
+        assert_eq!(out["from_frame"], 1);
+        assert_eq!(out["to_frame"], 3);
+        assert!(!ranged.join("frame-0001.jpg").exists(), "range must not write frame 1");
+        let img = image::open(ranged.join("frame-0002.jpg")).unwrap();
+        assert_eq!((img.width(), img.height()), (192, 144), "2.0x JPEG frame dims");
+        // Explicit scale 1.0 delegates to the unscaled entry:
+        // byte-identical files to an unscaled call.
+        let plain = dir.join("plain");
+        let one = dir.join("one");
+        call(
+            "render",
+            &mut core,
+            json!({ "path": plain.to_string_lossy(), "format": "jpeg" }),
+        )
+        .expect("unscaled jpeg render failed");
+        call(
+            "render",
+            &mut core,
+            json!({ "path": one.to_string_lossy(), "format": "jpeg", "scale": 1.0 }),
+        )
+        .expect("scale-1.0 jpeg render failed");
+        assert_eq!(
+            std::fs::read(plain.join("frame-0001.jpg")).unwrap(),
+            std::fs::read(one.join("frame-0001.jpg")).unwrap(),
+            "scale 1.0 JPEG bytes must match the unscaled entry"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_scale_jpeg_invalid_is_refused() {
+        // Wave T (T7): a non-positive scale for 'jpeg' reaches
+        // the scaled entries' shared validation and is refused
+        // in its voice (wrapped by the tool), before the target
+        // directory appears — full and ranged alike.
+        let dir = temp_dir("scale-jpeg-refused");
+        let mut core = range_core();
+        core.project.stage = [96.0, 72.0];
+        let target = dir.join("seq");
+        let err = call(
+            "render",
+            &mut core,
+            json!({ "path": target.to_string_lossy(), "format": "jpeg", "scale": 0 }),
+        )
+        .expect_err("scale 0 must be refused");
+        assert!(
+            err.contains("positive finite"),
+            "error '{err}' must name the scale rule"
+        );
+        assert!(!target.exists(), "a refused scale created the directory");
+        let err = call(
+            "render",
+            &mut core,
+            json!({ "path": target.to_string_lossy(), "format": "jpeg", "from_frame": 0, "to_frame": 2, "scale": 0 }),
+        )
+        .expect_err("ranged scale 0 must be refused");
+        assert!(err.contains("positive finite"), "{err}");
+        assert!(!target.exists(), "a refused ranged scale created the directory");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_scale_invalid_is_refused_by_the_scaled_entries() {
+        // Wave S (S5): a non-positive scale reaches the scaled
+        // entries' shared validation and is refused in its
+        // voice (wrapped by the tool), before a file appears.
+        let dir = temp_dir("scale-refused");
+        let mut core = range_core();
+        for format in ["mp4", "gif"] {
+            let target = dir.join(format!("bad.{format}"));
+            let err = call(
+                "render",
+                &mut core,
+                json!({ "path": target.to_string_lossy(), "format": format, "scale": 0 }),
+            )
+            .expect_err("scale 0 must be refused");
+            assert!(
+                err.contains("positive finite"),
+                "{format}: error '{err}' must name the scale rule"
+            );
+            assert!(!target.exists(), "{format}: a refused scale wrote a file");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn export_file_range_bounds_validated_before_any_write() {
         let dir = temp_dir("range-export-file");
         let mut core = range_core();
@@ -1980,5 +2250,161 @@ mod tests {
             "exports must not dirty the project"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------
+    // Wave T (T8): export_bundle scale — the PNG member
+    // honours it, every other member is byte-unaffected, and
+    // an invalid scale refuses before anything is written.
+    // -----------------------------------------------------------------
+
+    fn bundle_core() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project = Project::new_demo();
+        core.project.fps = 24.0;
+        core.project.stage = [120.0, 90.0];
+        core.project.frames.truncate(3);
+        core
+    }
+
+    /// Every file under `dir` as (relative path, bytes),
+    /// sorted by path — the member-wise bundle comparison.
+    fn bundle_tree(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for entry in std::fs::read_dir(&d).expect("read bundle dir") {
+                let p = entry.expect("bundle entry").path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    out.push((
+                        p.strip_prefix(dir)
+                            .expect("member under the bundle dir")
+                            .to_string_lossy()
+                            .into_owned(),
+                        std::fs::read(&p).expect("read bundle member"),
+                    ));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// The (width, height) out of a PNG's IHDR header.
+    fn png_dims_of(bytes: &[u8]) -> (u32, u32) {
+        assert_eq!(&bytes[0..8], b"\x89PNG\r\n\x1a\n", "not a PNG file");
+        (
+            u32::from_be_bytes(bytes[16..20].try_into().expect("IHDR width")),
+            u32::from_be_bytes(bytes[20..24].try_into().expect("IHDR height")),
+        )
+    }
+
+    #[test]
+    fn bundle_scale_doubles_the_png_member_and_leaves_the_rest_alone() {
+        let mut core = bundle_core();
+        let plain_dir = temp_dir("bundle-plain");
+        let reply = call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": plain_dir.to_string_lossy(), "kind": "images" }),
+        )
+        .expect("unscaled bundle failed");
+        assert_eq!(reply["succeeded"], 4, "{reply}");
+        let scaled_dir = temp_dir("bundle-scaled");
+        let reply = call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": scaled_dir.to_string_lossy(), "kind": "images", "scale": 2.0 }),
+        )
+        .expect("scaled bundle failed");
+        assert_eq!(reply["succeeded"], 4, "{reply}");
+
+        let plain = bundle_tree(&plain_dir);
+        let scaled = bundle_tree(&scaled_dir);
+        let plain_paths: Vec<&str> = plain.iter().map(|(p, _)| p.as_str()).collect();
+        let scaled_paths: Vec<&str> = scaled.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(plain_paths, scaled_paths, "the member sets must agree");
+        assert!(
+            plain_paths.iter().any(|p| p.starts_with("png/")),
+            "the PNG member must be present: {plain_paths:?}"
+        );
+        for ((p, plain_bytes), (_, scaled_bytes)) in plain.iter().zip(&scaled) {
+            if p.starts_with("png/") {
+                assert_eq!(png_dims_of(plain_bytes), (120, 90), "{p} at 1.0");
+                assert_eq!(png_dims_of(scaled_bytes), (240, 180), "{p} at 2.0");
+            } else {
+                assert_eq!(
+                    plain_bytes, scaled_bytes,
+                    "member {p} must be byte-unaffected by the PNG member's scale"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&plain_dir);
+        let _ = std::fs::remove_dir_all(&scaled_dir);
+    }
+
+    #[test]
+    fn bundle_absent_scale_and_explicit_1_0_are_byte_identical() {
+        let mut core = bundle_core();
+        let absent_dir = temp_dir("bundle-absent");
+        call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": absent_dir.to_string_lossy(), "kind": "images" }),
+        )
+        .expect("absent-scale bundle failed");
+        let one_dir = temp_dir("bundle-one");
+        call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": one_dir.to_string_lossy(), "kind": "images", "scale": 1.0 }),
+        )
+        .expect("1.0 bundle failed");
+        assert_eq!(
+            bundle_tree(&absent_dir),
+            bundle_tree(&one_dir),
+            "an explicit 1.0 must write the absent-scale bundle, byte for byte"
+        );
+        let _ = std::fs::remove_dir_all(&absent_dir);
+        let _ = std::fs::remove_dir_all(&one_dir);
+    }
+
+    #[test]
+    fn bundle_invalid_scale_refuses_before_anything_is_written() {
+        let mut core = bundle_core();
+        // Non-positive and f32-overflowing scales, for both
+        // kinds: the call refuses and the target directory is
+        // never even created — no partial bundle.
+        for kind in ["images", "video"] {
+            for scale in [json!(0), json!(-2.5), json!(1e300)] {
+                let target = temp_dir("bundle-refused").join("out");
+                let err = call(
+                    "export_bundle",
+                    &mut core,
+                    json!({ "path": target.to_string_lossy(), "kind": kind, "scale": scale }),
+                )
+                .expect_err("an invalid scale must refuse the call");
+                assert!(
+                    err.contains("positive finite"),
+                    "{kind} {scale}: {err}"
+                );
+                assert!(
+                    !target.exists(),
+                    "{kind} {scale}: a refused scale left a bundle behind"
+                );
+            }
+        }
+        // A non-number scale refuses in the helpers' voice.
+        let target = temp_dir("bundle-refused").join("out");
+        let err = call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": target.to_string_lossy(), "kind": "images", "scale": "2" }),
+        )
+        .expect_err("a mistyped scale must refuse the call");
+        assert!(err.contains("argument 'scale' must be a number"), "{err}");
+        assert!(!target.exists(), "a refused scale left a bundle behind");
     }
 }

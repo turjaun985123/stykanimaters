@@ -33,11 +33,17 @@
 //! them (the converters' documented settlement — an SRT
 //! import into a speaker'd project therefore reports
 //! `changed: true` and the imported cues carry no
-//! speaker).
+//! speaker). The loss is also surfaced at export time
+//! (Wave S, S9): an SRT export whose cues carry
+//! speakers reports the unwritten count in its reply
+//! as `speakers_dropped`, present only when above
+//! zero.
 
 use crate::editor::EditorCore;
 use crate::mcp::Tool;
-use crate::subtitles::{subtitles_from_srt, subtitles_from_vtt, subtitles_to_srt, subtitles_to_vtt};
+use crate::subtitles::{
+    subtitles_from_srt, subtitles_from_vtt, subtitles_to_srt_counted, subtitles_to_vtt,
+};
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -70,9 +76,12 @@ fn sio_ensure_parent(path: &Path) -> Result<(), String> {
 // export (read-only)
 // ---------------------------------------------------------------------
 
-/// Shared export body: serialise with `to_document`, write to
-/// `path`, reply with the count and the success sentence. No
+/// The WebVTT export body: serialise with `to_document`, write
+/// to `path`, reply with the count and the success sentence. No
 /// snapshot, no `core.status` write — the tool is read-only.
+/// (The SRT handler mirrors this body rather than sharing it:
+/// its reply also surfaces the dropped speaker count — see
+/// `tool_subtitle_export_srt`.)
 fn export_document(
     core: &mut EditorCore,
     args: &Value,
@@ -94,7 +103,31 @@ fn export_document(
 }
 
 fn tool_subtitle_export_srt(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
-    export_document(core, args, subtitles_to_srt)
+    // The counted export (Wave S, S9): this handler
+    // mirrors `export_document`'s body rather than
+    // sharing it, because the reply — not the document
+    // — is where the two formats differ: SRT drops cue
+    // speakers, and when it dropped any, the reply says
+    // how many. The field is additive and present ONLY
+    // above zero, so an uncredited export's reply keeps
+    // exactly its established shape.
+    let path = sio_arg_path(args)?;
+    let path_ref = Path::new(&path);
+    sio_ensure_parent(path_ref)?;
+    let export = subtitles_to_srt_counted(&core.project);
+    std::fs::write(path_ref, &export.text)
+        .map_err(|e| format!("could not write {}: {e}", path_ref.display()))?;
+    let count = core.project.subtitles.len();
+    let mut reply = json!({
+        "ok": true,
+        "path": path,
+        "count": count,
+        "status": format!("Exported {count} subtitle cue(s) to {path}"),
+    });
+    if export.speakers_dropped > 0 {
+        reply["speakers_dropped"] = json!(export.speakers_dropped);
+    }
+    Ok(reply)
 }
 
 fn tool_subtitle_export_vtt(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
@@ -166,7 +199,7 @@ pub fn tools() -> Vec<Tool> {
     vec![
         Tool {
             name: "subtitle_export_srt",
-            description: "Write the project's subtitle cues as an SRT (SubRip) document to the file at 'path', timed at the project's frame rate (the Subtitles panel's SRT export). Cue speakers are not written — SRT has no speaker syntax — and cue text is written verbatim. Read-only; no undo step. A path that cannot be written is refused and changes nothing. (Wave P, P30; speaker note Wave R, R21)",
+            description: "Write the project's subtitle cues as an SRT (SubRip) document to the file at 'path', timed at the project's frame rate (the Subtitles panel's SRT export). Cue speakers are not written — SRT has no speaker syntax — and cue text is written verbatim. When cues carry speakers, the reply counts the unwritten credits in 'speakers_dropped' (present only when above zero). Read-only; no undo step. A path that cannot be written is refused and changes nothing. (Wave P, P30; speaker note Wave R, R21; speakers_dropped surfacing Wave S, S9)",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -222,7 +255,7 @@ pub fn tools() -> Vec<Tool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::subtitles::SubtitleCue;
+    use crate::subtitles::{subtitles_to_srt, SubtitleCue};
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let dir =
@@ -287,6 +320,66 @@ mod tests {
         // Read-only: no undo step spent, no status-line write.
         assert_eq!(core.undo_depth(), depth_before);
         assert_eq!(core.status, status_before);
+    }
+
+    #[test]
+    fn export_srt_reports_dropped_speakers_only_when_positive() {
+        // Wave S (S9): the reply gains `speakers_dropped`
+        // only when the export actually dropped credits.
+        let dir = temp_dir("export-srt-speakers");
+        let path = dir.join("cues.srt");
+        // Uncredited cues (the cued_core fixture): the
+        // field is absent and the reply keeps exactly
+        // its established shape.
+        let mut core = cued_core();
+        let reply = call(
+            "subtitle_export_srt",
+            &mut core,
+            json!({ "path": path.to_string_lossy() }),
+        )
+        .expect("uncredited export succeeds");
+        assert!(
+            reply.get("speakers_dropped").is_none(),
+            "no field when nothing was dropped: {reply}"
+        );
+        assert_eq!(reply["count"], json!(2));
+        // Two credited cues: the field reports both, and
+        // the document on disk is the plain export's.
+        core.project.subtitles[0].speaker = Some("Mary Jane".to_string());
+        core.project.subtitles[1].speaker = Some("Tom".to_string());
+        let reply = call(
+            "subtitle_export_srt",
+            &mut core,
+            json!({ "path": path.to_string_lossy() }),
+        )
+        .expect("credited export succeeds");
+        assert_eq!(reply["speakers_dropped"], json!(2));
+        assert_eq!(reply["count"], json!(2));
+        let written = std::fs::read_to_string(&path).expect("the file was written");
+        assert_eq!(written, subtitles_to_srt(&core.project));
+        assert!(!written.contains("Mary"), "no name in the SRT: {written}");
+        // One credit among plain cues: exactly one.
+        core.project.subtitles[1].speaker = None;
+        let reply = call(
+            "subtitle_export_srt",
+            &mut core,
+            json!({ "path": path.to_string_lossy() }),
+        )
+        .expect("single-credit export succeeds");
+        assert_eq!(reply["speakers_dropped"], json!(1));
+        // The WebVTT twin never carries the field — it
+        // drops nothing.
+        let vtt_path = dir.join("cues.vtt");
+        let reply = call(
+            "subtitle_export_vtt",
+            &mut core,
+            json!({ "path": vtt_path.to_string_lossy() }),
+        )
+        .expect("vtt export succeeds");
+        assert!(
+            reply.get("speakers_dropped").is_none(),
+            "the VTT reply has no speakers_dropped: {reply}"
+        );
     }
 
     #[test]

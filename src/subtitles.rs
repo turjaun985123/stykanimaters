@@ -519,6 +519,30 @@ fn srt_seconds_to_frame(seconds: f64, fps: f32) -> usize {
     }
 }
 
+/// What an SRT export produced (see
+/// [`subtitles_to_srt_counted`]): the document itself,
+/// plus the count of speaker credits it could not
+/// carry — the surfacing half of the speaker-loss
+/// settlement below (Wave S, S9). Documented loss is
+/// not the same as visible loss: the surfaces that
+/// export for a user (the MCP tool's reply, the
+/// panel's status line) read the count from here and
+/// say so at export time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SrtExport {
+    /// The SRT document, exactly as
+    /// [`subtitles_to_srt`] returns it.
+    pub text: String,
+    /// How many cues carry a speaker the document
+    /// does not represent. A cue counts when its
+    /// stored speaker holds an actual name: an empty
+    /// or whitespace-only stored value is no credit
+    /// at all ([`normalise_speaker`] stores `None`
+    /// for it), so losing it loses nothing and it is
+    /// not counted.
+    pub speakers_dropped: usize,
+}
+
 /// Export the project's cues as SRT text at the
 /// project's own frame rate. Cues are written in the
 /// list's stored order, numbered from 1, with their
@@ -534,6 +558,14 @@ fn srt_seconds_to_frame(seconds: f64, fps: f32) -> usize {
 /// touching a word of text; WebVTT is the interchange
 /// format that keeps them.
 pub fn subtitles_to_srt(project: &Project) -> String {
+    subtitles_to_srt_counted(project).text
+}
+
+/// [`subtitles_to_srt`] with the speaker-loss count
+/// kept: the document and its count come from the
+/// same pass over the cue list, so the two can never
+/// disagree about which cues were credited.
+pub fn subtitles_to_srt_counted(project: &Project) -> SrtExport {
     // Mirror the exporters' fps discipline (export.rs):
     // a non-positive stored rate cannot name frame
     // boundaries, so it falls back to 1 fps rather than
@@ -541,7 +573,11 @@ pub fn subtitles_to_srt(project: &Project) -> String {
     // sane rate (default 12).
     let fps = project.fps.max(1.0);
     let mut out = String::new();
+    let mut speakers_dropped = 0usize;
     for (i, cue) in project.subtitles.iter().enumerate() {
+        if cue.speaker.as_deref().is_some_and(|name| !name.trim().is_empty()) {
+            speakers_dropped += 1;
+        }
         out.push_str(&(i + 1).to_string());
         out.push('\n');
         out.push_str(&srt_timestamp(cue.start_frame, fps));
@@ -551,7 +587,10 @@ pub fn subtitles_to_srt(project: &Project) -> String {
         out.push_str(&cue.text);
         out.push_str("\n\n");
     }
-    out
+    SrtExport {
+        text: out,
+        speakers_dropped,
+    }
 }
 
 /// Parse one blank-line-separated SRT block into a cue.
@@ -1169,6 +1208,131 @@ mod tests {
     }
 
     #[test]
+    fn tall_stack_centres_at_a_small_stage_are_pinned() {
+        // Wave S (S20): the subtitle-stack off-stage
+        // audit, at the helper level. Twelve live lines
+        // — six 2-line cues in stored order — on a
+        // 200-unit stage, default style (font 20, line
+        // step 24, edge margin 16). The composition
+        // below is the loop all three surfaces run
+        // (lines_before accumulates across cues; Bottom
+        // counts down within a cue, Top counts up), so
+        // these centres are at once the stage's band
+        // centres, the SVG writer's <text> y values and
+        // the raster burn-in's stamp centres. No surface
+        // clamps them: from offset 7 the stack straddles
+        // the far edge and from offset 8 it sits wholly
+        // past it, identically on every surface.
+        let bottom = SubtitleStyle::default();
+        let top = SubtitleStyle {
+            position: SubtitlePosition::Top,
+            ..SubtitleStyle::default()
+        };
+        let centres = |style: SubtitleStyle| -> Vec<f32> {
+            let mut out = Vec::new();
+            let mut lines_before = 0usize;
+            for _cue in 0..6 {
+                for line_index in 0..2 {
+                    let from_edge =
+                        subtitle_stack_line_offset(lines_before, 2, line_index, style.position);
+                    out.push(subtitle_line_center_y(style, 200.0, from_edge));
+                }
+                lines_before += 2;
+            }
+            out
+        };
+        // (cue, line) order: at Bottom a cue's LAST line
+        // sits closest to the edge, so each pair reads
+        // (farther, nearer); at Top it reads in order.
+        assert_eq!(
+            centres(bottom),
+            vec![
+                148.0, 172.0, 100.0, 124.0, 52.0, 76.0, 4.0, 28.0, -44.0, -20.0, -92.0, -68.0
+            ],
+            "Bottom centres, six 2-line cues on a 200 stage"
+        );
+        assert_eq!(
+            centres(top),
+            vec![
+                28.0, 52.0, 76.0, 100.0, 124.0, 148.0, 172.0, 196.0, 220.0, 244.0, 268.0, 292.0
+            ],
+            "Top centres, six 2-line cues on a 200 stage"
+        );
+        // Band visibility (centre ± half the 24-unit
+        // line height) against [0, 200]: seven lines
+        // fully on-stage, one straddling the far edge,
+        // four wholly past it — at BOTH anchors.
+        let classify = |style: SubtitleStyle| -> (usize, usize, usize) {
+            let half = subtitle_line_height(style) / 2.0;
+            let (mut full, mut partial, mut off) = (0, 0, 0);
+            for y in centres(style) {
+                if y - half >= 0.0 && y + half <= 200.0 {
+                    full += 1;
+                } else if y + half > 0.0 && y - half < 200.0 {
+                    partial += 1;
+                } else {
+                    off += 1;
+                }
+            }
+            (full, partial, off)
+        };
+        assert_eq!(classify(bottom), (7, 1, 4), "Bottom visibility at 200");
+        assert_eq!(classify(top), (7, 1, 4), "Top visibility at 200");
+    }
+
+    #[test]
+    fn stack_ceiling_by_stage_height_is_pinned() {
+        // Wave S (S20): how many stacked lines a stage
+        // height holds at the default style, counted by
+        // walking offsets through the shared helpers
+        // until the band (centre ± half line height)
+        // stops intersecting the stage. FULL lines have
+        // their whole band on-stage; one PARTIAL line
+        // may straddle the far edge (its glyph rows
+        // clip); every line beyond paints nothing, on
+        // any surface. A 400 stage is the boundary case:
+        // its step lands exactly on the edge, so it has
+        // no partial line at all.
+        let count = |style: SubtitleStyle, stage_height: f32| -> (usize, usize) {
+            let half = subtitle_line_height(style) / 2.0;
+            let (mut full, mut partial) = (0, 0);
+            for k in 0..64 {
+                let y = subtitle_line_center_y(style, stage_height, k);
+                if y - half >= 0.0 && y + half <= stage_height {
+                    full += 1;
+                } else if y + half > 0.0 && y - half < stage_height {
+                    partial += 1;
+                } else {
+                    break;
+                }
+            }
+            (full, partial)
+        };
+        let bottom = SubtitleStyle::default();
+        let top = SubtitleStyle {
+            position: SubtitlePosition::Top,
+            ..SubtitleStyle::default()
+        };
+        for (h, full, partial) in [
+            (200.0, 7, 1),
+            (400.0, 16, 0),
+            (540.0, 21, 1),
+            (720.0, 29, 1),
+        ] {
+            assert_eq!(count(bottom, h), (full, partial), "Bottom ceiling at {h}");
+            assert_eq!(count(top, h), (full, partial), "Top ceiling at {h}");
+        }
+        // Font scale 2.0 doubles the step (48) but NOT
+        // the 16-unit edge margin: a 200 stage then
+        // holds three full lines and one straddler.
+        let big = SubtitleStyle {
+            font_scale: 2.0,
+            ..SubtitleStyle::default()
+        };
+        assert_eq!(count(big, 200.0), (3, 1), "scale 2.0 ceiling at 200");
+    }
+
+    #[test]
     fn srt_round_trip_is_frame_exact_at_24_fps() {
         let cues = vec![
             cue(0, 24, "The gate is open."),
@@ -1183,6 +1347,49 @@ mod tests {
         );
         let imported = subtitles_from_srt(&srt, 24.0).expect("own export re-imports");
         assert_eq!(imported, cues);
+    }
+
+    #[test]
+    fn srt_counted_export_counts_the_speakers_it_drops() {
+        // Wave S (S9): the counted export's text is the
+        // plain export's text, byte for byte, at every
+        // credit level — the count is the only new
+        // information.
+        // No cues at all: empty document, nothing dropped.
+        let project = project_with(Vec::new());
+        let export = subtitles_to_srt_counted(&project);
+        assert_eq!(export.speakers_dropped, 0);
+        assert_eq!(export.text, subtitles_to_srt(&project));
+        // Cues, none credited: still zero.
+        let project = project_with(vec![cue(0, 24, "Plain."), cue(24, 48, "Also plain.")]);
+        let export = subtitles_to_srt_counted(&project);
+        assert_eq!(export.speakers_dropped, 0);
+        assert_eq!(export.text, subtitles_to_srt(&project));
+        // One credited cue among plain ones: exactly one.
+        let project = project_with(vec![
+            cue(0, 24, "Plain."),
+            speaker_cue(24, 48, "Credited.", "Mary Jane"),
+        ]);
+        let export = subtitles_to_srt_counted(&project);
+        assert_eq!(export.speakers_dropped, 1);
+        assert_eq!(export.text, subtitles_to_srt(&project));
+        assert!(!export.text.contains("Mary"), "no name in the SRT: {:?}", export.text);
+        // Many: every credited cue counts; a stored
+        // whitespace-only speaker is no credit (the
+        // normalise rule stores None for it), so it is
+        // not counted as lost.
+        let mut whitespace = cue(72, 96, "Whitespace credit.");
+        whitespace.speaker = Some("   ".to_string());
+        let project = project_with(vec![
+            speaker_cue(0, 24, "One.", "Mary Jane"),
+            speaker_cue(24, 48, "Two.", "Tom"),
+            cue(48, 72, "Plain."),
+            whitespace,
+            speaker_cue(96, 120, "Three.", "Mary Jane"),
+        ]);
+        let export = subtitles_to_srt_counted(&project);
+        assert_eq!(export.speakers_dropped, 3);
+        assert_eq!(export.text, subtitles_to_srt(&project));
     }
 
     #[test]

@@ -1267,6 +1267,38 @@ fn encode_gif(project: &Project, times: &[f32], path: &Path) -> std::io::Result<
     Ok(n)
 }
 
+/// Encode the given frame times as a looping GIF at the project
+/// fps at `scale` times the stage size (Wave S, S4): the scaled
+/// counterpart of [`encode_gif`], rendering every sample through
+/// [`render_frame_at_scaled`] — a true re-render at the scaled
+/// size, never a resample of the 1.0 raster.
+fn encode_gif_scaled(
+    project: &Project,
+    times: &[f32],
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    use image::codecs::gif::{GifEncoder, Repeat};
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::File::create(path)?;
+    let mut encoder = GifEncoder::new_with_speed(file, 10);
+    encoder
+        .set_repeat(Repeat::Infinite)
+        .map_err(std::io::Error::other)?;
+    let delay = image::Delay::from_numer_denom_ms((1000.0 / project.fps.max(1.0)) as u32, 1);
+    let mut frames = Vec::new();
+    for t in times {
+        let img =
+            image::DynamicImage::ImageRgb8(render_frame_at_scaled(project, *t, scale)?).to_rgba8();
+        frames.push(image::Frame::from_parts(img, 0, 0, delay));
+    }
+    let n = frames.len();
+    encoder.encode_frames(frames).map_err(std::io::Error::other)?;
+    Ok(n)
+}
+
 /// Export the animation as a looping GIF at the project fps.
 pub fn export_gif(project: &Project, path: &Path) -> std::io::Result<usize> {
     if project.frames.is_empty() {
@@ -1289,6 +1321,52 @@ pub fn export_gif_range(
     let (from, to) = clamp_frame_range(project, from, to)?;
     let times = sample_times_range(project, from, to);
     encode_gif(project, &times, path)
+}
+
+/// Export the animation as a looping GIF at the project fps, at
+/// `scale` times the stage size (Wave S, S4) — the export-scale
+/// counterpart of [`export_gif`]. Every frame is a true re-render
+/// at the scaled size via [`render_frame_at_scaled`]. At exactly
+/// 1.0 this delegates to [`export_gif`], so the output is
+/// byte-identical. An invalid scale is refused before anything
+/// is written.
+pub fn export_gif_scaled(
+    project: &Project,
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    if scale == 1.0 {
+        return export_gif(project, path);
+    }
+    if project.frames.is_empty() {
+        return encode_gif_scaled(project, &[], path, scale);
+    }
+    export_gif_range_scaled(project, 0, project.frames.len() - 1, path, scale)
+}
+
+/// Export the authored frames `from..=to` (inclusive, clamped to
+/// the timeline) as a looping GIF at the project fps, at `scale`
+/// times the stage size (Wave S, S4) — the scaled counterpart of
+/// [`export_gif_range`], with the same frame sampling and range
+/// rules. At exactly 1.0 this delegates to [`export_gif_range`],
+/// so the output is byte-identical. An invalid scale is refused
+/// before the range is even clamped, so a refused call writes
+/// nothing.
+pub fn export_gif_range_scaled(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    if scale == 1.0 {
+        return export_gif_range(project, from, to, path);
+    }
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let times = sample_times_range(project, from, to);
+    encode_gif_scaled(project, &times, path, scale)
 }
 
 /// The outcome of a successful MP4 export, full or range:
@@ -1356,6 +1434,61 @@ pub fn export_mp4(project: &Project, path: &Path) -> std::io::Result<Mp4ExportOu
     }
     let silent = unique_temp("silent").with_extension("mp4");
     let n = ffmpeg_encode(project, &silent, &["-c:v", "libx264", "-pix_fmt", "yuv420p"])?;
+    let muxed = mux_audio(project, &silent, path)?;
+    let _ = std::fs::remove_file(&silent);
+    if muxed {
+        Ok(Mp4ExportOutcome {
+            frames: n,
+            missing_audio,
+        })
+    } else {
+        Err(std::io::Error::other("audio mux failed"))
+    }
+}
+
+/// Export an MP4 (H.264, yuv420p) via the system `ffmpeg` at
+/// `scale` times the stage size (Wave S, S5) — the
+/// export-scale counterpart of [`export_mp4`]. Every frame
+/// is a true re-render at the scaled size via
+/// [`render_frame_at_scaled`]; the audio mux is untouched
+/// (audio does not scale), and the missing-audio reporting
+/// is [`export_mp4`]'s own. At exactly 1.0 the call routes
+/// through `export_mp4` itself, so a 1.0 export is the
+/// unscaled export byte for byte. An invalid scale is
+/// refused before anything is written.
+pub fn export_mp4_scaled(
+    project: &Project,
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<Mp4ExportOutcome> {
+    let scale = check_export_scale(scale)?;
+    if scale == 1.0 {
+        return export_mp4(project, path);
+    }
+    let has_audio = project
+        .audio
+        .iter()
+        .any(|c| !c.muted && std::path::Path::new(&c.path).exists());
+    let missing_audio = crate::audio::missing_audio_clips(&project.audio);
+    if !has_audio {
+        let frames = ffmpeg_encode_scaled(
+            project,
+            path,
+            &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+            scale,
+        )?;
+        return Ok(Mp4ExportOutcome {
+            frames,
+            missing_audio,
+        });
+    }
+    let silent = unique_temp("silent").with_extension("mp4");
+    let n = ffmpeg_encode_scaled(
+        project,
+        &silent,
+        &["-c:v", "libx264", "-pix_fmt", "yuv420p"],
+        scale,
+    )?;
     let muxed = mux_audio(project, &silent, path)?;
     let _ = std::fs::remove_file(&silent);
     if muxed {
@@ -1449,6 +1582,77 @@ pub fn export_mp4_range(
     }
 }
 
+/// Export the authored frames `from..=to` (inclusive, clamped
+/// to the timeline) as an MP4 at `scale` times the stage size
+/// (Wave S, S5) — the export-scale counterpart of
+/// [`export_mp4_range`], with the same range rules, the same
+/// unprobeable/missing-audio treatment and the same range mux
+/// plan (audio does not scale). At exactly 1.0 the call routes
+/// through `export_mp4_range` itself, so a 1.0 export is the
+/// unscaled export byte for byte. An invalid scale is refused
+/// before the range is even clamped, so a refused call writes
+/// nothing.
+pub fn export_mp4_range_scaled(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<Mp4ExportOutcome> {
+    let scale = check_export_scale(scale)?;
+    if scale == 1.0 {
+        return export_mp4_range(project, from, to, path);
+    }
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let times = sample_times_range(project, from, to);
+    let frames = times.len();
+    let (win_start, win_len) = range_window(project, from, times.len());
+    let outcome = range_plan_outcome(project, win_start, win_len, &probe_duration_secs);
+    if !outcome.unprobeable.is_empty() {
+        return Err(std::io::Error::other(format!(
+            "audio could not be included in the range export: the length of {} \
+             clip(s) could not be probed (not readable as WAV, and ffprobe \
+             failed or is not installed), so whether they intersect the range \
+             is unknown: {}",
+            outcome.unprobeable.len(),
+            outcome.unprobeable.join(", ")
+        )));
+    }
+    let missing_audio = outcome.missing;
+    let plan = outcome.plan;
+    if matches!(plan, RangeMuxPlan::None) {
+        ffmpeg_encode_times_scaled(
+            project,
+            &times,
+            path,
+            &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+            scale,
+        )?;
+        return Ok(Mp4ExportOutcome {
+            frames,
+            missing_audio,
+        });
+    }
+    let silent = unique_temp("silent").with_extension("mp4");
+    ffmpeg_encode_times_scaled(
+        project,
+        &times,
+        &silent,
+        &["-c:v", "libx264", "-pix_fmt", "yuv420p"],
+        scale,
+    )?;
+    let muxed = mux_audio_range(&plan, &silent, path)?;
+    let _ = std::fs::remove_file(&silent);
+    if muxed {
+        Ok(Mp4ExportOutcome {
+            frames,
+            missing_audio,
+        })
+    } else {
+        Err(std::io::Error::other("audio mux failed"))
+    }
+}
+
 /// Encode rendered frames with ffmpeg using the given video args.
 static ENCODE_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
@@ -1511,6 +1715,72 @@ fn ffmpeg_encode_times(
     }
 }
 
+/// Encode the whole timeline (see `sample_times`) with ffmpeg
+/// at `scale` times the stage size (Wave S, S5) — the
+/// export-scale counterpart of [`ffmpeg_encode`]. At exactly
+/// 1.0 it routes through `ffmpeg_encode` itself, so a 1.0
+/// encode is the unscaled encode byte for byte.
+fn ffmpeg_encode_scaled(
+    project: &Project,
+    path: &Path,
+    video_args: &[&str],
+    scale: f32,
+) -> std::io::Result<usize> {
+    if scale == 1.0 {
+        return ffmpeg_encode(project, path, video_args);
+    }
+    let times = sample_times(project);
+    ffmpeg_encode_times_scaled(project, &times, path, video_args, scale)
+}
+
+/// Encode the given frame times with ffmpeg at `scale` times
+/// the stage size (Wave S, S5): every sampled frame is a true
+/// re-render via [`render_frame_at_scaled`], never an upscale
+/// of the 1.0 raster — [`ffmpeg_encode_times`] with the scaled
+/// frame funnel swapped in. At exactly 1.0 it routes through
+/// `ffmpeg_encode_times` itself.
+fn ffmpeg_encode_times_scaled(
+    project: &Project,
+    times: &[f32],
+    path: &Path,
+    video_args: &[&str],
+    scale: f32,
+) -> std::io::Result<usize> {
+    if scale == 1.0 {
+        return ffmpeg_encode_times(project, times, path, video_args);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = unique_temp("enc");
+    std::fs::create_dir_all(&tmp)?;
+    for (k, t) in times.iter().enumerate() {
+        render_frame_at_scaled(project, *t, scale)?
+            .save(tmp.join(format!("frame-{:04}.png", k + 1)))
+            .map_err(std::io::Error::other)?;
+    }
+    let mut args: Vec<String> = vec![
+        "-y".into(),
+        "-framerate".into(),
+        format!("{}", project.fps.max(1.0) as i32),
+        "-i".into(),
+        tmp.join("frame-%04d.png").to_string_lossy().into_owned(),
+    ];
+    args.extend(video_args.iter().map(|a| a.to_string()));
+    args.push(path.to_string_lossy().into_owned());
+    let result = std::process::Command::new("ffmpeg")
+        .args(&args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let _ = std::fs::remove_dir_all(&tmp);
+    match result {
+        Ok(status) if status.success() => Ok(times.len()),
+        Ok(status) => Err(std::io::Error::other(format!("ffmpeg exited with {status}"))),
+        Err(e) => Err(std::io::Error::other(format!("could not run ffmpeg: {e}"))),
+    }
+}
+
 /// Export a WebM (VP9). Frames are opaque; the alpha channel is
 /// present but fully opaque.
 pub fn export_webm(project: &Project, path: &Path) -> std::io::Result<usize> {
@@ -1538,6 +1808,60 @@ pub fn export_webm_range(
         &times,
         path,
         &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"],
+    )?;
+    Ok(())
+}
+
+/// Export a WebM (VP9) at `scale` times the stage size
+/// (Wave S, S5) — the export-scale counterpart of
+/// [`export_webm`]. Every frame is a true re-render at the
+/// scaled size; video only, like the unscaled entry. At
+/// exactly 1.0 the call routes through `export_webm` itself,
+/// so a 1.0 export is the unscaled export byte for byte. An
+/// invalid scale is refused before anything is written.
+pub fn export_webm_scaled(
+    project: &Project,
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    if scale == 1.0 {
+        return export_webm(project, path);
+    }
+    ffmpeg_encode_scaled(
+        project,
+        path,
+        &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"],
+        scale,
+    )
+}
+
+/// Export the authored frames `from..=to` (inclusive, clamped
+/// to the timeline) as a WebM at `scale` times the stage size
+/// (Wave S, S5) — the export-scale counterpart of
+/// [`export_webm_range`], with the same range rules. At
+/// exactly 1.0 the call routes through `export_webm_range`
+/// itself. An invalid scale is refused before the range is
+/// even clamped, so a refused call writes nothing.
+pub fn export_webm_range_scaled(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<()> {
+    let scale = check_export_scale(scale)?;
+    if scale == 1.0 {
+        return export_webm_range(project, from, to, path);
+    }
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let times = sample_times_range(project, from, to);
+    ffmpeg_encode_times_scaled(
+        project,
+        &times,
+        path,
+        &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"],
+        scale,
     )?;
     Ok(())
 }
@@ -3077,6 +3401,41 @@ fn write_spritesheet(
     Ok(n)
 }
 
+/// Write a spritesheet of `indices` to `path` at `scale` times
+/// the stage size (Wave S, S4): the scaled counterpart of
+/// [`write_spritesheet`] — the same square-root grid, tile order
+/// and empty-list blank sheet, but the tile size is
+/// [`scaled_output_size`] at the scale and every tile is a true
+/// re-render via [`render_frame_scaled`], never an upscaled copy
+/// of the 1.0 tile.
+fn write_spritesheet_scaled(
+    project: &Project,
+    indices: &[usize],
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if indices.is_empty() {
+        let sheet = ImageBuffer::from_pixel(1, 1, Rgb([0u8, 0, 0]));
+        sheet.save(path).map_err(std::io::Error::other)?;
+        return Ok(0);
+    }
+    let n = indices.len();
+    let (w, h) = scaled_output_size(project, scale);
+    let cols = (n as f32).sqrt().ceil() as u32;
+    let rows = (n as u32 + cols - 1) / cols;
+    let mut sheet = ImageBuffer::new(w * cols, h * rows);
+    for (k, &i) in indices.iter().enumerate() {
+        let img = render_frame_scaled(project, i, scale)?;
+        let (ox, oy) = ((k as u32 % cols) * w, (k as u32 / cols) * h);
+        image::imageops::overlay(&mut sheet, &img, ox as i64, oy as i64);
+    }
+    sheet.save(path).map_err(std::io::Error::other)?;
+    Ok(n)
+}
+
 /// Export all authored frames as one spritesheet PNG (grid layout).
 pub fn export_spritesheet(project: &Project, path: &Path) -> std::io::Result<usize> {
     if project.frames.is_empty() {
@@ -3103,6 +3462,52 @@ pub fn export_sheet_range(
     let (from, to) = clamp_frame_range(project, from, to)?;
     let indices: Vec<usize> = (from..=to).collect();
     write_spritesheet(project, &indices, path)
+}
+
+/// Export all authored frames as one spritesheet PNG (grid
+/// layout) at `scale` times the stage size (Wave S, S4) — the
+/// export-scale counterpart of [`export_spritesheet`]: tiles are
+/// [`scaled_output_size`] at the scale, each a true re-render.
+/// At exactly 1.0 this delegates to [`export_spritesheet`], so
+/// the output is byte-identical. An invalid scale is refused
+/// before anything is written.
+pub fn export_sheet_scaled(
+    project: &Project,
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    if scale == 1.0 {
+        return export_spritesheet(project, path);
+    }
+    if project.frames.is_empty() {
+        return write_spritesheet_scaled(project, &[], path, scale);
+    }
+    export_sheet_range_scaled(project, 0, project.frames.len() - 1, path, scale)
+}
+
+/// Export the authored frames `from..=to` (inclusive, clamped
+/// to the timeline) as one spritesheet PNG at `scale` times the
+/// stage size (Wave S, S4) — the scaled counterpart of
+/// [`export_sheet_range`], with the same one-tile-per-authored-
+/// frame rule and range rules. At exactly 1.0 this delegates to
+/// [`export_sheet_range`], so the output is byte-identical. An
+/// invalid scale is refused before the range is even clamped,
+/// so a refused call writes nothing.
+pub fn export_sheet_range_scaled(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    if scale == 1.0 {
+        return export_sheet_range(project, from, to, path);
+    }
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let indices: Vec<usize> = (from..=to).collect();
+    write_spritesheet_scaled(project, &indices, path, scale)
 }
 
 /// Export every frame as `frame-0001.png`, `frame-0002.png`, ... in `dir`.
@@ -3216,6 +3621,64 @@ pub fn export_jpeg_sequence_range(
     Ok(to - from + 1)
 }
 
+/// Export every authored frame as `frame-0001.jpg`, `frame-0002.jpg`,
+/// ... in `dir`, at `scale` times the stage size (Wave T, T7) — the
+/// export-scale counterpart of [`export_jpeg_sequence`]. Every frame
+/// is a true re-render at the scaled size via
+/// [`render_frame_scaled`], never an upscaled copy, encoded as JPEG
+/// at quality 90 exactly as the unscaled entry encodes. At exactly
+/// 1.0 this delegates to [`export_jpeg_sequence`], so the output is
+/// byte-identical. An invalid scale is refused before anything is
+/// written.
+pub fn export_jpeg_sequence_scaled(
+    project: &Project,
+    dir: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    if scale == 1.0 {
+        return export_jpeg_sequence(project, dir);
+    }
+    if project.frames.is_empty() {
+        std::fs::create_dir_all(dir)?;
+        return Ok(0);
+    }
+    export_jpeg_sequence_range_scaled(project, 0, project.frames.len() - 1, dir, scale)
+}
+
+/// Export the authored frames `from..=to` (inclusive, clamped to
+/// the timeline) as `frame-XXXX.jpg` files in `dir` at `scale`
+/// times the stage size (Wave T, T7) — the scaled counterpart of
+/// [`export_jpeg_sequence_range`], with the same file naming (each
+/// frame keeps its authored index), the same range rules and the
+/// same JPEG encoding (quality 90). At exactly 1.0 this delegates
+/// to [`export_jpeg_sequence_range`], so the output is
+/// byte-identical. An invalid scale is refused before the range is
+/// even clamped, so a refused call writes nothing and creates no
+/// directory.
+pub fn export_jpeg_sequence_range_scaled(
+    project: &Project,
+    from: usize,
+    to: usize,
+    dir: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    if scale == 1.0 {
+        return export_jpeg_sequence_range(project, from, to, dir);
+    }
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    std::fs::create_dir_all(dir)?;
+    for i in from..=to {
+        let img = render_frame_scaled(project, i, scale)?;
+        let path = dir.join(format!("frame-{:04}.jpg", i + 1));
+        let mut file = std::fs::File::create(&path)?;
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, 90);
+        encoder.encode_image(&img).map_err(std::io::Error::other)?;
+    }
+    Ok(to - from + 1)
+}
+
 /// Encode the given frame times as an APNG (animated PNG) at the
 /// project fps, looping forever (the shared encoder behind the
 /// APNG exports). Uses the `png` crate's native APNG writer
@@ -3259,6 +3722,57 @@ fn encode_apng(project: &Project, times: &[f32], path: &Path) -> std::io::Result
     Ok(times.len())
 }
 
+/// Encode the given frame times as an APNG at the project fps,
+/// looping forever, at `scale` times the stage size (Wave S,
+/// S4): the scaled counterpart of [`encode_apng`], rendering
+/// every sample through [`render_frame_at_scaled`] — a true
+/// re-render at the scaled size, never a resample of the 1.0
+/// raster. Same empty-`times` contract: the parent directory is
+/// created but no file is written, returning `Ok(0)`.
+fn encode_apng_scaled(
+    project: &Project,
+    times: &[f32],
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    if times.is_empty() {
+        return Ok(0);
+    }
+    let first =
+        image::DynamicImage::ImageRgb8(render_frame_at_scaled(project, times[0], scale)?).to_rgba8();
+    let (w, h) = (first.width(), first.height());
+    let file = std::fs::File::create(path)?;
+    let mut encoder = png::Encoder::new(file, w, h);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .set_animated(times.len() as u32, 0) // 0 plays = loop forever
+        .map_err(std::io::Error::other)?;
+    // Frame delay 1/fps, expressed exactly as 100 / (fps * 100).
+    let den = (project.fps.max(1.0) * 100.0).round().clamp(1.0, u16::MAX as f32) as u16;
+    encoder
+        .set_frame_delay(100, den)
+        .map_err(std::io::Error::other)?;
+    let mut writer = encoder.write_header().map_err(std::io::Error::other)?;
+    writer
+        .write_image_data(first.as_raw())
+        .map_err(std::io::Error::other)?;
+    for t in &times[1..] {
+        let img =
+            image::DynamicImage::ImageRgb8(render_frame_at_scaled(project, *t, scale)?).to_rgba8();
+        writer
+            .write_image_data(img.as_raw())
+            .map_err(std::io::Error::other)?;
+    }
+    writer.finish().map_err(std::io::Error::other)?;
+    Ok(times.len())
+}
+
 /// Export the animation as an APNG (animated PNG) at the project
 /// fps, looping forever. Frames are the same full-canvas samples
 /// the GIF/MP4 exports use, converted to RGBA.
@@ -3282,6 +3796,50 @@ pub fn export_apng_range(
     let (from, to) = clamp_frame_range(project, from, to)?;
     let times = sample_times_range(project, from, to);
     encode_apng(project, &times, path)
+}
+
+/// Export the animation as an APNG (animated PNG) at the project
+/// fps, looping forever, at `scale` times the stage size (Wave S,
+/// S4) — the export-scale counterpart of [`export_apng`]. Every
+/// frame is a true re-render at the scaled size via
+/// [`render_frame_at_scaled`]. At exactly 1.0 this delegates to
+/// [`export_apng`], so the output is byte-identical. An invalid
+/// scale is refused before anything is written.
+pub fn export_apng_scaled(
+    project: &Project,
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    if scale == 1.0 {
+        return export_apng(project, path);
+    }
+    let times = sample_times(project);
+    encode_apng_scaled(project, &times, path, scale)
+}
+
+/// Export the authored frames `from..=to` (inclusive, clamped to
+/// the timeline) as an APNG (animated PNG) at the project fps,
+/// looping forever, at `scale` times the stage size (Wave S,
+/// S4) — the scaled counterpart of [`export_apng_range`], with
+/// the same frame sampling and range rules. At exactly 1.0 this
+/// delegates to [`export_apng_range`], so the output is
+/// byte-identical. An invalid scale is refused before the range
+/// is even clamped, so a refused call writes nothing.
+pub fn export_apng_range_scaled(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    if scale == 1.0 {
+        return export_apng_range(project, from, to, path);
+    }
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let times = sample_times_range(project, from, to);
+    encode_apng_scaled(project, &times, path, scale)
 }
 
 /// Columns and thumbnail width used by the contact-sheet file
@@ -3664,6 +4222,246 @@ mod tests {
         let img = image::open(dir_half.join("frame-0001.png")).unwrap();
         assert_eq!((img.width(), img.height()), (64, 48), "0.5x sequence frame dims");
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn scaled_jpeg_sequence_writes_scaled_frames() {
+        let project = tiny_project(); // 96x72 stage, 5 frames
+        let base = std::env::temp_dir().join(format!("styk-t7-jpeg-seq-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir2x = base.join("two");
+        let n = export_jpeg_sequence_scaled(&project, &dir2x, 2.0).unwrap();
+        assert_eq!(n, 5);
+        let img = image::open(dir2x.join("frame-0001.jpg")).unwrap();
+        assert_eq!((img.width(), img.height()), (192, 144), "2.0x JPEG frame dims");
+        let bytes = std::fs::read(dir2x.join("frame-0001.jpg")).unwrap();
+        assert_eq!(&bytes[0..2], &[0xFF, 0xD8], "scaled frame: missing JPEG SOI marker");
+        let dir_half = base.join("half");
+        let n = export_jpeg_sequence_range_scaled(&project, 0, 0, &dir_half, 0.5).unwrap();
+        assert_eq!(n, 1);
+        let img = image::open(dir_half.join("frame-0001.jpg")).unwrap();
+        assert_eq!((img.width(), img.height()), (48, 36), "0.5x JPEG frame dims");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn scaled_jpeg_sequence_at_one_is_byte_identical() {
+        let project = tiny_project();
+        let base = std::env::temp_dir().join(format!("styk-t7-jpeg-one-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let plain_dir = base.join("plain");
+        let scaled_dir = base.join("scaled");
+        let ranged_dir = base.join("ranged");
+        let n_plain = export_jpeg_sequence(&project, &plain_dir).unwrap();
+        let n_scaled = export_jpeg_sequence_scaled(&project, &scaled_dir, 1.0).unwrap();
+        let n_ranged =
+            export_jpeg_sequence_range_scaled(&project, 0, 4, &ranged_dir, 1.0).unwrap();
+        assert_eq!(n_plain, 5);
+        assert_eq!(n_plain, n_scaled);
+        assert_eq!(n_plain, n_ranged);
+        for i in 1..=n_plain {
+            let name = format!("frame-{i:04}.jpg");
+            let plain_bytes = std::fs::read(plain_dir.join(&name)).unwrap();
+            assert_eq!(
+                plain_bytes,
+                std::fs::read(scaled_dir.join(&name)).unwrap(),
+                "{name}: scaled 1.0 bytes"
+            );
+            assert_eq!(
+                plain_bytes,
+                std::fs::read(ranged_dir.join(&name)).unwrap(),
+                "{name}: range scaled 1.0 bytes"
+            );
+        }
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn scaled_jpeg_sequence_refuses_invalid_scales() {
+        let project = tiny_project();
+        for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let dir = std::env::temp_dir()
+                .join(format!("styk-t7-jpeg-bad-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let err = export_jpeg_sequence_scaled(&project, &dir, bad)
+                .err()
+                .expect("invalid scale must refuse");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "scale {bad}");
+            assert!(
+                export_jpeg_sequence_range_scaled(&project, 0, 0, &dir, bad).is_err(),
+                "scale {bad}"
+            );
+            assert!(!dir.exists(), "refused JPEG export created a directory (scale {bad})");
+        }
+    }
+
+    #[test]
+    fn scaled_gif_writes_scaled_frames() {
+        let project = tiny_project(); // 96x72 stage, 5 frames
+        let path = temp_file("gif-scaled", "gif");
+        let n = export_gif_scaled(&project, &path, 2.0).unwrap();
+        assert_eq!(n, 5);
+        assert_eq!(
+            image::image_dimensions(&path).unwrap(),
+            (192, 144),
+            "2.0x GIF frame size"
+        );
+        use image::AnimationDecoder as _;
+        let file = std::fs::File::open(&path).unwrap();
+        let decoder =
+            image::codecs::gif::GifDecoder::new(std::io::BufReader::new(file)).unwrap();
+        assert_eq!(decoder.into_frames().count(), 5, "all 5 frames at 2.0x");
+        let range_path = temp_file("gif-scaled-range", "gif");
+        let n = export_gif_range_scaled(&project, 1, 3, &range_path, 0.5).unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(
+            image::image_dimensions(&range_path).unwrap(),
+            (48, 36),
+            "0.5x GIF frame size"
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&range_path);
+    }
+
+    #[test]
+    fn scaled_apng_writes_scaled_frames() {
+        let project = tiny_project(); // 96x72 stage, 5 frames
+        let path = temp_file("apng-scaled", "png");
+        let n = export_apng_scaled(&project, &path, 2.0).unwrap();
+        assert_eq!(n, 5);
+        assert_eq!(
+            image::image_dimensions(&path).unwrap(),
+            (192, 144),
+            "2.0x APNG frame size"
+        );
+        let range_path = temp_file("apng-scaled-range", "png");
+        let n = export_apng_range_scaled(&project, 1, 3, &range_path, 0.5).unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(
+            image::image_dimensions(&range_path).unwrap(),
+            (48, 36),
+            "0.5x APNG frame size"
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&range_path);
+    }
+
+    #[test]
+    fn scaled_sheet_tiles_at_the_scaled_tile_size() {
+        let project = tiny_project(); // 96x72 tiles, 5 frames
+        let path = temp_file("sheet-scaled", "png");
+        let n = export_sheet_scaled(&project, &path, 2.0).unwrap();
+        assert_eq!(n, 5);
+        // Tiles are 192x144 on the square-root grid: 3 cols x 2 rows.
+        let sheet = image::open(&path).unwrap().to_rgb8();
+        assert_eq!((sheet.width(), sheet.height()), (576, 288), "2.0x sheet size");
+        // Tile 0 is the true 2.0 re-render of authored frame 0.
+        let tile0 = image::imageops::crop_imm(&sheet, 0, 0, 192, 144)
+            .to_image()
+            .into_raw();
+        assert_eq!(
+            tile0,
+            render_frame_scaled(&project, 0, 2.0).unwrap().into_raw(),
+            "tile 0 must be the 2.0 re-render of frame 0"
+        );
+        // Range at 0.5: frames 1..=3 as 48x36 tiles, 2 cols x 2 rows.
+        let range_path = temp_file("sheet-scaled-range", "png");
+        let n = export_sheet_range_scaled(&project, 1, 3, &range_path, 0.5).unwrap();
+        assert_eq!(n, 3);
+        let sheet = image::open(&range_path).unwrap().to_rgb8();
+        assert_eq!((sheet.width(), sheet.height()), (96, 72), "0.5x sheet size");
+        let tile1 = image::imageops::crop_imm(&sheet, 48, 0, 48, 36)
+            .to_image()
+            .into_raw();
+        assert_eq!(
+            tile1,
+            render_frame_scaled(&project, 2, 0.5).unwrap().into_raw(),
+            "tile 1 of the range sheet must be the 0.5 re-render of frame 2"
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&range_path);
+    }
+
+    #[test]
+    fn scaled_animation_exports_at_one_are_byte_identical() {
+        let project = tiny_project();
+        // GIF: full and range entries at 1.0 delegate to the
+        // unscaled code path, so the files must match byte for
+        // byte — the guarantee S5's MCP routing relies on when
+        // a caller passes scale 1.0 explicitly.
+        let plain = temp_file("gif-one-plain", "gif");
+        let scaled = temp_file("gif-one-scaled", "gif");
+        let ranged = temp_file("gif-one-ranged", "gif");
+        export_gif(&project, &plain).unwrap();
+        export_gif_scaled(&project, &scaled, 1.0).unwrap();
+        export_gif_range_scaled(&project, 0, 4, &ranged, 1.0).unwrap();
+        let plain_bytes = std::fs::read(&plain).unwrap();
+        assert_eq!(plain_bytes, std::fs::read(&scaled).unwrap(), "GIF 1.0 bytes");
+        assert_eq!(plain_bytes, std::fs::read(&ranged).unwrap(), "GIF range 1.0 bytes");
+        // APNG: same trio.
+        let plain = temp_file("apng-one-plain", "png");
+        let scaled = temp_file("apng-one-scaled", "png");
+        let ranged = temp_file("apng-one-ranged", "png");
+        export_apng(&project, &plain).unwrap();
+        export_apng_scaled(&project, &scaled, 1.0).unwrap();
+        export_apng_range_scaled(&project, 0, 4, &ranged, 1.0).unwrap();
+        let plain_bytes = std::fs::read(&plain).unwrap();
+        assert_eq!(plain_bytes, std::fs::read(&scaled).unwrap(), "APNG 1.0 bytes");
+        assert_eq!(plain_bytes, std::fs::read(&ranged).unwrap(), "APNG range 1.0 bytes");
+        // Spritesheet: same trio.
+        let plain = temp_file("sheet-one-plain", "png");
+        let scaled = temp_file("sheet-one-scaled", "png");
+        let ranged = temp_file("sheet-one-ranged", "png");
+        export_spritesheet(&project, &plain).unwrap();
+        export_sheet_scaled(&project, &scaled, 1.0).unwrap();
+        export_sheet_range_scaled(&project, 0, 4, &ranged, 1.0).unwrap();
+        let plain_bytes = std::fs::read(&plain).unwrap();
+        assert_eq!(plain_bytes, std::fs::read(&scaled).unwrap(), "sheet 1.0 bytes");
+        assert_eq!(plain_bytes, std::fs::read(&ranged).unwrap(), "sheet range 1.0 bytes");
+        for p in [
+            "gif-one-plain", "gif-one-scaled", "gif-one-ranged",
+        ] {
+            let _ = std::fs::remove_file(temp_file(p, "gif"));
+        }
+        for p in [
+            "apng-one-plain", "apng-one-scaled", "apng-one-ranged",
+            "sheet-one-plain", "sheet-one-scaled", "sheet-one-ranged",
+        ] {
+            let _ = std::fs::remove_file(temp_file(p, "png"));
+        }
+    }
+
+    #[test]
+    fn scaled_animation_exports_refuse_invalid_scales() {
+        let project = tiny_project();
+        for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let gif_path = temp_file("gif-bad", "gif");
+            let _ = std::fs::remove_file(&gif_path);
+            let err = export_gif_scaled(&project, &gif_path, bad)
+                .err()
+                .expect("invalid scale must refuse");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "scale {bad}");
+            assert!(export_gif_range_scaled(&project, 0, 4, &gif_path, bad).is_err());
+            assert!(!gif_path.exists(), "refused GIF export created a file (scale {bad})");
+
+            let apng_path = temp_file("apng-bad", "png");
+            let _ = std::fs::remove_file(&apng_path);
+            let err = export_apng_scaled(&project, &apng_path, bad)
+                .err()
+                .expect("invalid scale must refuse");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "scale {bad}");
+            assert!(export_apng_range_scaled(&project, 0, 4, &apng_path, bad).is_err());
+            assert!(!apng_path.exists(), "refused APNG export created a file (scale {bad})");
+
+            let sheet_path = temp_file("sheet-bad", "png");
+            let _ = std::fs::remove_file(&sheet_path);
+            let err = export_sheet_scaled(&project, &sheet_path, bad)
+                .err()
+                .expect("invalid scale must refuse");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "scale {bad}");
+            assert!(export_sheet_range_scaled(&project, 0, 4, &sheet_path, bad).is_err());
+            assert!(!sheet_path.exists(), "refused sheet export created a file (scale {bad})");
+        }
     }
 
     #[test]
@@ -4929,9 +5727,10 @@ mod range_export_tests {
     use super::{
         export_apng, export_apng_range, export_gif, export_gif_range,
         export_jpeg_sequence, export_jpeg_sequence_range, export_mp4, export_mp4_range,
-        export_png_sequence, export_png_sequence_range, export_sheet_range,
-        export_spritesheet, export_svg_range, export_webm_range, render_frame,
-        Mp4ExportOutcome,
+        export_mp4_range_scaled, export_mp4_scaled, export_png_sequence,
+        export_png_sequence_range, export_sheet_range, export_spritesheet,
+        export_svg_range, export_webm_range, export_webm_range_scaled,
+        export_webm_scaled, render_frame, Mp4ExportOutcome,
     };
     use crate::model::{AudioClip, Project};
     use image::AnimationDecoder as _;
@@ -5200,6 +5999,84 @@ mod range_export_tests {
             "not an EBML/WebM file"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mp4_range_scaled_writes_a_valid_container() {
+        // Wave S (S5): the scaled range entry renders its
+        // frames through the scaled funnel — a real MP4 over
+        // exactly the range's frames (2.0 on the 96x72 stage
+        // is 192x144).
+        let project = tiny_project();
+        let path = temp_file("mp4-scaled", "mp4");
+        let outcome = export_mp4_range_scaled(&project, 1, 3, &path, 2.0).unwrap();
+        assert_eq!(outcome.frames, 3);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(!bytes.is_empty(), "scaled mp4 range export is empty");
+        assert_eq!(&bytes[4..8], b"ftyp", "not an MP4 container");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn webm_scaled_writes_a_valid_container() {
+        // Wave S (S5): the scaled full entry at 0.5 (48x36 on
+        // the tiny stage) writes a real WebM over the whole
+        // timeline.
+        let project = tiny_project();
+        let path = temp_file("webm-scaled", "webm");
+        let frames = export_webm_scaled(&project, &path, 0.5).unwrap();
+        assert_eq!(frames, project.frames.len());
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(!bytes.is_empty(), "scaled webm export is empty");
+        assert_eq!(
+            &bytes[0..4],
+            &[0x1A, 0x45, 0xDF, 0xA3],
+            "not an EBML/WebM file"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn video_scaled_at_1_0_reports_the_unscaled_outcome() {
+        // Wave S (S5): the 1.0 route-through — the scaled
+        // entry at 1.0 IS the unscaled entry, so it reports
+        // exactly the unscaled outcome and writes a real file.
+        let project = tiny_project();
+        let plain = temp_file("mp4-plain", "mp4");
+        let scaled = temp_file("mp4-scaled-1", "mp4");
+        let a = export_mp4(&project, &plain).unwrap();
+        let b = export_mp4_scaled(&project, &scaled, 1.0).unwrap();
+        assert_eq!(a.frames, b.frames);
+        assert_eq!(a.missing_audio, b.missing_audio);
+        assert!(std::fs::metadata(&scaled).unwrap().len() > 0);
+        let _ = std::fs::remove_file(&plain);
+        let _ = std::fs::remove_file(&scaled);
+    }
+
+    #[test]
+    fn video_scaled_refuses_invalid_scales_before_writing() {
+        // Wave S (S5): the shared scale validation fires
+        // before any encode — nothing is written for a
+        // refused scale, full or range, MP4 or WebM.
+        let project = tiny_project();
+        for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let mp4_path = temp_file("mp4-badscale", "mp4");
+            let _ = std::fs::remove_file(&mp4_path);
+            let err = export_mp4_scaled(&project, &mp4_path, bad).unwrap_err();
+            assert!(
+                err.to_string().contains("positive finite"),
+                "scale {bad}: {err}"
+            );
+            assert!(!mp4_path.exists(), "scale {bad} wrote an MP4 file");
+            let webm_path = temp_file("webm-badscale", "webm");
+            let _ = std::fs::remove_file(&webm_path);
+            let err = export_webm_range_scaled(&project, 1, 3, &webm_path, bad).unwrap_err();
+            assert!(
+                err.to_string().contains("positive finite"),
+                "scale {bad}: {err}"
+            );
+            assert!(!webm_path.exists(), "scale {bad} wrote a WebM file");
+        }
     }
 
     #[test]
