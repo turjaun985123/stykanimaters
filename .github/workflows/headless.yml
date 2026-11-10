@@ -186,7 +186,7 @@ jobs:
           probe() { rm -rf ./projects; HOME="$(mktemp -d)" timeout "$@"; }
           mkdir -p headless-out
           missing=0
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error subtitles-populated subtitles-top subtitles-speaker home-missing-audio; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error subtitles-populated subtitles-top subtitles-speaker home-missing-audio home-scan-fallback; do
             probe 60 "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
               > "headless-out/tree-$scene.log" 2>&1
             echo $? > "headless-out/tree-$scene.exit"
@@ -236,7 +236,7 @@ jobs:
           # CWD-relative, so probe() also wipes ./projects
           # before every invocation.
           probe() { rm -rf ./projects; HOME="$(mktemp -d)" timeout "$@"; }
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error subtitles-populated subtitles-top subtitles-speaker home-missing-audio; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error subtitles-populated subtitles-top subtitles-speaker home-missing-audio home-scan-fallback; do
             if [ ! -f "headless-out/tree-$scene.json" ]; then
               probe 60 xvfb-run -a "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
                 > "headless-out/tree-$scene-xvfb.log" 2>&1
@@ -530,6 +530,35 @@ jobs:
           verdict = "HOME MISSING-AUDIO MARKER: " + ("PASS" if ok else "FAIL")
           print(verdict)
           open("headless-out/home-missing-audio-marker.txt", "w").write(verdict + "\n")
+          PYEOF
+
+      # Wave U (U12): the Home scan-fallback marker — the
+      # tree-text proof for the fallback arm the geometry
+      # scanner cannot make. The marker is the `text` of
+      # the element keyed home-proj-meta-0 in
+      # tree-home-scan-fallback.json; the seeded file is
+      # hand-trimmed of its frames key, so the row's light
+      # read refuses it and the text is the scan's line —
+      # it must ALSO carry the scan's defaulted frame
+      # count ("0 frames"), the fallback discriminator
+      # against the light-read line proven by the
+      # home-missing-audio step above. The transcript
+      # records PASS/FAIL per the probe's fail-soft
+      # contract.
+      - name: Home scan-fallback marker — tree text grep
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set +e
+          python3 - <<'PYEOF'
+          import json
+          tree = json.load(open("headless-out/tree-home-scan-fallback.json"))
+          rows = [e for e in tree["elements"] if e.get("key") == "home-proj-meta-0"]
+          text = rows[0].get("text", "") if len(rows) == 1 else ""
+          ok = text.endswith("· 1 audio clip missing") and "· 0 frames ·" in text
+          verdict = "HOME SCAN-FALLBACK MARKER: " + ("PASS" if ok else "FAIL")
+          print(verdict)
+          open("headless-out/home-scan-fallback-marker.txt", "w").write(verdict + "\n")
           PYEOF
 
       # Q4 (Wave 11): the LIVE control path. Every step
@@ -840,7 +869,7 @@ jobs:
             echo ""
             echo "| Output | Status | Bytes |"
             echo "|---|---|---|"
-            for f in headless-out/tree-default.json headless-out/tree-frame-3.json headless-out/tree-selected.json headless-out/tree-playing.json headless-out/snap-default.png headless-out/snap-stage.png headless-out/vulkaninfo.txt headless-out/rect-probe.txt headless-out/snap-subtitles-populated.png headless-out/snap-subtitles-speaker.png headless-out/tree-home-missing-audio.json headless-out/subtitle-census.txt; do
+            for f in headless-out/tree-default.json headless-out/tree-frame-3.json headless-out/tree-selected.json headless-out/tree-playing.json headless-out/snap-default.png headless-out/snap-stage.png headless-out/vulkaninfo.txt headless-out/rect-probe.txt headless-out/snap-subtitles-populated.png headless-out/snap-subtitles-speaker.png headless-out/tree-home-missing-audio.json headless-out/tree-home-scan-fallback.json headless-out/subtitle-census.txt; do
               if [ -f "$f" ]; then
                 echo "| $f | PRESENT | $(stat -c%s "$f") |"
               else

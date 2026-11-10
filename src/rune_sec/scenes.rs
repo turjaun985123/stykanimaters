@@ -283,6 +283,34 @@
 //! follow-up, and opens the library on Home. The
 //! row's proof is its meta line's TEXT (fact 35),
 //! the first text fact in the table.
+//!
+//! The Wave U scene gives the scan-fallback line
+//! (Wave T, T6) the headless proof
+//! `home-missing-audio` cannot give it — its saved
+//! file light-reads cleanly, so its row takes the
+//! light-read arm: `home-scan-fallback` seeds
+//! exactly as `home-missing-audio` does — the same
+//! planted clip, the same real save with its
+//! recents follow-up — and then trims the saved
+//! file, removing the top-level `frames` key from
+//! the JSON on disk. That file is the state the
+//! format's serde defaults exist for (model.rs's
+//! Wave 11 E7 census: every `Project` field is
+//! defaulted so a hand-trimmed or partially
+//! written file still loads), and Home's two
+//! readers judge it differently by design: the
+//! scan's full parse accepts it — frames default
+//! to none, and its summary carries the parse-time
+//! missing-audio count — while the row's light
+//! read refuses it (`read_metadata_counts`
+//! requires the `frames` key present as an
+//! array), so `row_meta_line` takes its fallback
+//! arm and the marker on the row comes from the
+//! scan. Fact 36 records it. The trim is a content
+//! rewrite of a real saved file; nothing in the
+//! panel is seeded, and no cache is primed — the
+//! probe's process is fresh, so the first render
+//! reads the trimmed file through both real paths.
 
 use crate::State;
 
@@ -1040,6 +1068,124 @@ fn scene_home_missing_audio(s: &mut State) {
     s.home_panel.open = true;
 }
 
+/// Remove the top-level `frames` key from a saved
+/// project file, in place — the hand trim of
+/// [`scene_home_scan_fallback`] (see its doc
+/// comment). Best-effort by design: any failure
+/// (unreadable file, non-JSON content, no object at
+/// the top level, no `frames` key to remove) leaves
+/// the file exactly as saved, so the scene that
+/// calls this stays total. Only the one key is
+/// removed; every other byte of the save's content
+/// round-trips through the `serde_json::Value`
+/// unchanged in meaning (key order and formatting
+/// are the serialiser's, as with any rewrite).
+fn trim_frames_key(path: &std::path::Path) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    if object.remove("frames").is_none() {
+        return;
+    }
+    let Ok(trimmed) = serde_json::to_string_pretty(&value) else {
+        return;
+    };
+    let _ = std::fs::write(path, trimmed);
+}
+
+/// `"home-scan-fallback"` — the Home workspace with
+/// the library OPEN over one saved project whose
+/// file has been hand-trimmed of its top-level
+/// `frames` key, so the project's row renders its
+/// metadata line from the SCAN FALLBACK — the
+/// `None` arm of `row_meta_line` — and the
+/// missing-audio marker on it (Wave T, T6) comes
+/// from the scan's parse-time count: the headless
+/// proof T12's scene could not give (its file
+/// light-reads cleanly, so its row takes the
+/// light-read arm and its marker is S7's). The seed
+/// follows `home-missing-audio` exactly — the clip
+/// planted by direct `project.audio` write (the
+/// same named exception, for the same reason:
+/// no op can create a clip whose file is missing),
+/// the project SAVED through
+/// `EditorCore::save_named_project` with the save
+/// press's recents follow-up — and then the saved
+/// file is trimmed where it lies
+/// ([`trim_frames_key`], gated on the save's
+/// success; the file trimmed is the one the save
+/// re-pointed the core's selector at).
+///
+/// The trimmed state is ordinary user state, not
+/// a manufactured one: every `Project` field
+/// carries a serde default (model.rs's Wave 11
+/// E7 census) precisely so that a hand-trimmed or
+/// partially written file — the census names the
+/// MCP-authored case — still loads, and this file
+/// DOES load: open it and the editor holds the
+/// project, frames defaulted to none. Home's two
+/// readers judge it differently by design. The
+/// scan (`projects::scan`) fully parses it, so a
+/// `ProjectInfo` exists and carries the summary's
+/// parse-time missing-audio count (1: the planted
+/// clip's file does not exist relative to the
+/// working directory). The row's light read
+/// (`HomePanelState::metadata_for` →
+/// `read_metadata_counts`) is stricter: it
+/// requires the top-level `frames` key present as
+/// an array, so it returns `None` for this file on
+/// every read, and the row renders the scan's
+/// `meta_line` — identifiable in the tree text by
+/// its shape: no size segment (the scan never
+/// stats for a length) and a frame count of 0, the
+/// defaulted count of a file with no `frames` key.
+/// No panel state is seeded and no cache is
+/// primed: the divergence lives entirely in the
+/// file, and the probe's fresh process reads it
+/// through both real paths at the first render
+/// (the probe wipes `./projects` before every
+/// invocation, so in the probe this row is the
+/// library's only row). A refused save or a failed
+/// trim leaves the row unseeded or untrimmed — the
+/// scene stays total and still lands on the open
+/// library, as `home-missing-audio` does.
+fn scene_home_scan_fallback(s: &mut State) {
+    s.core.project.audio = vec![stykanimate_rs::model::AudioClip {
+        path: "audio/vanished-take.wav".to_string(),
+        start_frame: 0,
+        gain: 1.0,
+        muted: false,
+    }];
+    s.core.project.name = "Trimmed Take".to_string();
+    if s.core.save_named_project() {
+        let name = s.core.project.name.clone();
+        stykanimate_rs::shell::touch_recent(&name);
+        // The save re-points the core's selector at
+        // the file just saved (editor.rs's
+        // `save_named_project_to`): that entry is
+        // the file to trim.
+        if let Some(path) = s
+            .core
+            .project_files
+            .get(s.core.project_index)
+            .cloned()
+        {
+            trim_frames_key(&path);
+        }
+    }
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Home,
+    );
+    s.home_panel.open = true;
+}
+
 /// `"strokes-populated"` — the Draw workspace with
 /// four strokes planted on the current frame and the
 /// last of them selected, so a `--tree` dump contains
@@ -1514,6 +1660,7 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
         ("subtitles-top", scene_subtitles_top),
         ("subtitles-speaker", scene_subtitles_speaker),
         ("home-missing-audio", scene_home_missing_audio),
+        ("home-scan-fallback", scene_home_scan_fallback),
     ]
 }
 
@@ -1839,6 +1986,32 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
 ///    segment. (The row's thumbnail is a `--snap`
 ///    fact, as in fact 28; no snap is wired for
 ///    this scene — its proof is the tree.)
+/// 36. Under `--scene home-scan-fallback` (Wave U):
+///    elements keyed `home-row-0` and `home-totals`
+///    exist — the one seeded project as a row in
+///    the open library, as in fact 35 — and the
+///    row's metadata element, keyed
+///    `home-proj-meta-0`, carries a `text` ending
+///    in "· 1 audio clip missing": the
+///    missing-audio marker (Wave T, T6) closing
+///    the row's SCAN-FALLBACK meta line — the arm
+///    fact 35's scene cannot reach, because its
+///    file light-reads cleanly. The seeded file is
+///    a real save hand-trimmed of its top-level
+///    `frames` key: the scan's full parse accepts
+///    it (every `Project` field is
+///    serde-defaulted, so the frames count
+///    defaults to 0 and the summary carries its
+///    parse-time missing-audio count), while the
+///    row's light read refuses it (the light read
+///    requires the `frames` key present as an
+///    array), so `metadata_for` returns `None` and
+///    `row_meta_line` falls back to the scan's
+///    line. The fallback shape is visible in the
+///    text itself: no size segment (the scan never
+///    stats for a length) and a frame count of 0
+///    — where fact 35's light-read line carries
+///    both a size and the file's real frame count.
 pub fn layout_assertions() -> Vec<&'static str> {
     vec![
         "exactly one element keyed \"stage\"",
@@ -1876,6 +2049,7 @@ pub fn layout_assertions() -> Vec<&'static str> {
         "under --scene subtitles-top: the element inventory is identical to the subtitles-populated tree's, lane included (only the subtitle style's position field differs — see fact 33)",
         "under --scene subtitles-speaker: the element inventory is identical to the subtitles-populated tree's, lane included (only the planted cue's text and speaker field differ — see fact 34)",
         "under --scene home-missing-audio: elements keyed \"home-row-0\" and \"home-totals\" exist and the element keyed \"home-proj-meta-0\" has text ending \"· 1 audio clip missing\" (the missing-audio marker on the seeded row's light-read meta line — see fact 35)",
+        "under --scene home-scan-fallback: elements keyed \"home-row-0\" and \"home-totals\" exist and the element keyed \"home-proj-meta-0\" has text ending \"· 1 audio clip missing\" (the missing-audio marker on the seeded row's scan-fallback meta line — the seeded file is hand-trimmed of its frames key, so the light read refuses it and the scan's line renders — see fact 36)",
     ]
 }
 
@@ -1886,7 +2060,7 @@ mod tests {
         scene_dopesheet_keys, scene_draw_open,
         scene_effects_open, scene_export_open, scene_fx_selected, scene_fx_split_mid,
         scene_graph_duplicates, scene_graph_open, scene_home, scene_home_missing_audio,
-        scene_home_populated,
+        scene_home_populated, scene_home_scan_fallback,
         scene_library_populated, scene_loop_range, scene_menu_open, scene_palette_open,
         scene_settings_open, scene_settings_open_light, scene_sprites_populated,
         scene_strokes_populated, scene_subtitles_populated, scene_subtitles_speaker,
@@ -1896,7 +2070,7 @@ mod tests {
     use crate::rune_sec::workspaces::Workspace;
 
     /// The scene table is the headless contract:
-    /// thirty-three scenes, each name unique (a duplicate
+    /// thirty-four scenes, each name unique (a duplicate
     /// would shadow the later entry in `with_scene`'s
     /// lookup), with the Phase J scenes in their display
     /// positions, the two Phase K scenes appended after
@@ -1917,12 +2091,14 @@ mod tests {
     /// those, the two Wave P subtitle scenes
     /// (subtitles-populated, subtitles-top) appended
     /// after those, the Wave S speaker scene
-    /// (subtitles-speaker) appended after those, and
-    /// the Wave T home-missing-audio scene last.
+    /// (subtitles-speaker) appended after those, the
+    /// Wave T home-missing-audio scene appended after
+    /// those, and the Wave U home-scan-fallback scene
+    /// last.
     #[test]
-    fn scene_table_has_thirtythree_uniquely_named_scenes() {
+    fn scene_table_has_thirtyfour_uniquely_named_scenes() {
         let table = scenes();
-        assert_eq!(table.len(), 33, "thirty-three scenes are registered");
+        assert_eq!(table.len(), 34, "thirty-four scenes are registered");
         let mut names: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
         let total = names.len();
         names.sort_unstable();
@@ -1957,6 +2133,7 @@ mod tests {
         assert_eq!(table[30].0, "subtitles-top");
         assert_eq!(table[31].0, "subtitles-speaker");
         assert_eq!(table[32].0, "home-missing-audio");
+        assert_eq!(table[33].0, "home-scan-fallback");
     }
 
     /// The export scene reaches the Export workspace through
@@ -2807,6 +2984,102 @@ mod tests {
         assert!(
             line.ends_with("· 1 audio clip missing"),
             "the row's meta line closes with the marker: {line}"
+        );
+    }
+
+    /// The home-scan-fallback scene (Wave U) saves the
+    /// same missing-audio seed as home-missing-audio
+    /// and then trims the saved file's top-level
+    /// `frames` key, so the panel's two readers
+    /// diverge on the one file by design — proven
+    /// through the panel's own readers, as in the
+    /// home-missing-audio pin. The scan's full parse
+    /// accepts the trimmed file (every `Project`
+    /// field is serde-defaulted — the hand-trimmed
+    /// file model.rs's Wave 11 E7 census exists for)
+    /// and reports it with the parse-time
+    /// missing-audio count and the defaulted frame
+    /// count; the light read refuses the same file
+    /// outright (it requires the `frames` key present
+    /// as an array); and the composed row line — the
+    /// panel state's own `metadata_for` feeding
+    /// `row_meta_line`, exactly the row builder's
+    /// call — is the scan's `meta_line` byte for byte
+    /// and closes with the marker. This is the state
+    /// behind layout fact 36. The row's INDEX is not
+    /// pinned here, for the home-missing-audio pin's
+    /// reason: the suite shares the real `./projects`
+    /// (the probe wipes it per invocation; the test
+    /// process does not), so row 0 is the probe's
+    /// fact, while the fallback line on the seeded
+    /// project's own row is this test's.
+    #[test]
+    fn home_scan_fallback_scene_seeds_a_row_whose_light_read_fails() {
+        let mut s = init();
+        scene_home_scan_fallback(&mut s);
+        assert_eq!(s.workspace, Workspace::Home);
+        assert!(s.home_panel.open, "the library is open");
+        assert_eq!(s.core.project.audio.len(), 1, "exactly one clip is planted");
+        let entries =
+            stykanimate_rs::projects::scan(&crate::rune_sec::home_panel::projects_dir());
+        let visible = crate::rune_sec::home_panel::visible_projects(&entries, "");
+        let info = visible
+            .iter()
+            .find(|info| info.name == "Trimmed Take")
+            .expect("the library lists the seeded project");
+        assert_eq!(
+            info.missing_audio,
+            Some(1),
+            "the scan's full parse counted the vanished clip"
+        );
+        assert_eq!(
+            info.frames, 0,
+            "the trimmed file's frames default to none in the scan"
+        );
+        assert_eq!(
+            info.figures, 1,
+            "the figure count is the saved file's real data"
+        );
+        // The trim removed exactly the one key.
+        let text = std::fs::read_to_string(&info.path).expect("the seeded file reads");
+        let value: serde_json::Value =
+            serde_json::from_str(&text).expect("the seeded file is JSON");
+        assert!(
+            value.get("frames").is_none(),
+            "the frames key was trimmed from the file"
+        );
+        assert!(
+            value.get("figures").is_some(),
+            "the figures key survives the trim"
+        );
+        assert!(
+            value.get("audio").is_some(),
+            "the audio key survives the trim"
+        );
+        // The light read refuses the same file the
+        // scan accepted — the divergence the scene
+        // exists for — through both of its entries:
+        // the free read and the panel state's cached
+        // accessor the row builder calls.
+        assert!(
+            crate::rune_sec::home_panel::project_metadata(&info.path).is_none(),
+            "the light read refuses the trimmed file"
+        );
+        let meta = s.home_panel.metadata_for(&info.path);
+        assert!(meta.is_none(), "the panel state's light read refuses it too");
+        let line = crate::rune_sec::home_panel::row_meta_line(info, meta);
+        assert_eq!(
+            line,
+            crate::rune_sec::home_panel::meta_line(info),
+            "the row renders the scan-fallback line"
+        );
+        assert!(
+            line.starts_with("1 figure · 0 frames"),
+            "the fallback line carries the scan's counts: {line}"
+        );
+        assert!(
+            line.ends_with("· 1 audio clip missing"),
+            "the fallback line closes with the scan marker: {line}"
         );
     }
 }

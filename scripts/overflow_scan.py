@@ -349,6 +349,22 @@ loops dump the new tree, the SCAN_SET entry is
 grep step this scan cannot make (the marker is
 element text; the scan reads only path/rect/key).
 
+Wave U maintenance (U12): U12 registered one new
+scene, `home-scan-fallback`, so the counts the T16
+note above recorded have moved again: the scan set
+now has 16 entries, all required and still no
+pending entries; `scenes()` lists 34 names, and the
+harness produces 37 tree dumps (the 34 default-size
+scene trees plus the same three 1280x720 variants).
+IA-U12-1 was applied in full: both headless.yml tree
+loops dump the new tree, the SCAN_SET entry is
+"required", and headless.yml carries the
+scan-fallback marker-text grep step beside the
+missing-audio one -- the fallback line's proof is
+its text (the marker plus the scan's defaulted
+"0 frames" count, the discriminator against the
+light-read line).
+
 Checks considered and NOT added (they would
 false-positive or judge what rects cannot show):
 
@@ -446,7 +462,10 @@ SCROLL_SEGMENTS = {"timeline"}
 # from the start -- IA-S2-1 landed its workflow dumps in
 # the same integration. The Home missing-audio tree
 # (Wave T) joined on the same terms -- IA-T12-1 landed
-# its workflow dumps in the same integration.
+# its workflow dumps in the same integration. The Home
+# scan-fallback tree (Wave U) joined on the same terms
+# again -- IA-U12-1 landed its workflow dumps in the
+# same integration.
 SCAN_SET = [
     ("tree-default.json", "required",
      "O-5 keyframe rows + O-6 wx-kind segments (P2); O-8 playback "
@@ -487,6 +506,11 @@ SCAN_SET = [
      "Home library open over a saved project whose audio file "
      "is missing — the row's meta line carries the missing-audio "
      "marker (Wave T, IA-T12-1)"),
+    ("tree-home-scan-fallback.json", "required",
+     "Home library open over a hand-trimmed project file (no "
+     "frames key) whose audio file is missing — the row's light "
+     "read refuses the file, so its meta line is the scan "
+     "fallback carrying the missing-audio marker (Wave U, IA-U12-1)"),
 ]
 
 
