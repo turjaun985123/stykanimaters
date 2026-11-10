@@ -12357,3 +12357,25 @@ schema-by-schema pass over all
 392 rows; neither is a defect,
 both are how the catalogue stays
 honest.
+
+**Wave AA CLOSED GREEN in CI round 3** (integration HEAD
+`3ef1207`; build 42808061488 — 4,317 tests, 0 failed;
+headless 42808095941 SUCCESS, transcripts verified:
+SUBTITLE CENSUS PASS, HOME THUMBNAIL PROBE PASS, MCP
+PROBE PASS; artifact 38 dumps, overflow scan CLEAN —
+the fifth consecutive CLEAN dispatch, AA3's channel
+marks rendering in the channel-planted scenes). Rounds
+1–2 failed only in compile/test targets: r1 E0027 (the
+opacity resolver's pattern missed the asset field), r2
+three exact-text pins for the .piv media notes, updated
+to IA-AA11-1's qualified copy. §6.21 (3) is settled by
+AB19's assembly: the `0d32fa8` docs-close pair was BOTH
+SUCCESS. Settled counts at the close: MCP 392, i18n
+695 ×28, element keys 1019 (floor), palette 135,
+scenes 35, SCAN_SET 19 required / 0 pending. Decisions
+taken at integration: IA-AA16-1 option C (`status_ready`
+reserved as kept-by-decision); IA-AA9-1 and bundle
+cancel's prerequisites stand as user rulings in the
+remainders. Wave AB (paying the catalogue's debts and
+the deferred board calls) was boarded before this
+close and launches on this HEAD.
