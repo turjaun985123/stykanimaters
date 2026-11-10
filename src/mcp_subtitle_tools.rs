@@ -67,8 +67,9 @@ use serde_json::{json, Value};
 // Argument helpers (the `mcp_tools` shapes, duplicated the
 // way this tree's MCP modules duplicate their small
 // helpers — same refusal sentences, including the Wave 11
-// finiteness rule: a JSON number like 1e999 parses to f64
-// infinity, and a finite f64 like 1e300 still casts to f32
+// finiteness rule: an overflowing JSON literal like 1e999
+// can surface as f64 infinity where the parser hands it
+// through, and a finite f64 like 1e300 still casts to f32
 // infinity; both must be refused).
 // ---------------------------------------------------------------------
 
@@ -742,16 +743,40 @@ mod tests {
             }),
         )
         .expect_err("an oversized colour refuses");
-        // A non-finite scale (1e999 parses to f64
-        // infinity): refused at parse, before the op.
-        let args: Value = serde_json::from_str(
+        // A finite f64 that overflows f32 (1e300 casts
+        // to f32 infinity): refused at parse, before the op.
+        let err = call(
+            "subtitle_set_style",
+            &mut core,
+            json!({
+                "position": "bottom",
+                "font_scale": 1e300,
+                "text_color": 16777215,
+                "box_color": 0,
+            }),
+        )
+        .expect_err("an f32-overflowing scale refuses");
+        assert_eq!(err, "argument 'font_scale' must be a finite number");
+        // An overflowing literal (1e999): if the JSON
+        // parser hands it through as f64 infinity, the
+        // handler must refuse it the same way; if the
+        // parser itself refuses the literal, the value can
+        // never reach a handler and there is nothing to
+        // prove (the draw_ops precedent).
+        if let Ok(args) = serde_json::from_str::<Value>(
             "{\"position\": \"bottom\", \"font_scale\": 1e999, \
              \"text_color\": 16777215, \"box_color\": 0}",
-        )
-        .unwrap();
-        let err = call("subtitle_set_style", &mut core, args)
-            .expect_err("a non-finite scale refuses");
-        assert_eq!(err, "argument 'font_scale' must be a finite number");
+        ) {
+            if args["font_scale"]
+                .as_f64()
+                .map(|f| !f.is_finite())
+                .unwrap_or(false)
+            {
+                let err = call("subtitle_set_style", &mut core, args)
+                    .expect_err("a non-finite scale refuses");
+                assert_eq!(err, "argument 'font_scale' must be a finite number");
+            }
+        }
         assert_eq!(core.project.subtitle_style, style_before);
         assert_eq!(core.undo_depth(), depth_before);
     }
