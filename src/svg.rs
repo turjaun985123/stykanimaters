@@ -184,8 +184,16 @@ pub fn write_frame_svg(project: &Project, frame: usize, path: &Path) -> std::io:
         let pos = evaluate(def, &poses[fi]);
         // Per-node bends at this frame (Wave 12, C1) — the same
         // source the rasterizer reads; empty when the project
-        // carries no bend data.
-        let bends = project.bends_at(frame as f32, fi);
+        // carries no bend data. Wave Y (P-7): with channels
+        // present the bends come from the channelled
+        // evaluation's own rows — seeded from `bends_at` and
+        // overridden by any Bend channel (graph.rs), so a
+        // bend channel is visible in the export; the
+        // no-channels path is `bends_at` verbatim, as before.
+        let bends = match &channelled {
+            Some(r) => r.bends.get(fi).cloned().unwrap_or_default(),
+            None => project.bends_at(frame as f32, fi),
+        };
         // Figure (layer) opacity, clamped once per figure. The
         // rasterizer composes it multiplicatively into every
         // segment's alpha (export.rs: style.opacity *
@@ -220,27 +228,52 @@ pub fn write_frame_svg(project: &Project, frame: usize, path: &Path) -> std::io:
                 // opacity is exactly this product (export.rs).
                 let seg_opacity = style.opacity * fig_opacity;
                 // Pieces: an unbent segment is a single piece;
-                // a bent one is two pieces through the arc
-                // midpoint — the rasterizer's construction
-                // (export.rs, wave 7): the mid width and colour
-                // are the t = 0.5 interpolations of the whole
-                // segment's, and the first piece's cap is Round
-                // so the arc joint stays smooth whatever the
-                // segment's own cap is. Each piece is (near
-                // point, far point, near half-width, far
-                // half-width, cap, near colour, far colour).
+                // a bent one is four pieces through the arc's
+                // quarter points — the piece generator's
+                // construction (paint::styled_segment_pieces,
+                // Wave Y P-7; the rasterizer chains the same
+                // generator): the joints are bend_mid at
+                // t = 0.5 and its recursion at half the bend
+                // for t = 0.25 / 0.75, the widths and colours
+                // are the whole-segment interpolations at
+                // those t values, and every piece but the
+                // last has a Round cap so the arc joints stay
+                // smooth whatever the segment's own cap is.
+                // Each piece is (near point, far point, near
+                // half-width, far half-width, cap, near
+                // colour, far colour).
                 let bend = bends.get(i).copied().unwrap_or(0.0);
                 let color_far = style.color2.unwrap_or(color_hex);
                 let pieces: Vec<(V2, V2, f32, f32, CapKind, u32, u32)> = if bend == 0.0 {
                     vec![(a, b, half_near, half_far, style.cap, color_hex, color_far)]
                 } else {
-                    let mid = view(crate::model::bend_mid(pos[par], pos[i], bend));
-                    let half_mid = (half_near + half_far) / 2.0;
-                    let color_mid = crate::style::lerp_color(color_hex, color_far, 0.5);
-                    vec![
-                        (a, mid, half_near, half_mid, CapKind::Round, color_hex, color_mid),
-                        (mid, b, half_mid, half_far, style.cap, color_mid, color_far),
-                    ]
+                    let mid_s = crate::model::bend_mid(pos[par], pos[i], bend);
+                    let joints = [
+                        a,
+                        view(crate::model::bend_mid(pos[par], mid_s, bend * 0.5)),
+                        view(mid_s),
+                        view(crate::model::bend_mid(mid_s, pos[i], bend * 0.5)),
+                        b,
+                    ];
+                    let half_at =
+                        |t: f32| half_near + (half_far - half_near) * t;
+                    let color_at =
+                        |t: f32| crate::style::lerp_color(color_hex, color_far, t);
+                    (0..4)
+                        .map(|k| {
+                            let t0 = k as f32 / 4.0;
+                            let t1 = (k + 1) as f32 / 4.0;
+                            (
+                                joints[k],
+                                joints[k + 1],
+                                half_at(t0),
+                                half_at(t1),
+                                if k < 3 { CapKind::Round } else { style.cap },
+                                color_at(t0),
+                                color_at(t1),
+                            )
+                        })
+                        .collect()
                 };
                 for (pa, pb, p_near, p_far, p_cap, p_col_near, p_col_far) in pieces {
                     if style.color2.is_some() || p_far != p_near {
@@ -797,16 +830,17 @@ fn matrix_num(v: f32) -> String {
 /// alpha below 1 (A6 §3a's figure × style product) rides as
 /// an `opacity` attribute on the `<use>`.
 ///
-/// Bent segment images (Wave X, X4): an item whose
-/// `src_rect` is not the whole image is one half of a bent
-/// segment's split quad. Its matrix is the same affine with
+/// Bent segment images (Wave X, X4; strip warp Wave Y,
+/// Y9): an item whose `src_rect` is not the whole image is
+/// one strip of a bent segment's warped quad (a half at
+/// K = 2). Its matrix is the same affine with
 /// the source rect folded in (the image's pixel space is
 /// first mapped so the rect spans the unit square the quad
 /// edges then carry), and the `<use>` is wrapped in a
 /// `<g clip-path>` whose defs-side `<clipPath>` polygon is
 /// the item's own view-space quad — the affine alone would
-/// paint the rest of the image outside the quad. Each half
-/// emits its own `<use>`, so a bent image is two uses over
+/// paint the rest of the image outside the quad. Each strip
+/// emits its own `<use>`, so a bent image is K uses over
 /// one shared asset def. Full-rect items keep the bare
 /// `<use>` emission byte for byte. Honest divergences
 /// from the raster, by construction: the raster stamps text
@@ -908,8 +942,8 @@ fn append_media(
                         opacity
                     );
                 } else {
-                    // Wave X (X4): one half of a bent
-                    // segment's split quad. The matrix folds
+                    // Wave X (X4): one strip of a bent
+                    // segment's warped quad. The matrix folds
                     // the source rect in: an image point p
                     // lands at v0 + ((p.x/w - u0)/du) * e1 +
                     // ((p.y/h - v0)/dv) * e2, so the rect —
@@ -1743,7 +1777,11 @@ mod tests {
     fn svg_bent_segment_routes_through_the_bend_midpoint() {
         // Wave 12 (C1): bent segments used to be drawn as one
         // straight line parent->child; the rasterizer draws
-        // two pieces through model::bend_mid (export.rs).
+        // pieces through model::bend_mid (export.rs).
+        // Wave Y (P-7): the chain is now FOUR pieces through
+        // the arc's quarter points — the same joints
+        // paint::styled_segment_pieces returns for this
+        // segment, asserted below from both sides.
         let mut project = Project::new_demo();
         project.set_camera_key(0, 480.0, 360.0, 1.0);
         let node_counts: Vec<usize> = project
@@ -1761,6 +1799,8 @@ mod tests {
         let par = project.figures[0].def.nodes[2].parent.unwrap();
         let (a, b) = (pos[par], pos[2]);
         let mid = crate::model::bend_mid(a, b, 0.7);
+        let q1 = crate::model::bend_mid(a, mid, 0.35);
+        let q3 = crate::model::bend_mid(mid, b, 0.35);
         // The bend actually displaces the midpoint off the
         // chord, so the routing assertions below can bite.
         assert_ne!(
@@ -1768,15 +1808,44 @@ mod tests {
             format!("{:.1},{:.1}", (a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0),
             "test bend must displace the midpoint"
         );
-        // Piece 1 ends at bend_mid; piece 2 starts there.
+        // Piece 2 ends at bend_mid; piece 3 starts there.
         assert!(
             text.contains(&format!("x2=\"{:.1}\" y2=\"{:.1}\"", mid[0], mid[1])),
-            "first bent piece does not end at bend_mid:\n{text}"
+            "second bent piece does not end at bend_mid:\n{text}"
         );
         assert!(
             text.contains(&format!("x1=\"{:.1}\" y1=\"{:.1}\"", mid[0], mid[1])),
-            "second bent piece does not start at bend_mid:\n{text}"
+            "third bent piece does not start at bend_mid:\n{text}"
         );
+        // Cross-surface parity (Wave Y, P-7): the generator
+        // the stage and rasterizer use returns exactly four
+        // pieces for this segment, with joints a, q1, mid,
+        // q3, b — and the SVG text carries each of the four
+        // as a line with those exact endpoints.
+        let node = &project.figures[0].def.nodes[2];
+        let gen = crate::paint::styled_segment_pieces(
+            a,
+            b,
+            0.7,
+            node.thickness,
+            &node.style,
+            node.color.unwrap_or(project.figures[0].color),
+        );
+        assert_eq!(gen.len(), 4, "generator piece count for the bent segment");
+        let joints = [a, q1, mid, q3, b];
+        for (k, w) in joints.windows(2).enumerate() {
+            assert_eq!(gen[k].a, w[0], "generator joint {k} (near)");
+            assert_eq!(gen[k].b, w[1], "generator joint {k} (far)");
+            assert!(
+                text.contains(&format!(
+                    "x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\"",
+                    w[0][0], w[0][1], w[1][0], w[1][1]
+                )),
+                "svg piece {k} does not run {:?} -> {:?}:\n{text}",
+                w[0],
+                w[1]
+            );
+        }
         // The straight parent->child line for this segment is
         // gone.
         assert!(
@@ -1785,6 +1854,46 @@ mod tests {
                 a[0], a[1], b[0], b[1]
             )),
             "bent segment still drawn straight:\n{text}"
+        );
+    }
+
+    #[test]
+    fn svg_bend_channel_routes_the_segment_without_frame_bends() {
+        // Wave Y (P-7): the writer's bends come from the
+        // channelled evaluation's rows (Y1's core), so a Bend
+        // channel ALONE — no Frame.bends authored anywhere —
+        // bends the exported segment through the same arc
+        // midpoint. Before the routing, this export was
+        // straight: the writer read bends_at, which knows
+        // nothing of channels.
+        let mut project = Project::new_demo();
+        project.set_camera_key(0, 480.0, 360.0, 1.0);
+        project.channels.push(crate::graph::Channel {
+            figure: 0,
+            target: crate::graph::ChannelTarget::Bend(2),
+            keys: vec![crate::graph::Key::flat(0.0, 0.7)],
+        });
+        let dir = std::path::Path::new("/tmp/styk-svg-bend-channel-test");
+        export_svg(&project, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        // Bend channels are render-only: the evaluated
+        // positions are the raw poses, exactly as the
+        // frame-bend test above computes them.
+        let poses = project.poses_at(0.0);
+        let pos = evaluate(&project.figures[0].def, &poses[0]);
+        let par = project.figures[0].def.nodes[2].parent.unwrap();
+        let (a, b) = (pos[par], pos[2]);
+        let mid = crate::model::bend_mid(a, b, 0.7);
+        assert!(
+            text.contains(&format!("x2=\"{:.1}\" y2=\"{:.1}\"", mid[0], mid[1])),
+            "bend channel does not reach the svg segment:\n{text}"
+        );
+        assert!(
+            !text.contains(&format!(
+                "x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\"",
+                a[0], a[1], b[0], b[1]
+            )),
+            "bend-channel segment still drawn straight:\n{text}"
         );
     }
 
@@ -2072,7 +2181,7 @@ mod tests {
     fn svg_media_segment_image_carries_the_opacity_product() {
         let mut project = media_project();
         project.figures[0].def.nodes[2].media =
-            Some(crate::model::SegmentMedia::Image { asset: 0 });
+            Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
         project.figures[0].opacity = 0.5;
         let dir = std::path::Path::new("/tmp/styk-svg-media-opacity-test");
         export_svg(&project, dir).unwrap();
@@ -2095,7 +2204,7 @@ mod tests {
         // over a single shared asset def — the unbent
         // single-use form is gone for this segment.
         let mut project = clip_media_project(
-            (Some(crate::model::SegmentMedia::Image { asset: 0 }), None),
+            (Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }), None),
             (None, None),
         );
         project.frames[0].bends = vec![vec![0.0, 0.9, 0.0]];
@@ -2153,6 +2262,50 @@ mod tests {
             !text.contains("<use href=\"#asset0\" transform=\"matrix(25 0 0 25 100.0 75.0)\"/>"),
             "bent segment still emitted as one straight use:\n{text}"
         );
+    }
+
+    #[test]
+    fn svg_bent_segment_image_emits_one_clipped_use_per_strip() {
+        // Wave Y (Y9, GAP P-11): at bend 2.0 the funnel warps
+        // the arm's image into K = 4 strips; this writer emits
+        // one clipped <use> per strip over the one shared
+        // asset def, so the SVG strip count equals the
+        // funnel's item count for the same project — the
+        // surfaces share the stream and cannot drift.
+        let mut project = clip_media_project(
+            (Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }), None),
+            (None, None),
+        );
+        project.frames[0].bends = vec![vec![0.0, 2.0, 0.0]];
+        let funnel_count = crate::media::media_items(&project, 0.0)
+            .iter()
+            .filter(|i| matches!(i, crate::media::MediaItem::Image { .. }))
+            .count();
+        assert_eq!(funnel_count, 4, "bend 2.0 warps into 4 funnel strips");
+        let dir = std::path::Path::new("/tmp/styk-svg-strip-media-test");
+        export_svg(&project, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        assert_eq!(
+            text.matches("<image id=").count(),
+            1,
+            "the strips share one asset def:\n{text}"
+        );
+        assert_eq!(
+            text.matches("<use href=\"#asset0\"").count(),
+            funnel_count,
+            "one <use> per funnel strip:\n{text}"
+        );
+        assert_eq!(
+            text.matches("<g clip-path=\"url(#mclip").count(),
+            funnel_count,
+            "each strip use is clipped to its quad:\n{text}"
+        );
+        for n in 0..funnel_count {
+            assert!(
+                text.contains(&format!("<clipPath id=\"mclip{n}\">")),
+                "strip {n} has its own clip def:\n{text}"
+            );
+        }
     }
 
     #[test]
@@ -2592,7 +2745,7 @@ mod tests {
         // first corner.
         let mut project = clip_media_project(
             (None, None),
-            (Some(crate::model::SegmentMedia::Image { asset: 0 }), None),
+            (Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }), None),
         );
         project.strokes.push(crate::model::Stroke {
             frame: 0,
@@ -2650,7 +2803,7 @@ mod tests {
         // carrier.
         let mut project = clip_media_project(
             (None, None),
-            (Some(crate::model::SegmentMedia::Image { asset: 0 }), None),
+            (Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }), None),
         );
         project.figures[0].opacity = 0.5;
         project.figures[0].def.nodes[1].style.opacity = 0.9;

@@ -507,8 +507,16 @@ fn collect_frame_art(
         };
         let pos = evaluate(def, pose);
         // Per-node bends at this time (wave 7); empty when the
-        // project carries no bend data.
-        let bends = project.bends_at(frame_f, fi);
+        // project carries no bend data. Wave Y (P-7): with
+        // channels present the bends come from the channelled
+        // evaluation's own rows — seeded from `bends_at` and
+        // overridden by any Bend channel (graph.rs), so a
+        // bend channel is visible in the render; the
+        // no-channels path is `bends_at` verbatim, as before.
+        let bends = match &channelled {
+            Some(r) => r.bends.get(fi).cloned().unwrap_or_default(),
+            None => project.bends_at(frame_f, fi),
+        };
         for (i, node) in fig.def.nodes.iter().enumerate() {
             let color_hex = node.color.unwrap_or(fig.color);
             // Heads/rings/polys (Wave 13, S10): the node's own
@@ -6120,6 +6128,177 @@ pub fn export_apng_range_scaled(
     encode_apng_scaled(project, &times, path, scale)
 }
 
+/// Encode the given frame times as an alpha APNG (animated
+/// PNG) at the project fps, looping forever (Wave Y, Y13):
+/// the transparent-background counterpart of [`encode_apng`],
+/// riding X8's alpha funnel — every frame is a
+/// [`render_frame_at_alpha`] render whose RGBA pixels (no
+/// background fill; coverage alpha on antialiased edges) feed
+/// the same `png`-crate APNG writer directly. The opaque
+/// encoder above is untouched, so its output stays
+/// byte-identical. Same empty-`times` contract: the parent
+/// directory is created but no file is written, returning
+/// `Ok(0)`.
+fn encode_apng_alpha(project: &Project, times: &[f32], path: &Path) -> std::io::Result<usize> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    if times.is_empty() {
+        return Ok(0);
+    }
+    let first = render_frame_at_alpha(project, times[0]);
+    let (w, h) = (first.width(), first.height());
+    let file = std::fs::File::create(path)?;
+    let mut encoder = png::Encoder::new(file, w, h);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .set_animated(times.len() as u32, 0) // 0 plays = loop forever
+        .map_err(std::io::Error::other)?;
+    // Frame delay 1/fps, expressed exactly as 100 / (fps * 100).
+    let den = (project.fps.max(1.0) * 100.0).round().clamp(1.0, u16::MAX as f32) as u16;
+    encoder
+        .set_frame_delay(100, den)
+        .map_err(std::io::Error::other)?;
+    let mut writer = encoder.write_header().map_err(std::io::Error::other)?;
+    writer
+        .write_image_data(first.as_raw())
+        .map_err(std::io::Error::other)?;
+    for t in &times[1..] {
+        let img = render_frame_at_alpha(project, *t);
+        writer
+            .write_image_data(img.as_raw())
+            .map_err(std::io::Error::other)?;
+    }
+    writer.finish().map_err(std::io::Error::other)?;
+    Ok(times.len())
+}
+
+/// Encode the given frame times as an alpha APNG at the
+/// project fps, looping forever, at `scale` times the stage
+/// size (Wave Y, Y13): the scaled counterpart of
+/// [`encode_apng_alpha`], rendering every sample through
+/// [`render_frame_at_alpha_scaled`] — a true re-render at the
+/// scaled size, never a resample of the 1.0 raster. Same
+/// empty-`times` contract as [`encode_apng_alpha`].
+fn encode_apng_alpha_scaled(
+    project: &Project,
+    times: &[f32],
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    if times.is_empty() {
+        return Ok(0);
+    }
+    let first = render_frame_at_alpha_scaled(project, times[0], scale)?;
+    let (w, h) = (first.width(), first.height());
+    let file = std::fs::File::create(path)?;
+    let mut encoder = png::Encoder::new(file, w, h);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .set_animated(times.len() as u32, 0) // 0 plays = loop forever
+        .map_err(std::io::Error::other)?;
+    // Frame delay 1/fps, expressed exactly as 100 / (fps * 100).
+    let den = (project.fps.max(1.0) * 100.0).round().clamp(1.0, u16::MAX as f32) as u16;
+    encoder
+        .set_frame_delay(100, den)
+        .map_err(std::io::Error::other)?;
+    let mut writer = encoder.write_header().map_err(std::io::Error::other)?;
+    writer
+        .write_image_data(first.as_raw())
+        .map_err(std::io::Error::other)?;
+    for t in &times[1..] {
+        let img = render_frame_at_alpha_scaled(project, *t, scale)?;
+        writer
+            .write_image_data(img.as_raw())
+            .map_err(std::io::Error::other)?;
+    }
+    writer.finish().map_err(std::io::Error::other)?;
+    Ok(times.len())
+}
+
+/// Export the animation as an alpha APNG (animated PNG) at
+/// the project fps, looping forever (Wave Y, Y13) — the
+/// transparent-background counterpart of [`export_apng`]:
+/// frames are transparent where nothing covers the pixel,
+/// with per-pixel coverage alpha instead of the project
+/// background colour.
+pub fn export_apng_alpha(project: &Project, path: &Path) -> std::io::Result<usize> {
+    let times = sample_times(project);
+    encode_apng_alpha(project, &times, path)
+}
+
+/// Export the authored frames `from..=to` (inclusive, clamped
+/// to the timeline) as an alpha APNG at the project fps,
+/// looping forever (Wave Y, Y13) — the alpha counterpart of
+/// [`export_apng_range`], with the same range rules: returns
+/// the number of APNG frames written; an empty or inverted
+/// range is an error.
+pub fn export_apng_alpha_range(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+) -> std::io::Result<usize> {
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let times = sample_times_range(project, from, to);
+    encode_apng_alpha(project, &times, path)
+}
+
+/// Export the animation as an alpha APNG at the project fps,
+/// looping forever, at `scale` times the stage size (Wave Y,
+/// Y13) — the scaled counterpart of [`export_apng_alpha`].
+/// Every frame is a true re-render at the scaled size via
+/// [`render_frame_at_alpha_scaled`]. At exactly 1.0 this
+/// delegates to [`export_apng_alpha`], so the output is
+/// byte-identical within the alpha family. An invalid scale
+/// is refused before anything is written.
+pub fn export_apng_alpha_scaled(
+    project: &Project,
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    if scale == 1.0 {
+        return export_apng_alpha(project, path);
+    }
+    let times = sample_times(project);
+    encode_apng_alpha_scaled(project, &times, path, scale)
+}
+
+/// Export the authored frames `from..=to` (inclusive, clamped
+/// to the timeline) as an alpha APNG at the project fps,
+/// looping forever, at `scale` times the stage size (Wave Y,
+/// Y13) — the scaled counterpart of [`export_apng_alpha_range`],
+/// with the same frame sampling and range rules. At exactly
+/// 1.0 this delegates to [`export_apng_alpha_range`], so the
+/// output is byte-identical within the alpha family. An
+/// invalid scale is refused before the range is even clamped,
+/// so a refused call writes nothing.
+pub fn export_apng_alpha_range_scaled(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    if scale == 1.0 {
+        return export_apng_alpha_range(project, from, to, path);
+    }
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let times = sample_times_range(project, from, to);
+    encode_apng_alpha_scaled(project, &times, path, scale)
+}
+
 /// Columns and thumbnail width used by the contact-sheet file
 /// exports: the same defaults the MCP `render_contact_sheet`
 /// tool uses (4 columns, 240 px thumbnails).
@@ -7758,7 +7937,7 @@ mod media_integration_tests {
         }
         project.assets.push(crate::model::ImageAsset { name: "g.png".into(), png });
         project.figures[0].def.nodes[1].media =
-            Some(crate::model::SegmentMedia::Image { asset: 0 });
+            Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
         let with = render_frame_at(&project, 0.0);
         assert_eq!((with.width(), with.height()), (960, 720));
         project.figures[0].def.nodes[1].media = None;
@@ -7794,7 +7973,7 @@ mod media_integration_tests {
         }
         project.assets.push(crate::model::ImageAsset { name: "g.png".into(), png });
         let mut clip_def = project.figures[0].def.clone();
-        clip_def.nodes[1].media = Some(crate::model::SegmentMedia::Image { asset: 0 });
+        clip_def.nodes[1].media = Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
         let pose0 = project.frames[0].poses[0].clone();
         project.clips = vec![crate::model::ClipDef {
             name: "clip".into(),
@@ -10290,5 +10469,241 @@ mod wave_p_subtitle_burn_in_tests {
             0,
             "a top-anchored cue paints nothing in the bottom half"
         );
+    }
+}
+
+#[cfg(test)]
+mod alpha_apng_tests {
+    use super::{
+        export_apng, export_apng_alpha, export_apng_alpha_range, export_apng_alpha_range_scaled,
+        export_apng_alpha_scaled,
+    };
+    use crate::model::Project;
+    use std::path::{Path, PathBuf};
+
+    /// The 5-frame demo project on a small stage so renders
+    /// stay fast, with every pose re-rooted at the tiny centre
+    /// (alpha_export_tests' fixture idiom: at the demo's native
+    /// root the figure stands hundreds of units off a 96x72
+    /// stage and nothing renders, which would defeat these
+    /// pins' absolute-coverage premises). fps is pinned to
+    /// 24.0 — the APNG frame delay derives from it.
+    fn tiny_project() -> Project {
+        let mut project = Project::new_demo();
+        project.stage = [96.0, 72.0];
+        project.fps = 24.0;
+        for frame in &mut project.frames {
+            for pose in &mut frame.poses {
+                pose.root = [48.0, 36.0];
+            }
+        }
+        project
+    }
+
+    fn temp_file(tag: &str, ext: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "styk-alpha-apng-{tag}-{}.{ext}",
+            std::process::id()
+        ))
+    }
+
+    /// Decode every frame of a written APNG through the `png`
+    /// crate's reader (the encoder writes full-canvas frames,
+    /// so each decoded frame is the displayed frame). Panics
+    /// on a malformed file — these pins only read files the
+    /// exports just wrote.
+    fn decode_apng_frames(path: &Path) -> Vec<image::RgbaImage> {
+        let file = std::fs::File::open(path).unwrap();
+        let decoder = png::Decoder::new(std::io::BufReader::new(file));
+        let mut reader = decoder.read_info().unwrap();
+        let (w, h) = (reader.info().width, reader.info().height);
+        let mut frames = Vec::new();
+        loop {
+            let mut buf = vec![0u8; reader.output_buffer_size()];
+            match reader.next_frame(&mut buf) {
+                Ok(info) => {
+                    buf.truncate(info.buffer_size());
+                    frames.push(
+                        image::RgbaImage::from_raw(info.width, info.height, buf)
+                            .expect("decoded frame size matches its buffer"),
+                    );
+                }
+                Err(_) => break,
+            }
+        }
+        assert!(!frames.is_empty(), "APNG at {} decoded no frames", path.display());
+        assert!(
+            frames.iter().all(|f| f.dimensions() == (w, h)),
+            "every APNG frame is the full canvas"
+        );
+        frames
+    }
+
+    /// (any fully opaque, any fully transparent, any partial)
+    /// alpha over one decoded frame — alpha_export_tests'
+    /// statistic, applied to decoded APNG frames.
+    fn alpha_stats(img: &image::RgbaImage) -> (bool, bool, bool) {
+        let mut any_opaque = false;
+        let mut any_clear = false;
+        let mut any_partial = false;
+        for p in img.pixels() {
+            match p[3] {
+                255 => any_opaque = true,
+                0 => any_clear = true,
+                _ => any_partial = true,
+            }
+        }
+        (any_opaque, any_clear, any_partial)
+    }
+
+    #[test]
+    fn alpha_apng_frames_carry_coverage_alpha() {
+        let project = tiny_project();
+        let path = temp_file("full", "png");
+        let n = export_apng_alpha(&project, &path).unwrap();
+        assert_eq!(n, project.frames.len());
+        let frames = decode_apng_frames(&path);
+        assert_eq!(frames.len(), n, "one decoded frame per written frame");
+        let (opaque, clear, partial) = alpha_stats(&frames[0]);
+        assert!(opaque, "figure strokes cover some pixels fully");
+        assert!(clear, "the background is transparent, not the project colour");
+        assert!(
+            partial,
+            "supersampled antialiasing leaves partial-coverage edge pixels"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn alpha_apng_range_writes_exactly_the_sub_range_frames() {
+        let project = tiny_project();
+        let path = temp_file("range", "png");
+        let n = export_apng_alpha_range(&project, 1, 3, &path).unwrap();
+        assert_eq!(n, 3);
+        let frames = decode_apng_frames(&path);
+        assert_eq!(frames.len(), 3, "the range is exactly frames 1..=3");
+        let (opaque, clear, _) = alpha_stats(&frames[0]);
+        assert!(opaque && clear, "ranged alpha frames carry coverage alpha too");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn alpha_apng_empty_stage_is_fully_transparent() {
+        let mut project = tiny_project();
+        project.figures.clear();
+        project.strokes.clear();
+        project.fx_clips.clear();
+        project.particles.clear();
+        project.weather = None;
+        project.sprites.clear();
+        project.texts.clear();
+        project.subtitles.clear();
+        let path = temp_file("empty-stage", "png");
+        let n = export_apng_alpha(&project, &path).unwrap();
+        assert_eq!(n, project.frames.len());
+        let frames = decode_apng_frames(&path);
+        assert!(
+            frames.iter().all(|f| f.pixels().all(|p| p[3] == 0)),
+            "a frame with no drawables is transparent everywhere, in every frame"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn alpha_apng_scaled_doubles_dimensions_and_keeps_alpha() {
+        let project = tiny_project();
+        let path = temp_file("scaled", "png");
+        let n = export_apng_alpha_scaled(&project, &path, 2.0).unwrap();
+        assert_eq!(n, project.frames.len());
+        let frames = decode_apng_frames(&path);
+        assert_eq!(
+            frames[0].dimensions(),
+            (192, 144),
+            "2.0x APNG frame size (a true re-render, not an upscale)"
+        );
+        let (opaque, clear, _) = alpha_stats(&frames[0]);
+        assert!(opaque && clear, "scaled alpha frames still carry coverage alpha");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn alpha_apng_scale_one_delegates_byte_identically() {
+        // The alpha family's own 1.0 contract, mirroring the
+        // opaque family's trio pin: the scaled and ranged
+        // entries at exactly 1.0 write the unscaled bytes.
+        let project = tiny_project();
+        let plain = temp_file("one-plain", "png");
+        let scaled = temp_file("one-scaled", "png");
+        let ranged = temp_file("one-ranged", "png");
+        export_apng_alpha(&project, &plain).unwrap();
+        export_apng_alpha_scaled(&project, &scaled, 1.0).unwrap();
+        export_apng_alpha_range_scaled(&project, 0, 4, &ranged, 1.0).unwrap();
+        let plain_bytes = std::fs::read(&plain).unwrap();
+        assert_eq!(plain_bytes, std::fs::read(&scaled).unwrap(), "alpha APNG 1.0 bytes");
+        assert_eq!(
+            plain_bytes,
+            std::fs::read(&ranged).unwrap(),
+            "alpha APNG range 1.0 bytes"
+        );
+        for p in [&plain, &scaled, &ranged] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn alpha_apng_invalid_scale_refused_before_any_write() {
+        let project = tiny_project();
+        for bad in [0.0f32, -1.0, f32::NAN, f32::INFINITY] {
+            let path = temp_file("bad", "png");
+            let _ = std::fs::remove_file(&path);
+            assert!(
+                export_apng_alpha_scaled(&project, &path, bad).is_err(),
+                "scale {bad} must be refused"
+            );
+            assert!(
+                export_apng_alpha_range_scaled(&project, 0, 4, &path, bad).is_err(),
+                "ranged scale {bad} must be refused"
+            );
+            assert!(!path.exists(), "refused alpha APNG export created a file (scale {bad})");
+        }
+    }
+
+    #[test]
+    fn alpha_apng_empty_project_writes_no_file() {
+        // The encoders' empty-times contract, at the public
+        // entry: Ok(0), the parent directory exists, no file.
+        let mut project = tiny_project();
+        project.frames.clear();
+        let path = temp_file("no-frames", "png");
+        let _ = std::fs::remove_file(&path);
+        let n = export_apng_alpha(&project, &path).unwrap();
+        assert_eq!(n, 0);
+        assert!(!path.exists(), "an empty alpha APNG export writes no file");
+    }
+
+    #[test]
+    fn opaque_apng_stays_fully_opaque_and_differs_from_alpha() {
+        // The opaque family's guard rail, expressible in-tree:
+        // its encoders are untouched by this slice, its decoded
+        // frames stay alpha-255 everywhere (the RGBA conversion
+        // it has always done), and its bytes differ from the
+        // alpha family's for the same project.
+        let project = tiny_project();
+        let opaque_path = temp_file("opaque", "png");
+        let alpha_path = temp_file("alpha", "png");
+        export_apng(&project, &opaque_path).unwrap();
+        export_apng_alpha(&project, &alpha_path).unwrap();
+        let frames = decode_apng_frames(&opaque_path);
+        assert!(
+            frames.iter().all(|f| f.pixels().all(|p| p[3] == 255)),
+            "opaque APNG frames carry no transparency"
+        );
+        assert_ne!(
+            std::fs::read(&opaque_path).unwrap(),
+            std::fs::read(&alpha_path).unwrap(),
+            "the alpha family's bytes differ from the opaque family's"
+        );
+        let _ = std::fs::remove_file(&opaque_path);
+        let _ = std::fs::remove_file(&alpha_path);
     }
 }

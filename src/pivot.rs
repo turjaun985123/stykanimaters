@@ -2518,7 +2518,7 @@ fn write_figure_v5(
     let mut table: Vec<usize> = Vec::new();
     let mut seg_table_idx: Vec<Option<usize>> = vec![None; def.nodes.len()];
     for (i, node) in def.nodes.iter().enumerate().skip(1) {
-        if let Some(SegmentMedia::Image { asset }) = node.media {
+        if let Some(SegmentMedia::Image { asset, .. }) = node.media {
             if asset < assets.len() {
                 seg_table_idx[i] = Some(match table.iter().position(|&a| a == asset) {
                     Some(p) => p,
@@ -2948,7 +2948,7 @@ mod tests {
             png: test_png(4, 2),
         });
         project.figures[0].def.nodes[3].media =
-            Some(SegmentMedia::Image { asset: 0 });
+            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
         project.figures[0].def.nodes[5].media = Some(SegmentMedia::Text {
             content: "HI".into(),
             size: 25.0,

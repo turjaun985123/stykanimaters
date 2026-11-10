@@ -750,12 +750,21 @@ pub struct StylePiece {
 ///   → `color2` along the same parameter, via
 ///   `style::lerp_color` (the exporters' own interpolation);
 ///   `None` keeps every piece at `color`.
-/// * A nonzero `bend` splits the segment at
-///   `model::bend_mid(from, to, bend)` — that point is a piece
-///   boundary verbatim — and each half is then treated as its
-///   own span for subdivision; the width/colour parameter does
-///   NOT restart at the split, matching the exporter, whose
-///   mid width/colour are the whole-segment lerp at t = 0.5.
+/// * A nonzero `bend` splits the segment at the arc's
+///   quarter points — `model::bend_mid(from, to, bend)` at
+///   t = 0.5 and the quarter points `bend_mid(from, mid,
+///   bend/2)` / `bend_mid(mid, to, bend/2)` at t = 0.25 /
+///   0.75 (a sub-arc of a circular arc lies on the same
+///   circle, so the recursion samples the one arc) — those
+///   points are piece boundaries verbatim, and each quarter
+///   is then treated as its own span for subdivision; the
+///   width/colour parameter does NOT restart at the splits,
+///   matching the exporter, whose mid width/colour are the
+///   whole-segment lerp at t = 0.5. (Wave Y, P-7: the arc
+///   was two pieces through the midpoint before; four
+///   quarters is the same construction at finer resolution,
+///   and svg.rs builds the identical joints so the surfaces
+///   cannot drift.)
 /// * `CapKind::Square` extends the FINAL piece's `b` by half
 ///   that piece's width along the final piece's own direction
 ///   (for an unbent segment, the segment direction). Only the
@@ -815,15 +824,30 @@ pub fn styled_segment_pieces(
     };
     let far_color = style.color2.unwrap_or(color);
     // Spans as (start, end, global t at start, global t at
-    // end): one span, or two split at the bend midpoint with
-    // the lerp parameter running continuously across the join.
-    let spans: [(V2, V2, f32, f32); 2] = if bend != 0.0 {
+    // end): one span, or four split at the bend arc's quarter
+    // points with the lerp parameter running continuously
+    // across the joins. The quarter points come from
+    // bend_mid itself: the arc midpoint at half the bend is
+    // the quarter point of the whole arc (same circle).
+    let spans: [(V2, V2, f32, f32); 4] = if bend != 0.0 {
         let mid = crate::model::bend_mid(from, to, bend);
-        [(from, mid, 0.0, 0.5), (mid, to, 0.5, 1.0)]
+        let q1 = crate::model::bend_mid(from, mid, bend * 0.5);
+        let q3 = crate::model::bend_mid(mid, to, bend * 0.5);
+        [
+            (from, q1, 0.0, 0.25),
+            (q1, mid, 0.25, 0.5),
+            (mid, q3, 0.5, 0.75),
+            (q3, to, 0.75, 1.0),
+        ]
     } else {
-        [(from, to, 0.0, 1.0), (to, to, 1.0, 1.0)]
+        [
+            (from, to, 0.0, 1.0),
+            (to, to, 1.0, 1.0),
+            (to, to, 1.0, 1.0),
+            (to, to, 1.0, 1.0),
+        ]
     };
-    let span_count = if bend != 0.0 { 2 } else { 1 };
+    let span_count = if bend != 0.0 { 4 } else { 1 };
     let varying = far_width != thickness || style.color2.is_some();
     let subdiv = if varying { 4 } else { 1 };
     let mut pieces: Vec<StylePiece> = Vec::with_capacity(span_count * subdiv);
@@ -3189,7 +3213,13 @@ mod stroke_dabs_tests {
     }
 
     #[test]
-    fn styled_segment_bend_splits_exactly_at_bend_mid() {
+    fn styled_segment_bend_arc_is_four_pieces_through_bend_mid() {
+        // Wave Y (P-7): the bent arc is four pieces through
+        // the arc's quarter points (was two through the
+        // midpoint). The joints are bend_mid and its own
+        // recursion at half the bend — the same points
+        // svg.rs emits for this segment (the parity pin
+        // there asserts the shared joints from its side).
         let (from, to) = ([100.0, 150.0], [300.0, 150.0]);
         let pieces = styled_segment_pieces(
             from,
@@ -3199,14 +3229,52 @@ mod stroke_dabs_tests {
             &NodeStyle::default(),
             0x00FF00,
         );
-        assert_eq!(pieces.len(), 2, "one piece per half for a flat solid style");
+        assert_eq!(pieces.len(), 4, "one piece per arc quarter for a flat solid style");
         let mid = crate::model::bend_mid(from, to, 0.7);
+        let q1 = crate::model::bend_mid(from, mid, 0.35);
+        let q3 = crate::model::bend_mid(mid, to, 0.35);
         assert_ne!(mid, [200.0, 150.0], "the bend actually bulges off the chord");
+        assert_ne!(q1, [150.0, 150.0], "the quarter point bulges too");
+        // The chain runs from -> q1 -> mid -> q3 -> to, every
+        // joint shared verbatim; bend_mid stays a boundary.
         assert_eq!(pieces[0].a, from);
-        assert_eq!(pieces[0].b, mid, "first half ends at bend_mid verbatim");
-        assert_eq!(pieces[1].a, mid, "second half starts at bend_mid verbatim");
-        assert_eq!(pieces[1].b, to);
+        assert_eq!(pieces[0].b, q1, "first quarter ends at the quarter point");
+        assert_eq!(pieces[1].a, q1);
+        assert_eq!(pieces[1].b, mid, "second quarter ends at bend_mid verbatim");
+        assert_eq!(pieces[2].a, mid, "third quarter starts at bend_mid verbatim");
+        assert_eq!(pieces[2].b, q3, "third quarter ends at the far quarter point");
+        assert_eq!(pieces[3].a, q3);
+        assert_eq!(pieces[3].b, to);
         assert!(pieces.iter().all(|p| p.width == 10.0 && p.color == 0x00FF00));
+    }
+
+    #[test]
+    fn styled_segment_bent_gradient_samples_the_global_lerp() {
+        // A gradient bent segment: each arc quarter is its
+        // own span for subdivision (4 per quarter, 16 total),
+        // and the colour parameter does NOT restart at the
+        // quarter joins — the first piece of each quarter
+        // carries the whole-segment lerp at that quarter's
+        // start t (0, 1/4, 1/2, 3/4), the same values the
+        // unbent gradient pin above samples.
+        let style = NodeStyle {
+            color2: Some(0x0000FF),
+            ..NodeStyle::default()
+        };
+        let pieces = styled_segment_pieces(
+            [100.0, 150.0],
+            [300.0, 150.0],
+            0.7,
+            10.0,
+            &style,
+            0xFF0000,
+        );
+        assert_eq!(pieces.len(), 16, "four quarters, four subdivisions each");
+        let quarter_starts: Vec<u32> = [0, 4, 8, 12].iter().map(|&i| pieces[i].color).collect();
+        assert_eq!(quarter_starts, vec![0xFF0000, 0xBF0040, 0x800080, 0x4000BF]);
+        for w in pieces.windows(2) {
+            assert_eq!(w[0].b, w[1].a, "consecutive pieces share endpoints");
+        }
     }
 
     #[test]

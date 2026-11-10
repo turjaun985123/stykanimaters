@@ -621,7 +621,7 @@ mod tests {
         // describe.
         let mut project = project_with_sprites();
         project.figures[0].def.nodes[1].media =
-            Some(SegmentMedia::Image { asset: 0 });
+            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
         let items = media::media_items(&project, 0.0);
         let image_count = items
             .iter()
@@ -677,7 +677,7 @@ mod tests {
         // Rune has no bitmap primitive; the placeholder is
         // the stage treatment, real pixels are export-only.
         let mut project =
-            project_with_clip_def_media(Some(SegmentMedia::Image { asset: 0 }));
+            project_with_clip_def_media(Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }));
         project.figures[0].opacity = 0.5;
         project.clips[0].def.nodes[1].style.opacity = 0.5;
         let items = media::media_items(&project, 0.0);
@@ -713,7 +713,7 @@ mod tests {
         // the sprite pass).
         let mut project = project_with_sprites();
         let mut clip_def = project.figures[0].def.clone();
-        clip_def.nodes[1].media = Some(SegmentMedia::Image { asset: 0 });
+        clip_def.nodes[1].media = Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
         let pose = project.frames[0].poses[0].clone();
         project.clips.push(ClipDef {
             name: "clip".into(),
