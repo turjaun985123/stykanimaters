@@ -1118,6 +1118,182 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The on-disk state one session of the real
+    /// save → window-close path leaves for the next
+    /// launch, laid down through the same writers the
+    /// path itself uses (Wave S, S13):
+    ///
+    /// * the named save — the save file's pretty bytes
+    ///   under the project's slug, plus the recents
+    ///   record (the two on-disk traces the panel's
+    ///   `save_named_pressed` leaves beside the
+    ///   snapshot);
+    /// * the close-flush's snapshot — written with
+    ///   [`write_recovery_in`], which is the flush's own
+    ///   write body with the directory made explicit:
+    ///   `EditorCore::flush_recovery_on_close` (editor.rs,
+    ///   wired to the window's exit hooks in main.rs)
+    ///   writes through `crate::shell::write_recovery`,
+    ///   and that is `write_recovery_in` at
+    ///   [`default_dir`]. Only the directory differs.
+    ///
+    /// The mtimes are pinned in the path's real order —
+    /// save first, flush at close strictly after — so the
+    /// mtime half of the verdict fires in every fixture
+    /// below and only the content gate can suppress an
+    /// offer. (The flush itself is not driven from this
+    /// module: it writes only to the CWD-relative default
+    /// dir, and redirecting it would take a process-global
+    /// `set_current_dir` inside the shared lib-test
+    /// process. P19 pinned the flush's own behaviour —
+    /// dirty writes the current project, clean writes
+    /// nothing — in a dedicated integration binary,
+    /// tests/wave_p_close_guard.rs; these pins cover the
+    /// half that file cannot: the next launch's verdict
+    /// on the state the flush leaves.)
+    fn save_then_close_flush(
+        dir: &Path,
+        saved_project: &Project,
+        flushed_project: &Project,
+    ) -> (PathBuf, PathBuf) {
+        let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let t1 = t0 + std::time::Duration::from_secs(60);
+        let saved = dir.join(format!("{}.json", project_file_slug(&saved_project.name)));
+        std::fs::write(
+            &saved,
+            serde_json::to_string_pretty(saved_project).unwrap(),
+        )
+        .unwrap();
+        touch_recent_in(dir, &saved_project.name);
+        let snapshot = write_recovery_in(dir, flushed_project).unwrap();
+        set_mtime(&saved, t0);
+        set_mtime(&snapshot, t1);
+        (saved, snapshot)
+    }
+
+    #[test]
+    fn close_flush_of_the_saved_project_is_not_offered_at_next_launch() {
+        // Wave S (S13): the close-flush × recovery-gate
+        // interaction — the exact P42 spurious-offer path
+        // through the flush. The edit counter counts
+        // edits, never content: an edit made after the
+        // save and then undone returns the project to
+        // exactly the saved content while the counter
+        // still stands (`edit_count` is only ever
+        // incremented or reset at a project swap), so the
+        // window-close flush fires and writes a snapshot
+        // OF THE JUST-SAVED PROJECT — strictly newer than
+        // the save by mtime. Before the gate, the next
+        // launch offered it as crash salvage.
+        let dir = temp_dir("close-flush-identical");
+        let mut project = Project::new_demo();
+        project.name = "Flush Check".into();
+        let (saved, snapshot) = save_then_close_flush(&dir, &project, &project);
+
+        // The fixture really is the flush shape: the
+        // snapshot is the saved project, readable back,
+        // and strictly newer by mtime — the mtime-only
+        // verdict would offer it.
+        let flushed = read_recovery_in(&dir).expect("the flush wrote a snapshot");
+        assert_eq!(flushed.name, "Flush Check");
+        assert_eq!(flushed.background, project.background);
+        assert!(
+            recovery_newer(file_mtime(&snapshot), file_mtime(&saved)),
+            "the snapshot must be strictly newer for this pin to mean anything"
+        );
+
+        // The gate: identical content is the close-flush
+        // of saved work, not unsaved work — no offer.
+        assert!(
+            !recovery_is_newer_than_last_project_in(&dir),
+            "a close-flush snapshot of the just-saved project must not be offered"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn close_flush_capturing_unsaved_work_is_offered_at_next_launch() {
+        // Wave S (S13): the flush's other face — the
+        // reason it exists. The user edited after the
+        // save and closed without saving again; the
+        // close-flush captured that work into the
+        // snapshot. The next launch MUST offer it: the
+        // gate suppresses only what it can prove is the
+        // save's own content.
+        let dir = temp_dir("close-flush-unsaved");
+        let mut project = Project::new_demo();
+        project.name = "Flush Check".into();
+        let mut unsaved = project.clone();
+        unsaved.background = unsaved.background.wrapping_add(1);
+        let (_saved, _snapshot) = save_then_close_flush(&dir, &project, &unsaved);
+
+        let flushed = read_recovery_in(&dir).expect("the flush wrote a snapshot");
+        assert_eq!(
+            flushed.background, unsaved.background,
+            "the snapshot holds the unsaved edit, not the save"
+        );
+        assert!(
+            recovery_is_newer_than_last_project_in(&dir),
+            "work past the save, captured by the close-flush, must be offered"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn close_flush_snapshot_corrupted_after_close_still_offers() {
+        // Wave S (S13): the flush wrote a good snapshot
+        // of the saved project, but the file was damaged
+        // after the close (torn write, disk fault, a hand
+        // edit). Nothing about it can be proven identical
+        // to the save, so the gate fails open through the
+        // real path: the offer stands.
+        let dir = temp_dir("close-flush-corrupt");
+        let mut project = Project::new_demo();
+        project.name = "Flush Check".into();
+        let (_saved, snapshot) = save_then_close_flush(&dir, &project, &project);
+        std::fs::write(&snapshot, "{ not a project").unwrap();
+        let t1 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_120);
+        set_mtime(&snapshot, t1);
+        assert!(
+            recovery_is_newer_than_last_project_in(&dir),
+            "a corrupt snapshot proves nothing — the offer must stand"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discard_after_close_flush_offer_deletes_the_snapshot() {
+        // Wave S (S13): Discard on the offered state,
+        // through this path. The Discard command's body
+        // at this seam is [`clear_recovery_in`] (the Home
+        // banner's `discard_recovery_in` wraps exactly
+        // it, plus an existence read-back): it deletes
+        // the snapshot file, and with the file gone the
+        // verdict has nothing left to offer.
+        let dir = temp_dir("close-flush-discard");
+        let mut project = Project::new_demo();
+        project.name = "Flush Check".into();
+        let mut unsaved = project.clone();
+        unsaved.background = unsaved.background.wrapping_add(1);
+        let (_saved, snapshot) = save_then_close_flush(&dir, &project, &unsaved);
+        assert!(
+            recovery_is_newer_than_last_project_in(&dir),
+            "the offer is live before the discard"
+        );
+
+        clear_recovery_in(&dir);
+        assert!(!snapshot.exists(), "discard deleted the snapshot file");
+        assert!(read_recovery_in(&dir).is_none());
+        assert!(
+            !recovery_is_newer_than_last_project_in(&dir),
+            "no snapshot, no offer"
+        );
+        // Discarding again is inert, never an error.
+        clear_recovery_in(&dir);
+        assert!(!recovery_is_newer_than_last_project_in(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn layout_defaults_when_file_is_missing() {
         let dir = temp_dir("layout-missing");

@@ -63,6 +63,18 @@
 //!      wave-p/findings/p19.md) is applied, and goes
 //!      green with it. That is deliberate: the bypass
 //!      must not be integrable-away in silence.
+//!   5. The composition S13 (Wave S) filed as its
+//!      follow-up: a save on disk plus recents, a core
+//!      made dirty by an edit that is then undone (the
+//!      counter stands over exactly the saved content),
+//!      and the REAL close flush — the snapshot the
+//!      flush writes is strictly newer than the save by
+//!      mtime, yet the next launch's verdict
+//!      (`recovery_is_newer_than_last_project_in`)
+//!      offers nothing, because the R22 content gate
+//!      recognises the snapshot as the save's own
+//!      content. Pre-gate this was the P42 spurious
+//!      offer in flush form.
 //!
 //! WHAT NO TEST HERE CAN PROVE: that a real window
 //! close fires the hook in a live session — that needs
@@ -72,9 +84,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
 
 use stykanimate_rs::editor::EditorCore;
-use stykanimate_rs::shell::read_recovery;
+use stykanimate_rs::model::Project;
+use stykanimate_rs::shell::{
+    read_recovery, recovery_is_newer_than_last_project_in, touch_recent_in, RECOVERY_FILE,
+};
 
 /// Serialises this file's tests: they each change the
 /// process current directory, which is process-global
@@ -211,6 +227,99 @@ fn failed_flush_keeps_the_dirty_truth_and_reports() {
         "the failure is reported on the status line, not \
          swallowed: got {:?}",
         core.status
+    );
+}
+
+#[test]
+fn close_flush_of_undone_edit_offers_nothing_at_next_launch() {
+    let _lock = lock_cwd();
+    let dir = temp_dir("flush-verdict");
+    let _cwd = CwdGuard::enter(&dir);
+    let projects_dir = dir.join("projects");
+    fs::create_dir_all(&projects_dir).expect("create the projects dir");
+
+    // The save, laid down the way the real save path
+    // leaves it (project_tools::save_named_pressed): the
+    // pretty serialisation under the name's slug, and the
+    // name touched into recents. The slug rule is the
+    // crate-wide one (lowercase, every non-alphanumeric
+    // becomes `-`): "Close Guard Save" → the file
+    // close-guard-save.json.
+    let mut saved = Project::new_demo();
+    saved.name = "Close Guard Save".to_string();
+    let save_path = projects_dir.join("close-guard-save.json");
+    fs::write(
+        &save_path,
+        serde_json::to_string_pretty(&saved).expect("serialise the save"),
+    )
+    .expect("write the save file");
+    touch_recent_in(&projects_dir, "Close Guard Save");
+    // Pin the save's mtime into the past, so the snapshot
+    // the flush writes below is strictly newer BY
+    // CONSTRUCTION (the shell pins' set_mtime idiom: the
+    // std handle API, no extra crates).
+    fs::File::options()
+        .write(true)
+        .open(&save_path)
+        .expect("open the save file")
+        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000))
+        .expect("pin the save mtime");
+
+    // A core holding exactly the saved project, made
+    // dirty the P42 way: a counted edit that is then
+    // undone. `edit_count` counts edits, never content
+    // (S13's analysis), so after the undo the counter
+    // stands while the project is again exactly the
+    // saved content.
+    let mut core = EditorCore::new();
+    core.project = saved.clone();
+    assert_eq!(core.edits_since_autosave(), 0, "a fresh core is clean");
+    core.snapshot();
+    core.project.background = core.project.background.wrapping_add(1);
+    core.undo();
+    assert_eq!(
+        serde_json::to_string(&core.project).expect("serialise the core project"),
+        serde_json::to_string(&saved).expect("serialise the save"),
+        "after the undo the core holds exactly the saved content"
+    );
+    assert_eq!(
+        core.edits_since_autosave(),
+        1,
+        "the undone edit still counts: the session reads dirty"
+    );
+
+    // The real close flush.
+    core.flush_recovery_on_close();
+    assert_eq!(
+        core.edits_since_autosave(),
+        0,
+        "the flush captured the session: it reads clean"
+    );
+
+    // Non-vacuity: the flush DID write a snapshot, it
+    // holds the saved project, and it is strictly newer
+    // than the save by mtime — the mtime-only verdict
+    // would offer it (that was the P42 bug).
+    let snapshot_path = projects_dir.join(RECOVERY_FILE);
+    let snapshot_mtime = fs::metadata(&snapshot_path)
+        .and_then(|m| m.modified())
+        .expect("the flush wrote a recovery snapshot");
+    let save_mtime = fs::metadata(&save_path)
+        .and_then(|m| m.modified())
+        .expect("read the save mtime");
+    assert!(
+        snapshot_mtime > save_mtime,
+        "the snapshot is strictly newer than the save by mtime"
+    );
+    let recovered = read_recovery().expect("the snapshot is readable");
+    assert_eq!(recovered.name, "Close Guard Save");
+
+    // The verdict: the content gate recognises the
+    // snapshot as the save's own content — no offer.
+    assert!(
+        !recovery_is_newer_than_last_project_in(&projects_dir),
+        "a close flush of the just-saved project must not be \
+         offered as crash salvage at the next launch"
     );
 }
 

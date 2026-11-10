@@ -254,6 +254,35 @@
 //! claimed inventory identity with `default`, the
 //! stage half only; the lane's wiring landed in
 //! Wave Q, and the facts are corrected there.)
+//!
+//! The Wave S scene extends the pair with the
+//! speaker field's pixel proof: `subtitles-speaker`
+//! plants ONE credited cue — speaker `NOVA`, a text
+//! distinct from the pair's — by the same direct
+//! write, under the same default (bottom) style, so
+//! its `--snap --crop stage` is the subtitle
+//! census's speaker-leg input: the credited line
+//! must paint measurably wider than the same text
+//! uncredited, by the `NOVA: ` prefix's advance.
+//! Its tree is the pair's tree (fact 34).
+//!
+//! The Wave T scene gives the Home missing-audio
+//! marker (Wave S, S7) its headless proof:
+//! `home-missing-audio` plants ONE audio clip whose
+//! file does not exist — by direct `project.audio`
+//! write, the module's named exception, because the
+//! core's only add op takes its path from a real
+//! file sitting in `./audio/` (`add_audio_clip`
+//! scans that directory and adds nothing when it
+//! holds none), so a missing-file clip is
+//! unreachable through ops: it is the state a user
+//! reaches by moving or deleting a file after
+//! adding it, which is exactly the state the marker
+//! exists to surface — saves the project through
+//! the real save op with `home-populated`'s recents
+//! follow-up, and opens the library on Home. The
+//! row's proof is its meta line's TEXT (fact 35),
+//! the first text fact in the table.
 
 use crate::State;
 
@@ -943,6 +972,74 @@ fn scene_home_populated(s: &mut State) {
     s.home_panel.open = true;
 }
 
+/// `"home-missing-audio"` — the Home workspace with
+/// the library OPEN over one saved project whose
+/// only audio clip points at a file that does not
+/// exist, so the project's row renders the
+/// missing-audio marker (Wave S, S7) at the end of
+/// its metadata line: the headless proof S7 had to
+/// leave unseeded (its findings record that no
+/// scene planted project audio, so the badge had
+/// no scene to be proven on). The seed follows
+/// `home-populated`'s mechanism exactly — the
+/// project is SAVED through
+/// `EditorCore::save_named_project`, the Project
+/// section's Save op, with the save press's own
+/// recents follow-up (`shell::touch_recent`, gated
+/// on the op's `true` as `after_save` gates it) —
+/// because the panel has no in-process row state to
+/// fake: it scans `./projects`, light-reads each
+/// file and classifies its clips, so the scene
+/// writes the directory, through the app's own op.
+/// (The probe wipes `./projects` before every
+/// invocation, so in the probe this save is the
+/// library's only row.)
+///
+/// The clip itself is planted by direct
+/// `project.audio` write — the `graph-duplicates`
+/// exception, with a sharper reason than usual: the
+/// core's only add op, `EditorCore::add_audio_clip`,
+/// takes its path from the first audio file it
+/// finds in `./audio/` and adds nothing when that
+/// directory holds none, so NO op can create a clip
+/// whose file is missing. That state is still
+/// ordinary user state — add a clip, then move or
+/// delete its file outside the app — and it is the
+/// one state the marker exists for, so the fixture
+/// writes the clip the filesystem would have left
+/// behind: one unmuted clip at frame 0 pointing at
+/// `audio/vanished-take.wav`, a file that exists
+/// nowhere the probe or the test suite runs (the
+/// shared classification resolves clip paths
+/// against the process working directory). The
+/// clip is planted BEFORE the save, so the file on
+/// disk carries it and the panel's light read —
+/// never the scene — produces the count the marker
+/// renders. A refused save (a name that cannot name
+/// a file) simply leaves the row unseeded — the
+/// scene stays total. The panel is opened by the
+/// pub `open` field write, as in `home-populated`
+/// (the toggle is a session action and stays out
+/// of fixtures).
+fn scene_home_missing_audio(s: &mut State) {
+    s.core.project.audio = vec![stykanimate_rs::model::AudioClip {
+        path: "audio/vanished-take.wav".to_string(),
+        start_frame: 0,
+        gain: 1.0,
+        muted: false,
+    }];
+    s.core.project.name = "Vanished Take".to_string();
+    if s.core.save_named_project() {
+        let name = s.core.project.name.clone();
+        stykanimate_rs::shell::touch_recent(&name);
+    }
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Home,
+    );
+    s.home_panel.open = true;
+}
+
 /// `"strokes-populated"` — the Draw workspace with
 /// four strokes planted on the current frame and the
 /// last of them selected, so a `--tree` dump contains
@@ -1319,7 +1416,31 @@ fn scene_subtitles_top(s: &mut State) {
         stykanimate_rs::subtitles::SubtitlePosition::Top;
 }
 
-/// The one cue both subtitle scenes plant: a single
+/// `"subtitles-speaker"` — the demo project with ONE
+/// CREDITED subtitle cue live across the whole
+/// timeline and the playhead parked mid-timeline
+/// (frame 2 of the demo's 5), under the project's
+/// DEFAULT subtitle style (bottom anchor — the same
+/// anchor the census's bottom band gates on). The
+/// cue is planted by `plant_subtitle_cue_as` with
+/// speaker `NOVA` and the text "The light is still
+/// on." — a text distinct from the uncredited pair's,
+/// so this scene's snap is never confusable with
+/// theirs. This scene's `--snap --crop stage` is the
+/// headless subtitle census's speaker-leg input
+/// (Wave S, S2): the stage draws a credited cue's
+/// first line with the `NOVA: ` prefix
+/// (`subtitles::subtitle_display_lines`), so the
+/// painted line must measure wider than the same
+/// text uncredited by the prefix's advance — the
+/// pixel proof that the Wave R speaker field
+/// reaches the stage. The planted cue mounts the
+/// same subtitle lane as the pair's (fact 34).
+fn scene_subtitles_speaker(s: &mut State) {
+    plant_subtitle_cue_as(s, "The light is still on.", Some("NOVA"));
+}
+
+/// The one cue the subtitle scenes plant: a single
 /// line of text spanning the project's whole timeline
 /// as it stands when the scene runs, with the playhead
 /// parked on frame 2 through `EditorCore::goto` (the
@@ -1329,9 +1450,19 @@ fn scene_subtitles_top(s: &mut State) {
 /// guarded no-op's frame 0 on a shorter project — and
 /// on an empty project the scene plants nothing at
 /// all: total, like every scene in this table. Shared
-/// by both scenes so they cannot drift apart in
-/// anything but the style field the census varies.
+/// by all three scenes so they cannot drift apart in
+/// anything but the cue content and the style field
+/// the census varies.
 fn plant_subtitle_cue(s: &mut State) {
+    plant_subtitle_cue_as(s, "We walk home before dark.", None);
+}
+
+/// The shared plant behind the subtitle scenes: one
+/// cue with the given text and speaker spanning the
+/// project's whole timeline as it stands when the
+/// scene runs (see `plant_subtitle_cue` for the
+/// liveness and totality argument).
+fn plant_subtitle_cue_as(s: &mut State, text: &str, speaker: Option<&str>) {
     let frames = s.core.project.frames.len();
     if frames == 0 {
         return;
@@ -1339,8 +1470,8 @@ fn plant_subtitle_cue(s: &mut State) {
     s.core.project.subtitles = vec![stykanimate_rs::subtitles::SubtitleCue {
         start_frame: 0,
         end_frame: frames,
-        text: "We walk home before dark.".to_string(),
-        speaker: None,
+        text: text.to_string(),
+        speaker: speaker.map(|name| name.to_string()),
     }];
     s.core.goto(2);
 }
@@ -1381,6 +1512,8 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
         ("settings-open-error", scene_settings_open_error),
         ("subtitles-populated", scene_subtitles_populated),
         ("subtitles-top", scene_subtitles_top),
+        ("subtitles-speaker", scene_subtitles_speaker),
+        ("home-missing-audio", scene_home_missing_audio),
     ]
 }
 
@@ -1670,6 +1803,42 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
 ///    between the two trees means a view branched
 ///    on the style. The top-band rendering is the
 ///    same census's second `--snap` fact.
+/// 34. Under `--scene subtitles-speaker` (Wave S):
+///    the inventory is identical to
+///    `subtitles-populated`'s (fact 32's inventory,
+///    lane included) — the scene differs only in
+///    the planted cue's text and its `speaker`
+///    field, and no view branches on cue content
+///    for structure (the lane block's label is
+///    text, not a key), so any key drift between
+///    the two trees means a view branched on the
+///    cue. The credited line's rendering — the
+///    `NOVA: ` prefix the display helper paints —
+///    is the subtitle census's third `--snap`
+///    fact (its speaker leg, Wave S S2).
+/// 35. Under `--scene home-missing-audio` (Wave T):
+///    elements keyed `home-row-0` and `home-totals`
+///    exist — the one seeded project as a row in the
+///    open library (fact 28's shape over a single
+///    save; the probe wipes `./projects` before the
+///    invocation, so the seeded row is the only
+///    row) — and the row's metadata element, keyed
+///    `home-proj-meta-0`, carries a `text` ending in
+///    "· 1 audio clip missing": the missing-audio
+///    marker (Wave S, S7) closing the light-read
+///    meta line. This is the first fact asserted on
+///    an element's TEXT — the dump carries `text`
+///    beside `key` and `rect` — because the marker
+///    is text, not structure: the row's keys are the
+///    same with and without it. The text's presence
+///    proves the whole chain ran in the probe: the
+///    scene's save wrote the clip, the panel's
+///    light read classified its file missing (the
+///    file does not exist relative to the probe's
+///    working directory), and the row rendered the
+///    segment. (The row's thumbnail is a `--snap`
+///    fact, as in fact 28; no snap is wired for
+///    this scene — its proof is the tree.)
 pub fn layout_assertions() -> Vec<&'static str> {
     vec![
         "exactly one element keyed \"stage\"",
@@ -1705,6 +1874,8 @@ pub fn layout_assertions() -> Vec<&'static str> {
         "under --scene sprites-populated: an element keyed \"sprite-panel\" exists and elements keyed \"sprite-row-0\" and \"sprite-row-1\" exist (the Sprites panel and its two placed-instance rows — see fact 31)",
         "under --scene subtitles-populated: the element inventory is the default tree's plus the subtitle lane — an element keyed \"subtitle-lane\" exists and an element keyed \"subtitle-cue-0\" exists (the planted cue's lane block; the stage cue paint itself is a --snap fact — see fact 32)",
         "under --scene subtitles-top: the element inventory is identical to the subtitles-populated tree's, lane included (only the subtitle style's position field differs — see fact 33)",
+        "under --scene subtitles-speaker: the element inventory is identical to the subtitles-populated tree's, lane included (only the planted cue's text and speaker field differ — see fact 34)",
+        "under --scene home-missing-audio: elements keyed \"home-row-0\" and \"home-totals\" exist and the element keyed \"home-proj-meta-0\" has text ending \"· 1 audio clip missing\" (the missing-audio marker on the seeded row's light-read meta line — see fact 35)",
     ]
 }
 
@@ -1714,17 +1885,18 @@ mod tests {
         scene_audio_open, scene_build_open, scene_clips_populated, scene_default_light,
         scene_dopesheet_keys, scene_draw_open,
         scene_effects_open, scene_export_open, scene_fx_selected, scene_fx_split_mid,
-        scene_graph_duplicates, scene_graph_open, scene_home, scene_home_populated,
+        scene_graph_duplicates, scene_graph_open, scene_home, scene_home_missing_audio,
+        scene_home_populated,
         scene_library_populated, scene_loop_range, scene_menu_open, scene_palette_open,
         scene_settings_open, scene_settings_open_light, scene_sprites_populated,
-        scene_strokes_populated, scene_subtitles_populated, scene_subtitles_top,
-        scene_three_d, scene_three_d_stage, scenes,
+        scene_strokes_populated, scene_subtitles_populated, scene_subtitles_speaker,
+        scene_subtitles_top, scene_three_d, scene_three_d_stage, scenes,
     };
     use crate::init;
     use crate::rune_sec::workspaces::Workspace;
 
     /// The scene table is the headless contract:
-    /// thirty-one scenes, each name unique (a duplicate
+    /// thirty-three scenes, each name unique (a duplicate
     /// would shadow the later entry in `with_scene`'s
     /// lookup), with the Phase J scenes in their display
     /// positions, the two Phase K scenes appended after
@@ -1742,12 +1914,15 @@ mod tests {
     /// populated-state scenes (library-populated,
     /// sprites-populated) appended after those, the
     /// Wave 14 settings-open-error scene appended after
-    /// those, and the two Wave P subtitle scenes
-    /// (subtitles-populated, subtitles-top) last.
+    /// those, the two Wave P subtitle scenes
+    /// (subtitles-populated, subtitles-top) appended
+    /// after those, the Wave S speaker scene
+    /// (subtitles-speaker) appended after those, and
+    /// the Wave T home-missing-audio scene last.
     #[test]
-    fn scene_table_has_thirtyone_uniquely_named_scenes() {
+    fn scene_table_has_thirtythree_uniquely_named_scenes() {
         let table = scenes();
-        assert_eq!(table.len(), 31, "thirty-one scenes are registered");
+        assert_eq!(table.len(), 33, "thirty-three scenes are registered");
         let mut names: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
         let total = names.len();
         names.sort_unstable();
@@ -1780,6 +1955,8 @@ mod tests {
         assert_eq!(table[28].0, "settings-open-error");
         assert_eq!(table[29].0, "subtitles-populated");
         assert_eq!(table[30].0, "subtitles-top");
+        assert_eq!(table[31].0, "subtitles-speaker");
+        assert_eq!(table[32].0, "home-missing-audio");
     }
 
     /// The export scene reaches the Export workspace through
@@ -2541,6 +2718,95 @@ mod tests {
             b.core.project.subtitle_style.box_color,
             a.core.project.subtitle_style.box_color,
             "the box colour is untouched"
+        );
+    }
+
+    /// The subtitles-speaker scene (Wave S) plants
+    /// exactly one CREDITED cue — speaker `NOVA`,
+    /// text "The light is still on.", distinct from
+    /// the uncredited pair's cue — spanning the whole
+    /// timeline under the default style, with the
+    /// playhead parked mid-timeline inside the cue.
+    /// This is the state behind layout fact 34 and
+    /// the subtitle census's speaker leg (S2): the
+    /// stage must paint the credited line with the
+    /// `NOVA: ` prefix
+    /// (`subtitles::subtitle_display_lines`), which
+    /// is what the census measures in the snap.
+    #[test]
+    fn subtitles_speaker_scene_plants_one_credited_live_cue() {
+        let mut s = init();
+        scene_subtitles_speaker(&mut s);
+        let project = &s.core.project;
+        assert_eq!(project.subtitles.len(), 1, "exactly one cue is planted");
+        let cue = &project.subtitles[0];
+        assert_eq!(cue.start_frame, 0, "the cue starts at the first frame");
+        assert_eq!(
+            cue.end_frame,
+            project.frames.len(),
+            "the cue spans the whole timeline"
+        );
+        assert_eq!(cue.text, "The light is still on.");
+        assert_eq!(
+            cue.speaker.as_deref(),
+            Some("NOVA"),
+            "the cue is credited to NOVA"
+        );
+        assert_eq!(s.core.current, 2, "the playhead is parked mid-timeline");
+        assert!(
+            cue.start_frame <= s.core.current && s.core.current < cue.end_frame,
+            "the cue is live at the parked frame"
+        );
+        assert_eq!(
+            project.subtitle_style.position,
+            stykanimate_rs::subtitles::SubtitlePosition::Bottom,
+            "the default style anchors at the bottom"
+        );
+    }
+
+    /// The home-missing-audio scene (Wave T) saves one
+    /// project carrying a clip whose file does not
+    /// exist and opens the library on Home — proven
+    /// through the panel's own readers, as in the
+    /// home-populated pin: the scan the panel reads
+    /// lists the saved name, the panel's light read of
+    /// the saved file counts exactly one missing clip,
+    /// and the row line the panel renders from that
+    /// read closes with the missing-audio marker. This
+    /// is the state behind layout fact 35. The row's
+    /// INDEX is not pinned here: the suite shares the
+    /// real `./projects` with the other scene tests
+    /// (the probe wipes it per invocation; the test
+    /// process does not), so row 0 is the probe's
+    /// fact, while the marker on the seeded project's
+    /// own line is this test's.
+    #[test]
+    fn home_missing_audio_scene_seeds_a_row_that_carries_the_marker() {
+        let mut s = init();
+        scene_home_missing_audio(&mut s);
+        assert_eq!(s.workspace, Workspace::Home);
+        assert!(s.home_panel.open, "the library is open");
+        assert_eq!(s.core.project.audio.len(), 1, "exactly one clip is planted");
+        let clip = &s.core.project.audio[0];
+        assert_eq!(
+            clip.path, "audio/vanished-take.wav",
+            "the planted clip points at the vanished file"
+        );
+        assert!(!clip.muted, "the planted clip is unmuted (muted clips never count as missing)");
+        let entries =
+            stykanimate_rs::projects::scan(&crate::rune_sec::home_panel::projects_dir());
+        let visible = crate::rune_sec::home_panel::visible_projects(&entries, "");
+        let info = visible
+            .iter()
+            .find(|info| info.name == "Vanished Take")
+            .expect("the library lists the seeded project");
+        let meta = crate::rune_sec::home_panel::project_metadata(&info.path)
+            .expect("the saved file light-reads");
+        assert_eq!(meta.4, 1, "the light read counts one missing clip");
+        let line = crate::rune_sec::home_panel::row_meta_line(info, Some(meta));
+        assert!(
+            line.ends_with("· 1 audio clip missing"),
+            "the row's meta line closes with the marker: {line}"
         );
     }
 }

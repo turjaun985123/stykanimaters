@@ -448,6 +448,64 @@
 //!   must name the real file); handlers, the search
 //!   and the rename field keep the stored name itself.
 //!
+//! ## Wave S (S7) — the missing-audio marker
+//!
+//! Wave P surfaced missing audio files when a project
+//! *opens* (P14) and on MP4 export (P15); until this
+//! wave nothing on Home said a *listed* project had
+//! missing audio before it was opened. The light read
+//! now answers it from the same parse: alongside the
+//! figures/frames counts it deserialises the file's
+//! top-level `audio` array into clips and classifies
+//! them with the one shared helper —
+//! `audio::missing_audio_clips`, the classification
+//! the open-time note, the export path and the Audio
+//! panel all use (Wave Q, Q20) — so a muted clip never
+//! counts and an existing file never counts, here
+//! exactly as there. The count rides the mtime meta
+//! cache with the counts (fifth element of the light
+//! tuple), and a row whose count is non-zero closes
+//! its metadata line with the marker segment
+//! ([`missing_audio_segment`]: "· 1 audio clip
+//! missing" / "· N audio clips missing"). No new
+//! element keys: the marker is text in the existing
+//! keyed meta line. The honest scope, stated plainly:
+//! the marker rides the *light-read* line only — the
+//! scan fallback line ([`meta_line`], shown when the
+//! file cannot be re-read at render time) carries no
+//! marker, because the scan never inspects audio; and
+//! clip paths resolve exactly as the shared helper
+//! resolves them (relative to the process working
+//! directory), the same resolution the open-time
+//! check makes, so the marker can never disagree
+//! with the verdict opening the project would give
+//! for the same file version. A file whose `audio`
+//! array will not deserialise as clips fails the
+//! whole light read (the row falls back to the scan
+//! line) — the scan's full `Project` parse rejects
+//! such a file too, so a listed row can only reach
+//! that state if the file changed between the scan
+//! and this render, which is the fallback's existing
+//! case. A file with no `audio` key at all carries
+//! none (`Project::audio` is serde-defaulted): its
+//! count is 0 and its line is unchanged.
+//!
+//! Wave T (T6) closed the fallback half of that scope:
+//! the scan in `projects.rs` now classifies the clips
+//! of the project it already fully parses, with the
+//! same shared helper, and carries the count on
+//! `ProjectInfo::missing_audio` — so the scan fallback
+//! line ([`meta_line`]) closes with the same marker
+//! whenever the scan's count is known and non-zero.
+//! A `None` count (an entry no scan ever parsed)
+//! renders no marker: unknown is not zero, and the
+//! line claims no health it did not verify. The two
+//! lines can therefore disagree only in freshness —
+//! the light read re-verifies at render time, the
+//! scan's count is as of its parse (cached under the
+//! project file's stamp) — never in classification,
+//! which is the one helper's everywhere.
+//!
 //! ## Integrator wiring (main.rs)
 //!
 //! ```ignore
@@ -509,17 +567,19 @@ pub struct HomePanelState {
     /// `&State`, exactly as in the GPUI panel.
     scan_cache: RefCell<Option<(Option<SystemTime>, Vec<ProjectInfo>)>>,
     /// Per-file light-metadata cache (Phase J):
-    /// path → `(mtime, figures, frames, size_bytes)` as
-    /// last read by [`project_metadata`] (the size joined
-    /// in Phase M, from the same stat as the mtime). An
-    /// entry is served only while
+    /// path → `(mtime, figures, frames, size_bytes,
+    /// missing_audio)` as last read by
+    /// [`project_metadata`] (the size joined in Phase
+    /// M, from the same stat as the mtime; the
+    /// missing-audio count in Wave S, from the same
+    /// parse). An entry is served only while
     /// the file's current mtime equals the stored one —
     /// the same mtime-key discipline as the scan cache,
     /// one level down (per file, not per directory).
     /// Interior mutability for the same reason as
     /// `scan_cache`; `Default` (empty map) keeps every
     /// existing construction of this state working.
-    meta_cache: RefCell<HashMap<PathBuf, (SystemTime, usize, usize, u64)>>,
+    meta_cache: RefCell<HashMap<PathBuf, (SystemTime, usize, usize, u64, usize)>>,
     /// Per-file thumbnail cache (UI mission Wave 4):
     /// path → `(mtime, Option<Image>)` — the frame-0
     /// render of the file as it stood at that mtime,
@@ -768,22 +828,30 @@ impl HomePanelState {
     /// (Phase M) rides the same discipline as the counts:
     /// it is taken from the call's one stat on a miss and
     /// served from the cache on a hit, so a returned tuple
-    /// is always one moment's read, never a mix.
-    pub fn metadata_for(&self, path: &Path) -> Option<(usize, usize, u64, SystemTime)> {
+    /// is always one moment's read, never a mix. The
+    /// missing-audio count (Wave S) rides it too, from
+    /// the same parse as the counts.
+    pub fn metadata_for(
+        &self,
+        path: &Path,
+    ) -> Option<(usize, usize, u64, SystemTime, usize)> {
         let stat = std::fs::metadata(path).ok()?;
         let modified = stat.modified().ok()?;
         let size_bytes = stat.len();
         {
             let cache = self.meta_cache.borrow();
-            if let Some((figures, frames, size)) = cached_meta(&cache, path, modified) {
-                return Some((figures, frames, size, modified));
+            if let Some((figures, frames, size, missing_audio)) =
+                cached_meta(&cache, path, modified)
+            {
+                return Some((figures, frames, size, modified, missing_audio));
             }
         }
-        let (figures, frames) = read_metadata_counts(path)?;
-        self.meta_cache
-            .borrow_mut()
-            .insert(path.to_path_buf(), (modified, figures, frames, size_bytes));
-        Some((figures, frames, size_bytes, modified))
+        let (figures, frames, missing_audio) = read_metadata_counts(path)?;
+        self.meta_cache.borrow_mut().insert(
+            path.to_path_buf(),
+            (modified, figures, frames, size_bytes, missing_audio),
+        );
+        Some((figures, frames, size_bytes, modified, missing_audio))
     }
 
     /// Drop all three caches wholesale (Phase K; the
@@ -1396,51 +1464,80 @@ fn civil_from_unix(secs: u64) -> (i64, u32, u32, u32, u32) {
 }
 
 /// A project file's light metadata: `(figures, frames,
-/// size_bytes, modified)` read *without* deserialising
-/// the whole `Project`. The file is parsed as a bare
-/// `serde_json::Value` and only the lengths of the
-/// top-level `figures` and `frames` arrays are counted
-/// (model.rs's `Project` serialises both under exactly
-/// those keys). The size is the file's byte length,
-/// taken from the same single `stat` that yields the
-/// mtime (Phase M) — no second filesystem call. `None`
-/// — never a guess — when the file is
-/// missing, unreadable, not JSON, or either key is absent
-/// or not an array: such a file is not a project file,
-/// the same verdict `projects::scan` reaches by failing
-/// its full parse.
-pub fn project_metadata(path: &Path) -> Option<(usize, usize, u64, SystemTime)> {
+/// size_bytes, modified, missing_audio)` read *without*
+/// deserialising the whole `Project`. The file is parsed
+/// as a bare `serde_json::Value` and only the lengths of
+/// the top-level `figures` and `frames` arrays are
+/// counted (model.rs's `Project` serialises both under
+/// exactly those keys). The size is the file's byte
+/// length, taken from the same single `stat` that yields
+/// the mtime (Phase M) — no second filesystem call. The
+/// missing-audio count (Wave S, S7) comes from the same
+/// parse: the top-level `audio` array deserialised into
+/// clips and classified by the shared
+/// `audio::missing_audio_clips` — see
+/// [`read_metadata_counts`]. `None` — never a guess —
+/// when the file is missing, unreadable, not JSON,
+/// either counted key is absent or not an array, or the
+/// `audio` array will not deserialise as clips: such a
+/// file is not a project file, the same verdict
+/// `projects::scan` reaches by failing its full parse.
+pub fn project_metadata(
+    path: &Path,
+) -> Option<(usize, usize, u64, SystemTime, usize)> {
     let stat = std::fs::metadata(path).ok()?;
     let modified = stat.modified().ok()?;
-    let (figures, frames) = read_metadata_counts(path)?;
-    Some((figures, frames, stat.len(), modified))
+    let (figures, frames, missing_audio) = read_metadata_counts(path)?;
+    Some((figures, frames, stat.len(), modified, missing_audio))
 }
 
 /// The parse half of [`project_metadata`] (the counts
-/// only; the caller supplies the stat): split out so the
-/// cached accessor can stat once and parse once.
-fn read_metadata_counts(path: &Path) -> Option<(usize, usize)> {
+/// and the missing-audio count; the caller supplies the
+/// stat): split out so the cached accessor can stat
+/// once and parse once. The audio half deserialises
+/// only the `audio` array — never the whole project —
+/// into `model::AudioClip`s and hands them to the one
+/// shared classification (`audio::missing_audio_clips`:
+/// unmuted clips whose file does not exist), the same
+/// helper the open-time surfacing, the MP4 export path
+/// and the Audio panel use, so the count here can never
+/// apply a different rule than the verdict shown when
+/// the project is opened. An absent `audio` key is an
+/// empty clip list (`Project::audio` is
+/// serde-defaulted), not a failure; a present array
+/// that will not deserialise fails the whole read, the
+/// same verdict the scan's full parse reaches on it.
+fn read_metadata_counts(path: &Path) -> Option<(usize, usize, usize)> {
     let text = std::fs::read_to_string(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
     let figures = value.get("figures")?.as_array()?.len();
     let frames = value.get("frames")?.as_array()?.len();
-    Some((figures, frames))
+    let missing_audio = match value.get("audio") {
+        None => 0,
+        Some(raw) => {
+            let clips: Vec<stykanimate_rs::model::AudioClip> =
+                serde_json::from_value(raw.clone()).ok()?;
+            stykanimate_rs::audio::missing_audio_clips(&clips).len()
+        }
+    };
+    Some((figures, frames, missing_audio))
 }
 
 /// The metadata cache's lookup rule, pure so it is
-/// testable without the filesystem: the cached counts
-/// and size for `path` are served only when the mtime
-/// they were read at equals the file's current mtime —
-/// a moved mtime is a miss even for the same path, and
-/// a hit is served without any re-read.
+/// testable without the filesystem: the cached counts,
+/// size and missing-audio count for `path` are served
+/// only when the mtime they were read at equals the
+/// file's current mtime — a moved mtime is a miss even
+/// for the same path, and a hit is served without any
+/// re-read.
 fn cached_meta(
-    cache: &HashMap<PathBuf, (SystemTime, usize, usize, u64)>,
+    cache: &HashMap<PathBuf, (SystemTime, usize, usize, u64, usize)>,
     path: &Path,
     modified: SystemTime,
-) -> Option<(usize, usize, u64)> {
+) -> Option<(usize, usize, u64, usize)> {
     match cache.get(path) {
-        Some(&(read_at, figures, frames, size)) if read_at == modified => {
-            Some((figures, frames, size))
+        Some(&(read_at, figures, frames, size, missing_audio)) if read_at == modified => {
+            Some((figures, frames, size, missing_audio))
         }
         _ => None,
     }
@@ -1569,7 +1666,16 @@ fn thumb_el(image: &rune::Image) -> El {
 /// comes from the scan; the duration segment (Wave 9,
 /// [`duration_segment`]) is computed from that same fps
 /// and whichever frame count the line is showing, so it
-/// costs no read of its own. When the light read failed
+/// costs no read of its own. The light-read form also
+/// closes with the missing-audio marker (Wave S, S7 —
+/// [`missing_audio_segment`]) when the same read counted
+/// clips whose files are missing; the fallback line
+/// carries the same marker from the scan's own
+/// parse-time count (Wave T, T6 — the scan classifies
+/// the clips of the project it already fully parsed, so
+/// [`meta_line`] closes with the marker whenever the
+/// scan's count is known and non-zero, and with none
+/// when the count is unknown). When the light read failed
 /// (the file vanished or stopped parsing between the scan
 /// and this render) the line is exactly the scan's
 /// [`meta_line`] — no size segment (the scan never stats
@@ -1577,19 +1683,55 @@ fn thumb_el(image: &rune::Image) -> El {
 /// blank.
 pub fn row_meta_line(
     info: &ProjectInfo,
-    meta: Option<(usize, usize, u64, SystemTime)>,
+    meta: Option<(usize, usize, u64, SystemTime, usize)>,
 ) -> String {
     match meta {
-        Some((figures, frames, size_bytes, modified)) => format!(
-            "{} · {}{} · {} fps · {} · modified {}",
-            count_label(figures, "figure", "figures"),
-            count_label(frames, "frame", "frames"),
-            duration_suffix(frames, info.fps),
-            format_fps(info.fps),
-            human_size(size_bytes),
-            format_modified(Some(modified))
-        ),
+        Some((figures, frames, size_bytes, modified, missing_audio)) => {
+            let mut line = format!(
+                "{} · {}{} · {} fps · {} · modified {}",
+                count_label(figures, "figure", "figures"),
+                count_label(frames, "frame", "frames"),
+                duration_suffix(frames, info.fps),
+                format_fps(info.fps),
+                human_size(size_bytes),
+                format_modified(Some(modified))
+            );
+            // Wave S (S7): the missing-audio marker
+            // closes the line when the light read's
+            // count is non-zero — the only segment the
+            // line ever gains conditionally on file
+            // *health* rather than file contents, and
+            // absent entirely (never a "0 missing"
+            // placeholder) when every clip's file is
+            // present.
+            if let Some(segment) = missing_audio_segment(missing_audio) {
+                line.push_str(" · ");
+                line.push_str(&segment);
+            }
+            line
+        }
         None => meta_line(info),
+    }
+}
+
+/// The missing-audio marker segment for a row's
+/// metadata line (Wave S, S7): "1 audio clip missing" /
+/// "N audio clips missing" for a non-zero count of
+/// clips the shared classification
+/// (`audio::missing_audio_clips`, via the light read)
+/// found missing their files, `None` at zero — a
+/// healthy project, a muted-only project and a
+/// no-audio project all render the line the panel has
+/// always rendered. Singular/plural wording is
+/// [`count_label`]'s, the rows' own helper.
+pub fn missing_audio_segment(missing: usize) -> Option<String> {
+    if missing == 0 {
+        None
+    } else {
+        Some(format!(
+            "{} missing",
+            count_label(missing, "audio clip", "audio clips")
+        ))
     }
 }
 
@@ -1623,16 +1765,29 @@ pub fn totals_line(entries_meta: &[(usize, usize)], project_count: usize) -> Str
 /// One row's metadata line: real scan data only
 /// (`ProjectInfo` figures/frames/fps/modified), plus
 /// the duration (Wave 9) computed from the scan's own
-/// frames and fps — still nothing but scan data.
+/// frames and fps — still nothing but scan data. Since
+/// Wave T (T6) the scan also carries a missing-audio
+/// count from its full parse, so the line closes with
+/// the same marker ([`missing_audio_segment`]) the
+/// light-read line uses when that count is known and
+/// non-zero. An entry whose count was never computed
+/// (`ProjectInfo::missing_audio` is `None`) renders no
+/// marker: unknown is not zero, and the line claims no
+/// health the scan did not verify.
 pub fn meta_line(info: &ProjectInfo) -> String {
-    format!(
+    let mut line = format!(
         "{} · {}{} · {} fps · modified {}",
         count_label(info.figures, "figure", "figures"),
         count_label(info.frames, "frame", "frames"),
         duration_suffix(info.frames, info.fps),
         format_fps(info.fps),
         format_modified(info.modified)
-    )
+    );
+    if let Some(segment) = info.missing_audio.and_then(missing_audio_segment) {
+        line.push_str(" · ");
+        line.push_str(&segment);
+    }
+    line
 }
 
 // ---- Dispatch: one function per control, against a bare
@@ -2320,7 +2475,7 @@ fn project_row(
     info: &ProjectInfo,
     i: usize,
     t: &Theme,
-    meta: Option<(usize, usize, u64, SystemTime)>,
+    meta: Option<(usize, usize, u64, SystemTime, usize)>,
     thumb: Option<rune::Image>,
 ) -> El {
     project_row_confirm(info, i, t, meta, false, thumb)
@@ -2340,7 +2495,7 @@ fn project_row_confirm(
     info: &ProjectInfo,
     i: usize,
     t: &Theme,
-    meta: Option<(usize, usize, u64, SystemTime)>,
+    meta: Option<(usize, usize, u64, SystemTime, usize)>,
     confirming: bool,
     thumb: Option<rune::Image>,
 ) -> El {
@@ -2370,7 +2525,7 @@ fn project_row_marked(
     info: &ProjectInfo,
     i: usize,
     t: &Theme,
-    meta: Option<(usize, usize, u64, SystemTime)>,
+    meta: Option<(usize, usize, u64, SystemTime, usize)>,
     confirming: bool,
     selected: bool,
     thumb: Option<rune::Image>,
@@ -2742,7 +2897,7 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
         let mut metas: Vec<(usize, usize)> = Vec::new();
         for (i, info) in shown.iter().enumerate() {
             let meta = home.metadata_for(&info.path);
-            if let Some((figures, frames, _, _)) = meta {
+            if let Some((figures, frames, _, _, _)) = meta {
                 metas.push((figures, frames));
             }
             let confirming = confirm_pending(home, &info.path);
@@ -2798,6 +2953,9 @@ mod tests {
     use super::*;
 
     /// Build a scan entry without touching the disk.
+    /// Its missing-audio count is `None` — never
+    /// computed — which is the "unknown" the fallback
+    /// line must not present as health.
     fn info(name: &str, path: &str) -> ProjectInfo {
         ProjectInfo {
             name: name.into(),
@@ -2806,6 +2964,7 @@ mod tests {
             frames: 5,
             fps: 12.0,
             modified: None,
+            missing_audio: None,
         }
     }
 
@@ -3195,7 +3354,7 @@ mod tests {
         let stamp =
             SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_117_426);
         assert_eq!(
-            row_meta_line(&entry, Some((3, 12, 1_500, stamp))),
+            row_meta_line(&entry, Some((3, 12, 1_500, stamp, 0))),
             "3 figures · 12 frames · 0 fps · 1.5 KB · modified 2026-11-08 05:57"
         );
     }
@@ -3249,9 +3408,15 @@ mod tests {
         let written = project_json(3, 7);
         let expected_size = written.len() as u64;
         std::fs::write(&path, written).unwrap();
-        let (figures, frames, size_bytes, modified) = project_metadata(&path).unwrap();
+        let (figures, frames, size_bytes, modified, missing_audio) =
+            project_metadata(&path).unwrap();
         assert_eq!(figures, 3);
         assert_eq!(frames, 7);
+        // The fixture carries no `audio` key at all:
+        // an absent array is an empty clip list
+        // (`Project::audio` is serde-defaulted), so
+        // nothing is missing.
+        assert_eq!(missing_audio, 0);
         // The size is the file's byte length — the exact
         // bytes written, from the same stat as the mtime.
         assert_eq!(size_bytes, expected_size);
@@ -3287,13 +3452,15 @@ mod tests {
         let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
         let t1 = t0 + std::time::Duration::from_secs(60);
         let path = PathBuf::from("projects/alpha.json");
-        let mut cache: HashMap<PathBuf, (SystemTime, usize, usize, u64)> = HashMap::new();
+        let mut cache: HashMap<PathBuf, (SystemTime, usize, usize, u64, usize)> =
+            HashMap::new();
         // Empty cache misses.
         assert_eq!(cached_meta(&cache, &path, t0), None);
-        cache.insert(path.clone(), (t0, 4, 9, 1_500));
+        cache.insert(path.clone(), (t0, 4, 9, 1_500, 2));
         // Same path, the mtime it was read at: a hit —
-        // counts and size served together.
-        assert_eq!(cached_meta(&cache, &path, t0), Some((4, 9, 1_500)));
+        // counts, size and the missing-audio count
+        // served together.
+        assert_eq!(cached_meta(&cache, &path, t0), Some((4, 9, 1_500, 2)));
         // Same path, a moved mtime: a miss — the file may
         // have changed under the same name.
         assert_eq!(cached_meta(&cache, &path, t1), None);
@@ -3310,8 +3477,10 @@ mod tests {
         let path = dir.join("cached.json");
         std::fs::write(&path, project_json(2, 5)).unwrap();
         let state = HomePanelState::default();
-        let (figures, frames, size_bytes, read_at) = state.metadata_for(&path).unwrap();
+        let (figures, frames, size_bytes, read_at, missing_audio) =
+            state.metadata_for(&path).unwrap();
         assert_eq!((figures, frames), (2, 5));
+        assert_eq!(missing_audio, 0);
         assert_eq!(size_bytes, project_json(2, 5).len() as u64);
 
         // Rewrite the file with different counts (and a
@@ -3322,7 +3491,7 @@ mod tests {
         // length).
         std::fs::write(&path, project_json(6, 1)).unwrap();
         set_mtime(&path, read_at);
-        let (figures, frames, size_bytes, modified) = state.metadata_for(&path).unwrap();
+        let (figures, frames, size_bytes, modified, _) = state.metadata_for(&path).unwrap();
         assert_eq!((figures, frames), (2, 5), "cache served, no re-read");
         assert_eq!(
             size_bytes,
@@ -3335,7 +3504,7 @@ mod tests {
         // re-read, and the new counts and size land.
         let later = read_at + std::time::Duration::from_secs(60);
         set_mtime(&path, later);
-        let (figures, frames, size_bytes, modified) = state.metadata_for(&path).unwrap();
+        let (figures, frames, size_bytes, modified, _) = state.metadata_for(&path).unwrap();
         assert_eq!((figures, frames), (6, 1));
         assert_eq!(size_bytes, project_json(6, 1).len() as u64);
         assert_eq!(modified, later);
@@ -3362,7 +3531,7 @@ mod tests {
         // duration (12 frames at the scan's 24 fps →
         // "0.5s") sits between frames and fps.
         assert_eq!(
-            row_meta_line(&entry, Some((3, 12, 1_500, stamp))),
+            row_meta_line(&entry, Some((3, 12, 1_500, stamp, 0))),
             "3 figures · 12 frames · 0.5s · 24 fps · 1.5 KB · modified 2026-11-08 05:57"
         );
         // No light read: the line is the scan's, unchanged
@@ -3377,6 +3546,165 @@ mod tests {
     }
 
     #[test]
+    fn row_meta_line_closes_with_the_missing_audio_marker() {
+        // Wave S (S7): a non-zero missing count appends
+        // the marker as the line's closing segment —
+        // pluralised by `count_label` — and a zero count
+        // leaves the line byte-identical to its pre-Wave-S
+        // shape (pinned by the tests above; the segment
+        // helper itself is pinned here).
+        let mut entry = info("Demo", "projects/demo.json");
+        entry.fps = 24.0;
+        let stamp =
+            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_117_426);
+        assert_eq!(
+            row_meta_line(&entry, Some((3, 12, 1_500, stamp, 2))),
+            "3 figures · 12 frames · 0.5s · 24 fps · 1.5 KB · modified 2026-11-08 05:57 · 2 audio clips missing"
+        );
+        assert!(
+            row_meta_line(&entry, Some((3, 12, 1_500, stamp, 1)))
+                .ends_with("· 1 audio clip missing"),
+            "a single missing clip singularises"
+        );
+        assert_eq!(missing_audio_segment(0), None);
+        assert_eq!(
+            missing_audio_segment(1).as_deref(),
+            Some("1 audio clip missing")
+        );
+        assert_eq!(
+            missing_audio_segment(3).as_deref(),
+            Some("3 audio clips missing")
+        );
+    }
+
+    #[test]
+    fn meta_line_closes_with_the_scan_missing_audio_marker() {
+        // Wave T (T6): the scan fallback line carries
+        // the same marker, sourced from the scan's own
+        // parse-time count on the ProjectInfo — so a row
+        // whose light read failed still reports the
+        // missing audio the scan verified. The base
+        // shape is the one `meta_line_carries_real_metadata`
+        // pins; the marker is purely additive at its end.
+        let mut entry = info("Demo", "projects/demo.json");
+        entry.figures = 3;
+        entry.frames = 12;
+        entry.fps = 24.0;
+        entry.modified =
+            Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_117_426));
+        const BASE: &str =
+            "3 figures · 12 frames · 0.5s · 24 fps · modified 2026-11-08 05:57";
+
+        entry.missing_audio = Some(2);
+        assert_eq!(
+            meta_line(&entry),
+            format!("{} · 2 audio clips missing", BASE)
+        );
+        // The marker reaches the rendered row through
+        // the fallback arm itself, not only via
+        // `meta_line` directly.
+        assert_eq!(
+            row_meta_line(&entry, None),
+            format!("{} · 2 audio clips missing", BASE)
+        );
+
+        entry.missing_audio = Some(1);
+        assert_eq!(
+            meta_line(&entry),
+            format!("{} · 1 audio clip missing", BASE)
+        );
+
+        // A verified zero: the scan parsed the file and
+        // found nothing missing — the line is the old
+        // shape exactly, no "0 missing" placeholder.
+        entry.missing_audio = Some(0);
+        assert_eq!(meta_line(&entry), BASE);
+
+        // Unknown is not zero: an entry no scan ever
+        // parsed carries `None`, and the line claims no
+        // health it did not verify — byte-identical to
+        // the verified-zero line, by the absence of the
+        // marker rather than by a count.
+        entry.missing_audio = None;
+        assert_eq!(meta_line(&entry), BASE);
+    }
+
+    #[test]
+    fn project_metadata_counts_missing_audio_with_the_shared_classification() {
+        // Wave S (S7): the light read classifies a listed
+        // project's clips with the shared helper's rule —
+        // an unmuted clip whose file does not exist counts;
+        // a present file does not; a MUTED clip whose file
+        // is gone does not (muted clips are excluded from
+        // playback and export, so the open-time surfacing
+        // excludes them too, and the marker must agree).
+        // Clip paths are absolute (the temp dir), so the
+        // existence checks do not depend on the process
+        // working directory.
+        let dir = temp_dir("metadata-audio");
+        let present = dir.join("present.wav");
+        std::fs::write(&present, b"RIFF").unwrap();
+        let gone = dir.join("gone.wav");
+        let gone_muted = dir.join("gone-muted.wav");
+        let doc = serde_json::json!({
+            "name": "Audio",
+            "fps": 24.0,
+            "figures": [],
+            "frames": [],
+            "audio": [
+                { "path": present.to_string_lossy(), "start_frame": 0 },
+                { "path": gone.to_string_lossy(), "start_frame": 0 },
+                { "path": gone_muted.to_string_lossy(), "start_frame": 0, "muted": true },
+            ],
+        });
+        let path = dir.join("audio.json");
+        std::fs::write(&path, doc.to_string()).unwrap();
+        let (_, _, _, _, missing_audio) = project_metadata(&path).unwrap();
+        assert_eq!(
+            missing_audio, 1,
+            "exactly the one unmuted missing clip counts"
+        );
+        // The same count reaches the row through the
+        // cached accessor the row loop actually calls.
+        let state = HomePanelState::default();
+        let (_, _, _, _, missing_audio) = state.metadata_for(&path).unwrap();
+        assert_eq!(missing_audio, 1);
+
+        // Every clip's file present: no marker.
+        let healthy = serde_json::json!({
+            "name": "Healthy",
+            "fps": 24.0,
+            "figures": [],
+            "frames": [],
+            "audio": [
+                { "path": present.to_string_lossy(), "start_frame": 0 },
+            ],
+        });
+        let healthy_path = dir.join("healthy.json");
+        std::fs::write(&healthy_path, healthy.to_string()).unwrap();
+        let (_, _, _, _, missing_audio) = project_metadata(&healthy_path).unwrap();
+        assert_eq!(missing_audio, 0);
+
+        // An `audio` array that will not deserialise as
+        // clips fails the whole light read — the row
+        // falls back to the scan line, the documented
+        // scope (the scan's full parse rejects such a
+        // file too, so it can only be a listed row if
+        // the file changed after the scan).
+        let broken = serde_json::json!({
+            "name": "Broken",
+            "fps": 24.0,
+            "figures": [],
+            "frames": [],
+            "audio": [ { "path": 3, "start_frame": 0 } ],
+        });
+        let broken_path = dir.join("broken.json");
+        std::fs::write(&broken_path, broken.to_string()).unwrap();
+        assert!(project_metadata(&broken_path).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn project_row_builds_with_and_without_light_metadata() {
         // Builder smoke test: the row (including the keyed
         // metadata line) constructs in both modes — the
@@ -3386,7 +3714,10 @@ mod tests {
         let _ = project_row(&entry, 0, &t, None, None);
         let stamp =
             SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_117_426);
-        let _ = project_row(&entry, 0, &t, Some((3, 12, 1_500, stamp)), None);
+        let _ = project_row(&entry, 0, &t, Some((3, 12, 1_500, stamp, 0)), None);
+        // And with a missing-audio count: the marker
+        // rides the same keyed meta line, no new element.
+        let _ = project_row(&entry, 0, &t, Some((3, 12, 1_500, stamp, 2)), None);
     }
 
     #[test]
@@ -4155,6 +4486,7 @@ mod tests {
             frames: 5,
             fps: 12.0,
             modified: mtime,
+            missing_audio: None,
         }
     }
 

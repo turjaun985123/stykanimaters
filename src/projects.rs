@@ -94,6 +94,18 @@ pub struct ProjectInfo {
     pub frames: usize,
     pub fps: f32,
     pub modified: Option<SystemTime>,
+    /// How many of the project's audio clips are missing
+    /// their files, as counted by the scan's full parse
+    /// with the one shared classification
+    /// ([`crate::audio::missing_audio_clips`]) — Wave T
+    /// (T6). `Some` is a verified count from an actual
+    /// parse of the file, zero included: `Some(0)` is
+    /// verified health. `None` means no count was ever
+    /// computed for this entry — the count is *unknown*,
+    /// not zero, and consumers must not present it as
+    /// health (the Home fallback line renders no
+    /// missing-audio marker for it).
+    pub missing_audio: Option<usize>,
 }
 
 /// The file-name slug for a project name (same rule as the
@@ -141,13 +153,18 @@ impl FileStamp {
 
 /// The part of a parsed project a listing needs — everything
 /// in [`ProjectInfo`] except the path and the stamp, which a
-/// scan always knows first-hand.
+/// scan always knows first-hand. A summary exists only for a
+/// file that fully parsed, so its `missing_audio` is a plain
+/// count (always verified — the `Option` is added when the
+/// summary becomes a [`ProjectInfo`], whose other, non-scan
+/// constructors may have never computed one).
 #[derive(Clone, Debug, PartialEq)]
 struct ScanSummary {
     name: String,
     figures: usize,
     frames: usize,
     fps: f32,
+    missing_audio: usize,
 }
 
 /// One file's cached scan outcome: the stamp it was computed
@@ -214,7 +231,15 @@ thread_local! {
 /// Cost: one directory listing plus one stat per `.json`
 /// file. A file whose (mtime, length) stamp matches its
 /// cached summary is not re-read or re-parsed; only new or
-/// changed files pay the read + parse.
+/// changed files pay the read + parse. A (re)parse also
+/// classifies the project's audio clips (Wave T, T6: one
+/// existence stat per unmuted clip, through the shared
+/// [`crate::audio::missing_audio_clips`]) and the verdict
+/// is cached with the summary under the same stamp — a
+/// clip file that appears or vanishes while the project
+/// file itself is untouched is re-verified when the
+/// project file's stamp next moves, the same staleness
+/// contract the counts already carry.
 pub fn scan(dir: &Path) -> Vec<ProjectInfo> {
     let mut infos: Vec<ProjectInfo> = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -238,11 +263,24 @@ pub fn scan(dir: &Path) -> Vec<ProjectInfo> {
                 let parsed = std::fs::read_to_string(&path)
                     .ok()
                     .and_then(|text| serde_json::from_str::<Project>(&text).ok())
-                    .map(|project| ScanSummary {
-                        name: project.name,
-                        figures: project.figures.len(),
-                        frames: project.frames.len(),
-                        fps: project.fps,
+                    .map(|project| {
+                        // Wave T (T6): the parse already
+                        // holds the whole project, so the
+                        // missing-audio verdict costs only
+                        // the shared classification over its
+                        // clips — the same helper the open
+                        // path, the export mux and both Home
+                        // lines use, never a second
+                        // existence/muted rule.
+                        let missing_audio =
+                            crate::audio::missing_audio_clips(&project.audio).len();
+                        ScanSummary {
+                            name: project.name,
+                            figures: project.figures.len(),
+                            frames: project.frames.len(),
+                            fps: project.fps,
+                            missing_audio,
+                        }
                     });
                 if let Some(st) = stamp {
                     SCAN_CACHE.with(|c| {
@@ -260,6 +298,10 @@ pub fn scan(dir: &Path) -> Vec<ProjectInfo> {
                 fps: summary.fps,
                 path,
                 modified: stamp.and_then(|st| st.modified),
+                // A summary exists only for a file the
+                // scan fully parsed, so the count is
+                // always known here (Wave T, T6).
+                missing_audio: Some(summary.missing_audio),
             });
         }
     }
@@ -812,6 +854,63 @@ mod tests {
     }
 
     #[test]
+    fn scan_counts_missing_audio_with_the_shared_classification() {
+        // Wave T (T6): the scan's full parse classifies
+        // the project's clips with the one shared helper
+        // (`audio::missing_audio_clips`), so every listed
+        // ProjectInfo carries a *verified* count: an
+        // unmuted clip whose file is gone counts; a
+        // present file does not; a muted clip whose file
+        // is gone does not (the muted leg is the
+        // shared-rule proof).
+        let dir = temp_dir("scan-audio");
+        let present = dir.join("present.wav");
+        std::fs::write(&present, b"wav").unwrap();
+        let clip = |path: &Path, muted: bool| crate::model::AudioClip {
+            path: path.to_string_lossy().into_owned(),
+            start_frame: 0,
+            gain: 1.0,
+            muted,
+        };
+
+        let mut mixed = Project::new_demo();
+        mixed.name = "Audio Mixed".into();
+        mixed.audio = vec![
+            clip(&present, false),
+            clip(&dir.join("gone.wav"), false),
+            clip(&dir.join("gone-muted.wav"), true),
+        ];
+        save(&mixed, &dir).unwrap();
+
+        // Every clip present: a verified zero, distinct
+        // from "unknown".
+        let mut healthy = Project::new_demo();
+        healthy.name = "Audio Healthy".into();
+        healthy.audio = vec![clip(&present, false)];
+        save(&healthy, &dir).unwrap();
+
+        // No clips at all (the demo default): also a
+        // verified zero — the parse ran, the list was
+        // empty.
+        let mut silent = Project::new_demo();
+        silent.name = "Audio Silent".into();
+        save(&silent, &dir).unwrap();
+
+        // A file the scan cannot parse yields no
+        // ProjectInfo at all: there is no count that
+        // could be mistaken for a verified zero.
+        std::fs::write(dir.join("broken.json"), "{ not a project").unwrap();
+
+        let infos = scan(&dir);
+        assert_eq!(infos.len(), 3, "scan found {infos:?}");
+        let by_name = |name: &str| infos.iter().find(|i| i.name == name).unwrap();
+        assert_eq!(by_name("Audio Mixed").missing_audio, Some(1));
+        assert_eq!(by_name("Audio Healthy").missing_audio, Some(0));
+        assert_eq!(by_name("Audio Silent").missing_audio, Some(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn load_round_trips_a_saved_project() {
         let dir = temp_dir("load");
         let mut project = Project::new_demo();
@@ -915,6 +1014,7 @@ mod tests {
             frames: 0,
             fps: 12.0,
             modified: None,
+            missing_audio: None,
         };
         let projects = vec![
             info("Alpha Run"),
@@ -1122,6 +1222,7 @@ mod tests {
             figures: 1,
             frames: 2,
             fps: 12.0,
+            missing_audio: 0,
         };
         let mut cache: HashMap<PathBuf, CachedScan> = HashMap::new();
         assert_eq!(cache_get(&cache, &path, stamp), None, "empty cache misses");
