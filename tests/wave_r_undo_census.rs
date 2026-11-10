@@ -52,6 +52,21 @@ use stykanimate_rs::mcp::all_tools;
 // Harness
 // ---------------------------------------------------------------------
 
+/// Serial guard: this suite's legs share the CWD-relative
+/// stores (./library, ./library3d, ./projects, ./import),
+/// and cargo runs a binary's tests on parallel threads —
+/// left unserialised, one test's library delete/rename
+/// lands inside another's save→list window (CI rounds
+/// 42761122064/42761838001). Every test below holds this
+/// guard for its whole body (the wave_p_close_guard
+/// precedent). Poison-tolerant: one panicking test must
+/// not cascade-fail the rest.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial_guard() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// A fresh demo core (1 humanoid figure, 5 frames) with the
 /// project's fps set to 24.0 explicitly, per the board's
 /// timing-fixture rule (subtitle import legs convert
@@ -566,7 +581,7 @@ fn a_legs() -> Vec<Leg> {
         Leg { name: "audio_clip_normalise", group: "fxpa", setup: s_audio1, args: |_| json!({ "index": 0 }) },
         Leg { name: "audio_clip_trim", group: "fxpa", setup: s_audio1_long, args: |_| json!({ "index": 0, "start_secs": 0.1, "end_secs": 0.4 }) },
         Leg { name: "audio_clip_toggle_muted", group: "fxpa", setup: s_audio1, args: |_| json!({ "index": 0 }) },
-        Leg { name: "audio_split", group: "fxpa", setup: s_audio1, args: |_| json!({ "at_frame": 2 }) },
+        Leg { name: "audio_split", group: "fxpa", setup: s_audio1, args: |_| json!({ "index": 0, "at_frame": 2 }) },
         Leg { name: "audio_crossfade", group: "fxpa", setup: s_audio2, args: |_| json!({ "index": 0 }) },
         // ---- graph channels (group "graph") ----
         Leg { name: "graph_key", group: "graph", setup: s_none, args: |_| json!({ "figure": 0, "target": "root_x", "frame": 0, "value": 10 }) },
@@ -658,7 +673,10 @@ fn a_legs() -> Vec<Leg> {
         // ---- fig3 bakes, libraries, subtitles ----
         Leg { name: "fig3_bake", group: "misc", setup: s_fig3, args: |_| json!({}) },
         Leg { name: "fig3_bake_animation", group: "misc", setup: |c| { s_fig3(c); must(c, "fig3_rotate", json!({ "axis": 0, "degrees": 25 })); must(c, "fig3_mark_b", json!({})); must(c, "fig3_rotate", json!({ "axis": 0, "degrees": -10 })); }, args: |_| json!({ "frames": 3 }) },
-        Leg { name: "figure_library_insert", group: "misc", setup: s_figlib_save, args: |_| json!({ "name": "Styk" }) },
+        // The library names disk entries by file stem, and
+        // the save writes the figure's name lower-cased —
+        // the saved "Styk" figure is listed as "styk".
+        Leg { name: "figure_library_insert", group: "misc", setup: s_figlib_save, args: |_| json!({ "name": "styk" }) },
         Leg { name: "pose_library_apply", group: "misc", setup: s_pose_save, args: |_| json!({ "name": "wave-r-census-apply", "figure": 0, "frame": 1 }) },
         Leg { name: "subtitle_add", group: "misc", setup: s_none, args: |_| json!({ "start_frame": 0, "end_frame": 48, "text": "Hello census" }) },
         Leg { name: "subtitle_update", group: "misc", setup: s_cue, args: |_| json!({ "index": 0, "start_frame": 0, "end_frame": 24, "text": "Updated" }) },
@@ -671,21 +689,25 @@ fn a_legs() -> Vec<Leg> {
 
 #[test]
 fn census_mutating_core_spend_one_step() {
+    let _serial = serial_guard();
     run_legs(&a_legs(), "core", 1);
 }
 
 #[test]
 fn census_mutating_fx_particles_audio_spend_one_step() {
+    let _serial = serial_guard();
     run_legs(&a_legs(), "fxpa", 1);
 }
 
 #[test]
 fn census_mutating_graph_strokes_spend_one_step() {
+    let _serial = serial_guard();
     run_legs(&a_legs(), "graph", 1);
 }
 
 #[test]
 fn census_mutating_misc_spend_one_step() {
+    let _serial = serial_guard();
     run_legs(&a_legs(), "misc", 1);
 }
 
@@ -694,6 +716,7 @@ fn census_mutating_misc_spend_one_step() {
 /// bespoke leg so the planted file is removed afterwards.
 #[test]
 fn census_attach_image_to_node_spends_one_step() {
+    let _serial = serial_guard();
     let mut core = fresh_core();
     s_import_dir(&mut core);
     let before = core.undo_depth();
@@ -739,6 +762,7 @@ fn exception_legs() -> Vec<Leg> {
 
 #[test]
 fn census_exceptions_spend_no_step_but_really_write() {
+    let _serial = serial_guard();
     run_legs(&exception_legs(), "exc", 0);
 
     // Non-vacuity witnesses for three representatives: the
@@ -751,9 +775,15 @@ fn census_exceptions_spend_no_step_but_really_write() {
     assert_eq!(core.project.frames[0].duration, 2.0);
     let mut core = fresh_core();
     s_clip_session(&mut core);
+    // The setup itself spends a step (clip_create is a
+    // project mutation, counted in its own group above);
+    // the exception's contract is that the measured call
+    // adds none — measured relatively, like the fig3 and
+    // figlib witnesses below.
+    let before = core.undo_depth();
     must(&mut core, "clip_set_angle", json!({ "node": 1, "degrees": 33 }));
     assert_eq!(core.project.clips[0].frames[0].angles[1], 33.0);
-    assert_eq!(core.undo_depth(), 0, "exceptions never touch the undo stack");
+    assert_eq!(core.undo_depth(), before, "exceptions never touch the undo stack");
 }
 
 // ---------------------------------------------------------------------
@@ -811,6 +841,7 @@ fn session_legs() -> Vec<Leg> {
 
 #[test]
 fn census_session_state_spends_no_step() {
+    let _serial = serial_guard();
     run_legs(&session_legs(), "ses", 0);
 }
 
@@ -819,6 +850,7 @@ fn census_session_state_spends_no_step() {
 /// session state throughout, never an undo step.
 #[test]
 fn census_fig3_library_chain_spends_no_step() {
+    let _serial = serial_guard();
     let mut core = fresh_core();
     s_fig3(&mut core);
     let before = core.undo_depth();
@@ -836,6 +868,7 @@ fn census_fig3_library_chain_spends_no_step() {
 /// The figure-library selection cycle is session state.
 #[test]
 fn census_figure_library_cycle_spends_no_step() {
+    let _serial = serial_guard();
     let mut core = fresh_core();
     s_figlib_save(&mut core);
     let before = core.undo_depth();
@@ -906,6 +939,7 @@ fn read_legs() -> Vec<Leg> {
 
 #[test]
 fn census_read_only_spends_no_step() {
+    let _serial = serial_guard();
     run_legs(&read_legs(), "read", 0);
 }
 
@@ -934,6 +968,7 @@ fn libfile_legs() -> Vec<Leg> {
 
 #[test]
 fn census_library_file_spends_no_step() {
+    let _serial = serial_guard();
     run_legs(&libfile_legs(), "lib", 0);
 }
 
@@ -941,6 +976,7 @@ fn census_library_file_spends_no_step() {
 /// on the entry the save leg planted.
 #[test]
 fn census_pose_library_file_ops_spend_no_step() {
+    let _serial = serial_guard();
     let mut core = fresh_core();
     must(&mut core, "pose_library_save", json!({ "name": "wave-r-census" }));
     let before = core.undo_depth();
@@ -961,6 +997,7 @@ fn census_pose_library_file_ops_spend_no_step() {
 /// (P20 pinned its zero-undo as designed).
 #[test]
 fn census_figure_library_rename_spends_no_step() {
+    let _serial = serial_guard();
     let mut core = fresh_core();
     s_figlib_save(&mut core);
     let listed = invoke(&mut core, "figure_library_list", &json!({})).expect("library list");
@@ -968,10 +1005,10 @@ fn census_figure_library_rename_spends_no_step() {
         .as_array()
         .and_then(|es| {
             es.iter()
-                .position(|e| e["name"] == json!("Styk"))
+                .position(|e| e["name"] == json!("styk"))
                 .map(|p| p as i64)
         })
-        .expect("the saved Styk entry is listed");
+        .expect("the saved Styk entry is listed (as 'styk', its file stem)");
     let before = core.undo_depth();
     must(
         &mut core,
@@ -985,6 +1022,7 @@ fn census_figure_library_rename_spends_no_step() {
 /// ./projects — a file operation, not an undo step.
 #[test]
 fn census_delete_project_file_spends_no_step() {
+    let _serial = serial_guard();
     std::fs::create_dir_all("projects").expect("create ./projects");
     let mut core = fresh_core();
     must(
@@ -1011,6 +1049,7 @@ fn census_delete_project_file_spends_no_step() {
 
 #[test]
 fn census_live_stubs_and_file_refusals_spend_no_step() {
+    let _serial = serial_guard();
     for (name, class) in NON_MUTATING {
         if *class != "live-only" {
             continue;
@@ -1047,6 +1086,7 @@ fn census_live_stubs_and_file_refusals_spend_no_step() {
 
 #[test]
 fn census_history_tools_restore_not_spend() {
+    let _serial = serial_guard();
     let mut core = fresh_core();
     must(&mut core, "add_figure", json!({ "kind": "humanoid" }));
     assert_eq!(core.undo_depth(), 1);
@@ -1069,6 +1109,7 @@ fn census_history_tools_restore_not_spend() {
 
 #[test]
 fn census_swap_tools_replace_the_project() {
+    let _serial = serial_guard();
     let mut core = fresh_core();
     must(&mut core, "add_frame", json!({}));
     assert_eq!(core.project.frames.len(), 6);
@@ -1088,6 +1129,7 @@ fn census_swap_tools_replace_the_project() {
 
 #[test]
 fn census_import_file_stk_branch_spends_one_step() {
+    let _serial = serial_guard();
     let mut core = fresh_core();
     let path = tmp_path("wave_r_census_fig.stk");
     must(
@@ -1282,6 +1324,7 @@ const EXTRA_MUTATING: &[&str] = &["attach_image_to_node"];
 
 #[test]
 fn census_covers_every_tool_exactly_once() {
+    let _serial = serial_guard();
     let surface: BTreeSet<String> = all_tools().iter().map(|t| t.name.to_string()).collect();
 
     let mutating: BTreeSet<String> = a_legs()
