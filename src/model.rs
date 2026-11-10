@@ -1606,7 +1606,80 @@ impl Project {
 
     /// Total playback length in seconds, honouring frame durations.
     pub fn total_seconds(&self) -> f32 {
-        self.frames.iter().map(|f| f.duration).sum::<f32>() / self.fps.max(1.0)
+        self.timeline_beats() / self.fps.max(1.0)
+    }
+
+    /// The timeline's length in beats — the one duration-weighted
+    /// time definition the editor, transport timecode and export
+    /// sampling all share (Roadmap Wave 1, RM7 / F-6). One beat is
+    /// one frame period at the project fps; a frame lasts
+    /// `duration` beats. Durations are floored at 0.05 — the floor
+    /// playback has always applied — and a non-finite duration
+    /// counts as one beat, so a corrupt stored value can neither
+    /// erase a frame nor poison every total derived from it.
+    pub fn timeline_beats(&self) -> f32 {
+        self.frames.iter().map(|f| Self::duration_beats(f)).sum()
+    }
+
+    fn duration_beats(frame: &Frame) -> f32 {
+        if frame.duration.is_finite() {
+            frame.duration.max(0.05)
+        } else {
+            1.0
+        }
+    }
+
+    /// Timeline beats elapsed at fractional authored-frame time
+    /// `frame_time` (frame `i` spans `[i, i + 1)` in this
+    /// coordinate): each whole frame before it contributes its
+    /// duration, and the frame it lands in contributes the
+    /// matching fraction of its own duration. Times at or past
+    /// the end read as the whole timeline.
+    pub fn beats_at_frame_time(&self, frame_time: f32) -> f32 {
+        if self.frames.is_empty() || !frame_time.is_finite() || frame_time <= 0.0 {
+            return 0.0;
+        }
+        let mut beats = 0.0;
+        for (i, frame) in self.frames.iter().enumerate() {
+            let duration = Self::duration_beats(frame);
+            if frame_time < (i + 1) as f32 {
+                return beats + (frame_time - i as f32) * duration;
+            }
+            beats += duration;
+        }
+        beats
+    }
+
+    /// Fractional authored-frame time at `beats` beats into the
+    /// timeline — the inverse of [`Project::beats_at_frame_time`],
+    /// walking each frame's duration in turn so a tick that
+    /// crosses a boundary is charged at each frame's own rate.
+    /// Beats at or past the end read as the last frame.
+    pub fn frame_time_at_beats(&self, beats: f32) -> f32 {
+        if self.frames.is_empty() || !beats.is_finite() || beats <= 0.0 {
+            return 0.0;
+        }
+        let mut rest = beats;
+        for (i, frame) in self.frames.iter().enumerate() {
+            let duration = Self::duration_beats(frame);
+            if rest < duration {
+                return i as f32 + rest / duration;
+            }
+            rest -= duration;
+        }
+        (self.frames.len() - 1) as f32
+    }
+
+    /// Seconds elapsed at fractional authored-frame time
+    /// `frame_time`, on the shared duration-weighted clock.
+    pub fn seconds_at_frame_time(&self, frame_time: f32) -> f32 {
+        self.beats_at_frame_time(frame_time) / self.fps.max(1.0)
+    }
+
+    /// Fractional authored-frame time at `seconds` seconds into
+    /// the timeline, on the shared duration-weighted clock.
+    pub fn frame_time_at_seconds(&self, seconds: f32) -> f32 {
+        self.frame_time_at_beats(seconds * self.fps.max(1.0))
     }
 
     /// Camera (centre x, centre y, zoom) at a fractional frame time.
@@ -1934,11 +2007,46 @@ mod tests {
     #[test]
     fn durations_expand_and_total_time() {
         let mut project = Project::new_demo();
+        project.fps = 24.0;
         project.frames[0].duration = 2.0;
         project.frames[1].duration = 3.0;
         let expanded = crate::export::expanded_frames(&project);
         assert_eq!(expanded.len(), 2 + 3 + 1 + 1 + 1);
-        assert!((project.total_seconds() - 8.0 / 12.0).abs() < 0.001);
+        assert!((project.total_seconds() - 8.0 / 24.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn timeline_clock_walks_fractional_durations() {
+        // Roadmap Wave 1 (RM7 / F-6): the shared clock charges
+        // each frame its own fractional duration — a 1.5-beat
+        // hold followed by a 0.5-beat hold is a 2-beat span in
+        // which the second frame starts at beat 1.5, not at a
+        // rounded boundary.
+        let mut project = Project::new_demo();
+        project.fps = 24.0;
+        project.frames[0].duration = 1.5;
+        project.frames[1].duration = 0.5;
+        project.frames[2].duration = 2.0;
+        project.frames[3].duration = 1.0;
+        project.frames[4].duration = 1.0;
+        assert!((project.timeline_beats() - 6.0).abs() < 1e-6);
+        assert!((project.total_seconds() - 6.0 / 24.0).abs() < 1e-6);
+        // Beat 1.5 is exactly the second frame's start; beat
+        // 1.75 is halfway through its half-beat hold.
+        assert!((project.frame_time_at_beats(1.5) - 1.0).abs() < 1e-6);
+        assert!((project.frame_time_at_beats(1.75) - 1.5).abs() < 1e-6);
+        // The inverse map agrees, in beats and in seconds.
+        assert!((project.beats_at_frame_time(1.5) - 1.75).abs() < 1e-6);
+        assert!(
+            (project.seconds_at_frame_time(1.5) - 1.75 / 24.0).abs() < 1e-6,
+            "seconds at frame 1.5: {}",
+            project.seconds_at_frame_time(1.5)
+        );
+        assert!(
+            (project.frame_time_at_seconds(1.75 / 24.0) - 1.5).abs() < 1e-6,
+            "frame time at 1.75 beats: {}",
+            project.frame_time_at_seconds(1.75 / 24.0)
+        );
     }
 
     #[test]

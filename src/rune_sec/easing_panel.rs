@@ -446,10 +446,16 @@ pub fn easing_panel(s: &State, t: &Theme) -> El {
             ));
         }
     } else {
-        panel = panel.child(design::empty_state(
+        // RM28 (PL-7): the state offers its filling
+        // action — the same op the Graph panel's Key
+        // angle button runs.
+        panel = panel.child(design::empty_state_action(
             "chart-line",
             "No graph channels on this figure yet — Key angle starts one.",
+            "ease-empty-key-angle",
+            "Key angle",
             t,
+            |s| s.core.key_graph_angle(),
         ));
     }
 

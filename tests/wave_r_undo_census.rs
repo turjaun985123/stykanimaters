@@ -9,24 +9,31 @@
 //! behaviour (static call-path trace + handler reads), not by
 //! name:
 //!
-//!   MUTATING (211)   — a leg per tool below: fresh demo core,
+//!   MUTATING (232)   — a leg per tool below: fresh demo core,
 //!                      invoke the handler through
 //!                      `mcp::all_tools()`, assert the result
 //!                      is Ok and the undo depth moves by
 //!                      EXACTLY 1. Setups use other tools'
 //!                      handlers, then the baseline is read —
 //!                      only the leg call is measured.
-//!   EXCEPTION (21)   — project-mutating tools that spend ZERO
+//!   EXCEPTION (0)    — project-mutating tools that spend ZERO
 //!                      steps BY DESIGN: the Wave 13 dirty-
 //!                      census seam (`mark_dirty`, no snapshot)
-//!                      with panel parity — the panel caller
-//!                      writes through the same op/seam and
-//!                      also spends no step. Each leg asserts
-//!                      Ok + depth unchanged; the per-tool
-//!                      evidence is in
-//!                      ~/workspace/wave-r/findings/r7.md.
-//!                      `figure_set_color` is the member P41
-//!                      flagged (F1) and Q18 declared.
+//!                      with panel parity. This class held 21
+//!                      tools when the census was written
+//!                      (per-tool evidence in
+//!                      ~/workspace/wave-r/findings/r7.md;
+//!                      `figure_set_color` was the member P41
+//!                      flagged (F1) and Q18 declared).
+//!                      Roadmap Wave 1 (RM24, P-14 — audit
+//!                      A15 H3) CLOSED the census: all 21
+//!                      were promoted to the one-step class
+//!                      (their legs live in `promoted_legs`
+//!                      below and run with the mutating
+//!                      expectation), and the class is empty.
+//!                      It is kept as a named class so a
+//!                      future exception must be declared
+//!                      here, in the open, to exist.
 //!   NON-MUTATING (160) — read-only (53), session/runtime
 //!                      state (47), library/file state (20),
 //!                      project swaps (4, standing exclusion),
@@ -799,47 +806,59 @@ fn census_attach_image_to_node_spends_one_step() {
 }
 
 // ---------------------------------------------------------------------
-// EXCEPTION legs — project writes that spend ZERO steps by
-// design (the Wave 13 mark_dirty seam, panel parity). Each
-// leg asserts Ok + depth unchanged; several also assert the
-// write really landed and dirty moved, so a leg cannot pass
-// vacuously. Evidence per tool: findings/r7.md.
+// PROMOTED legs — the Wave 13 exception class, promoted by
+// Roadmap Wave 1 (RM24, P-14): project writes that spent
+// ZERO steps by design (the mark_dirty seam, panel parity)
+// now spend exactly ONE undo step each, like every other
+// mutating tool. The legs are the former exception legs
+// verbatim (same setups, same args); only the expectation
+// changed. `exception_legs` below is the emptied class.
 // ---------------------------------------------------------------------
 
-fn exception_legs() -> Vec<Leg> {
+fn promoted_legs() -> Vec<Leg> {
     vec![
-        Leg { name: "figure_set_color", group: "exc", setup: s_none, args: |_| json!({ "figure": 0, "color": 0x224466 }) },
-        Leg { name: "figure_rename", group: "exc", setup: s_none, args: |_| json!({ "figure": 0, "name": "Hero" }) },
-        Leg { name: "set_project_easing", group: "exc", setup: s_none, args: |_| json!({ "easing": "smooth" }) },
-        Leg { name: "set_frame_duration", group: "exc", setup: s_none, args: |_| json!({ "frame": 0, "duration": 2.0 }) },
-        Leg { name: "set_frame_durations", group: "exc", setup: s_none, args: |_| json!({ "durations": [2.0, 1.0] }) },
-        Leg { name: "adjust_frame_duration", group: "exc", setup: s_none, args: |_| json!({ "factor": 2.0 }) },
-        Leg { name: "set_weather", group: "exc", setup: s_none, args: |_| json!({ "kind": "rain" }) },
-        Leg { name: "set_weather_kind", group: "exc", setup: s_none, args: |_| json!({ "kind": "snow" }) },
-        Leg { name: "cycle_weather", group: "exc", setup: s_none, args: |_| json!({}) },
-        Leg { name: "set_weather_amount", group: "exc", setup: |c| must(c, "set_weather_kind", json!({ "kind": "rain" })), args: |_| json!({ "amount": 120 }) },
-        Leg { name: "set_weather_wind", group: "exc", setup: |c| must(c, "set_weather_kind", json!({ "kind": "rain" })), args: |_| json!({ "wind": 40 }) },
-        Leg { name: "layers", group: "exc", setup: s_none, args: |_| json!({ "figure": 0, "hidden": true }) },
-        Leg { name: "layers_set_all_visible", group: "exc", setup: s_none, args: |_| json!({ "visible": false }) },
-        Leg { name: "layers_invert_visibility", group: "exc", setup: s_none, args: |_| json!({}) },
-        Leg { name: "figure_cycle_opacity", group: "exc", setup: s_none, args: |_| json!({}) },
-        Leg { name: "figure_step_opacity", group: "exc", setup: s_none, args: |_| json!({ "delta": -0.2 }) },
-        Leg { name: "figure_toggle_hidden", group: "exc", setup: s_none, args: |_| json!({}) },
-        Leg { name: "figure_toggle_lock", group: "exc", setup: s_none, args: |_| json!({}) },
-        Leg { name: "clear_camera_key", group: "exc", setup: s_camera_key, args: |_| json!({}) },
-        Leg { name: "clip_set_angle", group: "exc", setup: s_clip_session, args: |_| json!({ "node": 1, "degrees": 33 }) },
-        Leg { name: "clip_set_root", group: "exc", setup: s_clip_session, args: |_| json!({ "root": [400, 300] }) },
+        Leg { name: "figure_set_color", group: "mut", setup: s_none, args: |_| json!({ "figure": 0, "color": 0x224466 }) },
+        Leg { name: "figure_rename", group: "mut", setup: s_none, args: |_| json!({ "figure": 0, "name": "Hero" }) },
+        Leg { name: "set_project_easing", group: "mut", setup: s_none, args: |_| json!({ "easing": "smooth" }) },
+        Leg { name: "set_frame_duration", group: "mut", setup: s_none, args: |_| json!({ "frame": 0, "duration": 2.0 }) },
+        Leg { name: "set_frame_durations", group: "mut", setup: s_none, args: |_| json!({ "durations": [2.0, 1.0] }) },
+        Leg { name: "adjust_frame_duration", group: "mut", setup: s_none, args: |_| json!({ "factor": 2.0 }) },
+        Leg { name: "set_weather", group: "mut", setup: s_none, args: |_| json!({ "kind": "rain" }) },
+        Leg { name: "set_weather_kind", group: "mut", setup: s_none, args: |_| json!({ "kind": "snow" }) },
+        Leg { name: "cycle_weather", group: "mut", setup: s_none, args: |_| json!({}) },
+        Leg { name: "set_weather_amount", group: "mut", setup: |c| must(c, "set_weather_kind", json!({ "kind": "rain" })), args: |_| json!({ "amount": 120 }) },
+        Leg { name: "set_weather_wind", group: "mut", setup: |c| must(c, "set_weather_kind", json!({ "kind": "rain" })), args: |_| json!({ "wind": 40 }) },
+        Leg { name: "layers", group: "mut", setup: s_none, args: |_| json!({ "figure": 0, "hidden": true }) },
+        Leg { name: "layers_set_all_visible", group: "mut", setup: s_none, args: |_| json!({ "visible": false }) },
+        Leg { name: "layers_invert_visibility", group: "mut", setup: s_none, args: |_| json!({}) },
+        Leg { name: "figure_cycle_opacity", group: "mut", setup: s_none, args: |_| json!({}) },
+        Leg { name: "figure_step_opacity", group: "mut", setup: s_none, args: |_| json!({ "delta": -0.2 }) },
+        Leg { name: "figure_toggle_hidden", group: "mut", setup: s_none, args: |_| json!({}) },
+        Leg { name: "figure_toggle_lock", group: "mut", setup: s_none, args: |_| json!({}) },
+        Leg { name: "clear_camera_key", group: "mut", setup: s_camera_key, args: |_| json!({}) },
+        Leg { name: "clip_set_angle", group: "mut", setup: s_clip_session, args: |_| json!({ "node": 1, "degrees": 33 }) },
+        Leg { name: "clip_set_root", group: "mut", setup: s_clip_session, args: |_| json!({ "root": [400, 300] }) },
     ]
 }
 
+/// The exception class, emptied by RM24's census closure:
+/// kept as a function (and a completeness-test input) so
+/// the classification's shape survives and any future
+/// exception must be declared here explicitly.
+fn exception_legs() -> Vec<Leg> {
+    vec![]
+}
+
 #[test]
-fn census_exceptions_spend_no_step_but_really_write() {
+fn census_promoted_spend_one_step_and_really_write() {
     let _serial = serial_guard();
-    run_legs(&exception_legs(), "exc", 0);
+    run_legs(&promoted_legs(), "mut", 1);
 
     // Non-vacuity witnesses for three representatives: the
     // colour write lands in the project, the duration write
-    // lands in the frame, the clip tweak lands in the clip.
+    // lands in the frame, the clip tweak lands in the clip —
+    // each now WITH its undo step (RM24; the Wave R version
+    // of this test asserted the step's absence).
     let mut core = fresh_core();
     must(&mut core, "figure_set_color", json!({ "figure": 0, "color": 0x224466 }));
     assert_eq!(core.project.figures[0].color, 0x224466);
@@ -847,15 +866,19 @@ fn census_exceptions_spend_no_step_but_really_write() {
     assert_eq!(core.project.frames[0].duration, 2.0);
     let mut core = fresh_core();
     s_clip_session(&mut core);
-    // The setup itself spends a step (clip_create is a
+    // The setup itself spends steps (clip_create is a
     // project mutation, counted in its own group above);
-    // the exception's contract is that the measured call
-    // adds none — measured relatively, like the fig3 and
+    // the promoted contract is that the measured call adds
+    // exactly one — measured relatively, like the fig3 and
     // figlib witnesses below.
     let before = core.undo_depth();
     must(&mut core, "clip_set_angle", json!({ "node": 1, "degrees": 33 }));
     assert_eq!(core.project.clips[0].frames[0].angles[1], 33.0);
-    assert_eq!(core.undo_depth(), before, "exceptions never touch the undo stack");
+    assert_eq!(core.undo_depth(), before + 1, "the promoted tweak spends its step");
+    // And the step is a real one: undoing restores the
+    // pre-tweak angle.
+    core.undo();
+    assert_ne!(core.project.clips[0].frames[0].angles[1], 33.0);
 }
 
 // ---------------------------------------------------------------------
@@ -1221,9 +1244,10 @@ fn census_import_file_stk_branch_spends_one_step() {
     assert_eq!(core.undo_depth(), before + 1, "the .stk import is one undo step");
 }
 /// The non-mutating classification: every tool NOT in
-/// the mutating legs or the exception legs, with its
-/// class. Pinned against all_tools() by the
-/// completeness test below.
+/// the mutating legs (the promoted legs included) or
+/// the — now empty — exception legs, with its class.
+/// Pinned against all_tools() by the completeness test
+/// below.
 const NON_MUTATING: &[(&str, &str)] = &[
     ("asset_info", "read"),
     ("assets_list", "read"),
@@ -1406,6 +1430,7 @@ fn census_covers_every_tool_exactly_once() {
     let mutating: BTreeSet<String> = a_legs()
         .iter()
         .map(|l| l.name.to_string())
+        .chain(promoted_legs().iter().map(|l| l.name.to_string()))
         .chain(EXTRA_MUTATING.iter().map(|s| s.to_string()))
         .collect();
     let exceptions: BTreeSet<String> = exception_legs()
@@ -1416,10 +1441,10 @@ fn census_covers_every_tool_exactly_once() {
 
     assert_eq!(
         mutating.len(),
-        211,
-        "211 mutating tools (legs may repeat a tool with different args)"
+        232,
+        "232 mutating tools (legs may repeat a tool with different args)"
     );
-    assert_eq!(exceptions.len(), 21, "21 declared exceptions");
+    assert_eq!(exceptions.len(), 0, "the exception class is closed (RM24)");
     assert_eq!(non_mutating.len(), 160, "160 non-mutating tools");
     assert!(
         mutating.is_disjoint(&exceptions),

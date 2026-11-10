@@ -431,10 +431,11 @@ pub fn opacity_frac(opacity: f32) -> f32 {
 /// `value`, through the stepper's own write — rounded to
 /// the whole-percent grid `step_figure_opacity` computes,
 /// then `layers::set_opacity` (which clamps to
-/// 0.05..=1.0). No snapshot, like the op. `report` is true
-/// only on drag release: a reporting write posts the op's
-/// own status string (or its "No such figure." refusal);
-/// mid-drag writes stay silent.
+/// 0.05..=1.0). Records nothing itself: the drag owns the
+/// gesture's one undo step (see [`opacity_drag`]). `report`
+/// is true only on drag release: a reporting write posts
+/// the op's own status string (or its "No such figure."
+/// refusal); mid-drag writes stay silent.
 pub fn set_figure_opacity(core: &mut EditorCore, fi: usize, value: f32, report: bool) {
     let next = (value * 100.0).round() / 100.0;
     if stykanimate_rs::layers::set_opacity(&mut core.project, fi, next) {
@@ -465,6 +466,14 @@ fn opacity_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
                 .get(fi)
                 .map(|f| f.opacity)
                 .unwrap_or(1.0);
+            // Roadmap Wave 1 (RM24, P-14): the gesture takes
+            // its one undo step up front (labelled, never
+            // folded — a fold would leave the Up rollback
+            // nothing of its own to pop; the scene sliders'
+            // shape). No figure, no step.
+            if core.project.figures.get(fi).is_some() {
+                core.snapshot_labeled("Figure opacity");
+            }
             set_figure_opacity(core, fi, opacity_at(d.x, d.w), false);
         }
         Phase::Move => {
@@ -474,8 +483,15 @@ fn opacity_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
         Phase::Up => {
             if d.cancelled() {
                 set_figure_opacity(core, fi, d.data, false);
+                core.rollback_coalesced("Figure opacity");
             } else {
                 set_figure_opacity(core, fi, opacity_at(d.x, d.w), true);
+                // RM24: a gesture that ends on its press
+                // value spent nothing — roll the Down step
+                // back.
+                if core.project.figures.get(fi).map(|f| f.opacity) == Some(d.data) {
+                    core.rollback_coalesced("Figure opacity");
+                }
             }
         }
     }
@@ -540,10 +556,15 @@ fn jump_layer(core: &mut EditorCore, fi: usize, to_top: bool) {
 /// figure's `hidden` flag cleared through the layers
 /// engine, solo cleared with it so the bulk result is the
 /// effective visibility, and the figures panel footer's
-/// own status string. No snapshot — the figures footer
-/// takes none either; the op works straight on the
-/// project's flags.
+/// own status string. Since Roadmap Wave 1 (RM24, P-14)
+/// the bulk write takes exactly one undo step when at
+/// least one figure was hidden — before, this handler
+/// took no snapshot AND counted no edit (a census hole:
+/// the write was invisible to undo and autosave alike).
 fn show_all_figures(core: &mut EditorCore) {
+    if core.project.figures.iter().any(|f| f.hidden) {
+        core.snapshot_labeled("Figure visibility");
+    }
     let changed = stykanimate_rs::layers::set_all_visible(&mut core.project, true);
     core.solo = None;
     core.status = format!("All figures shown ({changed} changed).");
@@ -800,7 +821,16 @@ pub fn panel(s: &State, t: &Theme) -> El {
     // selected figure existing, so nothing else in the
     // empty panel changes shape.
     if s.core.project.figures.is_empty() {
-        body = body.child(design::empty_state("layer-group", EMPTY_MESSAGE, t));
+        // RM28 (PL-7): the state offers its filling
+        // action — the figures panel's + Figure op.
+        body = body.child(design::empty_state_action(
+            "layer-group",
+            EMPTY_MESSAGE,
+            "layers-empty-add-figure",
+            "Add figure",
+            t,
+            |s| s.core.add_figure(),
+        ));
     }
     if let Some(fig) = s.core.project.figures.get(s.core.selected_figure) {
         body = body
@@ -1126,14 +1156,19 @@ mod tests {
         core.project.figures[0].hidden = true;
         core.project.figures[2].hidden = true;
         core.solo = Some(1);
+        let depth = core.undo_depth();
         show_all_figures(&mut core);
         assert!(core.project.figures.iter().all(|f| !f.hidden));
         assert_eq!(core.solo, None);
         assert_eq!(core.status, "All figures shown (2 changed).");
-        // A second press changes nothing and says so.
+        // RM24: the bulk write is exactly one undo step.
+        assert_eq!(core.undo_depth(), depth + 1);
+        // A second press changes nothing and says so —
+        // and spends nothing.
         show_all_figures(&mut core);
         assert_eq!(core.status, "All figures shown (0 changed).");
         assert!(core.project.figures.iter().all(|f| !f.hidden));
+        assert_eq!(core.undo_depth(), depth + 1);
     }
 
     #[test]

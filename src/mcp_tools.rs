@@ -486,13 +486,13 @@ fn tool_set_frame_duration(core: &mut EditorCore, args: &Value) -> Result<Value,
     if duration <= 0.0 {
         return Err("argument 'duration' must be positive".into());
     }
-    // Wave 13 (B9, dirty census): a timing tweak in the
-    // `adjust_frame_duration` family — no undo step, but a
-    // real change counts for dirty/autosave via the seam
-    // (previously this direct write was invisible to both).
+    // Roadmap Wave 1 (RM24, P-14 — A15 H3): the Wave 13
+    // (B9) mark-only census line is closed — a real change
+    // takes exactly one undo step, like the rest of the
+    // `adjust_frame_duration` family.
     if core.project.frames[frame].duration != duration {
+        core.snapshot_labeled("Frame duration");
         core.project.frames[frame].duration = duration;
-        core.mark_dirty();
     }
     Ok(json!({ "ok": true, "frame": frame, "duration": duration }))
 }
@@ -519,18 +519,20 @@ fn tool_set_frame_durations(core: &mut EditorCore, args: &Value) -> Result<Value
         durations.push(d);
     }
     let updated = durations.len().min(core.project.frames.len());
-    // Wave 13 (B9, dirty census): as `set_frame_duration` —
-    // one counted edit for the call when any applied value
-    // actually changes; identical values mark nothing.
-    let mut changed = false;
-    for (i, d) in durations.into_iter().take(updated).enumerate() {
-        if core.project.frames[i].duration != d {
-            core.project.frames[i].duration = d;
-            changed = true;
-        }
+    // Roadmap Wave 1 (RM24, P-14): as `set_frame_duration` —
+    // exactly one undo step for the call when any applied
+    // value actually changes (peeked first, so the step
+    // precedes the writes); identical values spend nothing.
+    let any_change = durations
+        .iter()
+        .take(updated)
+        .enumerate()
+        .any(|(i, d)| core.project.frames[i].duration != *d);
+    if any_change {
+        core.snapshot_labeled("Frame duration");
     }
-    if changed {
-        core.mark_dirty();
+    for (i, d) in durations.into_iter().take(updated).enumerate() {
+        core.project.frames[i].duration = d;
     }
     Ok(json!({ "ok": true, "updated": updated }))
 }
@@ -1197,13 +1199,12 @@ fn tool_fx_preset_add(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
 fn tool_set_weather(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let kind = req_str(args, "kind")?;
     if kind == "off" {
-        // Wave 13 (B9, dirty census): a project-settings
-        // write — no undo step, but a real change counts
-        // for dirty/autosave via the seam (previously this
-        // direct write was invisible to both).
+        // Roadmap Wave 1 (RM24, P-14 — A15 H3): the Wave 13
+        // (B9) mark-only census line is closed — a real
+        // change takes exactly one undo step.
         if core.project.weather.is_some() {
+            core.snapshot_labeled("Weather");
             core.project.weather = None;
-            core.mark_dirty();
         }
         return Ok(json!({ "ok": true, "weather": "off" }));
     }
@@ -1228,13 +1229,14 @@ fn tool_set_weather(core: &mut EditorCore, args: &Value) -> Result<Value, String
     let preset = crate::editor::eds_kind_preset(wk);
     let amount = opt_f32(args, "amount")?.unwrap_or(preset.amount).clamp(0.0, 200.0);
     let wind = opt_f32(args, "wind")?.unwrap_or(preset.wind);
-    // Wave 13 (B9, dirty census): as the "off" branch — a
-    // settings write that changes the stored weather marks
-    // dirty; re-setting the identical weather marks nothing.
+    // Roadmap Wave 1 (RM24, P-14): as the "off" branch — a
+    // settings write that changes the stored weather takes
+    // exactly one undo step; re-setting the identical
+    // weather spends nothing.
     let new_weather = Weather { kind: wk, amount, wind };
     if core.project.weather != Some(new_weather) {
+        core.snapshot_labeled("Weather");
         core.project.weather = Some(new_weather);
-        core.mark_dirty();
     }
     Ok(json!({
         "ok": true,
@@ -1912,38 +1914,40 @@ fn tool_graph_key(core: &mut EditorCore, args: &Value) -> Result<Value, String> 
 fn tool_layers(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let fi = req_usize(args, "figure")?;
     check_figure(core, fi)?;
-    // Wave 13 (B9, dirty census): the layers family —
-    // lock / hide / opacity — has undoability deliberately
-    // OFF (the core ops `toggle_figure_lock`,
-    // `cycle_figure_opacity` and `step_figure_opacity` set
-    // the pattern: no snapshot, the write counts for
-    // dirty/autosave via the seam). One counted edit for
-    // the call when any project field actually changes;
-    // identical values mark nothing, and `solo` is editor
-    // session state, never a project write.
-    let mut changed = false;
-    if let Some(locked) = opt_bool(args, "locked")? {
-        if core.project.figures[fi].locked != locked {
-            core.project.figures[fi].locked = locked;
-            changed = true;
-        }
+    // Roadmap Wave 1 (RM24, P-14 — A15 H3): the layers
+    // family census line is closed — exactly one undo
+    // step for the call when any project field actually
+    // changes (peeked across all three fields first, so
+    // the step precedes the writes and a combined call is
+    // still one step); identical values spend nothing,
+    // and `solo` is editor session state, never a project
+    // write.
+    let want_locked = opt_bool(args, "locked")?;
+    let want_hidden = opt_bool(args, "hidden")?;
+    let want_opacity = opt_f32(args, "opacity")?;
+    let would_change = {
+        let fig = &core.project.figures[fi];
+        let locked_changes = want_locked.is_some_and(|v| v != fig.locked);
+        let hidden_changes = want_hidden.is_some_and(|v| v != fig.hidden);
+        // layers::set_opacity clamps to the supported 0.05..=1.0 range
+        // and refuses NaN — the peek mirrors both.
+        let opacity_changes = want_opacity.is_some_and(|v| {
+            v.is_finite()
+                && v.clamp(crate::layers::MIN_OPACITY, crate::layers::MAX_OPACITY) != fig.opacity
+        });
+        locked_changes || hidden_changes || opacity_changes
+    };
+    if would_change {
+        core.snapshot_labeled("Layer state");
     }
-    if let Some(hidden) = opt_bool(args, "hidden")? {
-        if core.project.figures[fi].hidden != hidden {
-            core.project.figures[fi].hidden = hidden;
-            changed = true;
-        }
+    if let Some(locked) = want_locked {
+        core.project.figures[fi].locked = locked;
     }
-    if let Some(opacity) = opt_f32(args, "opacity")? {
-        // layers::set_opacity clamps to the supported 0.05..=1.0 range.
-        let before = core.project.figures[fi].opacity;
+    if let Some(hidden) = want_hidden {
+        core.project.figures[fi].hidden = hidden;
+    }
+    if let Some(opacity) = want_opacity {
         crate::layers::set_opacity(&mut core.project, fi, opacity);
-        if core.project.figures[fi].opacity != before {
-            changed = true;
-        }
-    }
-    if changed {
-        core.mark_dirty();
     }
     if let Some(solo) = opt_bool(args, "solo")? {
         if solo {
@@ -3314,9 +3318,12 @@ fn tool_set_project_background(core: &mut EditorCore, args: &Value) -> Result<Va
 
 fn tool_list_projects(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
     let _ = core;
-    // The Home panel's scan of ./projects, as data (E10 G5).
-    let dir = std::path::Path::new("projects");
-    let projects: Vec<Value> = crate::projects::scan(dir)
+    // The Home panel's scan of the projects dir, as data
+    // (E10 G5) — resolved through the one resolver
+    // (Roadmap Wave 1, RM9 / F-8), so the tool lists the
+    // same files the panel shows in every layout.
+    let dir = crate::shell::projects_dir();
+    let projects: Vec<Value> = crate::projects::scan(&dir)
         .iter()
         .map(|p| {
             json!({
@@ -3399,7 +3406,10 @@ fn tool_project_rename(core: &mut EditorCore, args: &Value) -> Result<Value, Str
     // restore the old session name against a file that keeps
     // the new one — but a real change counts for
     // dirty/autosave via the seam (previously this write
-    // never counted, the Wave 12 E8 remainder).
+    // never counted, the Wave 12 E8 remainder). Roadmap
+    // Wave 1 (RM24, P-14) reviewed this line at the census
+    // closure and KEPT it: it is the one remaining
+    // mark_dirty write, by the reasoning above.
     let trimmed = new_name.trim().to_string();
     if core.project.name != trimmed {
         core.project.name = trimmed;
@@ -3552,7 +3562,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "figure_set_color",
-            description: "Set a figure's colour (0xRRGGBB) — the colour its segments draw in unless a segment carries its own colour override. A direct field write like the inspector's colour swatches — not an undo step; a real change marks the project dirty.",
+            description: "Set a figure's colour (0xRRGGBB) — the colour its segments draw in unless a segment carries its own colour override. One undo step on a real change, like the inspector's colour swatches.",
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
@@ -3599,7 +3609,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "set_frame_duration",
-            description: "Set a frame's hold-time multiplier (1.0 = one beat at the project fps). Not an undo step (the panel writes through the same mark_dirty seam); a real change counts for dirty/autosave.",
+            description: "Set a frame's hold-time multiplier (1.0 = one beat at the project fps). One undo step on a real change.",
             schema: obj_schema(
                 json!({
                     "frame": { "type": "integer" },
@@ -3611,7 +3621,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "set_frame_durations",
-            description: "Set hold-time multipliers for frames 0..n in one call (same positive-value rule as set_frame_duration; extra entries beyond the frame count are ignored). Not an undo step (the panel writes through the same mark_dirty seam); a real change counts for dirty/autosave.",
+            description: "Set hold-time multipliers for frames 0..n in one call (same positive-value rule as set_frame_duration; extra entries beyond the frame count are ignored). One undo step when any applied value changes.",
             schema: obj_schema(
                 json!({
                     "durations": { "type": "array", "items": { "type": "number" } }
@@ -3622,7 +3632,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "set_project_easing",
-            description: "Set the project's default easing for tweened playback: \"linear\", \"smooth\", \"ease-in\" or \"ease-out\" (the easing panel's preset buttons). A project-settings tweak — not an undo step.",
+            description: "Set the project's default easing for tweened playback: \"linear\", \"smooth\", \"ease-in\" or \"ease-out\" (the easing panel's preset buttons). One undo step on a real change.",
             schema: obj_schema(
                 json!({
                     "easing": { "type": "string", "enum": ["linear", "smooth", "ease-in", "ease-out"] }
@@ -3962,7 +3972,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "set_weather",
-            description: "Set continuous weather over the whole timeline, or turn it off. Not an undo step (the panel writes through the same mark_dirty seam); a real change counts for dirty/autosave.",
+            description: "Set continuous weather over the whole timeline, or turn it off. One undo step on a real change.",
             schema: obj_schema(
                 json!({
                     "kind": { "type": "string", "enum": ["rain", "snow", "fireflies", "fog", "storm", "off"] },
@@ -4287,7 +4297,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "layers",
-            description: "Apply layer state to a figure: locked, hidden, opacity (0.05-1.0), and solo (true solos this figure in the editor, false clears its solo). Not an undo step (the panel writes through the same mark_dirty seam); a real change counts for dirty/autosave.",
+            description: "Apply layer state to a figure: locked, hidden, opacity (0.05-1.0), and solo (true solos this figure in the editor, false clears its solo). One undo step when any of locked/hidden/opacity actually changes; solo is session state and never spends one.",
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
@@ -4650,7 +4660,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "figure_rename",
-            description: "Rename a figure (the name is trimmed; blank is refused). A plain field write like the inspector's Rename — not an undo step.",
+            description: "Rename a figure (the name is trimmed; blank is refused). One undo step on a real change, like the inspector's Rename.",
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
@@ -4813,7 +4823,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "layers_set_all_visible",
-            description: "Show or hide ALL figures at once (the figures panel's All / None buttons): visible=true shows every figure, visible=false hides every figure. Clears any active solo, exactly as the panel does, so the flags are the effective visibility. Returns how many figures changed state. Not an undo step (the panel writes through the same mark_dirty seam); a real change counts for dirty/autosave.",
+            description: "Show or hide ALL figures at once (the figures panel's All / None buttons): visible=true shows every figure, visible=false hides every figure. Clears any active solo, exactly as the panel does, so the flags are the effective visibility. Returns how many figures changed state. One undo step when at least one figure changes state.",
             schema: obj_schema(
                 json!({
                     "visible": { "type": "boolean" }
@@ -4824,7 +4834,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "layers_invert_visibility",
-            description: "Invert every figure's hidden flag (the figures panel's Invert button). Clears any active solo, exactly as the panel does. Returns how many figures changed state (always the figure count). Not an undo step (the panel writes through the same mark_dirty seam); a real change counts for dirty/autosave.",
+            description: "Invert every figure's hidden flag (the figures panel's Invert button). Clears any active solo, exactly as the panel does. Returns how many figures changed state (always the figure count). One undo step.",
             schema: obj_schema(json!({}), &[]),
             handler: crate::figure_ops::tool_layers_invert_visibility,
         },
@@ -5223,6 +5233,18 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["count"],
             ),
             handler: crate::frame_swap::tool_insert_frames,
+        },
+        Tool {
+            name: "insert_breakdown",
+            description: "Insert 'count' breakdown frames between the current frame and the next (the Frames panel's breakdown insert): the breakdowns sample the segment at favour-biased fractions — 'favour' 0.5 spaces them evenly (a single breakdown is the legacy midpoint inbetween), below 0.5 crowds them toward the current key, above 0.5 toward the next — with poses shaped by the segment's easing and bends interpolated linearly, exactly what tween playback shows at those points. 'favour' is clamped to 0.1–0.9 and 'count' to 8 by the op. One undo step; frame pins are not remapped (the timeline-length rule).",
+            schema: obj_schema(
+                json!({
+                    "favour": { "type": "number", "description": "Breakdown spacing bias between 0 and 1 (exclusive), default 0.5" },
+                    "count": { "type": "integer", "description": "Breakdowns to insert, at least 1 (default 1)" }
+                }),
+                &[],
+            ),
+            handler: crate::frame_swap::tool_insert_breakdown,
         },
         Tool {
             name: "get_keyframes",
@@ -5783,7 +5805,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "figure_cycle_opacity",
-            description: "Cycle a figure's opacity one step through the inspector's steps (1.0 -> 0.6 -> 0.3 -> 1.0). 'figure' defaults to the selected figure. Like the panel cycler, this takes NO undo snapshot.",
+            description: "Cycle a figure's opacity one step through the inspector's steps (1.0 -> 0.6 -> 0.3 -> 1.0). 'figure' defaults to the selected figure. One undo step, taken inside the core op like the panel cycler.",
             schema: obj_schema(
                 json!({ "figure": { "type": "integer" } }),
                 &[],
@@ -5958,7 +5980,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "clip_set_angle",
-            description: "Set one joint angle (degrees, stored parent-relative) on the movieclip session's current frame. Like the core pose-tweak ops this takes NO undo snapshot (per-angle tweaks would flood the history); use clip_add_frame/undo boundaries deliberately. Requires an active session (clip_enter).",
+            description: "Set one joint angle (degrees, stored parent-relative) on the movieclip session's current frame. One undo step per change, coalesced so a run of tweaks is a single step. Requires an active session (clip_enter).",
             schema: obj_schema(
                 json!({
                     "node": { "type": "integer" },
@@ -5970,7 +5992,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "clip_set_root",
-            description: "Set the root position [x, y] of the movieclip session's current frame. No undo snapshot (pose-tweak rule, as clip_set_angle). Requires an active session (clip_enter).",
+            description: "Set the root position [x, y] of the movieclip session's current frame. One undo step per change, coalesced (as clip_set_angle). Requires an active session (clip_enter).",
             schema: obj_schema(
                 json!({ "root": { "type": "array", "items": { "type": "number" }, "description": "[x, y] stage position" } }),
                 &["root"],
@@ -6337,7 +6359,7 @@ Tool {
   },
 Tool {
       name: "set_weather_kind",
-      description: "Set the scene weather kind (the Scene panel's kind picker): switching kinds keeps the tuned amount/wind, and enabling a kind from off applies the panel's per-kind preset. \"off\" turns weather off. A project-settings tweak — no undo step; a real change marks the project dirty, exactly like the panel.",
+      description: "Set the scene weather kind (the Scene panel's kind picker): switching kinds keeps the tuned amount/wind, and enabling a kind from off applies the panel's per-kind preset. \"off\" turns weather off. One undo step on a real change, exactly like the panel.",
       schema: obj_schema(
           json!({
               "kind": { "type": "string", "enum": ["rain", "snow", "fireflies", "fog", "storm", "off"] }
@@ -6348,13 +6370,13 @@ Tool {
   },
 Tool {
       name: "cycle_weather",
-      description: "Cycle the scene weather like the Scene group's Cycle weather button: off -> rain -> snow -> fireflies -> off, applying each kind's preset wholesale (fog and storm are not in the cycle; cycling from either turns weather off). A project-settings tweak — no undo step; a real change marks the project dirty, exactly like the panel.",
+      description: "Cycle the scene weather like the Scene group's Cycle weather button: off -> rain -> snow -> fireflies -> off, applying each kind's preset wholesale (fog and storm are not in the cycle; cycling from either turns weather off). One undo step, exactly like the panel.",
       schema: obj_schema(json!({}), &[]),
       handler: crate::editor::tool_cycle_weather,
   },
 Tool {
       name: "set_weather_amount",
-      description: "Set the weather's particle amount absolutely (the Scene panel's Amount stepper/slider): clamped to 0..=200. Errors when the weather is off — pick a kind first (set_weather_kind). A project-settings tweak — no undo step; a real change marks the project dirty, exactly like the panel's steppers.",
+      description: "Set the weather's particle amount absolutely (the Scene panel's Amount stepper/slider): clamped to 0..=200. Errors when the weather is off — pick a kind first (set_weather_kind). One undo step on a real change, exactly like the panel's steppers.",
       schema: obj_schema(
           json!({
               "amount": { "type": "number", "description": "Particles per frame at steady state, 0..=200" }
@@ -6365,7 +6387,7 @@ Tool {
   },
 Tool {
       name: "set_weather_wind",
-      description: "Set the weather's wind (horizontal drift, stage units per second) absolutely (the Scene panel's Wind stepper/slider): clamped to -200..=200. Errors when the weather is off — pick a kind first (set_weather_kind). A project-settings tweak — no undo step; a real change marks the project dirty, exactly like the panel's steppers.",
+      description: "Set the weather's wind (horizontal drift, stage units per second) absolutely (the Scene panel's Wind stepper/slider): clamped to -200..=200. Errors when the weather is off — pick a kind first (set_weather_kind). One undo step on a real change, exactly like the panel's steppers.",
       schema: obj_schema(
           json!({
               "wind": { "type": "number", "description": "Horizontal drift in stage units per second, -200..=200" }
@@ -6376,7 +6398,7 @@ Tool {
   },
 Tool {
       name: "clear_camera_key",
-      description: "Remove the camera key at the CURRENT frame without an undo step (the camera panel's 'Clear key (no undo)' button): the removal counts for dirty/autosave but cannot be undone — for the undoable delete at any frame, use delete_camera_key. Errors when the current frame holds no camera key.",
+      description: "Remove the camera key at the CURRENT frame with one undo step (the camera panel's Clear key button). For a delete at any frame, delete_camera_key also works. Errors when the current frame holds no camera key.",
       schema: obj_schema(json!({}), &[]),
       handler: crate::editor::tool_clear_camera_key,
   },
@@ -6470,7 +6492,7 @@ Tool {
   },
 Tool {
       name: "figure_step_opacity",
-      description: "Step a figure's opacity by 'delta' (the figures/layers panels' opacity −/+ buttons): the target is rounded to whole percent and clamped to 0.05-1.0 by the op, and the reply reports the opacity read back after clamping. The relative form of the layers tool's opacity. Not an undo step (layers-family panel parity); a real change counts for dirty/autosave.",
+      description: "Step a figure's opacity by 'delta' (the figures/layers panels' opacity −/+ buttons): the target is rounded to whole percent and clamped to 0.05-1.0 by the op, and the reply reports the opacity read back after clamping. The relative form of the layers tool's opacity. One undo step on a real change.",
       schema: obj_schema(
           json!({
               "figure": { "type": "integer", "description": "0-based figure index (default: the selected figure)" },
@@ -6482,7 +6504,7 @@ Tool {
   },
 Tool {
       name: "figure_toggle_hidden",
-      description: "Toggle a figure's hidden flag (the figures panel's hide button / the palette's Toggle figure hidden): the relative form of the layers tool's 'hidden'. Not an undo step (layers-family panel parity); the flip counts for dirty/autosave.",
+      description: "Toggle a figure's hidden flag (the figures panel's hide button / the palette's Toggle figure hidden): the relative form of the layers tool's 'hidden'. One undo step.",
       schema: obj_schema(
           json!({
               "figure": { "type": "integer", "description": "0-based figure index (default: the selected figure)" }
@@ -6493,7 +6515,7 @@ Tool {
   },
 Tool {
       name: "figure_toggle_lock",
-      description: "Toggle a figure's locked flag (the figures panel's lock button / the palette's Lock selected figure): the relative form of the layers tool's 'locked'. Not an undo step (layers-family panel parity); the flip counts for dirty/autosave.",
+      description: "Toggle a figure's locked flag (the figures panel's lock button / the palette's Lock selected figure): the relative form of the layers tool's 'locked'. One undo step.",
       schema: obj_schema(
           json!({
               "figure": { "type": "integer", "description": "0-based figure index (default: the selected figure)" }
@@ -6529,7 +6551,7 @@ Tool {
   },
 Tool {
       name: "adjust_frame_duration",
-      description: "Adjust a frame's duration multiplier by 'factor' (the frame-ops panel's Dur −/+/×0.5/×2 buttons): the stored duration is multiplied and clamped to 0.25-8.0 by the op, and the reply reports the duration read back after clamping. The relative form of set_frame_duration. Applies to the current frame unless 'frame' names another (which moves the playhead there first, the set_frame_easing convention). Not an undo step (timing-tweak panel parity); a real change counts for dirty/autosave.",
+      description: "Adjust a frame's duration multiplier by 'factor' (the frame-ops panel's Dur −/+/×0.5/×2 buttons): the stored duration is multiplied and clamped to 0.25-8.0 by the op, and the reply reports the duration read back after clamping. The relative form of set_frame_duration. Applies to the current frame unless 'frame' names another (which moves the playhead there first, the set_frame_easing convention). One undo step on a real change.",
       schema: obj_schema(
           json!({
               "factor": { "type": "number", "description": "Duration multiplier (positive, finite); 0.5 halves the hold, 2.0 doubles it" },
@@ -7049,6 +7071,13 @@ mod tests {
     // one snapshot. `edits_since_autosave` is the observable
     // counter for both (snapshot bumps it too, so the undo
     // assertions separate the two).
+    //
+    // Roadmap Wave 1 (RM24, P-14) closed that census: the
+    // tweak/settings handlers below now take exactly one undo
+    // step when (and only when) a value actually changes —
+    // the counting assertions stand verbatim (a snapshot
+    // counts one edit, as the mark did), and the undo
+    // assertions now prove the step exists.
     // -----------------------------------------------------------------
 
     #[test]
@@ -7064,22 +7093,29 @@ mod tests {
         call(&mut core, &tools, "set_frame_duration", json!({ "frame": 0, "duration": 2.0 }))
             .unwrap();
         assert_eq!(core.edits_since_autosave(), edits + 1);
-        // No undo step was recorded: undo leaves the value.
+        // Exactly one undo step was recorded (RM24): undo
+        // restores the pre-change duration.
         core.undo();
-        assert_eq!(core.project.frames[0].duration, 2.0);
+        assert_eq!(core.project.frames[0].duration, 1.0);
     }
 
     #[test]
     fn set_frame_durations_marks_once_for_the_call() {
+        // (RM24: "marks" is now "spends exactly one undo
+        // step" — the counting shape is unchanged.)
         let tools = tools();
         let mut core = EditorCore::new();
         let edits = core.edits_since_autosave();
+        let depth = core.undo_depth();
         call(&mut core, &tools, "set_frame_durations", json!({ "durations": [2.0] })).unwrap();
         assert_eq!(core.edits_since_autosave(), edits + 1);
+        assert_eq!(core.undo_depth(), depth + 1, "one step for the changing call");
         call(&mut core, &tools, "set_frame_durations", json!({ "durations": [2.0] })).unwrap();
-        assert_eq!(core.edits_since_autosave(), edits + 1, "identical values mark nothing");
+        assert_eq!(core.edits_since_autosave(), edits + 1, "identical values spend nothing");
+        assert_eq!(core.undo_depth(), depth + 1);
         call(&mut core, &tools, "set_frame_durations", json!({ "durations": [3.0] })).unwrap();
         assert_eq!(core.edits_since_autosave(), edits + 2);
+        assert_eq!(core.undo_depth(), depth + 2);
     }
 
     #[test]
@@ -7097,10 +7133,13 @@ mod tests {
         call(&mut core, &tools, "set_weather", json!({ "kind": "off" })).unwrap();
         assert!(core.project.weather.is_none());
         assert_eq!(core.edits_since_autosave(), edits + 2);
-        // Off when already off: no change, no mark, and no
-        // undo step anywhere in the sequence.
+        // Off when already off: no change, no edit counted.
+        // The two real changes each took an undo step
+        // (RM24): undoing walks them back one at a time.
         call(&mut core, &tools, "set_weather", json!({ "kind": "off" })).unwrap();
         assert_eq!(core.edits_since_autosave(), edits + 2);
+        core.undo();
+        assert!(core.project.weather.is_some(), "undo restores the rain");
         core.undo();
         assert!(core.project.weather.is_none());
     }
@@ -7143,7 +7182,7 @@ mod tests {
     }
 
     #[test]
-    fn layers_marks_dirty_once_and_never_snapshots() {
+    fn layers_spends_one_step_per_changing_call() {
         let tools = tools();
         let mut core = EditorCore::new();
         let edits = core.edits_since_autosave();
@@ -7173,11 +7212,14 @@ mod tests {
         call(&mut core, &tools, "layers", json!({ "figure": 0, "opacity": 0.5 })).unwrap();
         assert_eq!(core.project.figures[0].opacity, 0.5);
         assert_eq!(core.edits_since_autosave(), edits + 2);
-        // The layers family takes no undo step: undo leaves
-        // every write standing.
+        // Each changing call took exactly one undo step
+        // (RM24): undoing walks the writes back one call at
+        // a time, newest first.
         core.undo();
-        assert!(core.project.figures[0].locked);
-        assert_eq!(core.project.figures[0].opacity, 0.5);
+        assert_eq!(core.project.figures[0].opacity, 1.0, "the opacity step undoes");
+        assert!(core.project.figures[0].locked, "the earlier call still stands");
+        core.undo();
+        assert!(!core.project.figures[0].locked, "the lock/hide step undoes");
     }
 
     #[test]

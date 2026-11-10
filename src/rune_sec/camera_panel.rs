@@ -71,6 +71,10 @@
 //!   this same undoable delete under the label "Delete",
 //!   so the panel's two removal verbs are Delete
 //!   (undoable, playhead stays) and Clear (not undoable).
+//!   Roadmap Wave 1 (RM24, P-14) reversed the Clear half of
+//!   that split: `camera_clear_key` takes exactly one undo
+//!   step now, and the "(no undo)" label is retired with
+//!   it (the label swap itself is IA-RM24-4).
 //! * Follow → `toggle_camera_follow` (editor.rs:1740); its
 //!   active state is `project.camera_follow ==
 //!   Some(selected_figure)` (model.rs:699), the same condition
@@ -87,7 +91,11 @@
 //!   project toggle `toggle_tween_playback`, while the ops
 //!   in this panel that DO snapshot (`rotate_camera`, the
 //!   dial, paste) are the ones writing camera *keys*. The
-//!   block mirrors the toggle it sits beside. A stale follow
+//!   block mirrors the toggle it sits beside. Roadmap
+//!   Wave 1 (RM24, P-14) closed that discipline too: the
+//!   toggle snapshots in the core now, and these buttons
+//!   snapshot with it (labelled for set/clear, coalesced
+//!   for the cycle). A stale follow
 //!   index (a figure deleted out from under it — Phase F's
 //!   remap normally clears it, this is belt-and-braces) is
 //!   read as "off (missing)", never panicked on, and Clear
@@ -129,7 +137,11 @@
 //!   site's successor. The overlay's `tok::theme(true)` is
 //!   NOT the same case: the pill floats over the stage,
 //!   which is dark project space in both themes (see
-//!   [`overlay`]).
+//!   [`overlay`]). Roadmap Wave 1 (RM25 / PL-2) retires
+//!   even that exception: the pill now resolves
+//!   `app_theme(!core.light_theme)` like every other
+//!   surface — in light it renders as a light pill over
+//!   the dark stage, the designed floating-card read.
 //!
 //! * UI mission Wave 10 (round-2 audit): three findings.
 //!   (1) The panel now states the view/authored line in
@@ -147,7 +159,14 @@
 //!   report instead of silently no-oping
 //!   ([`goto_key_frame`]). Panel copy never claimed keys
 //!   shift; it now never pretends a stranded key is
-//!   reachable either. (3) Angle readouts are wrapped via
+//!   reachable either. Roadmap Wave 1 (RM18, P-6b)
+//!   reverses the engine half of this finding: the five
+//!   frame ops now remap camera keys (IA-RM18-1), so a
+//!   stranded key can now only arrive via project import
+//!   or a file written before the remap. The "past end"
+//!   row state stays — it is the import path's honest
+//!   marker — and its Delete remains the cleanup.
+//!   (3) Angle readouts are wrapped via
 //!   `model::norm_deg` (see [`angle_deg`]): stored angles
 //!   can arrive unwrapped via project import (and, until
 //!   Wave 11, via the MCP `set_camera` tool, which now
@@ -204,6 +223,26 @@
 //!   exact-value catalogue key yet and remain English
 //!   pending the R4 key additions filed by this wave.
 //!
+//! * Roadmap Wave 1 (F-3, RM4): the zoom and angle
+//!   readouts are the design kit's number fields
+//!   ([`zoom_spec`] / [`angle_spec`]) under their existing
+//!   keys — click to type, drag to scrub. The camera ops
+//!   are delta-only and snapshot per call, so the fields
+//!   write through field-level halves
+//!   ([`write_zoom_quiet`] / [`write_angle_quiet`]) under
+//!   one lazy snapshot per gesture ([`ScrubGesture`] —
+//!   the dial's discipline), and typed commits take
+//!   exactly one snapshot. The stage overlay's readout
+//!   deliberately stays a plain stepper value: the pill
+//!   is view navigation, not authoring, and its number
+//!   is the effective (camera × view) zoom no field
+//!   could commit. The panel's session state lives in
+//!   [`CameraPanelState`] on `State` (IA-RM4-2); its
+//!   Escape-revert sync is [`sync_number_edits`]
+//!   (IA-RM4-1). The fields' help / invalid copy rides
+//!   IA-RM3-1's `number_field_help` /
+//!   `number_field_invalid` keys.
+//!
 //! Engine facts this panel lives with (verified, not worked
 //! around silently): `camera_clear_key` does NOT snapshot, so
 //! clearing a key is not undoable; and `camera_zoom_by`'s
@@ -237,6 +276,15 @@ use crate::State;
 
 /// Zoom multiplier applied by one stepper press.
 pub const ZOOM_STEP: f32 = 1.25;
+
+/// The angle readout's element key, as a const: since
+/// F-3 the readout is a number field, which takes its
+/// key as an argument rather than through `.key()` —
+/// the gate's key-diff reads `*_KEY` consts, so the key
+/// stays diff-visible in its carried form (the AC1
+/// const-carried pattern). The zoom key needs no const:
+/// the overlay's readout still carries it via `.key()`.
+pub const ANGLE_FIELD_KEY: &str = "cam-angle-label";
 
 /// Camera rotation applied by one rotation press, in degrees.
 pub const ROTATE_STEP: f32 = 15.0;
@@ -705,22 +753,22 @@ pub fn cycle_follow(current: Option<usize>, count: usize, dir: i32) -> Option<us
 }
 
 /// Follow-selected button: follow the core's selected
-/// figure. A direct field write + status, mirroring
+/// figure. A field write + status, mirroring
 /// `toggle_camera_follow`'s discipline (see the module
-/// docs): no snapshot. With no valid selection — an empty
-/// project, or a selection index past the figure list —
+/// docs): since RM24, exactly one undo step on a real
+/// change. With no valid selection — an empty project,
+/// or a selection index past the figure list —
 /// status-only refusal and the stored follow is untouched.
 pub fn follow_selected(core: &mut EditorCore) {
     let fi = core.selected_figure;
     match core.project.figures.get(fi) {
         Some(f) => {
             let name = f.name.clone();
-            // Wave 13 (census E2): no snapshot (the follow
-            // family's discipline), but a real change
-            // counts for dirty/autosave via the seam.
+            // Roadmap Wave 1 (RM24, P-14 — A15 H3): the
+            // Wave 13 (census E2) mark-only line is closed.
             if core.project.camera_follow != Some(fi) {
+                core.snapshot_labeled("Camera follow");
                 core.project.camera_follow = Some(fi);
-                core.mark_dirty();
             }
             core.status = format!("Camera follows {name}.");
         }
@@ -731,13 +779,14 @@ pub fn follow_selected(core: &mut EditorCore) {
 /// Follow-clear button: stop following. Sets the field to
 /// `None` unconditionally (so it also repairs a stale
 /// index) with `toggle_camera_follow`'s own off wording;
-/// no snapshot, per the module docs.
+/// one undo step on a real change, per the module docs.
 pub fn follow_clear(core: &mut EditorCore) {
-    // Wave 13 (census E2): clearing an already-off follow
-    // marks nothing; repairing a stale index IS a change.
+    // Roadmap Wave 1 (RM24, P-14): clearing an already-off
+    // follow spends nothing; repairing a stale index IS a
+    // change and spends the step.
     if core.project.camera_follow.is_some() {
+        core.snapshot_labeled("Camera follow");
         core.project.camera_follow = None;
-        core.mark_dirty();
     }
     core.status = "Camera follow off.".into();
 }
@@ -748,17 +797,18 @@ pub fn follow_clear(core: &mut EditorCore) {
 /// figure whenever figures exist — including from off or a
 /// stale index, which the write then replaces — and reports
 /// with the toggle's wording. In an empty project,
-/// status-only: nothing to follow. No snapshot (module
-/// docs).
+/// status-only: nothing to follow. A coalesced undo step
+/// on a real change (module docs).
 pub fn follow_cycle(core: &mut EditorCore, dir: i32) {
     let count = core.project.figures.len();
     match cycle_follow(core.project.camera_follow, count, dir) {
         Some(fi) => {
-            // Wave 13 (census E2): as `follow_selected` —
-            // mark only on a real change.
+            // Roadmap Wave 1 (RM24, P-14): as
+            // `follow_selected`, coalesced — a run of
+            // cycle presses is one step.
             if core.project.camera_follow != Some(fi) {
+                core.snapshot_coalesced("Camera follow");
                 core.project.camera_follow = Some(fi);
-                core.mark_dirty();
             }
             core.status = format!("Camera follows {}.", core.project.figures[fi].name);
         }
@@ -796,13 +846,43 @@ pub fn marker_x(angle: f32) -> f32 {
 /// dial is the only caller; it manages the gesture's single
 /// snapshot itself (see [`dial_gesture`]).
 fn write_angle_here(core: &mut EditorCore, target: f32) {
+    write_angle_quiet(core, target);
+    core.status = format!(
+        "Camera rotation {target:.0}° at frame {}.",
+        core.current + 1
+    );
+}
+
+/// The field-level half of [`write_angle_here`]: the key
+/// write with no snapshot and no status — the number
+/// field's scrub write (Roadmap Wave 1, F-3), whose
+/// gesture bookkeeping owns the snapshot and the recap
+/// (see [`ScrubGesture`]).
+fn write_angle_quiet(core: &mut EditorCore, target: f32) {
     let frame = core.current;
     let (x, y, zoom) = core.project.camera_at(frame as f32);
     core.project.set_camera_key(frame, x, y, zoom);
     if let Some(k) = core.project.camera.iter_mut().find(|k| k.frame == frame) {
         k.angle = target;
     }
-    core.status = format!("Camera rotation {target:.0}° at frame {}.", frame + 1);
+}
+
+/// Write `zoom` as the camera zoom at the current frame,
+/// field-level: the body of `set_camera_key_here`
+/// (editor.rs) minus its snapshot — upsert a key at the
+/// current frame carrying the pan in effect and the angle
+/// in effect (a fresh key must not snap an interpolated
+/// rotation to 0, the fix-up `rotate_camera` applies).
+/// No snapshot, no status: the number field's scrub
+/// write, under [`ScrubGesture`]'s bookkeeping.
+fn write_zoom_quiet(core: &mut EditorCore, zoom: f32) {
+    let frame = core.current;
+    let (x, y, _) = core.camera_here();
+    let angle = core.project.camera_angle_at(frame as f32);
+    core.project.set_camera_key(frame, x, y, zoom);
+    if let Some(k) = core.project.camera.iter_mut().find(|k| k.frame == frame) {
+        k.angle = angle;
+    }
 }
 
 /// One phase of a rotation-dial drag, against the bare core
@@ -880,6 +960,137 @@ fn dial_drag(s: &mut State, d: &mut Drag) {
     dial_gesture(&mut s.core, d.phase, d.x, d.w, &mut d.data, cancelled);
 }
 
+// ----------------------------------------------------------------
+// F-3 number fields (Roadmap Wave 1, RM4)
+// ----------------------------------------------------------------
+
+/// One number-field scrub gesture's undo bookkeeping
+/// (Roadmap Wave 1, F-3): the camera ops snapshot per
+/// call, so a scrub writing through them would flood
+/// the undo stack — instead the gesture takes ONE
+/// snapshot, lazily, at its first real change (the
+/// [`dial_gesture`] discipline), and every write after
+/// that is field-level ([`write_zoom_quiet`] /
+/// [`write_angle_quiet`]). `press` is the value the
+/// gesture started from: the kit's cancel path calls
+/// the scrub write once more with exactly that value,
+/// which seals the gesture (see [`scrub_write`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScrubGesture {
+    /// A snapshot has been taken for the in-flight scrub.
+    pub open: bool,
+    /// The value the in-flight scrub started from.
+    pub press: f32,
+}
+
+/// A number field's silent mid-scrub write, under
+/// `gesture`'s bookkeeping: the first write that
+/// actually changes the value takes the gesture's one
+/// snapshot; later writes are field-level. A write of
+/// exactly the press value while a gesture is open is
+/// the kit's cancel-restore — it writes the value back
+/// and seals the gesture, so the next scrub snapshots
+/// afresh. (A live scrub can never produce that call
+/// itself: the kit only writes mid-scrub once the
+/// pointer has travelled, and the scrub mapping moves
+/// the value off the anchor on any such write.)
+fn scrub_write(
+    gesture: &mut ScrubGesture,
+    core: &mut EditorCore,
+    value: f32,
+    current: f32,
+    write: fn(&mut EditorCore, f32),
+) {
+    if gesture.open && value == gesture.press {
+        write(core, value);
+        gesture.open = false;
+        return;
+    }
+    if !gesture.open {
+        if value == current {
+            return;
+        }
+        core.snapshot();
+        gesture.press = current;
+        gesture.open = true;
+    }
+    write(core, value);
+}
+
+/// A number field's scrub release: the final write and
+/// the one status recap (the op's own wording, built by
+/// the caller). When the gesture changed nothing — no
+/// snapshot was ever taken and the final value is the
+/// current one — the release is a true no-op: no key is
+/// pinned and no recap is posted, so a scrub that went
+/// nowhere leaves no trace.
+fn scrub_finish(
+    gesture: &mut ScrubGesture,
+    core: &mut EditorCore,
+    value: f32,
+    current: f32,
+    write: fn(&mut EditorCore, f32),
+    status: String,
+) {
+    if gesture.open {
+        write(core, value);
+    } else if value != current {
+        core.snapshot();
+        write(core, value);
+    } else {
+        return;
+    }
+    gesture.open = false;
+    core.status = status;
+}
+
+/// The camera panel's stored number-field state
+/// (Roadmap Wave 1, F-3): one [`design::NumberEdit`]
+/// session per adopted field plus each field's scrub
+/// bookkeeping. The panel was stateless before this
+/// (its one piece of session state, the key clipboard,
+/// is a thread-local); a `NumberEdit` cannot live there
+/// — the kit's wiring projects it out of `State` — so
+/// the panel gains a state struct on the
+/// `GraphPanelState` precedent, homed on `State` by the
+/// integrator (IA-RM4-2).
+#[derive(Clone, Debug, Default)]
+pub struct CameraPanelState {
+    /// Zoom field session (`cam-zoom-label`).
+    pub zoom_edit: design::NumberEdit,
+    /// Angle field session (`cam-angle-label`).
+    pub angle_edit: design::NumberEdit,
+    /// Zoom scrub bookkeeping.
+    pub zoom_scrub: ScrubGesture,
+    /// Angle scrub bookkeeping.
+    pub angle_scrub: ScrubGesture,
+}
+
+/// The zoom field's contract: `camera_zoom_by`'s own
+/// clamp (0.3..=4.0), displayed as a percent — the
+/// readout's existing format (`zoom_label`).
+pub fn zoom_spec() -> design::NumSpec {
+    design::NumSpec::percent(0.3, 4.0, 0.05)
+}
+
+/// The angle field's contract: the dial's own stops
+/// (−180°..=180°); a typed value clamps at the stops
+/// rather than wrapping, exactly as the dial's marker
+/// clamps (see [`marker_x`]).
+pub fn angle_spec() -> design::NumSpec {
+    design::NumSpec::degrees(-180.0, 180.0, 1.0)
+}
+
+/// Poll sync (the `sync_name_edit` idiom, called from
+/// the shell's `poll` — IA-RM4-1): revert any camera
+/// number-field session the framework has blurred —
+/// Escape lands here as a revert, per the kit's
+/// session rules ([`design::NumberEdit::reconcile`]).
+pub fn sync_number_edits(s: &mut State) {
+    s.camera_panel.zoom_edit.reconcile();
+    s.camera_panel.angle_edit.reconcile();
+}
+
 /// The dial marker's colour: the app theme's accent for
 /// the theme the panel was built with — `#6C8CFF` in dark,
 /// `#4666D8` in light. Wave 9: this replaces the hard-coded
@@ -946,21 +1157,129 @@ fn angle_dial(core: &EditorCore, t: &Theme) -> El {
 // Views
 // ----------------------------------------------------------------
 
-/// The zoom readout (`cam-zoom-label`): the current zoom
-/// percentage as the kit's stepper value (charter §6 —
-/// MONO_CAPTION, centred, min-width 34), so the readout's
-/// width no longer changes with the label ("50%" vs
-/// "100%") and the + button beside it never shifts. The
-/// key stays on the readout element itself (P06 §3.2).
-fn zoom_readout(core: &EditorCore, t: &Theme) -> El {
-    design::stepper_value(&zoom_label(core), t).key("cam-zoom-label")
+/// The zoom readout (`cam-zoom-label`): since Roadmap
+/// Wave 1 (F-3) the kit's number field on [`zoom_spec`]
+/// — click to type a percent, drag to scrub — where the
+/// stepper value used to sit, under the same key (the
+/// kit keeps the caller's key on the field's root in
+/// both its forms, so the census sees one element).
+/// Typed commits snapshot once and write through
+/// [`write_zoom_quiet`] with `camera_zoom_by`'s own
+/// status wording; scrubs write silently under
+/// [`ScrubGesture`] and recap once at release.
+fn zoom_readout(s: &State, t: &Theme) -> El {
+    let core = &s.core;
+    let spec = zoom_spec();
+    let zoom = core.camera_here().2;
+    design::number_field(
+        "cam-zoom-label",
+        &s.camera_panel.zoom_edit,
+        &spec,
+        zoom,
+        &spec.format(zoom),
+        &i18n_wire::tr(core, "number_field_help"),
+        Some(&i18n_wire::tr(core, "number_field_invalid")),
+        t,
+        design::NumWiring {
+            access: |s: &mut State| &mut s.camera_panel.zoom_edit,
+            commit: |s: &mut State, v: f32| {
+                s.core.snapshot();
+                write_zoom_quiet(&mut s.core, v);
+                s.core.status = format!(
+                    "Camera zoom {v:.2} at frame {}.",
+                    s.core.current + 1
+                );
+            },
+            reject: |s: &mut State| {
+                s.core.status = i18n_wire::tr(&s.core, "number_field_invalid");
+            },
+            scrub_write: |s: &mut State, v: f32| {
+                let current = s.core.camera_here().2;
+                scrub_write(
+                    &mut s.camera_panel.zoom_scrub,
+                    &mut s.core,
+                    v,
+                    current,
+                    write_zoom_quiet,
+                );
+            },
+            scrub_finish: |s: &mut State, v: f32| {
+                let current = s.core.camera_here().2;
+                let status = format!(
+                    "Camera zoom {v:.2} at frame {}.",
+                    s.core.current + 1
+                );
+                scrub_finish(
+                    &mut s.camera_panel.zoom_scrub,
+                    &mut s.core,
+                    v,
+                    current,
+                    write_zoom_quiet,
+                    status,
+                );
+            },
+        },
+    )
 }
 
-/// The angle readout (`cam-angle-label`): the same kit
-/// stepper value as the zoom readout — one readout, one
-/// look — under its existing key.
-fn angle_readout(core: &EditorCore, t: &Theme) -> El {
-    design::stepper_value(&angle_label(core), t).key("cam-angle-label")
+/// The angle readout (`cam-angle-label`): the same
+/// adoption as the zoom readout — the kit number field
+/// on [`angle_spec`] under its existing key. Typed
+/// commits snapshot once and write through
+/// [`write_angle_here`] (the dial's own write, status
+/// included) on the wrapped value; scrubs write
+/// silently through [`write_angle_quiet`] under
+/// [`ScrubGesture`] and recap once at release with the
+/// same wording.
+fn angle_readout(s: &State, t: &Theme) -> El {
+    let core = &s.core;
+    let spec = angle_spec();
+    let angle = angle_deg(core);
+    design::number_field(
+        ANGLE_FIELD_KEY,
+        &s.camera_panel.angle_edit,
+        &spec,
+        angle,
+        &spec.format(angle),
+        &i18n_wire::tr(core, "number_field_help"),
+        Some(&i18n_wire::tr(core, "number_field_invalid")),
+        t,
+        design::NumWiring {
+            access: |s: &mut State| &mut s.camera_panel.angle_edit,
+            commit: |s: &mut State, v: f32| {
+                s.core.snapshot();
+                write_angle_here(&mut s.core, stykanimate_rs::model::norm_deg(v));
+            },
+            reject: |s: &mut State| {
+                s.core.status = i18n_wire::tr(&s.core, "number_field_invalid");
+            },
+            scrub_write: |s: &mut State, v: f32| {
+                let current = angle_deg(&s.core);
+                scrub_write(
+                    &mut s.camera_panel.angle_scrub,
+                    &mut s.core,
+                    v,
+                    current,
+                    write_angle_quiet,
+                );
+            },
+            scrub_finish: |s: &mut State, v: f32| {
+                let current = angle_deg(&s.core);
+                let status = format!(
+                    "Camera rotation {v:.0}° at frame {}.",
+                    s.core.current + 1
+                );
+                scrub_finish(
+                    &mut s.camera_panel.angle_scrub,
+                    &mut s.core,
+                    v,
+                    current,
+                    write_angle_quiet,
+                    status,
+                );
+            },
+        },
+    )
 }
 
 /// The note under the panel's header (Wave 10): the
@@ -1194,7 +1513,7 @@ pub fn panel(s: &State, t: &Theme) -> El {
                     t,
                     |s: &mut State| s.core.camera_zoom_by(1.0 / ZOOM_STEP),
                 ))
-                .child(zoom_readout(core, t))
+                .child(zoom_readout(s, t))
                 .child(design::step_btn(
                     "cam-zoom-in",
                     "+",
@@ -1214,7 +1533,7 @@ pub fn panel(s: &State, t: &Theme) -> El {
                 .child(btn("cam-rot-left", "-15°", false, t, |s: &mut State| {
                     s.core.rotate_camera(-ROTATE_STEP)
                 }))
-                .child(angle_readout(core, t))
+                .child(angle_readout(s, t))
                 .child(btn("cam-rot-right", "+15°", false, t, |s: &mut State| {
                     s.core.rotate_camera(ROTATE_STEP)
                 })),
@@ -1235,7 +1554,7 @@ pub fn panel(s: &State, t: &Theme) -> El {
                 .child(btn("cam-set-key", &i18n_wire::tr(core, "camera_set_key"), false, t, set_key_here))
                 .child(btn(
                     "cam-clear-key",
-                    &i18n_wire::tr(core, "clear_key_no_undo"),
+                    &i18n_wire::tr(core, "clear_key"),
                     false,
                     t,
                     |s: &mut State| s.core.camera_clear_key(),
@@ -1322,9 +1641,12 @@ pub(crate) fn view_centre(s: &mut State) {
 /// (UI mission Wave 5, audit S10 D5 — it used to sit in a
 /// full-width row under the canvas); this builder only
 /// supplies the cluster itself. Takes just the core —
-/// readouts and active states need nothing else — and uses
-/// the dark theme, as the shell's `view` does
-/// (`tok::theme(true)` in `main.rs`).
+/// readouts and active states need nothing else — and
+/// resolves its theme from the core's own appearance flag
+/// through `app_theme` (Roadmap Wave 1, RM25 / PL-2: the
+/// pill was the shell's last hard-coded dark surface; it
+/// now follows the caller's appearance like every other
+/// surface, the toasts precedent in the same wave).
 ///
 /// Wave 5 also makes the pill pure VIEWPORT NAVIGATION
 /// (audit S10 D4): every control drives the shell view layer
@@ -1345,13 +1667,13 @@ pub(crate) fn view_centre(s: &mut State) {
 ///
 /// Phase N: the root row is the charter §14 floating card
 /// pill — card fill, hairline border, radius 999, px 10 /
-/// py 4 — styled from the SAME `theme(true)` the buttons
-/// already build with, so pill and buttons can never
-/// disagree (P06 §3.2). The children rest flat on the
-/// pill (their resting fill is also `t.card`); hover and
+/// py 4 — styled from the SAME theme the buttons build
+/// with, so pill and buttons can never disagree
+/// (P06 §3.2). The children rest flat on the pill
+/// (their resting fill is also `t.card`); hover and
 /// press still read.
 pub fn overlay(core: &EditorCore) -> El {
-    let t = tok::theme(true);
+    let t = crate::rune_sec::app_theme::app_theme(!core.light_theme);
     row()
         .key("camera-overlay")
         .gap(4.0)
@@ -1579,7 +1901,7 @@ mod tests {
     }
 
     #[test]
-    fn follow_selected_sets_the_selection_without_a_snapshot() {
+    fn follow_selected_sets_the_selection_with_one_snapshot() {
         let mut core = EditorCore::new();
         with_figures(&mut core, 2);
         core.selected_figure = 1;
@@ -1587,9 +1909,11 @@ mod tests {
         follow_selected(&mut core);
         assert_eq!(core.project.camera_follow, Some(1));
         assert_eq!(core.status, "Camera follows Extra 2.");
-        // Project-data discipline (module docs): the write
-        // is snapshot-free, like `toggle_camera_follow`.
-        assert_eq!(core.undo_depth(), depth0);
+        // Project-data discipline (module docs): since
+        // RM24 the write takes exactly one undo step, like
+        // `toggle_camera_follow` itself.
+        assert_eq!(core.undo_depth(), depth0 + 1);
+        assert_eq!(core.undo_label(), Some("Camera follow"));
     }
 
     #[test]
@@ -1934,6 +2258,10 @@ mod tests {
             show_right: true,
             key_clipboard: None,
             key_follow_graph: false,
+            key_sel: Default::default(),
+            help_panel: Default::default(),
+            camera_panel: CameraPanelState::default(),
+            segment_numbers: crate::rune_sec::inspector_segment::SegmentNumberState::default(),
             export_recap: String::new(),
             export_job: None,
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
@@ -1956,6 +2284,100 @@ playback_speed: 1.0,
         };
         let _ = panel(&s, &t);
         let _ = overlay(&s.core);
+    }
+
+    // ---- F-3 number fields (Roadmap Wave 1, RM4) ----
+
+    #[test]
+    fn zoom_spec_speaks_percent_in_both_directions() {
+        let spec = zoom_spec();
+        assert_eq!(spec.format(1.25), "125%");
+        assert_eq!(spec.format(0.3), "30%");
+        assert_eq!(spec.parse("150%"), design::NumParse::Value(1.5));
+        assert_eq!(spec.parse("150"), design::NumParse::Value(1.5));
+        // The clamp is camera_zoom_by's own (0.3..=4.0).
+        assert_eq!(spec.clamp(10.0), 4.0);
+        assert_eq!(spec.clamp(0.1), 0.3);
+    }
+
+    #[test]
+    fn angle_spec_clamps_at_the_dial_stops() {
+        let spec = angle_spec();
+        assert_eq!(spec.format(-15.0), "-15°");
+        assert_eq!(spec.clamp(270.0), 180.0);
+        assert_eq!(spec.clamp(-270.0), -180.0);
+    }
+
+    #[test]
+    fn write_zoom_quiet_preserves_the_angle_and_spends_no_snapshot() {
+        let mut core = EditorCore::new();
+        core.rotate_camera(30.0);
+        let depth = core.undo_depth();
+        write_zoom_quiet(&mut core, 2.0);
+        assert_eq!(core.undo_depth(), depth, "the quiet write never snapshots");
+        assert_eq!(core.camera_here().2, 2.0);
+        assert_eq!(angle_deg(&core), 30.0, "the angle in effect survives");
+    }
+
+    #[test]
+    fn zoom_scrub_is_one_undo_step_and_cancel_restores() {
+        let mut core = EditorCore::new();
+        let mut g = ScrubGesture::default();
+        let depth = core.undo_depth();
+        // Two moves, one gesture: exactly one snapshot.
+        let cur = core.camera_here().2;
+        scrub_write(&mut g, &mut core, 1.5, cur, write_zoom_quiet);
+        let cur = core.camera_here().2;
+        scrub_write(&mut g, &mut core, 2.0, cur, write_zoom_quiet);
+        assert_eq!(core.undo_depth(), depth + 1, "one scrub is one undo step");
+        assert!(g.open);
+        // Release: final write + the op's recap, gesture sealed.
+        let cur = core.camera_here().2;
+        scrub_finish(
+            &mut g,
+            &mut core,
+            2.5,
+            cur,
+            write_zoom_quiet,
+            "Camera zoom 2.50 at frame 1.".to_string(),
+        );
+        assert_eq!(core.camera_here().2, 2.5);
+        assert_eq!(core.status, "Camera zoom 2.50 at frame 1.");
+        assert!(!g.open);
+        core.undo();
+        assert_eq!(core.camera_here().2, 1.0, "the one step undoes the scrub");
+
+        // A cancelled scrub writes the press value back and
+        // seals, so the NEXT scrub snapshots afresh.
+        let mut g = ScrubGesture::default();
+        let cur = core.camera_here().2;
+        scrub_write(&mut g, &mut core, 3.0, cur, write_zoom_quiet);
+        assert!(g.open);
+        let cur = core.camera_here().2;
+        scrub_write(&mut g, &mut core, 1.0, cur, write_zoom_quiet);
+        assert!(!g.open, "the press-value write is the cancel seal");
+        assert_eq!(core.camera_here().2, 1.0, "the press value is restored");
+    }
+
+    #[test]
+    fn number_fields_construct_in_both_forms() {
+        // The panel builds with the fields closed (display
+        // form) and with a session open (editing form,
+        // invalid buffer included) under both themes.
+        let mut s = crate::init();
+        for dark in [true, false] {
+            let t = tok::theme(dark);
+            let _ = panel(&s, &t);
+        }
+        s.camera_panel.zoom_edit.begin("150".to_string());
+        s.camera_panel.angle_edit.begin("abc".to_string());
+        let _ = panel(&s, &tok::theme(true));
+        // The poll sync reverts the blurred sessions.
+        s.camera_panel.zoom_edit.edit.focused = false;
+        s.camera_panel.angle_edit.edit.focused = false;
+        sync_number_edits(&mut s);
+        assert!(!s.camera_panel.zoom_edit.is_open());
+        assert!(!s.camera_panel.angle_edit.is_open());
     }
 
     // ---- Hold camera (Phase J, section 32) ----

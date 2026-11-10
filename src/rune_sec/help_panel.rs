@@ -407,13 +407,75 @@
 //! evidence the later +2 / +1 / +1 / +3 arithmetic
 //! stands on — but no "54 rows" above describes the
 //! panel as it is today.
+//!
+//! Roadmap Wave 1 (RM26, PL-4 + PL-5), 2026-11-10: the
+//! five key sections are no longer literal tables here —
+//! they are generated from the binding registry
+//! (`keymap::BINDINGS`), which the menu hints and the
+//! palette chips also read, so the three surfaces share
+//! one spelling by construction. PL-4's clusters added
+//! 19 rows (File/Edit chords + the Backspace alias in
+//! Shortcuts, the arrow-nudge row in Posing, the
+//! transport + keyframing clusters in Timeline, and
+//! Drawing's first four keys — its "no shortcuts yet"
+//! note is retired). The panel now holds **81 rows**:
+//! 17 Shortcuts + 8 Workspaces + 3 Posing + 13 Timeline
+//! + 4 Drawing + 36 Features, pinned by
+//! `shortcut_rows_has_exactly_81_rows` below. (As
+//! landed at integration: RM26's registry brought the
+//! census to 80; IA-RM28-5's F1 binding then added the
+//! 81st row, Shortcuts 16 → 17.)
+//!
+//! Roadmap Wave 1 (RM28, PL-7 first steps), 2026-11-10:
+//! the panel becomes searchable and its rows act. A
+//! search field (state: [`HelpPanelState::search`], the
+//! figures filter's `TextEdit` idiom) filters the
+//! canonical rows: matching runs over the canonical
+//! English AND its rendered translation, a section the
+//! query names shows whole, and a query matching
+//! nothing renders the kit's actionable empty state
+//! with a Clear search button. Under the header, a
+//! Getting Started block (NOT part of the
+//! [`group_rows`] census) lists six steps whose
+//! buttons perform the step: go to Animate, add a
+//! figure, add a frame, play, save, go to Export.
+//! Rows whose label names a real op now run it on
+//! press: a key row runs the palette command its
+//! registry binding names (PL-5's twin link — the
+//! very op the key runs), with three direct arms
+//! (Ctrl+K opens the palette, C flips camera mode,
+//! F1 closes the panel — the toggle's reachable half
+//! from inside it); every Features row except MCP
+//! stdio server (an external program — nothing in-app
+//! to jump to) takes the user to the surface its text
+//! names (a workspace switch; Settings opens for Live
+//! MCP control; the palette opens for Palette
+//! recents). Rows with no honest press — the
+//! palette-scope Down/Up/Enter, Escape, the Delete
+//! cascade, the Arrows nudge row, the two 10-frame
+//! rows — stay plain text, unpressable. The F1 row
+//! itself joins the registry via IA-RM28-5 (the
+//! `on_key` arm in main.rs, placed after the
+//! text-field bail so the Shortcuts description's
+//! typing-guard sentence stays exactly true, plus the
+//! `keymap` entry that generates the row); the search
+//! wiring is IA-RM28-1/-2/-3 and the new strings are
+//! IA-RM28-4 — the Q7 pattern: wiring and keys land
+//! together at integration. The census stands at 80
+//! until IA-RM28-5 lands, at 81 with it.
 
 use rune::tok::{type_, Theme};
-use rune::{col, row, text, El};
+use rune::{col, row, text, El, TextEdit};
 use stykanimate_rs::editor::EditorCore;
 
+use crate::chrome_view::btn;
+use crate::rune_sec::command_palette;
 use crate::rune_sec::design;
 use crate::rune_sec::i18n_wire;
+use crate::rune_sec::icons::icon_el;
+use crate::rune_sec::keymap;
+use crate::rune_sec::workspaces;
+use crate::State;
 
 /// The keyboard shortcuts that are real in this shell, as
 /// (key label, action) rows, grouped by section in panel
@@ -430,45 +492,23 @@ pub fn shortcut_rows() -> Vec<(&'static str, &'static str)> {
 }
 
 /// The shortcut rows belonging to one help section, by the
-/// section names from [`group_rows`]. Drawing currently has
-/// no live keys, so it returns an empty list — the panel
-/// renders its [`section_note`] text instead.
+/// section names from [`group_rows`]. (Drawing held no live
+/// keys until Roadmap Wave 1's PL-4 cluster — RM26 — gave
+/// it four; its old [`section_note`] is retired with them.)
 pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
     match section {
-        "Shortcuts" => vec![
-            ("Ctrl+Z", "Undo"),
-            ("Ctrl+Shift+Z", "Redo"),
-            ("Ctrl+Y", "Redo"),
-            ("Ctrl+S", "Quick save"),
-            ("Ctrl+K", "Open the command palette"),
-            ("Down", "Next result in the command palette (palette open)"),
-            ("Up", "Previous result in the command palette (palette open)"),
-            ("Enter", "Run the selected command (command palette open)"),
-            ("Escape", "Close the open menu or command palette"),
-            ("Delete", "Delete the selected stroke, particle event or segment"),
-        ],
-        "Workspaces" => vec![
-            ("Alt+1", "Switch to the Animate workspace"),
-            ("Alt+2", "Switch to the Draw workspace"),
-            ("Alt+3", "Switch to the Graph workspace"),
-            ("Alt+4", "Switch to the Effects workspace"),
-            ("Alt+5", "Switch to the Audio workspace"),
-            ("Alt+6", "Switch to the 3D workspace"),
-            ("Alt+7", "Switch to the Export workspace"),
-            ("Alt+8", "Switch to the Home workspace"),
-        ],
-        "Posing" => vec![
-            ("C", "Toggle camera mode"),
-            ("O", "Toggle onion skin"),
-        ],
-        "Timeline" => vec![
-            ("Space", "Play / pause"),
-            ("Left", "Previous frame (wraps around)"),
-            ("Right", "Next frame (wraps around)"),
-            ("N", "Add a frame after the current one"),
-            ("I", "Insert an inbetween frame"),
-        ],
-        "Drawing" => vec![],
+        // Roadmap Wave 1 (RM26, PL-5): every section that
+        // holds bindings is generated from the binding
+        // registry (`keymap::BINDINGS`) — the help rows,
+        // the menu hints and the palette chips now read
+        // one table, so a spelling cannot drift between
+        // surfaces. The Features section below stays a
+        // literal table: its rows name features, not keys.
+        "Shortcuts" => crate::rune_sec::keymap::section_rows("Shortcuts"),
+        "Workspaces" => crate::rune_sec::keymap::section_rows("Workspaces"),
+        "Posing" => crate::rune_sec::keymap::section_rows("Posing"),
+        "Timeline" => crate::rune_sec::keymap::section_rows("Timeline"),
+        "Drawing" => crate::rune_sec::keymap::section_rows("Drawing"),
         "Features" => vec![
             (
                 "Loop playback",
@@ -623,13 +663,13 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
 /// section that has no live shortcuts yet. `None` for
 /// sections that have rows.
 pub fn section_note(section: &str) -> Option<&'static str> {
-    match section {
-        "Drawing" => Some(
-            "No keyboard shortcuts yet. Draw mode exists in the core \
-             and stage drags paint while it is on, but no key toggles it.",
-        ),
-        _ => None,
-    }
+    // Roadmap Wave 1 (RM26): Drawing's note ("No keyboard
+    // shortcuts yet…") is retired — PL-4 gave the section
+    // real keys, so no section currently needs a note. The
+    // fn stays as the panel's one extension point for a
+    // future row-less section.
+    let _ = section;
+    None
 }
 
 /// The help panel's sections, as (name, one-line description)
@@ -652,7 +692,10 @@ pub fn group_rows() -> Vec<(&'static str, &'static str)> {
             "Timeline",
             "Playback and frame keys — paused while typing in a text field",
         ),
-        ("Drawing", "Freehand drawing keys"),
+        // RM26: Drawing has real keys now (PL-4), routed
+        // through the same text-field guard as every other
+        // binding — its description says so, like the rest.
+        ("Drawing", "Freehand drawing keys — paused while typing in a text field"),
         (
             "Features",
             "Features on buttons, panels and the stage — none of these is a keyboard shortcut",
@@ -700,14 +743,15 @@ fn help_text_key(english: &str) -> Option<&'static str> {
         "Playback and frame keys — paused while typing in a text field" => {
             "help_section_timeline_desc"
         }
-        "Freehand drawing keys" => "help_section_drawing_desc",
+        "Freehand drawing keys — paused while typing in a text field" => {
+            "help_section_drawing_desc"
+        }
         "Features on buttons, panels and the stage — none of these is a keyboard shortcut" => {
             "help_section_features_desc"
         }
-        // The Drawing section's note.
-        "No keyboard shortcuts yet. Draw mode exists in the core and stage drags paint while it is on, but no key toggles it." => {
-            "help_drawing_note"
-        }
+        // (The Drawing section's note and its
+        // `help_drawing_note` key retired at RM26 — the
+        // section has real keys now; see `section_note`.)
         // Shortcuts actions ("Redo" serves two rows).
         "Undo" => "help_act_undo",
         "Redo" => "help_act_redo",
@@ -736,6 +780,30 @@ fn help_text_key(english: &str) -> Option<&'static str> {
         "Next frame (wraps around)" => "help_act_next_frame_wrap",
         "Add a frame after the current one" => "help_act_add_frame",
         "Insert an inbetween frame" => "help_act_insert_inbetween",
+        // Roadmap Wave 1 (RM26, PL-4) actions — the
+        // registry's new bindings. Keys land via
+        // IA-RM26-3 (the Q7 pattern: wiring and keys land
+        // together at integration).
+        "Open the selected project file" => "help_act_open_project_file",
+        "Save a copy of the project" => "help_act_save_copy",
+        "Duplicate the current frame" => "help_act_duplicate_frame",
+        "Copy the current frame" => "help_act_copy_frame",
+        "Paste the copied frame" => "help_act_paste_frame",
+        "Nudge the selected joint by 1 (Shift 10, Alt 0.1); with no joint selected, step frames" => {
+            "help_act_nudge_selected_joint"
+        }
+        "Go to the first frame" => "help_act_first_frame",
+        "Go to the last frame" => "help_act_last_frame",
+        "Back 10 frames" => "help_act_back_10_frames",
+        "Forward 10 frames" => "help_act_forward_10_frames",
+        "Go to the previous keyframe" => "help_act_prev_keyframe",
+        "Go to the next keyframe" => "help_act_next_keyframe",
+        "Key all channels at the playhead" => "help_act_key_all_channels",
+        "Delete the key at the playhead" => "help_act_delete_key_here",
+        "Toggle draw mode" => "help_act_toggle_draw_mode",
+        "Brush size down (nearest smaller preset)" => "help_act_brush_size_down",
+        "Brush size up (nearest larger preset)" => "help_act_brush_size_up",
+        "Cycle brush" => "help_act_cycle_brush",
         // Features labels ("Live MCP control" is absent on
         // purpose — see this fn's docs).
         "Loop playback" => "help_feature_loop_playback",
@@ -876,6 +944,22 @@ fn help_text_key(english: &str) -> Option<&'static str> {
         "Settings — off by default; when on, the Live MCP control toggle lets MCP clients and other programs on this computer drive this running editor in full at http://127.0.0.1:32117/mcp: the core tools edit the project, and the live-only shell_* tools drive the window itself — workspace, playback, view, selection, theme and panels (the full tool list is in docs/MCP.md). There is no password: any program on this computer can drive the editor and its window while this is on, so turn it off here when you do not want that" => {
             "help_feature_live_mcp_control_desc"
         }
+        // Roadmap Wave 1 (RM28): the F1 row's action, the
+        // Getting Started block and the search chrome.
+        // Keys land via IA-RM28-4 (the Q7 pattern).
+        "Open or close Help" => "help_open_or_close_help",
+        "Getting Started" => "help_getting_started",
+        "New here? Each step does the step for you — work through them in order." => {
+            "help_start_desc"
+        }
+        "Go to the Animate workspace" => "help_start_go_animate",
+        "Add a figure" => "help_start_add_figure",
+        "Add a frame" => "help_start_add_frame",
+        "Play the animation" => "help_start_play",
+        "Save the project" => "help_start_save",
+        "Open the Export workspace to render a video" => "help_start_open_export",
+        "Search help" => "help_search_placeholder",
+        "Clear search" => "help_search_clear",
         _ => return None,
     })
 }
@@ -912,30 +996,356 @@ fn header_meta(core: &EditorCore) -> String {
         .replace("{name}", &core.project.name)
 }
 
+/// View-state for the help panel (Roadmap Wave 1,
+/// RM28): the search box's text edit. Owned by `State`
+/// (the wiring is IA-RM28-1/-2/-3); the derived
+/// `Default` covers it (`TextEdit` defaults to empty),
+/// so the shell's init is one field line. Searching
+/// never touches the project.
+#[derive(Clone, Debug, Default)]
+pub struct HelpPanelState {
+    /// Help search box contents (Rune core text edit).
+    /// The sections below filter through
+    /// [`section_match`] on this text every render;
+    /// typing is the only writer.
+    pub search: TextEdit,
+}
+
+/// True when `query` actually narrows the panel: a
+/// non-blank search (the figures filter's
+/// `filter_active` rule).
+pub fn search_active(query: &str) -> bool {
+    !query.trim().is_empty()
+}
+
+/// The search comparison: a case-insensitive substring
+/// test over BOTH the canonical English string and its
+/// rendered translation, so a search finds rows in the
+/// language the user is reading — the canonical pairs
+/// are English, the rendered text is what is on
+/// screen. A blank query matches everything (callers
+/// gate on [`search_active`] first).
+fn text_matches(query: &str, canonical: &str, rendered: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    q.is_empty()
+        || canonical.to_lowercase().contains(&q)
+        || rendered.to_lowercase().contains(&q)
+}
+
+/// One section's search result: the rows that survive
+/// the query, and whether the section note shows.
+struct SectionMatch {
+    rows: Vec<(&'static str, &'static str)>,
+    note: bool,
+}
+
+/// Filter one section by `query`. With no active
+/// search the section is whole. A query naming the
+/// section or its description shows the section whole;
+/// otherwise rows survive individually (either column
+/// may match, in either language) and the note shows
+/// when its own text matches. `None` hides the
+/// section from a searching panel entirely.
+fn section_match(
+    core: &EditorCore,
+    name: &'static str,
+    description: &'static str,
+    query: &str,
+) -> Option<SectionMatch> {
+    let rows = section_rows(name);
+    let note = section_note(name);
+    if !search_active(query) {
+        return Some(SectionMatch {
+            rows,
+            note: note.is_some(),
+        });
+    }
+    if text_matches(query, name, &help_text(core, name))
+        || text_matches(query, description, &help_text(core, description))
+    {
+        return Some(SectionMatch {
+            rows,
+            note: note.is_some(),
+        });
+    }
+    let kept: Vec<(&'static str, &'static str)> = rows
+        .into_iter()
+        .filter(|(label, action)| {
+            text_matches(query, label, &help_text(core, label))
+                || text_matches(query, action, &help_text(core, action))
+        })
+        .collect();
+    let note_hit = note.map_or(false, |n| text_matches(query, n, &help_text(core, n)));
+    if kept.is_empty() && !note_hit {
+        None
+    } else {
+        Some(SectionMatch {
+            rows: kept,
+            note: note_hit,
+        })
+    }
+}
+
+/// The palette command a key row's press runs, from
+/// the binding registry's own twin link (PL-5: the
+/// registry names the command whose action is exactly
+/// this binding's). Running it runs the very op the
+/// key runs — `cmd_undo` is `on_key`'s undo body,
+/// stroke-selection clear included.
+fn key_row_command(key: &str) -> Option<&'static str> {
+    // The Ctrl+Y alias row: the palette lists Redo
+    // once, under Ctrl+Shift+Z, so the registry leaves
+    // the alias unlinked; its press runs the same
+    // command.
+    if key == "Ctrl+Y" {
+        return Some("redo");
+    }
+    keymap::BINDINGS
+        .iter()
+        .find(|b| b.keys == key)
+        .and_then(|b| b.command_key)
+}
+
+/// True when a key row's press performs its labelled
+/// action. The rows left plain are the ones with no
+/// honest press: the palette-scope rows (Down/Up/Enter
+/// — the palette is closed while Help is open),
+/// Escape and the Delete/Backspace cascade (both are
+/// `on_key`'s own tier/cascade code, with no shared
+/// entry point), the Arrows nudge row (its op is
+/// modifier- and selection-sensitive) and the two
+/// 10-frame rows (no palette twin).
+fn key_row_has_action(key: &str) -> bool {
+    matches!(key, "F1" | "C" | "Ctrl+K") || key_row_command(key).is_some()
+}
+
+/// A key row's press: run its labelled action. Only
+/// called for rows [`key_row_has_action`] accepts.
+fn key_row_press(s: &mut State, key: &str) {
+    match key {
+        // F1 toggles Help; from inside the open panel
+        // the reachable half of the toggle is Close.
+        // (The row itself lands with IA-RM28-5.)
+        "F1" => s.menus.help_open = false,
+        // Ctrl+K's binding IS opening the palette.
+        "Ctrl+K" => command_palette::open_palette(s),
+        // Camera mode has no palette twin; the binding
+        // is the one-field flip `on_key` runs.
+        "C" => s.core.camera_mode = !s.core.camera_mode,
+        _ => {
+            if let Some(cmd) = key_row_command(key) {
+                if let Some(c) = command_palette::COMMANDS.iter().find(|c| c.key == cmd) {
+                    (c.run)(s);
+                }
+            }
+        }
+    }
+}
+
+/// Where a Features row's press takes the user: the
+/// workspace hosting the surface its text names, or
+/// one of the two chrome surfaces (Settings, the
+/// palette) that mount in every workspace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FeatureAction {
+    Workspace(workspaces::Workspace),
+    OpenSettings,
+    OpenPalette,
+    /// No in-app target: the row documents an external
+    /// program (the MCP stdio server).
+    None,
+}
+
+/// A Features row's press target, by canonical label.
+/// The default arm is Animate: the transport, the
+/// timeline and its lanes, the keyframe tools, the
+/// camera and scene panels, the inspectors, the pose
+/// tools and the sprites panel all live there (the
+/// workspaces gating table is the census this
+/// follows).
+fn feature_action(label: &str) -> FeatureAction {
+    use workspaces::Workspace as Ws;
+    match label {
+        "MCP stdio server" => FeatureAction::None,
+        "Live MCP control" => FeatureAction::OpenSettings,
+        "Palette recents" => FeatureAction::OpenPalette,
+        "Shift graph channel" | "Delete graph channel" => FeatureAction::Workspace(Ws::Graph),
+        "Stroke simplify" | "Stroke opacity" => FeatureAction::Workspace(Ws::Draw),
+        "Particles panel" | "Split FX clip" | "Hide FX clips" => {
+            FeatureAction::Workspace(Ws::Effects)
+        }
+        "Mute audio clips" | "Audio clip selection" => FeatureAction::Workspace(Ws::Audio),
+        "3D preview" | "3D figure on the stage" => FeatureAction::Workspace(Ws::Build3D),
+        "Range export" => FeatureAction::Workspace(Ws::Export),
+        "Delete project file" | "Reload from disk" => FeatureAction::Workspace(Ws::Home),
+        _ => FeatureAction::Workspace(Ws::Animate),
+    }
+}
+
+/// A Features row's press: go to the surface its text
+/// names. The help panel itself is ungated and stays
+/// open beside it.
+fn feature_press(s: &mut State, label: &str) {
+    match feature_action(label) {
+        FeatureAction::Workspace(ws) => workspaces::select_workspace(s, ws),
+        FeatureAction::OpenSettings => s.settings.open = true,
+        FeatureAction::OpenPalette => command_palette::open_palette(s),
+        FeatureAction::None => {}
+    }
+}
+
+/// The slug inside a pressable help row's element key,
+/// from its section and canonical label. The key itself
+/// is composed at the two call sites
+/// (`help-row-{slug}` — one `format!` template), so the
+/// key census sees the dynamic pattern.
+fn row_slug(section: &str, label: &str) -> String {
+    format!("{section}-{label}")
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// The Getting Started steps, as (element key, label)
+/// pairs in order. NOT part of [`group_rows`] /
+/// [`section_rows`]: those are the canonical shortcut
+/// census the palette drift guard pins. Each step's
+/// button performs the step (see [`start_press`]).
+pub fn start_steps() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("help-start-1", "Go to the Animate workspace"),
+        ("help-start-2", "Add a figure"),
+        ("help-start-3", "Add a frame"),
+        ("help-start-4", "Play the animation"),
+        ("help-start-5", "Save the project"),
+        ("help-start-6", "Open the Export workspace to render a video"),
+    ]
+}
+
+/// A Getting Started step's press: the step itself —
+/// the same ops the shell's own controls run (the
+/// figures panel's + Figure is `core.add_figure`, the
+/// transport's Play is `chrome_view::toggle_play`,
+/// quick save is `core.save`).
+fn start_press(s: &mut State, step: usize) {
+    match step {
+        0 => workspaces::select_workspace(s, workspaces::Workspace::Animate),
+        1 => s.core.add_figure(),
+        2 => s.core.add_frame(),
+        3 => crate::chrome_view::toggle_play(s),
+        4 => s.core.save(),
+        5 => workspaces::select_workspace(s, workspaces::Workspace::Export),
+        _ => {}
+    }
+}
+
+/// The Getting Started block: a titled section whose
+/// six numbered steps are buttons that do the step.
+/// Shown only while no search is active — search is a
+/// reference lookup, not the starter path.
+fn getting_started(core: &EditorCore, t: &Theme) -> El {
+    let mut block = col()
+        .key("help-getting-started")
+        .gap(4.0)
+        .child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(design::panel_title(
+                    Some("shapes"),
+                    &help_text(core, "Getting Started"),
+                    None,
+                    t,
+                )),
+        )
+        .child(
+            text(help_text(
+                core,
+                "New here? Each step does the step for you — work through them in order.",
+            ))
+            .font(type_::LABEL)
+            .color(t.text_secondary),
+        );
+    for (i, (key, label)) in start_steps().into_iter().enumerate() {
+        block = block.child(
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text(format!("{}.", i + 1))
+                        .font(type_::LABEL)
+                        .color(t.text_secondary),
+                )
+                .child(btn(key, &help_text(core, label), false, t, move |s: &mut State| {
+                    start_press(s, i)
+                })),
+        );
+    }
+    block
+}
+
+/// The no-results line for an active search: the
+/// `help_no_matches` template (the [`header_meta`]
+/// shape — the query substitutes into `{query}`).
+/// The key lands via IA-RM28-4 (the Q7 pattern).
+fn no_matches_line(core: &EditorCore, query: &str) -> String {
+    i18n_wire::tr(core, "help_no_matches").replace("{query}", query.trim())
+}
+
 /// One shortcut row: a kit `kbd` chip, then the action it
 /// performs. Only for rows whose first column names a real
-/// key (the Shortcuts, Workspaces, Posing and Timeline
-/// sections) — Features rows render through
-/// [`feature_row`] instead.
-fn shortcut_row(core: &EditorCore, key: &str, action: &'static str, t: &Theme) -> El {
-    row()
-        .gap(8.0)
-        .center_y()
-        .child(design::kbd(key, t))
-        .child(text(help_text(core, action)).font(type_::LABEL).color(t.text))
+/// key (the binding sections) — Features rows render through
+/// [`feature_row`] instead. When the row's binding has an
+/// honest press (see [`key_row_has_action`]) the row rides
+/// the kit's list-row shell and runs the action on press;
+/// otherwise it stays the plain text row it has always been.
+fn shortcut_row(
+    core: &EditorCore,
+    section: &str,
+    key: &'static str,
+    action: &'static str,
+    t: &Theme,
+) -> El {
+    if key_row_has_action(key) {
+        design::row_shell(false, t)
+            .key(format!("help-row-{}", row_slug(section, key)))
+            .on_press(move |s: &mut State| key_row_press(s, key))
+            .child(design::kbd(key, t))
+            .child(text(help_text(core, action)).font(type_::LABEL).color(t.text))
+    } else {
+        row()
+            .gap(8.0)
+            .center_y()
+            .child(design::kbd(key, t))
+            .child(text(help_text(core, action)).font(type_::LABEL).color(t.text))
+    }
 }
 
 /// One Features row: the feature name as plain text, then
 /// how the feature is reached. The first column names a
 /// feature, not a key, so it must not wear a `kbd` chip —
 /// a chip would claim a keyboard binding that does not
-/// exist (p14 §3).
+/// exist (p14 §3). When the feature has an in-app home
+/// (see [`feature_action`]) the row rides the kit's
+/// list-row shell and takes the user there on press;
+/// the one row documenting an external program stays
+/// plain.
 fn feature_row(core: &EditorCore, label: &'static str, action: &'static str, t: &Theme) -> El {
-    row()
-        .gap(8.0)
-        .center_y()
-        .child(text(help_text(core, label)).font(type_::LABEL).color(t.text))
-        .child(text(help_text(core, action)).font(type_::LABEL).color(t.text))
+    if feature_action(label) != FeatureAction::None {
+        design::row_shell(false, t)
+            .key(format!("help-row-{}", row_slug("Features", label)))
+            .on_press(move |s: &mut State| feature_press(s, label))
+            .child(text(help_text(core, label)).font(type_::LABEL).color(t.text))
+            .child(text(help_text(core, action)).font(type_::LABEL).color(t.text))
+    } else {
+        row()
+            .gap(8.0)
+            .center_y()
+            .child(text(help_text(core, label)).font(type_::LABEL).color(t.text))
+            .child(text(help_text(core, action)).font(type_::LABEL).color(t.text))
+    }
 }
 
 /// One help section: a title, its description, then either
@@ -947,7 +1357,17 @@ fn feature_row(core: &EditorCore, label: &'static str, action: &'static str, t: 
 /// `t.text`, the kit's header treatment), and the rows
 /// split by kind: true-key sections get `kbd` chips,
 /// Features rows stay plain text (see [`feature_row`]).
-fn help_section(core: &EditorCore, name: &'static str, description: &'static str, t: &Theme) -> El {
+/// Under an active search the section renders only its
+/// surviving rows (see [`section_match`]); `None` hides
+/// a section the search emptied.
+fn help_section(
+    core: &EditorCore,
+    name: &'static str,
+    description: &'static str,
+    query: &str,
+    t: &Theme,
+) -> Option<El> {
+    let m = section_match(core, name, description, query)?;
     // Branching, the header icon and the element key stay
     // keyed on the canonical English `name`; only the
     // displayed title and description translate.
@@ -972,33 +1392,41 @@ fn help_section(core: &EditorCore, name: &'static str, description: &'static str
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         );
-    let rows = section_rows(name);
-    if rows.is_empty() {
-        if let Some(note) = section_note(name) {
-            section = section.child(
-                text(help_text(core, note))
-                    .font(type_::LABEL)
-                    .color(t.text_secondary),
-            );
+    if m.rows.is_empty() {
+        if m.note {
+            if let Some(note) = section_note(name) {
+                section = section.child(
+                    text(help_text(core, note))
+                        .font(type_::LABEL)
+                        .color(t.text_secondary),
+                );
+            }
         }
     } else if name == "Features" {
-        for (label, action) in rows {
+        for (label, action) in m.rows {
             section = section.child(feature_row(core, label, action, t));
         }
     } else {
-        for (key, action) in rows {
-            section = section.child(shortcut_row(core, key, action, t));
+        for (key, action) in m.rows {
+            section = section.child(shortcut_row(core, name, key, action, t));
         }
     }
-    section
+    Some(section)
 }
 
 /// The help panel: a header (title + the open project's
-/// name, frame count and fps, read from the core) over the
-/// six sections from [`group_rows`]. Pure: it builds
-/// elements from `core` and never calls an op on it.
-pub fn help_panel(core: &EditorCore, t: &Theme) -> El {
+/// name, frame count and fps, read from the core), the
+/// search field, the Getting Started block and the six
+/// sections from [`group_rows`] (filtered while a
+/// search is active — see [`section_match`]). Like
+/// every other panel it builds elements from the core
+/// plus its own view-state ([`HelpPanelState`]); the
+/// ops its rows run live behind the presses, never in
+/// the builder.
+pub fn help_panel(core: &EditorCore, st: &HelpPanelState, t: &Theme) -> El {
     let meta = header_meta(core);
+    let query = st.search.text.clone();
+    let searching = search_active(&query);
     let mut panel = design::panel_col("help-panel", t)
         .child(
             row()
@@ -1017,8 +1445,56 @@ pub fn help_panel(core: &EditorCore, t: &Theme) -> El {
                 )),
         )
         .child(design::divider(t));
+    // The search field (the figures filter's
+    // composition): typing is the only writer, and the
+    // sections below filter on the text every render.
+    let mut search_row = row()
+        .key("help-search-row")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(icon_el("magnifying-glass", 13.0, t.text_secondary))
+        .child(
+            design::text_field(&st.search, type_::BODY.lh(26.0), st.search.focused, t)
+                .key("help-search")
+                .single_line()
+                .grow(1.0)
+                .color(t.text)
+                .placeholder(help_text(core, "Search help"), t.text_secondary)
+                .on_edit(|s: &mut State| &mut s.help_panel.search),
+        );
+    if searching {
+        search_row = search_row.child(btn(
+            "help-search-clear",
+            &help_text(core, "Clear search"),
+            false,
+            t,
+            |s: &mut State| s.help_panel.search = TextEdit::default(),
+        ));
+    }
+    panel = panel.child(search_row);
+    if !searching {
+        panel = panel.child(getting_started(core, t));
+    }
+    let mut any_section = false;
     for (name, description) in group_rows() {
-        panel = panel.child(help_section(core, name, description, t));
+        if let Some(section) = help_section(core, name, description, &query, t) {
+            panel = panel.child(section);
+            any_section = true;
+        }
+    }
+    if searching && !any_section {
+        // The search that found nothing offers its own
+        // remedy (PL-7's actionable empty states, in
+        // this panel first): clear the search.
+        panel = panel.child(design::empty_state_action(
+            "magnifying-glass",
+            &no_matches_line(core, &query),
+            "help-no-results-clear",
+            &help_text(core, "Clear search"),
+            t,
+            |s: &mut State| s.help_panel.search = TextEdit::default(),
+        ));
     }
     panel
 }
@@ -1026,12 +1502,15 @@ pub fn help_panel(core: &EditorCore, t: &Theme) -> El {
 #[cfg(test)]
 mod tests {
     use super::{
-        group_rows, header_meta, help_text_key, i18n_wire, section_note, section_rows,
-        shortcut_rows, EditorCore,
+        command_palette, feature_action, group_rows, header_meta, help_text_key,
+        i18n_wire, key_row_command, key_row_has_action, keymap, no_matches_line,
+        search_active, section_match, section_note, section_rows, shortcut_rows,
+        start_steps, text_matches, workspaces, EditorCore, FeatureAction,
+        HelpPanelState,
     };
 
     #[test]
-    fn shortcut_rows_has_exactly_61_rows() {
+    fn shortcut_rows_has_exactly_81_rows() {
         // 10 Shortcuts + 8 Workspaces + 2 Posing + 5 Timeline
         // + 36 Features; Drawing contributes none (see the
         // module docs for which GPUI-era rows were dropped
@@ -1050,7 +1529,16 @@ mod tests {
         // refresh added one more (MCP stdio server).
         // The Wave 12 refresh added three more (Project
         // assets, Attach asset to segment, Sprites).
-        assert_eq!(shortcut_rows().len(), 61);
+        // Roadmap Wave 1 (RM26) added 19 binding rows
+        // from the keymap registry: Shortcuts 10 → 16
+        // (Ctrl+O, Ctrl+Shift+S, Ctrl+D, Ctrl+C, Ctrl+V,
+        // Backspace), Posing 2 → 3 (the Arrows nudge
+        // row), Timeline 5 → 13 (Home, End, Shift+Left,
+        // Shift+Right, comma, period, K, Alt+K) and
+        // Drawing 0 → 4 (B, [, ], Shift+B).
+        // IA-RM28-5 (RM28) then landed the F1 binding in
+        // Shortcuts (16 → 17): the census is 81.
+        assert_eq!(shortcut_rows().len(), 81);
     }
 
     #[test]
@@ -1697,11 +2185,12 @@ mod tests {
         // bindings must say they pause while typing, and
         // Shortcuts must name the one exception the routing
         // order creates (Ctrl+K reaches the palette handler
-        // before the guard). Drawing and Features have no
-        // keys to guard — Features is buttons and panels,
-        // and its description says so instead.
+        // before the guard). Features alone has no keys to
+        // guard — it is buttons and panels, and its
+        // description says so instead. (Drawing joined the
+        // guarded sections at RM26, when PL-4 gave it keys.)
         for (name, description) in group_rows() {
-            if name == "Drawing" || name == "Features" {
+            if name == "Features" {
                 continue;
             }
             assert!(
@@ -1739,13 +2228,52 @@ mod tests {
     }
 
     #[test]
-    fn empty_sections_carry_notes_and_filled_sections_do_not() {
-        assert!(section_rows("Drawing").is_empty());
-        assert!(section_note("Drawing").is_some());
-        for name in ["Shortcuts", "Workspaces", "Posing", "Timeline", "Features"] {
+    fn no_section_is_empty_and_none_carries_a_note() {
+        // Until RM26 this test pinned the opposite for
+        // Drawing (empty rows + the "no shortcuts yet"
+        // note); PL-4 gave Drawing real keys, so every
+        // section now has rows and no section needs a
+        // note.
+        for name in ["Shortcuts", "Workspaces", "Posing", "Timeline", "Drawing", "Features"] {
             assert!(!section_rows(name).is_empty(), "{name} should have rows");
             assert!(section_note(name).is_none(), "{name} should have no note");
         }
+        assert_eq!(section_rows("Drawing").len(), 4);
+    }
+
+    #[test]
+    fn rm26_pl4_rows_are_listed() {
+        // The PL-4 clusters (RM26), generated from the
+        // keymap registry: File/Edit chords + the
+        // Backspace alias, the nudge row, the transport
+        // and keyframing clusters, and Drawing's first
+        // keys.
+        let rows = shortcut_rows();
+        assert!(rows.contains(&("Ctrl+O", "Open the selected project file")));
+        assert!(rows.contains(&("Ctrl+Shift+S", "Save a copy of the project")));
+        assert!(rows.contains(&("Ctrl+D", "Duplicate the current frame")));
+        assert!(rows.contains(&("Ctrl+C", "Copy the current frame")));
+        assert!(rows.contains(&("Ctrl+V", "Paste the copied frame")));
+        assert!(rows.contains(&(
+            "Backspace",
+            "Delete the selected stroke, particle event or segment"
+        )));
+        assert!(rows.contains(&(
+            "Arrows",
+            "Nudge the selected joint by 1 (Shift 10, Alt 0.1); with no joint selected, step frames"
+        )));
+        assert!(rows.contains(&("Home", "Go to the first frame")));
+        assert!(rows.contains(&("End", "Go to the last frame")));
+        assert!(rows.contains(&("Shift+Left", "Back 10 frames")));
+        assert!(rows.contains(&("Shift+Right", "Forward 10 frames")));
+        assert!(rows.contains(&(",", "Go to the previous keyframe")));
+        assert!(rows.contains(&(".", "Go to the next keyframe")));
+        assert!(rows.contains(&("K", "Key all channels at the playhead")));
+        assert!(rows.contains(&("Alt+K", "Delete the key at the playhead")));
+        assert!(rows.contains(&("B", "Toggle draw mode")));
+        assert!(rows.contains(&("[", "Brush size down (nearest smaller preset)")));
+        assert!(rows.contains(&("]", "Brush size up (nearest larger preset)")));
+        assert!(rows.contains(&("Shift+B", "Cycle brush")));
     }
 
     #[test]
@@ -1890,5 +2418,165 @@ mod tests {
                 fps_txt
             )
         );
+    }
+
+    #[test]
+    fn rm28_search_model_filters_rows_and_sections() {
+        let core = EditorCore::new();
+        // Blank queries are no search at all.
+        assert!(!search_active(""));
+        assert!(!search_active("   "));
+        assert!(search_active("undo"));
+        // Case-insensitive substring over either column
+        // (canonical or rendered — identical under an
+        // English core).
+        assert!(text_matches("UNDO", "Ctrl+Z", "Ctrl+Z"));
+        assert!(text_matches("undo", "Ctrl+Z", "Undo"));
+        assert!(!text_matches("xyz", "Ctrl+Z", "Undo"));
+        // A row-level query keeps only the matching rows.
+        let m = section_match(&core, "Shortcuts", group_rows()[0].1, "undo")
+            .expect("Shortcuts survives an undo search");
+        assert_eq!(m.rows, vec![("Ctrl+Z", "Undo")]);
+        // A query naming the section shows it whole.
+        let m = section_match(&core, "Workspaces", group_rows()[1].1, "workspaces")
+            .expect("a named section shows whole");
+        assert_eq!(m.rows.len(), 8);
+        // A query with no match anywhere hides the section.
+        assert!(section_match(&core, "Features", group_rows()[5].1, "zzz-no-match").is_none());
+        // No search: every section is whole.
+        for (name, description) in group_rows() {
+            let m = section_match(&core, name, description, "").expect("unfiltered section");
+            assert_eq!(m.rows, section_rows(name));
+        }
+    }
+
+    #[test]
+    fn rm28_every_actionable_key_row_names_a_real_command() {
+        // The press runs the palette command the registry
+        // links — the command must exist, or the press
+        // would be a fake control.
+        for b in keymap::BINDINGS {
+            if let Some(cmd) = b.command_key {
+                assert!(
+                    command_palette::COMMANDS.iter().any(|c| c.key == cmd),
+                    "binding {} names missing command {cmd}",
+                    b.id
+                );
+            }
+        }
+        // The disposition, pinned: these rows act…
+        for key in [
+            "Ctrl+Z", "Ctrl+Shift+Z", "Ctrl+Y", "Ctrl+S", "Ctrl+K", "Ctrl+O",
+            "Ctrl+Shift+S", "Ctrl+D", "Ctrl+C", "Ctrl+V", "Alt+1", "Alt+8",
+            "C", "O", "Space", "Left", "Right", "N", "I", "Home", "End", ",",
+            ".", "K", "Alt+K", "B", "[", "]", "Shift+B",
+        ] {
+            assert!(key_row_has_action(key), "{key} should act");
+        }
+        // …and these stay plain (see key_row_has_action).
+        for key in [
+            "Down", "Up", "Enter", "Escape", "Delete", "Backspace", "Arrows",
+            "Shift+Left", "Shift+Right",
+        ] {
+            assert!(!key_row_has_action(key), "{key} must stay plain");
+        }
+        // F1's press is armed ahead of its row (the row
+        // lands with IA-RM28-5).
+        assert!(key_row_has_action("F1"));
+        assert_eq!(key_row_command("Ctrl+Y"), Some("redo"));
+    }
+
+    #[test]
+    fn rm28_every_feature_row_has_a_disposition() {
+        // Every Features row either takes the user to its
+        // surface on press or is the one documented
+        // exception (the external stdio server).
+        for (label, _) in section_rows("Features") {
+            let action = feature_action(label);
+            if label == "MCP stdio server" {
+                assert_eq!(action, FeatureAction::None);
+            } else {
+                assert_ne!(action, FeatureAction::None, "{label} must act");
+            }
+        }
+        // Spot-pin the non-Animate homes.
+        assert_eq!(
+            feature_action("Delete graph channel"),
+            FeatureAction::Workspace(workspaces::Workspace::Graph)
+        );
+        assert_eq!(feature_action("Live MCP control"), FeatureAction::OpenSettings);
+        assert_eq!(feature_action("Palette recents"), FeatureAction::OpenPalette);
+        assert_eq!(
+            feature_action("Range export"),
+            FeatureAction::Workspace(workspaces::Workspace::Export)
+        );
+        assert_eq!(
+            feature_action("Sprites"),
+            FeatureAction::Workspace(workspaces::Workspace::Animate)
+        );
+    }
+
+    #[test]
+    fn rm28_getting_started_steps_are_six_and_wired() {
+        let steps = start_steps();
+        assert_eq!(steps.len(), 6);
+        for (i, (key, label)) in steps.iter().enumerate() {
+            assert!(
+                !steps[..i].iter().any(|(k, _)| k == key),
+                "duplicate step key {key}"
+            );
+            assert!(!label.trim().is_empty());
+        }
+        assert_eq!(steps[0], ("help-start-1", "Go to the Animate workspace"));
+        assert_eq!(
+            steps[5],
+            ("help-start-6", "Open the Export workspace to render a video")
+        );
+    }
+
+    #[test]
+    fn rm28_new_strings_resolve_through_the_catalogue() {
+        // The RM28 strings (the F1 action, the Getting
+        // Started block, the search chrome) resolve
+        // through `help_text_key` like every other string
+        // the panel renders, to keys whose catalogue
+        // English is byte-identical. The keys land via
+        // IA-RM28-4, so this pin passes only once that IA
+        // lands (the Q7 pattern).
+        let core = EditorCore::new();
+        let mut strings: Vec<&'static str> = vec![
+            "Open or close Help",
+            "Getting Started",
+            "New here? Each step does the step for you — work through them in order.",
+            "Search help",
+            "Clear search",
+        ];
+        for (_, label) in start_steps() {
+            strings.push(label);
+        }
+        for english in strings {
+            let key =
+                help_text_key(english).unwrap_or_else(|| panic!("{english} is not wired"));
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
+        // The no-matches template composes like
+        // header_meta (its own pin, same pattern).
+        assert!(
+            i18n_wire::key_in_table("help_no_matches"),
+            "missing i18n key: help_no_matches"
+        );
+        assert_eq!(
+            i18n_wire::tr(&core, "help_no_matches"),
+            "No help matches \"{query}\""
+        );
+        assert_eq!(no_matches_line(&core, " undo "), "No help matches \"undo\"");
+    }
+
+    #[test]
+    fn rm28_panel_state_defaults_to_an_empty_search() {
+        let st = HelpPanelState::default();
+        assert!(st.search.text.is_empty());
+        assert!(!st.search.focused);
     }
 }

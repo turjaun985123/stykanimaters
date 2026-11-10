@@ -85,3 +85,56 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 90
+
+  # Roadmap F-7 (A26 R1): the source gate and the instruments'
+  # self-tests run IN CI as their own job — pure stdlib Python,
+  # no Rust toolchain, about a minute. Until this job existed
+  # the gate was a human ritual: it ran locally when someone
+  # remembered, and a wave could close on a gate nobody had
+  # re-run. A failed check here fails the run's conclusion
+  # exactly like a failed test. Independent of the build job
+  # on purpose (parallel, fast feedback); binding comes from
+  # the run conclusion, not from job ordering.
+  #
+  # The key-diff check compares the tree against the change's
+  # BASE — push: the before-commit; PR: the base sha — never
+  # plain HEAD: on a committed checkout, diffing against HEAD
+  # would find no changed files and pass vacuously.
+  gate:
+    name: Source gate + instrument self-tests (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          # Full history: the gate diffs against the base ref.
+          fetch-depth: 0
+
+      - name: Source gate (phase_j_checks.py)
+        run: |
+          BASE="${{ github.event.before }}"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          fi
+          if [ -z "$BASE" ]; then BASE="HEAD"; fi
+          echo "gate key-diff base: $BASE"
+          python3 scripts/phase_j_checks.py "$BASE"
+
+      # Roadmap F-10 (RM11, IA-RM11-1): the schema half of
+      # the standing parity audit — check 11 inside the
+      # gate covers counts; this compares every tool's
+      # argument schema against docs/MCP.md.
+      - name: MCP schema audit (mcp_schema_audit.py)
+        run: python3 scripts/mcp_schema_audit.py
+
+      # Each instrument proves it is not vacuous against
+      # synthetic fixtures (a probe that cannot fail proves
+      # nothing). The verdict aggregator's self-test joins
+      # them: it pins that FAIL / UNPROVEN / missing evidence
+      # all fold to a FAIL verdict.
+      - name: Instrument self-tests (scan, census, thumbnail probe, aggregator)
+        run: |
+          python3 scripts/overflow_scan.py --self-test
+          python3 scripts/subtitle_census.py --self-test
+          python3 scripts/home_thumbnail_probe.py --self-test
+          python3 scripts/verdict_aggregate.py --self-test

@@ -200,6 +200,62 @@ pub fn sort_subtitle_cues(cues: &mut Vec<SubtitleCue>) {
     cues.sort_by_key(cue_key);
 }
 
+/// A millisecond nudge as a frame delta at `fps`:
+/// rounded to the nearest frame, and never zero for
+/// a non-zero nudge (a ±100 ms press at a low rate
+/// still moves one frame — a press that visibly does
+/// nothing would be a fake control). The same rate guard
+/// as the panel's timecode applies (no rate, no move).
+pub fn nudge_delta_frames(ms: i32, fps: f32) -> i32 {
+    if ms == 0 || !(fps > 0.0) || !fps.is_finite() {
+        return 0;
+    }
+    let frames = (ms as f32 * fps / 1000.0).round() as i32;
+    if frames == 0 {
+        ms.signum()
+    } else {
+        frames
+    }
+}
+
+/// A whole cue shifted by `delta` frames, duration
+/// preserved: the start clamps at frame 0 and the end
+/// follows by the APPLIED delta, so a cue hard
+/// against the floor moves less than asked rather
+/// than shrinking. `None` when nothing would move
+/// (a zero delta, or a backward shift with the start
+/// already at 0) — the caller's no-change report.
+pub fn shifted_window(cue: &SubtitleCue, delta: i32) -> Option<(usize, usize)> {
+    if delta == 0 {
+        return None;
+    }
+    let start = cue.start_frame as i64 + delta as i64;
+    let start = start.max(0) as usize;
+    let applied = start as i64 - cue.start_frame as i64;
+    if applied == 0 {
+        return None;
+    }
+    let end = (cue.end_frame as i64 + applied).max(0) as usize;
+    Some((start, end))
+}
+
+/// A cue's window rescaled from `from_fps` to
+/// `to_fps` — the explicit retime: frame counts scale
+/// by the rate ratio (rounded to nearest), preserving
+/// the cue's WALL-CLOCK window, and the half-open
+/// minimum (end after start) is re-established after
+/// rounding. Rates are the caller's validated values;
+/// equal rates return the window unchanged.
+pub fn retimed_window(cue: &SubtitleCue, from_fps: f32, to_fps: f32) -> (usize, usize) {
+    if !(from_fps > 0.0) || !from_fps.is_finite() || !(to_fps > 0.0) || !to_fps.is_finite() {
+        return (cue.start_frame, cue.end_frame);
+    }
+    let ratio = to_fps / from_fps;
+    let start = (cue.start_frame as f32 * ratio).round() as usize;
+    let end = (cue.end_frame as f32 * ratio).round() as usize;
+    (start, end.max(start + 1))
+}
+
 /// Every cue in `project` live at `frame`, in the list's
 /// kept (stored) order — the renderer-facing query. The
 /// raster and SVG writers work from a `&Project` alone
@@ -248,6 +304,27 @@ pub enum SubtitlePosition {
     Top,
 }
 
+/// Which renderer draws subtitle text on the raster
+/// surfaces (burn-in and the raster stage texts that share
+/// the funnel). Wave RM (RM2, roadmap F-2): the default is
+/// real shaped text from the system font stack — the pre-RM2
+/// 3×5 bitmap stamp destroyed every character outside its
+/// ~68-glyph set (Bengali dialogue burned in as `?`). The
+/// bitmap stamp survives as the explicit `Pixel` style: it
+/// is the .piv format's native look and needs no font files,
+/// so a user can still choose it deliberately. SVG output
+/// always uses real text and ignores this choice.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubtitleFont {
+    /// Shaped text from a real font (font-stack fallback
+    /// per script), anti-aliased.
+    #[default]
+    Shaped,
+    /// The legacy 3×5 bitmap stamp (uppercase-folded,
+    /// ~68 glyphs, everything else `?`).
+    Pixel,
+}
+
 /// The smallest font scale a style may carry.
 pub const SUBTITLE_FONT_SCALE_MIN: f32 = 0.5;
 /// The largest font scale a style may carry.
@@ -272,6 +349,14 @@ pub struct SubtitleStyle {
     /// offset stamps that keep the text legible (no
     /// surface draws a filled box; see the section note).
     pub box_color: u32,
+    /// Which renderer draws the text on raster surfaces
+    /// (Wave RM, RM2). Serde-defaulted to
+    /// [`SubtitleFont::Shaped`], so a pre-RM2 project file
+    /// (whose style names no font) loads with the shaped
+    /// renderer — the fix — never silently with the stamp
+    /// that destroyed its dialogue.
+    #[serde(default)]
+    pub font: SubtitleFont,
 }
 
 impl Default for SubtitleStyle {
@@ -284,6 +369,7 @@ impl Default for SubtitleStyle {
             font_scale: 1.0,
             text_color: 0xFF_FFFF,
             box_color: 0x00_0000,
+            font: SubtitleFont::Shaped,
         }
     }
 }
@@ -1564,6 +1650,7 @@ mod tests {
             font_scale: 1.5,
             text_color: 0x12_34_56,
             box_color: 0x65_43_21,
+            font: SubtitleFont::Pixel,
         };
         let json = serde_json::to_string(&project).unwrap();
         let loaded: Project = serde_json::from_str(&json).unwrap();

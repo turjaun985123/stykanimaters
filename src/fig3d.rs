@@ -1864,10 +1864,12 @@ struct PoseLibraryEntry {
     pose: Pose3,
 }
 
-/// The directory the 3D pose library lives in: `./library3d/poses`,
-/// beside the figure library's own files in `./library3d`.
+/// The directory the 3D pose library lives in: the `poses`
+/// folder inside the one resolver's library3d dir
+/// ([`crate::shell::library3d_dir`], Roadmap Wave 1, RM9 /
+/// F-8), beside the 3D figure library's own files.
 fn pose_library_dir() -> PathBuf {
-    PathBuf::from("library3d").join("poses")
+    crate::shell::library3d_dir().join("poses")
 }
 
 /// Save `pose` into pose library directory `dir` (created if
@@ -3849,15 +3851,20 @@ mod pose_library_tests {
         pose.rotations[6] = [0.0, -45.0, 15.5];
         let name = "Wave12 Pose Library Test";
         let path = save_pose_library(&pose, name).unwrap();
+        // The public API resolves through the one
+        // resolver (Roadmap Wave 1, RM9 / F-8): the pose
+        // lands in the library3d dir's `poses` folder,
+        // wherever the resolver roots it.
         assert_eq!(
             path,
-            PathBuf::from("library3d")
+            crate::shell::library3d_dir()
                 .join("poses")
                 .join("wave12-pose-library-test.json")
         );
         assert!(scan_pose_library().iter().any(|n| n == name));
         assert_eq!(load_pose_library(name).unwrap(), pose);
-        // Clean up the file this test wrote into ./library3d/poses.
+        // Clean up the file this test wrote into the
+        // resolved pose library.
         let _ = std::fs::remove_file(&path);
     }
 }

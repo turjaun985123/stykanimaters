@@ -397,6 +397,36 @@
 //! instead — the one state in which the timeline has
 //! something to say before it has frames to show.
 //!
+//! ## Lane space model (Roadmap Wave 1, RM12 — F-11)
+//!
+//! The card's data-gated lanes — the marker row, the
+//! clips lane, the dopesheet and the subtitle lane —
+//! each carry a per-lane visibility flag on
+//! [`FrameOpsState`] (`show_*_lane`, addressed by
+//! [`TimelineLane`]). A lane mounts only when all
+//! three hold: the card is expanded (the collapsed
+//! form is chips-only, above), the user has the lane
+//! shown, and the lane's own data gate passes — the
+//! rule is [`lane_mounted`], and the data gates
+//! themselves are unchanged (markers exist / clips
+//! exist / the Animate workspace / cues exist). The
+//! ruler and the chips are the card's spine and carry
+//! no flag.
+//!
+//! The flags are flipped from the card's own lane row
+//! ([`lane_toggles_row`]): one toggle per lane whose
+//! data gate passes, mounted under the loop row,
+//! outside the scroll viewport, so the controls stay
+//! put however far the chips scroll (the loop row's
+//! placement rule). A toggle for a lane that cannot
+//! mount would be a dead control, so it is not
+//! rendered; a HIDDEN lane's toggle stays — it is the
+//! only way back. The toggle renders in
+//! [`crate::chrome_view::btn`]'s active form while
+//! its lane is shown. The flags are session-only this
+//! wave (their `LayoutPrefs` mirror is IA-RM12-2), so
+//! a restart restores every lane.
+//!
 //! ## Label widths (measured, Wave 9)
 //!
 //! Both number-bearing rows were re-audited against
@@ -441,6 +471,54 @@
 //!   format is pinned by [`chip_label`]'s tests), so
 //!   they are recorded here as integrator decisions,
 //!   not landed as an unproven restyle.
+//!
+//!   Postscript (Roadmap Wave 1, RM13): the wider-pitch
+//!   remedy has landed as the timeline zoom below —
+//!   the pitch is now a view choice, and
+//!   [`chip_label_at`] thins the label as the pitch
+//!   narrows instead of pretending it fits. The 30 pt
+//!   default the audit priced is unchanged.
+//!
+//! ## Timeline zoom (Roadmap Wave 1, RM13 — P-1)
+//!
+//! The chip width is view data, not a constant: the
+//! live width is `FrameOpsState::chip_w()` (stored on
+//! the frame-ops state, persisted through
+//! `LayoutPrefs::timeline_zoom`), clamped to
+//! [`ZOOM_MIN_W`]..=[`ZOOM_MAX_W`]. [`CHIP_W`] remains
+//! the default and the value every pre-zoom pin is
+//! stated at. [`CHIP_GAP`] never scales — it is
+//! chrome, not content — so one frame's pitch at
+//! width `w` is [`pitch`] (`w + CHIP_GAP`). Every
+//! geometry fn takes the width it lays out at:
+//! [`timeline_width`], [`span_rect`],
+//! [`ruler_frame_at_x`], [`ruler_ticks`] (whose label
+//! stride widens as the pitch narrows — see
+//! [`RULER_SLOT_W`]), [`chip_label_at`] (full label,
+//! bare number, or no text as the width thins). The
+//! builders thread the live width; the drag handlers
+//! read it the same way, so a press at any zoom lands
+//! on the frame the user sees.
+//!
+//! The card's zoom row (expanded form, under the lane
+//! row) carries the steppers, a percent readout, Fit,
+//! span zooms for the loop range and the range
+//! selection when they exist, and the Follow toggle.
+//! Fit and the span zooms read the strip's scroll
+//! record (below) for the viewport width. The overview
+//! strip under the row — a miniature of the whole
+//! timeline with the viewport window drawn on it —
+//! mounts only when the content is wider than the
+//! viewport; pressing or dragging on it scrolls, a
+//! click seeks. Follow is `poll`'s half: while playing
+//! with follow on, the strip scrolls to keep the
+//! playhead's chip in view ([`chip_visible`]).
+//!
+//! The scroll record: the strip's scroll row writes
+//! `(offset_x, viewport_w)` through `on_scroll_offset`
+//! into a thread-local on every scroll change — the
+//! `PRESSED_CHIP` pattern, gesture/view state with its
+//! own lifetime, read through [`timeline_viewport`].
 
 use std::cell::Cell;
 
@@ -450,7 +528,7 @@ use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
-use crate::rune_sec::frame_ops::{selected_range, FrameOpsState};
+use crate::rune_sec::frame_ops::{selected_range, FrameOpsState, TimelineLane};
 use crate::stage_view::hex_color;
 use crate::State;
 
@@ -471,6 +549,111 @@ pub const CHIP_GAP: f32 = 4.0;
 /// importing this instead of duplicating the 34-point
 /// stride.
 pub const CHIP_PITCH: f32 = CHIP_W + CHIP_GAP;
+
+/// The narrowest chip width the timeline zoom allows,
+/// in points (Roadmap Wave 1, RM13 — P-1): below this
+/// a chip carries no text at all (see
+/// [`chip_label_at`]) and reads as a pure tick.
+pub const ZOOM_MIN_W: f32 = 8.0;
+
+/// The widest chip width the timeline zoom allows, in
+/// points: twice the pre-zoom [`CHIP_W`].
+pub const ZOOM_MAX_W: f32 = 60.0;
+
+/// One zoom step's factor: the square root of two, so
+/// two steps double (or halve) the width and a step
+/// out undoes a step in.
+pub const ZOOM_STEP: f32 = std::f32::consts::SQRT_2;
+
+/// The narrowest width at which a chip still carries
+/// its bare frame number (below [`CHIP_W`] the suffix
+/// half of [`chip_label`] is dropped; below this, all
+/// text is).
+pub const LABEL_MIN_W: f32 = 14.0;
+
+/// The narrowest slot a ruler time label is allowed to
+/// occupy, in points: the stride rule in
+/// [`ruler_ticks`] picks the smallest whole-second
+/// stride whose slot — stride × fps × pitch — reaches
+/// this width.
+pub const RULER_SLOT_W: f32 = 30.0;
+
+/// Height of the overview strip (Roadmap Wave 1,
+/// RM13 — P-1), in points.
+pub const OVERVIEW_H: f32 = 16.0;
+
+/// The pitch at chip width `chip_w`: one chip plus
+/// the one gap after it. [`CHIP_GAP`] never scales
+/// with the zoom — it is chrome, not content — so
+/// this is the only pitch formula in the crate.
+pub fn pitch(chip_w: f32) -> f32 {
+    chip_w + CHIP_GAP
+}
+
+/// The chip width that fits `frame_count` frames
+/// exactly into `viewport_w` points of strip:
+/// `(viewport + gap) / count - gap`, clamped to the
+/// zoom range. A zero count or a non-positive viewport
+/// has nothing to fit, and reads as the pre-zoom
+/// [`CHIP_W`].
+pub fn fit_chip_w(frame_count: usize, viewport_w: f32) -> f32 {
+    if frame_count == 0 || viewport_w <= 0.0 {
+        return CHIP_W;
+    }
+    ((viewport_w + CHIP_GAP) / frame_count as f32 - CHIP_GAP).clamp(ZOOM_MIN_W, ZOOM_MAX_W)
+}
+
+/// The chip width that fits the frame span
+/// `span_frames` into `viewport_w` points: [`fit_chip_w`]
+/// over the span.
+pub fn span_chip_w(span_frames: usize, viewport_w: f32) -> f32 {
+    fit_chip_w(span_frames, viewport_w)
+}
+
+/// The labelled text of the chip for `frame` at chip
+/// width `chip_w`: at the pre-zoom width and wider,
+/// [`chip_label`]'s full label; down to
+/// [`LABEL_MIN_W`], the bare frame number (suffixes
+/// are the first thing the narrow pitch cannot carry);
+/// below that, `None` — the chip is a tick, and the
+/// builder mounts no text child.
+pub fn chip_label_at(frame: usize, duration: f32, chip_w: f32) -> Option<String> {
+    if chip_w >= CHIP_W {
+        Some(chip_label(frame, duration))
+    } else if chip_w >= LABEL_MIN_W {
+        Some(format!("{}", frame + 1))
+    } else {
+        None
+    }
+}
+
+/// The overview strip's viewport window in the
+/// strip's own coordinate space (a coordinate width of
+/// 1000 units standing for the whole content width —
+/// the strip lays out at whatever width the card gives
+/// it and the canvas scales): `[x, width]` for scroll
+/// offset `offset_x`, viewport `viewport_w` and
+/// content `content_w`. A non-positive content width
+/// has no window.
+pub fn overview_window(offset_x: f32, viewport_w: f32, content_w: f32) -> [f32; 2] {
+    if content_w <= 0.0 {
+        return [0.0, 0.0];
+    }
+    let x = (offset_x / content_w * 1000.0).clamp(0.0, 1000.0);
+    let w = (viewport_w / content_w * 1000.0).clamp(0.0, 1000.0 - x);
+    [x, w]
+}
+
+/// Whether `frame`'s chip is inside the viewport at
+/// scroll offset `offset_x` with viewport width
+/// `viewport_w`, at chip width `chip_w` — the pure
+/// half of Follow (see the module docs): `poll` asks
+/// this on every playing tick and scrolls only when
+/// the answer is no.
+pub fn chip_visible(offset_x: f32, viewport_w: f32, frame: usize, chip_w: f32) -> bool {
+    let x = frame as f32 * pitch(chip_w);
+    x + chip_w > offset_x && x < offset_x + viewport_w
+}
 
 /// Which frame a content x falls on: chips of `chip_w`
 /// points separated by `gap`, laid out from x = 0. A point in
@@ -791,15 +974,42 @@ pub fn ruler_label(frame: usize, fps: f32) -> Option<String> {
     Some(format!("{}:{:02}", seconds / 60, seconds % 60))
 }
 
+/// The ruler's label stride in frames (Roadmap Wave
+/// 1, RM13 — P-1): the smallest stride from
+/// {1, 5, 10, 30, 60} whole seconds whose slot —
+/// stride × fps × [`pitch`] — reaches [`RULER_SLOT_W`]
+/// points, so a time label always has room to draw.
+/// At the pre-zoom pitch every rate takes the 1-second
+/// stride, exactly the pre-zoom ruler.
+fn ruler_stride_frames(fps: f32, chip_w: f32) -> usize {
+    let frames_per_second = ruler_fps(fps).max(1) as usize;
+    for seconds in [1usize, 5, 10, 30, 60] {
+        if seconds as f32 * frames_per_second as f32 * pitch(chip_w) >= RULER_SLOT_W {
+            return seconds * frames_per_second;
+        }
+    }
+    60 * frames_per_second
+}
+
 /// One ruler slot per frame, in frame order: the
 /// [`ruler_label`] for each of the first `frame_count`
-/// frames at project rate `fps` — `Some` at whole seconds,
-/// `None` (a plain tick) elsewhere. The vector's length is
+/// frames at project rate `fps` — `Some` at stride
+/// boundaries (see [`ruler_stride_frames`]), `None`
+/// (a plain tick) elsewhere. The vector's length is
 /// exactly `frame_count`, so the ruler row the builder
 /// renders from it can never drift out of step with the
 /// chips.
-pub fn ruler_ticks(frame_count: usize, fps: f32) -> Vec<Option<String>> {
-    (0..frame_count).map(|frame| ruler_label(frame, fps)).collect()
+pub fn ruler_ticks(frame_count: usize, fps: f32, chip_w: f32) -> Vec<Option<String>> {
+    let stride = ruler_stride_frames(fps, chip_w);
+    (0..frame_count)
+        .map(|frame| {
+            if frame % stride == 0 {
+                ruler_label(frame, fps)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// The frame a ruler drag at content x `x` seeks to: the
@@ -812,11 +1022,11 @@ pub fn ruler_ticks(frame_count: usize, fps: f32) -> Vec<Option<String>> {
 /// empty timeline, a negative x and a non-finite x all
 /// read as frame 0, which the core's `goto` then simply
 /// ignores or lands on.
-pub fn ruler_frame_at_x(x: f32, frame_count: usize) -> usize {
+pub fn ruler_frame_at_x(x: f32, frame_count: usize, chip_w: f32) -> usize {
     if frame_count == 0 || !x.is_finite() || x <= 0.0 {
         return 0;
     }
-    let idx = (x / CHIP_PITCH).floor() as usize;
+    let idx = (x / pitch(chip_w)).floor() as usize;
     idx.min(frame_count - 1)
 }
 
@@ -969,7 +1179,7 @@ pub fn marker_glyph_color(
 /// F2): the row is not mounted at all then, and a
 /// marker-free timeline is ruler + chips (+ clips),
 /// exactly as it was before the row existed.
-fn marker_row(core: &EditorCore, t: &Theme) -> Option<El> {
+fn marker_row(core: &EditorCore, t: &Theme, chip_w: f32) -> Option<El> {
     let markers = markers_for_project(core);
     if !any_markers(&markers) {
         return None;
@@ -978,7 +1188,7 @@ fn marker_row(core: &EditorCore, t: &Theme) -> Option<El> {
     let mut marker_row = row().key("timeline-markers").gap(CHIP_GAP);
     for (i, &(camera, graph)) in markers.iter().enumerate() {
         let current = i == core.current;
-        let mut cell = row().size(CHIP_W, MARKER_H).center().gap(2.0);
+        let mut cell = row().size(chip_w, MARKER_H).center().gap(2.0);
         if current {
             cell = cell.fill(accent).radius(6.0);
         }
@@ -1044,7 +1254,7 @@ fn marker_row(core: &EditorCore, t: &Theme) -> Option<El> {
 fn ruler_drag(s: &mut State, d: &mut Drag) {
     match d.phase {
         Phase::Down | Phase::Move => {
-            let frame = ruler_frame_at_x(d.x, s.core.frame_count());
+            let frame = ruler_frame_at_x(d.x, s.core.frame_count(), s.frame_ops.chip_w());
             s.core.goto(frame);
         }
         Phase::Up => {}
@@ -1105,6 +1315,27 @@ pub fn pressed_fill(fill: Color, press: Color) -> Color {
     fill.mix(press, press.a).alpha(fill.a)
 }
 
+thread_local! {
+    /// The timeline strip's scroll record (Roadmap Wave
+    /// 1, RM13 — P-1): `(offset_x, viewport_w)` as last
+    /// reported by the scroll row's `on_scroll_offset`,
+    /// or `None` until the strip first scrolls. A
+    /// `thread_local` for the `PRESSED_CHIP` reason: it
+    /// is view state with the view's own lifetime, and
+    /// the consumers (Fit / span zooms, the overview
+    /// strip's mount rule, `poll`'s Follow) are spread
+    /// across the shell.
+    static TIMELINE_SCROLL: std::cell::Cell<Option<(f32, f32)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The timeline strip's last reported `(offset_x,
+/// viewport_w)`, if the strip has scrolled yet (see
+/// [`TIMELINE_SCROLL`]).
+pub fn timeline_viewport() -> Option<(f32, f32)> {
+    TIMELINE_SCROLL.with(|c| c.get())
+}
+
 /// The row's drag gesture (see the module docs for the exact
 /// semantics). `d.data` records which gesture the press
 /// started: the selection anchor across phases as a fallback
@@ -1117,7 +1348,7 @@ fn timeline_drag(s: &mut State, d: &mut Drag) {
     // release clears the record even when it lands where
     // `frame_at_x` names no chip (the early return below
     // would otherwise strand the press paint).
-    let frame = frame_at_x(d.x, CHIP_W, CHIP_GAP, n);
+    let frame = frame_at_x(d.x, s.frame_ops.chip_w(), CHIP_GAP, n);
     set_pressed_chip(press_target(d.phase, frame));
     let Some(f) = frame else {
         return;
@@ -1127,7 +1358,7 @@ fn timeline_drag(s: &mut State, d: &mut Drag) {
             // A press on a loop edge starts an edge drag and
             // leaves the range selection untouched; anywhere
             // else is the selection gesture.
-            if let Some(edge) = edge_at(d.x, CHIP_W, CHIP_GAP, s.core.loop_range, n) {
+            if let Some(edge) = edge_at(d.x, s.frame_ops.chip_w(), CHIP_GAP, s.core.loop_range, n) {
                 d.data = edge_scratch(edge);
                 return;
             }
@@ -1179,6 +1410,76 @@ fn timeline_drag(s: &mut State, d: &mut Drag) {
     }
 }
 
+/// The per-lane mount rule (Roadmap Wave 1, RM12 —
+/// F-11's timeline space model): a data-gated lane of
+/// the card mounts only when ALL THREE hold — the card
+/// is expanded (the collapsed form is chips-only), the
+/// user has the lane shown
+/// (`FrameOpsState::lane_shown`), and the lane's own
+/// data gate passes (markers exist / clips exist /
+/// the Animate workspace for the dopesheet / cues
+/// exist). Pure, so the truth table is pinnable
+/// without a shell.
+pub fn lane_mounted(collapsed: bool, user_shown: bool, data_present: bool) -> bool {
+    !collapsed && user_shown && data_present
+}
+
+/// The lanes whose data gate passes, in the card's
+/// stacking order (markers, clips, dopesheet,
+/// subtitles) — exactly the set the lane row offers a
+/// toggle for ([`lane_toggles_row`]). A toggle exists
+/// precisely when its lane COULD mount: offering one
+/// for a lane with no data would render a dead
+/// control, and withholding a hidden lane's toggle
+/// would strand the lane. Pure; `animate` is the
+/// dopesheet's workspace gate in bool form.
+pub fn applicable_lanes(
+    has_markers: bool,
+    has_clips: bool,
+    animate: bool,
+    has_cues: bool,
+) -> Vec<TimelineLane> {
+    let mut lanes = Vec::new();
+    if has_markers {
+        lanes.push(TimelineLane::Markers);
+    }
+    if has_clips {
+        lanes.push(TimelineLane::Clips);
+    }
+    if animate {
+        lanes.push(TimelineLane::Dopesheet);
+    }
+    if has_cues {
+        lanes.push(TimelineLane::Subtitles);
+    }
+    lanes
+}
+
+/// A lane toggle's element key and button label. The
+/// keys are new (Roadmap Wave 1, RM12) and deliberately
+/// distinct from the lanes' own keys (`timeline-
+/// markers`, `timeline-clips`, `dopesheet-lane`,
+/// `subtitle-lane`). Carriage note: the row's key
+/// (`timeline-lane-toggles`, at its `.key()` call in
+/// [`lane_toggles_row`]) is a counted literal, but
+/// these four are returned from this fn and reach
+/// `btn` as a variable, so they ride OUTSIDE the gate
+/// counter — the F6 artefact family, like AC1's
+/// const-carried pair in keyframe_tools. Their
+/// distinctness is therefore pinned by the test
+/// below, not by the census. The labels are literals
+/// like this card's other buttons ("Set loop",
+/// "Clear"); the catalogue keys for them are
+/// recorded as IA-RM12-3.
+fn lane_toggle_key_label(lane: TimelineLane) -> (&'static str, &'static str) {
+    match lane {
+        TimelineLane::Markers => ("timeline-lane-markers", "Markers"),
+        TimelineLane::Clips => ("timeline-lane-clips", "Clips"),
+        TimelineLane::Dopesheet => ("timeline-lane-dopesheet", "Dopesheet"),
+        TimelineLane::Subtitles => ("timeline-lane-subtitles", "Subtitles"),
+    }
+}
+
 /// The replacement timeline: one numbered chip per frame in a
 /// horizontally scrolling row, with the time ruler (see the
 /// module docs) directly above the chips and the marker row
@@ -1218,8 +1519,8 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     // Collapsed: the ruler is not mounted (see the
     // assembly below), so its tick cells are not built.
     if !collapsed {
-        for label in ruler_ticks(core.frame_count(), core.project.fps) {
-            let mut cell = row().size(CHIP_W, RULER_H).center();
+        for label in ruler_ticks(core.frame_count(), core.project.fps, s.frame_ops.chip_w()) {
+            let mut cell = row().size(s.frame_ops.chip_w(), RULER_H).center();
             cell = match label {
                 Some(label) => cell.child(
                     text(label)
@@ -1267,17 +1568,20 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
         let fill = if held { pressed_fill(fill, t.press) } else { fill };
         let mut chip = el()
             .key(format!("frame-{}", i + 1))
-            .size(CHIP_W, CHIP_H)
+            .size(s.frame_ops.chip_w(), CHIP_H)
             .radius(6.0)
             .fill(fill);
         if !held {
             chip = chip.hover(if current { accent } else { t.control_track });
         }
-        chip = chip.center().child(
-            text(chip_label(i, duration))
-                .font(type_::LABEL)
-                .color(if current { Color::WHITE } else { t.text }),
-        );
+        chip = chip.center();
+        if let Some(label) = chip_label_at(i, duration, s.frame_ops.chip_w()) {
+            chip = chip.child(
+                text(label)
+                    .font(type_::LABEL)
+                    .color(if current { Color::WHITE } else { t.text }),
+            );
+        }
         if in_sel(s.frame_ops.range_sel, i) {
             let ink = if current { Color::WHITE } else { accent };
             chip = chip.outline(2.0, 1.0, ink);
@@ -1304,8 +1608,12 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
         content = content.child(ruler);
     }
     content = content.child(chips);
-    if !collapsed {
-        if let Some(markers_row) = marker_row(core, t) {
+    // Roadmap Wave 1 (RM12): the user's per-lane flag
+    // is the second half of the mount rule — the data
+    // gate stays inside `marker_row` (see
+    // `lane_mounted`).
+    if lane_mounted(collapsed, s.frame_ops.lane_shown(TimelineLane::Markers), true) {
+        if let Some(markers_row) = marker_row(core, t, s.frame_ops.chip_w()) {
             content = content.child(markers_row);
         }
     }
@@ -1323,8 +1631,11 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     // no existing row's content coordinates — the ruler,
     // chips and marker rows keep the exact geometry their
     // drag handlers read.
-    if !collapsed {
-        if let Some(clips) = clips_lane(core) {
+    // Roadmap Wave 1 (RM12): the user's per-lane flag
+    // gates the lane beside the data gate inside
+    // `clips_lane` (see `lane_mounted`).
+    if lane_mounted(collapsed, s.frame_ops.lane_shown(TimelineLane::Clips), true) {
+        if let Some(clips) = clips_lane(core, s.frame_ops.chip_w()) {
             content = content.child(clips);
         }
     }
@@ -1340,7 +1651,14 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     // (it is centre-column chrome), so the Animate gate
     // sits here at the call site; the lane builder is
     // workspace-agnostic. See docs/DOPESHEET.md.
-    if !collapsed && s.workspace == crate::rune_sec::workspaces::Workspace::Animate {
+    // Roadmap Wave 1 (RM12): that workspace gate is the
+    // lane's data half of `lane_mounted`; the user's
+    // per-lane flag is the other half.
+    if lane_mounted(
+        collapsed,
+        s.frame_ops.lane_shown(TimelineLane::Dopesheet),
+        s.workspace == crate::rune_sec::workspaces::Workspace::Animate,
+    ) {
         content = content.child(crate::rune_sec::dopesheet::dopesheet_lane(s, t));
     }
     // Wave P (P32): the subtitle lane — cue blocks under
@@ -1349,12 +1667,23 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     // must show in the Audio workspace, where the P31
     // Subtitles panel lives, not just in Animate. The
     // builder is `None` on a cue-free project.
-    if !collapsed {
+    // Roadmap Wave 1 (RM12): the mount rule is now
+    // `lane_mounted` — the collapsed gate and the cue
+    // gate (inside the builder) are joined by the
+    // user's per-lane flag.
+    if lane_mounted(collapsed, s.frame_ops.lane_shown(TimelineLane::Subtitles), true) {
         if let Some(subtitles) = crate::rune_sec::subtitle_lane::subtitle_lane(s, t) {
             content = content.child(subtitles);
         }
     }
-    let timeline = row().key("timeline").child(content).scroll_x().w_full();
+    let timeline = row()
+        .key("timeline")
+        .child(content)
+        .scroll_x()
+        .w_full()
+        .on_scroll_offset(|offset_x, _offset_y, viewport_w, _viewport_h| {
+            TIMELINE_SCROLL.with(|c| c.set(Some((offset_x, viewport_w))));
+        });
     // Phase N (charter §13, see the module docs' Timeline
     // card section): the whole stack sits in one unkeyed
     // card — fill `t.card`, hairline border, radius 12,
@@ -1406,6 +1735,24 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
             if let Some(loop_row) = loop_row(s, t) {
                 card = card.child(loop_row);
             }
+            // Roadmap Wave 1 (RM12): the lane row rides
+            // under the loop row in the expanded form —
+            // the controls for the lanes it can hide must
+            // stay reachable while any of them is hidden.
+            if let Some(lanes_row) = lane_toggles_row(s, t) {
+                card = card.child(lanes_row);
+            }
+            // Roadmap Wave 1 (RM13 — P-1): the zoom row
+            // rides under the lane row, and the overview
+            // strip under it (the strip mounts only when
+            // the content overflows the viewport — see
+            // `overview_strip`).
+            if let Some(zrow) = zoom_row(s, t) {
+                card = card.child(zrow);
+            }
+            if let Some(overview) = overview_strip(s, t) {
+                card = card.child(overview);
+            }
         }
     }
     card
@@ -1449,6 +1796,309 @@ fn loop_row(s: &State, t: &Theme) -> Option<El> {
         }
     }
     Some(r)
+}
+
+/// The lane row (Roadmap Wave 1, RM12 — F-11's
+/// timeline space model): one toggle per applicable
+/// lane under the loop row, inside the card but
+/// outside the scroll viewport, so the controls stay
+/// put however far the chips scroll (the loop row's
+/// placement rule). A toggle renders in `btn`'s
+/// active (accent) form while its lane is shown and
+/// in the plain form while hidden; pressing it flips
+/// the lane's flag on `FrameOpsState` — a view
+/// preference, so no snapshot and no status (the
+/// `timeline_collapsed` discipline). `None` when no
+/// lane's data gate passes: on a plain project
+/// outside Animate the row costs nothing, exactly
+/// like the lanes it controls. The row's own key is
+/// `timeline-lane-toggles`; the buttons' keys are
+/// [`lane_toggle_key_label`]'s.
+fn lane_toggles_row(s: &State, t: &Theme) -> Option<El> {
+    let core = &s.core;
+    let lanes = applicable_lanes(
+        any_markers(&markers_for_project(core)),
+        !clip_spans(core).is_empty(),
+        s.workspace == crate::rune_sec::workspaces::Workspace::Animate,
+        !core.project.subtitles.is_empty(),
+    );
+    if lanes.is_empty() {
+        return None;
+    }
+    let mut r = row().key("timeline-lane-toggles").gap(8.0).center_y();
+    for lane in lanes {
+        let (key, label) = lane_toggle_key_label(lane);
+        let shown = s.frame_ops.lane_shown(lane);
+        r = r.child(btn(key, label, shown, t, move |s: &mut State| {
+            s.frame_ops.toggle_lane(lane);
+        }));
+    }
+    Some(r)
+}
+
+/// A pressable that also receives the shell's `Tx`
+/// (Roadmap Wave 1, RM13 — P-1): chrome's `btn` hands
+/// its handler `&mut State` only, but the zoom row's
+/// Fit and span zooms must also scroll the strip. The
+/// kit's own press idiom (the lane toggles' shape)
+/// with the transaction in hand. `f` is `Copy`, like
+/// every chrome handler.
+fn on_press_tx(
+    key: &str,
+    label: &str,
+    active: bool,
+    t: &Theme,
+    f: impl Fn(&mut State, &mut Tx) + Copy + 'static,
+) -> El {
+    let fill = if active { tok::accent(0, true) } else { t.control_off };
+    let ink = if active { Color::WHITE } else { t.text };
+    el()
+        .key(key)
+        .h(22.0)
+        .px(8.0)
+        .radius(design::CONTROL_RADIUS)
+        .fill(fill)
+        .hover(t.hover)
+        .press(t.press)
+        .center()
+        .child(text(label).font(type_::LABEL).color(ink))
+        .on_press_tx(move |s: &mut State, tx: &mut Tx| f(s, tx))
+}
+
+/// The zoom row (Roadmap Wave 1, RM13 — P-1): the
+/// steppers, the percent readout, Fit, the span zooms
+/// and the Follow toggle, under the lane row in the
+/// expanded form (the loop row's placement rule — the
+/// controls stay put however far the chips scroll).
+/// The span zooms mount only while their span exists.
+/// Labels come from the catalogue (`timeline_zoom_*`,
+/// `timeline_follow`); the readout is a formatted
+/// number, no copy. `None` on a zero-frame project.
+fn zoom_row(s: &State, t: &Theme) -> Option<El> {
+    let core = &s.core;
+    let count = core.frame_count();
+    if count == 0 {
+        return None;
+    }
+    let w = s.frame_ops.chip_w();
+    let mut r = row().key("timeline-zoom-row").gap(8.0).center_y();
+    r = r.child(on_press_tx(
+        "timeline-zoom-out",
+        &crate::rune_sec::i18n_wire::tr(core, "timeline_zoom_out"),
+        false,
+        t,
+        |s: &mut State, _tx: &mut Tx| {
+            s.frame_ops.zoom_step(-1);
+        },
+    ));
+    r = r.child(
+        text(format!("{}%", (w / CHIP_W * 100.0).round() as i32))
+            .key("timeline-zoom-level")
+            .font(type_::LABEL)
+            .color(t.text),
+    );
+    r = r.child(on_press_tx(
+        "timeline-zoom-in",
+        &crate::rune_sec::i18n_wire::tr(core, "timeline_zoom_in"),
+        false,
+        t,
+        |s: &mut State, _tx: &mut Tx| {
+            s.frame_ops.zoom_step(1);
+        },
+    ));
+    r = r.child(on_press_tx(
+        "timeline-zoom-fit",
+        &crate::rune_sec::i18n_wire::tr(core, "timeline_zoom_fit"),
+        false,
+        t,
+        |s: &mut State, tx: &mut Tx| {
+            if let Some((_, vw)) = timeline_viewport() {
+                let fw = fit_chip_w(s.core.frame_count(), vw);
+                s.frame_ops.set_zoom(fw);
+            }
+            tx.scroll_to_x("timeline", 0.0);
+        },
+    ));
+    if let Some((a, b)) = core.loop_range {
+        r = r.child(on_press_tx(
+            "timeline-zoom-loop",
+            &crate::rune_sec::i18n_wire::tr(core, "timeline_zoom_loop"),
+            false,
+            t,
+            move |s: &mut State, tx: &mut Tx| {
+                if let Some((_, vw)) = timeline_viewport() {
+                    s.frame_ops.set_zoom(span_chip_w(b - a + 1, vw));
+                    let target = a as f32 * pitch(s.frame_ops.chip_w());
+                    tx.scroll_to_x("timeline", target);
+                }
+            },
+        ));
+    }
+    if let Some((lo, hi)) = selected_range(core, &s.frame_ops) {
+        r = r.child(on_press_tx(
+            "timeline-zoom-sel",
+            &crate::rune_sec::i18n_wire::tr(core, "timeline_zoom_selection"),
+            false,
+            t,
+            move |s: &mut State, tx: &mut Tx| {
+                if let Some((_, vw)) = timeline_viewport() {
+                    s.frame_ops.set_zoom(span_chip_w(hi - lo + 1, vw));
+                    let target = lo as f32 * pitch(s.frame_ops.chip_w());
+                    tx.scroll_to_x("timeline", target);
+                }
+            },
+        ));
+    }
+    r = r.child(btn(
+        "timeline-zoom-follow",
+        &crate::rune_sec::i18n_wire::tr(core, "timeline_follow"),
+        s.frame_ops.timeline_follow,
+        t,
+        |s: &mut State| {
+            s.frame_ops.timeline_follow = !s.frame_ops.timeline_follow;
+        },
+    ));
+    Some(r)
+}
+
+/// The overview strip's shape (Roadmap Wave 1, RM13 —
+/// P-1), drawn in the strip's 1000-unit coordinate
+/// space (see [`overview_window`]): the loop and
+/// selection bands, one bar per clip span, a dot per
+/// camera/graph key frame, the current-frame line and
+/// the viewport window.
+fn overview_shape(s: &State, t: &Theme) -> Shape {
+    let core = &s.core;
+    let count = core.frame_count();
+    let w = s.frame_ops.chip_w();
+    let total = timeline_width(count, w);
+    let mut shape = Shape::new();
+    if total <= 0.0 {
+        return shape.view_box(1000.0, OVERVIEW_H);
+    }
+    let frac = |frame: f32| frame * pitch(w) / total * 1000.0;
+    let accent = tok::accent(0, true);
+    let band = |shape: Shape, from: f32, to: f32, color: Color| {
+        let x0 = frac(from);
+        let x1 = frac(to + 1.0);
+        shape.fill(
+            vec![[x0, 1.0], [x1, 1.0], [x1, OVERVIEW_H - 1.0], [x0, OVERVIEW_H - 1.0]],
+            color,
+        )
+    };
+    if let Some((a, b)) = core.loop_range {
+        shape = band(shape, a as f32, b as f32, t.card.mix(accent, 0.35));
+    }
+    if let Some((lo, hi)) = selected_range(core, &s.frame_ops) {
+        shape = band(shape, lo as f32, hi as f32, accent.alpha(0.25));
+    }
+    for span in clip_spans(core) {
+        let [x, sw] = span_rect(&span, count, w);
+        if sw <= 0.0 {
+            continue;
+        }
+        let base = hex_color(span_rgb(span.kind)).unwrap_or(Color::WHITE);
+        let color = if span.muted_or_hidden {
+            base.alpha(CLIP_DIM_ALPHA)
+        } else {
+            base
+        };
+        let x0 = x / total * 1000.0;
+        let x1 = (x + sw) / total * 1000.0;
+        shape = shape.fill(
+            vec![[x0, 3.0], [x1, 3.0], [x1, OVERVIEW_H - 3.0], [x0, OVERVIEW_H - 3.0]],
+            color,
+        );
+    }
+    for (i, &(camera, graph)) in markers_for_project(core).iter().enumerate() {
+        if !camera && !graph {
+            continue;
+        }
+        let cx = frac(i as f32 + 0.5);
+        let cy = OVERVIEW_H / 2.0;
+        let r = 2.0;
+        let dot: Vec<[f32; 2]> = (0..8)
+            .map(|k| {
+                let a = std::f32::consts::TAU * k as f32 / 8.0;
+                [cx + r * a.cos(), cy + r * a.sin()]
+            })
+            .collect();
+        shape = shape.fill(dot, t.text_secondary);
+    }
+    let cx = frac(core.current as f32 + 0.5);
+    shape = shape.line([cx, 0.5], [cx, OVERVIEW_H - 0.5], 1.5, LineCap::Round, accent);
+    if let Some((off, vw)) = timeline_viewport() {
+        let [wx, ww] = overview_window(off, vw, total);
+        shape = shape.fill(
+            vec![[wx, 0.0], [wx + ww, 0.0], [wx + ww, OVERVIEW_H], [wx, OVERVIEW_H]],
+            t.hover,
+        );
+    }
+    shape.view_box(1000.0, OVERVIEW_H)
+}
+
+/// The overview strip (Roadmap Wave 1, RM13 — P-1): a
+/// miniature of the whole timeline under the zoom row,
+/// mounted only when the content is wider than the
+/// viewport (and a scroll record exists to measure
+/// against). Its drag pans the strip — the pointed
+/// content position centres in the viewport; a click
+/// (release within 4 pt of the press) seeks instead.
+/// Pointer x reads against the scroll record's
+/// viewport width, the strip's own width to within
+/// the card's padding.
+fn overview_strip(s: &State, t: &Theme) -> Option<El> {
+    let core = &s.core;
+    let count = core.frame_count();
+    if count == 0 {
+        return None;
+    }
+    let total = timeline_width(count, s.frame_ops.chip_w());
+    let (_, vw) = timeline_viewport()?;
+    if total <= vw + 1.0 {
+        return None;
+    }
+    Some(
+        canvas(overview_shape(s, t))
+            .key("timeline-overview")
+            .w_full()
+            .h(OVERVIEW_H)
+            .on_drag(|s: &mut State, d: &mut Drag, tx: &mut Tx| {
+                overview_drag(s, d, tx);
+            }),
+    )
+}
+
+/// The overview strip's drag (see [`overview_strip`]).
+fn overview_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
+    let count = s.core.frame_count();
+    if count == 0 {
+        return;
+    }
+    let Some((_, vw)) = timeline_viewport() else {
+        return;
+    };
+    let total = timeline_width(count, s.frame_ops.chip_w());
+    if total <= 0.0 || vw <= 0.0 {
+        return;
+    }
+    let frame_x = (d.x / vw).clamp(0.0, 1.0) * total;
+    match d.phase {
+        Phase::Down => {
+            d.data = d.x;
+        }
+        Phase::Move => {
+            tx.scroll_to_x("timeline", (frame_x - vw / 2.0).max(0.0));
+        }
+        Phase::Up => {
+            if (d.x - d.data).abs() < 4.0 {
+                let frame = ruler_frame_at_x(frame_x, count, s.frame_ops.chip_w());
+                s.core.goto(frame);
+            } else {
+                tx.scroll_to_x("timeline", (frame_x - vw / 2.0).max(0.0));
+            }
+        }
+    }
 }
 
 /// Height of ONE sub-lane row of the clips lane in
@@ -1526,11 +2176,11 @@ pub struct ClipSpan {
 /// between them — the width the ruler, chips and marker
 /// rows lay out to, and the width [`span_rect`] clamps
 /// against. Zero frames have no width.
-pub fn timeline_width(frame_count: usize) -> f32 {
+pub fn timeline_width(frame_count: usize, chip_w: f32) -> f32 {
     if frame_count == 0 {
         return 0.0;
     }
-    frame_count as f32 * CHIP_PITCH - CHIP_GAP
+    frame_count as f32 * pitch(chip_w) - CHIP_GAP
 }
 
 /// Every clip in the project as a [`ClipSpan`]: audio
@@ -1579,12 +2229,12 @@ pub fn clip_spans(core: &EditorCore) -> Vec<ClipSpan> {
 /// a span wholly past the end comes back zero-width at
 /// the end. A non-finite endpoint, or no frames, gives
 /// `[0.0, 0.0]`.
-pub fn span_rect(span: &ClipSpan, frame_count: usize) -> [f32; 2] {
+pub fn span_rect(span: &ClipSpan, frame_count: usize, chip_w: f32) -> [f32; 2] {
     if frame_count == 0 || !span.from_frame.is_finite() || !span.to_frame.is_finite() {
         return [0.0, 0.0];
     }
-    let total = timeline_width(frame_count);
-    let stride = CHIP_PITCH;
+    let total = timeline_width(frame_count, chip_w);
+    let stride = pitch(chip_w);
     let x = (span.from_frame * stride).clamp(0.0, total);
     let right = (span.to_frame * stride - CHIP_GAP).clamp(x, total);
     [x, right - x]
@@ -1610,7 +2260,7 @@ pub fn span_rgb(kind: SpanKind) -> u32 {
 /// are global: the first FX row is numbered after ALL
 /// audio rows, never interleaved, so the kind split
 /// holds structurally even when no spans overlap.
-pub fn clip_lane_rows(spans: &[ClipSpan], frame_count: usize) -> Vec<Option<usize>> {
+pub fn clip_lane_rows(spans: &[ClipSpan], frame_count: usize, chip_w: f32) -> Vec<Option<usize>> {
     let mut rows: Vec<Option<usize>> = vec![None; spans.len()];
     // Per kind, the end x of the last span placed on each
     // of that kind's rows. Audio is placed first so the
@@ -1624,7 +2274,7 @@ pub fn clip_lane_rows(spans: &[ClipSpan], frame_count: usize) -> Vec<Option<usiz
             if matches!(span.kind, SpanKind::Fx) != want_fx {
                 continue;
             }
-            let [x, w] = span_rect(span, frame_count);
+            let [x, w] = span_rect(span, frame_count, chip_w);
             if w <= 0.0 {
                 continue;
             }
@@ -1649,8 +2299,8 @@ pub fn clip_lane_rows(spans: &[ClipSpan], frame_count: usize) -> Vec<Option<usiz
 /// the highest assigned row plus one, or 0 when no span
 /// draws (an empty lane still reserves one row's
 /// height — see [`clips_lane_height`]).
-pub fn clip_lane_row_count(spans: &[ClipSpan], frame_count: usize) -> usize {
-    clip_lane_rows(spans, frame_count)
+pub fn clip_lane_row_count(spans: &[ClipSpan], frame_count: usize, chip_w: f32) -> usize {
+    clip_lane_rows(spans, frame_count, chip_w)
         .into_iter()
         .flatten()
         .max()
@@ -1668,17 +2318,17 @@ pub fn clip_lane_row_count(spans: &[ClipSpan], frame_count: usize) -> usize {
 /// (the stage's polygon-circle idiom), so a very short
 /// clip still marks its place. Muted/hidden spans draw
 /// at [`CLIP_DIM_ALPHA`].
-pub fn clips_shape(spans: &[ClipSpan], frame_count: usize) -> Shape {
-    let total = timeline_width(frame_count);
+pub fn clips_shape(spans: &[ClipSpan], frame_count: usize, chip_w: f32) -> Shape {
+    let total = timeline_width(frame_count, chip_w);
     let mut shape = Shape::new();
     if total <= 0.0 {
         return shape;
     }
-    let rows = clip_lane_rows(spans, frame_count);
+    let rows = clip_lane_rows(spans, frame_count, chip_w);
     let row_count = rows.iter().flatten().max().map_or(0, |m| m + 1);
     let r = CLIP_BAR_H / 2.0;
     for (span, row) in spans.iter().zip(rows.iter()) {
-        let [x, w] = span_rect(span, frame_count);
+        let [x, w] = span_rect(span, frame_count, chip_w);
         let Some(row) = row else {
             continue;
         };
@@ -1716,17 +2366,17 @@ pub fn clips_shape(spans: &[ClipSpan], frame_count: usize) -> Shape {
 /// need. `None` when the project has no audio and no FX
 /// clips — the lane exists only when it has something
 /// to show.
-fn clips_lane(core: &EditorCore) -> Option<El> {
+fn clips_lane(core: &EditorCore, chip_w: f32) -> Option<El> {
     let spans = clip_spans(core);
     if spans.is_empty() {
         return None;
     }
-    let h = clips_lane_height(clip_lane_row_count(&spans, core.frame_count()));
-    let shape = clips_shape(&spans, core.frame_count());
+    let h = clips_lane_height(clip_lane_row_count(&spans, core.frame_count(), chip_w));
+    let shape = clips_shape(&spans, core.frame_count(), chip_w);
     Some(
         canvas(shape)
             .key("timeline-clips")
-            .w(timeline_width(core.frame_count()))
+            .w(timeline_width(core.frame_count(), chip_w))
             .h(h),
     )
 }
@@ -1743,6 +2393,75 @@ mod tests {
     use stykanimate_rs::graph::{Channel, ChannelTarget, Key};
     use stykanimate_rs::model::{AudioClip, CameraKey, FxClipEntry};
     use stykanimate_rs::vfx::{ClipKind, ParticleClip};
+
+    // ---- lane space model (Roadmap Wave 1, RM12) ----
+
+    #[test]
+    fn lane_mounted_is_the_three_way_and() {
+        // The mount rule: expanded AND user-shown AND
+        // data present — every other combination hides
+        // the lane.
+        assert!(lane_mounted(false, true, true));
+        assert!(!lane_mounted(true, true, true), "collapsed card hides every lane");
+        assert!(!lane_mounted(false, false, true), "the user's flag hides the lane");
+        assert!(!lane_mounted(false, true, false), "no data, no lane");
+        assert!(!lane_mounted(true, false, true));
+        assert!(!lane_mounted(true, true, false));
+        assert!(!lane_mounted(false, false, false));
+        assert!(!lane_mounted(true, false, false));
+    }
+
+    #[test]
+    fn applicable_lanes_keeps_the_stacking_order() {
+        // The toggle set is exactly the data-gated set,
+        // in the card's stacking order, whatever subset
+        // passes.
+        assert_eq!(
+            applicable_lanes(true, true, true, true),
+            vec![
+                TimelineLane::Markers,
+                TimelineLane::Clips,
+                TimelineLane::Dopesheet,
+                TimelineLane::Subtitles,
+            ]
+        );
+        assert_eq!(
+            applicable_lanes(false, true, false, true),
+            vec![TimelineLane::Clips, TimelineLane::Subtitles]
+        );
+        assert_eq!(
+            applicable_lanes(false, false, true, false),
+            vec![TimelineLane::Dopesheet],
+            "Animate alone offers the dopesheet toggle"
+        );
+        assert!(applicable_lanes(false, false, false, false).is_empty());
+    }
+
+    #[test]
+    fn lane_toggle_keys_are_new_and_distinct_from_the_lane_keys() {
+        // The toggles' keys must not collide with the
+        // lanes' own keys or with each other. (They are
+        // variable-carried and ride outside the gate
+        // counter — see `lane_toggle_key_label`'s docs —
+        // so this pin, not the census, is their proof.)
+        let keys: Vec<&str> = [
+            TimelineLane::Markers,
+            TimelineLane::Clips,
+            TimelineLane::Dopesheet,
+            TimelineLane::Subtitles,
+        ]
+        .iter()
+        .map(|lane| lane_toggle_key_label(*lane).0)
+        .collect();
+        for (i, key) in keys.iter().enumerate() {
+            assert_eq!(keys.iter().filter(|k| *k == key).count(), 1, "{key} repeats");
+            assert!(
+                !["timeline-markers", "timeline-clips", "dopesheet-lane", "subtitle-lane"]
+                    .contains(key),
+                "{key} collides with a lane's own key (index {i})"
+            );
+        }
+    }
 
     // ---- frame_at_x ----
 
@@ -2144,7 +2863,7 @@ mod tests {
 
     #[test]
     fn ruler_ticks_covers_every_frame_and_labels_only_boundaries() {
-        let ticks = ruler_ticks(25, 12.0);
+        let ticks = ruler_ticks(25, 12.0, CHIP_W);
         assert_eq!(ticks.len(), 25);
         assert_eq!(ticks[0], Some("0:00".to_string()));
         assert_eq!(ticks[12], Some("0:01".to_string()));
@@ -2153,7 +2872,7 @@ mod tests {
             .iter()
             .enumerate()
             .all(|(frame, tick)| frame % 12 == 0 || tick.is_none()));
-        assert_eq!(ruler_ticks(0, 12.0), Vec::<Option<String>>::new());
+        assert_eq!(ruler_ticks(0, 12.0, CHIP_W), Vec::<Option<String>>::new());
     }
 
     #[test]
@@ -2164,7 +2883,7 @@ mod tests {
         assert_eq!(core.frame_count(), 5);
         assert_eq!(core.project.fps, 12.0);
         assert_eq!(
-            ruler_ticks(core.frame_count(), core.project.fps),
+            ruler_ticks(core.frame_count(), core.project.fps, CHIP_W),
             vec![Some("0:00".to_string()), None, None, None, None]
         );
     }
@@ -2176,15 +2895,15 @@ mod tests {
     fn ruler_frame_at_x_maps_slots_at_the_chip_pitch() {
         // Slot 0 spans [0, 34): its chip and the gap after
         // it both seek to frame 0.
-        assert_eq!(ruler_frame_at_x(0.0, 5), 0);
-        assert_eq!(ruler_frame_at_x(29.9, 5), 0);
-        assert_eq!(ruler_frame_at_x(33.9, 5), 0);
+        assert_eq!(ruler_frame_at_x(0.0, 5, CHIP_W), 0);
+        assert_eq!(ruler_frame_at_x(29.9, 5, CHIP_W), 0);
+        assert_eq!(ruler_frame_at_x(33.9, 5, CHIP_W), 0);
         // Exactly one pitch is the first point of slot 1.
-        assert_eq!(ruler_frame_at_x(34.0, 5), 1);
-        assert_eq!(ruler_frame_at_x(49.0, 5), 1);
-        assert_eq!(ruler_frame_at_x(68.0, 5), 2);
+        assert_eq!(ruler_frame_at_x(34.0, 5, CHIP_W), 1);
+        assert_eq!(ruler_frame_at_x(49.0, 5, CHIP_W), 1);
+        assert_eq!(ruler_frame_at_x(68.0, 5, CHIP_W), 2);
         // The last frame's own slot still reads as itself.
-        assert_eq!(ruler_frame_at_x(4.0 * 34.0, 5), 4);
+        assert_eq!(ruler_frame_at_x(4.0 * 34.0, 5, CHIP_W), 4);
     }
 
     #[test]
@@ -2192,18 +2911,18 @@ mod tests {
         // A captured drag far past the row's end clamps to
         // the last frame instead of running off the
         // timeline.
-        assert_eq!(ruler_frame_at_x(10_000.0, 5), 4);
-        assert_eq!(ruler_frame_at_x(135.9, 5), 3);
+        assert_eq!(ruler_frame_at_x(10_000.0, 5, CHIP_W), 4);
+        assert_eq!(ruler_frame_at_x(135.9, 5, CHIP_W), 3);
         // Negative and non-finite x read as frame 0.
-        assert_eq!(ruler_frame_at_x(-1.0, 5), 0);
-        assert_eq!(ruler_frame_at_x(-40.0, 5), 0);
-        assert_eq!(ruler_frame_at_x(f32::NAN, 5), 0);
-        assert_eq!(ruler_frame_at_x(f32::INFINITY, 5), 0);
-        assert_eq!(ruler_frame_at_x(f32::NEG_INFINITY, 5), 0);
+        assert_eq!(ruler_frame_at_x(-1.0, 5, CHIP_W), 0);
+        assert_eq!(ruler_frame_at_x(-40.0, 5, CHIP_W), 0);
+        assert_eq!(ruler_frame_at_x(f32::NAN, 5, CHIP_W), 0);
+        assert_eq!(ruler_frame_at_x(f32::INFINITY, 5, CHIP_W), 0);
+        assert_eq!(ruler_frame_at_x(f32::NEG_INFINITY, 5, CHIP_W), 0);
         // No frames: frame 0 is the only answer (and the
         // core's `goto` ignores it there).
-        assert_eq!(ruler_frame_at_x(0.0, 0), 0);
-        assert_eq!(ruler_frame_at_x(100.0, 0), 0);
+        assert_eq!(ruler_frame_at_x(0.0, 0, CHIP_W), 0);
+        assert_eq!(ruler_frame_at_x(100.0, 0, CHIP_W), 0);
     }
 
     #[test]
@@ -2222,7 +2941,7 @@ mod tests {
         // seeks there — and writes nothing else: the play
         // state, the range selection and the loop range
         // all stand exactly as they were.
-        let frame = ruler_frame_at_x(110.0, state.core.frame_count());
+        let frame = ruler_frame_at_x(110.0, state.core.frame_count(), CHIP_W);
         state.core.goto(frame);
         assert_eq!(state.core.current, 3);
         assert!(state.core.playing);
@@ -2232,7 +2951,7 @@ mod tests {
         // stays paused — a ruler press never starts
         // playback.
         state.core.playing = false;
-        let frame = ruler_frame_at_x(40.0, state.core.frame_count());
+        let frame = ruler_frame_at_x(40.0, state.core.frame_count(), CHIP_W);
         state.core.goto(frame);
         assert_eq!(state.core.current, 1);
         assert!(!state.core.playing);
@@ -2446,9 +3165,9 @@ mod tests {
         // on the pitch agree with it.
         assert_eq!(CHIP_PITCH, CHIP_W + CHIP_GAP);
         assert_eq!(CHIP_PITCH, 34.0);
-        assert_eq!(timeline_width(5), 5.0 * CHIP_PITCH - CHIP_GAP);
-        assert_eq!(ruler_frame_at_x(CHIP_PITCH, 5), 1);
-        assert_eq!(ruler_frame_at_x(CHIP_PITCH - 0.1, 5), 0);
+        assert_eq!(timeline_width(5, CHIP_W), 5.0 * CHIP_PITCH - CHIP_GAP);
+        assert_eq!(ruler_frame_at_x(CHIP_PITCH, 5, CHIP_W), 1);
+        assert_eq!(ruler_frame_at_x(CHIP_PITCH - 0.1, 5, CHIP_W), 0);
     }
 
     // ---- builder smoke test (the drag handler itself is
@@ -2489,6 +3208,10 @@ mod tests {
             show_right: true,
             key_clipboard: None,
             key_follow_graph: false,
+            key_sel: Default::default(),
+            help_panel: Default::default(),
+            camera_panel: Default::default(),
+            segment_numbers: Default::default(),
             export_recap: String::new(),
             export_job: None,
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
@@ -2794,7 +3517,7 @@ playback_speed: 1.0,
             to_frame: 6.0,
             muted_or_hidden: false,
         };
-        assert_eq!(span_rect(&span, 8), [68.0, 132.0]);
+        assert_eq!(span_rect(&span, 8, CHIP_W), [68.0, 132.0]);
         // A one-frame tick is exactly one chip wide.
         let tick = ClipSpan {
             kind: SpanKind::Audio,
@@ -2802,11 +3525,11 @@ playback_speed: 1.0,
             to_frame: 1.0,
             muted_or_hidden: false,
         };
-        assert_eq!(span_rect(&tick, 8), [0.0, CHIP_W]);
+        assert_eq!(span_rect(&tick, 8, CHIP_W), [0.0, CHIP_W]);
         // The total width the rect clamps against.
-        assert_eq!(timeline_width(8), 8.0 * (CHIP_W + CHIP_GAP) - CHIP_GAP);
-        assert_eq!(timeline_width(1), CHIP_W);
-        assert_eq!(timeline_width(0), 0.0);
+        assert_eq!(timeline_width(8, CHIP_W), 8.0 * (CHIP_W + CHIP_GAP) - CHIP_GAP);
+        assert_eq!(timeline_width(1, CHIP_W), CHIP_W);
+        assert_eq!(timeline_width(0, CHIP_W), 0.0);
     }
 
     #[test]
@@ -2820,7 +3543,7 @@ playback_speed: 1.0,
             to_frame: 9.0,
             muted_or_hidden: false,
         };
-        assert_eq!(span_rect(&span, 5), [136.0, CHIP_W]);
+        assert_eq!(span_rect(&span, 5, CHIP_W), [136.0, CHIP_W]);
         // Wholly past the end: zero width, at the end.
         let past = ClipSpan {
             kind: SpanKind::Fx,
@@ -2828,14 +3551,14 @@ playback_speed: 1.0,
             to_frame: 12.0,
             muted_or_hidden: false,
         };
-        assert_eq!(span_rect(&past, 5), [timeline_width(5), 0.0]);
+        assert_eq!(span_rect(&past, 5, CHIP_W), [timeline_width(5, CHIP_W), 0.0]);
         // No frames, or a non-finite endpoint: nothing.
-        assert_eq!(span_rect(&span, 0), [0.0, 0.0]);
+        assert_eq!(span_rect(&span, 0, CHIP_W), [0.0, 0.0]);
         let nan = ClipSpan {
             from_frame: f32::NAN,
             ..span
         };
-        assert_eq!(span_rect(&nan, 5), [0.0, 0.0]);
+        assert_eq!(span_rect(&nan, 5, CHIP_W), [0.0, 0.0]);
     }
 
     #[test]
@@ -2844,19 +3567,19 @@ playback_speed: 1.0,
         let mut state = demo_state();
         // Clip-free: no lane element, and the timeline
         // builds exactly as it did before the lane.
-        assert!(clips_lane(&state.core).is_none());
+        assert!(clips_lane(&state.core, CHIP_W).is_none());
         let _ = timeline_marks(&state, &t);
         // With clips planted: the lane exists, the whole
         // timeline still builds, and the shape carries
         // bars (on the 5-frame demo the fx span clamps to
         // frames 2..5 and still draws).
         state.core = clipped_core();
-        assert!(clips_lane(&state.core).is_some());
+        assert!(clips_lane(&state.core, CHIP_W).is_some());
         let _ = timeline_marks(&state, &t);
-        let shape = clips_shape(&clip_spans(&state.core), state.core.frame_count());
+        let shape = clips_shape(&clip_spans(&state.core), state.core.frame_count(), CHIP_W);
         assert!(!shape.is_empty());
         // No frames at all: an empty shape, no panic.
-        assert!(clips_shape(&clip_spans(&state.core), 0).is_empty());
+        assert!(clips_shape(&clip_spans(&state.core), 0, CHIP_W).is_empty());
     }
 
     fn span(kind: SpanKind, from: f32, to: f32) -> ClipSpan {
@@ -2874,7 +3597,7 @@ playback_speed: 1.0,
         // alone puts FX below audio (audit D2/T2) — the
         // audio span takes row 0, the FX span row 1.
         let spans = vec![span(SpanKind::Audio, 0.0, 2.0), span(SpanKind::Fx, 3.0, 5.0)];
-        assert_eq!(clip_lane_rows(&spans, 8), vec![Some(0), Some(1)]);
+        assert_eq!(clip_lane_rows(&spans, 8, CHIP_W), vec![Some(0), Some(1)]);
         // Two overlapping audio spans stack onto two
         // audio rows; a third starting after the first
         // ends reuses row 0 (touching at an edge counts
@@ -2884,8 +3607,8 @@ playback_speed: 1.0,
             span(SpanKind::Audio, 2.0, 6.0),
             span(SpanKind::Audio, 4.0, 6.0),
         ];
-        assert_eq!(clip_lane_rows(&spans, 8), vec![Some(0), Some(1), Some(0)]);
-        assert_eq!(clip_lane_row_count(&spans, 8), 2);
+        assert_eq!(clip_lane_rows(&spans, 8, CHIP_W), vec![Some(0), Some(1), Some(0)]);
+        assert_eq!(clip_lane_row_count(&spans, 8, CHIP_W), 2);
         // FX rows start after ALL audio rows: one audio
         // row plus two stacked FX rows is rows 0, 1, 2 —
         // never interleaved with the audio band.
@@ -2894,13 +3617,133 @@ playback_speed: 1.0,
             span(SpanKind::Audio, 0.0, 2.0),
             span(SpanKind::Fx, 2.0, 6.0),
         ];
-        assert_eq!(clip_lane_rows(&spans, 8), vec![Some(1), Some(0), Some(2)]);
-        assert_eq!(clip_lane_row_count(&spans, 8), 3);
+        assert_eq!(clip_lane_rows(&spans, 8, CHIP_W), vec![Some(1), Some(0), Some(2)]);
+        assert_eq!(clip_lane_row_count(&spans, 8, CHIP_W), 3);
         // A zero-width span (wholly past the end) takes
         // no row and forces no height.
         let spans = vec![span(SpanKind::Audio, 9.0, 12.0)];
-        assert_eq!(clip_lane_rows(&spans, 5), vec![None]);
-        assert_eq!(clip_lane_row_count(&spans, 5), 0);
+        assert_eq!(clip_lane_rows(&spans, 5, CHIP_W), vec![None]);
+        assert_eq!(clip_lane_row_count(&spans, 5, CHIP_W), 0);
+    }
+
+    // ---- timeline zoom (Roadmap Wave 1, RM13 — P-1) ----
+
+    #[test]
+    fn zoom_geometry_at_the_default_width_is_the_pre_zoom_geometry() {
+        // Every parameterised fn at CHIP_W reproduces
+        // the constants the pre-zoom pins were stated
+        // against (CHIP_PITCH = 34).
+        assert_eq!(pitch(CHIP_W), CHIP_PITCH);
+        assert_eq!(timeline_width(5, CHIP_W), 166.0);
+        assert_eq!(ruler_frame_at_x(34.0, 5, CHIP_W), 1);
+        let span = ClipSpan {
+            kind: SpanKind::Fx,
+            from_frame: 2.0,
+            to_frame: 6.0,
+            muted_or_hidden: false,
+        };
+        assert_eq!(span_rect(&span, 8, CHIP_W), [68.0, 132.0]);
+    }
+
+    #[test]
+    fn frame_at_x_and_edge_at_read_the_live_pitch() {
+        // At 8 pt chips (pitch 12) and 60 pt chips
+        // (pitch 64) the drag mappings follow the width
+        // they are handed.
+        assert_eq!(frame_at_x(12.0, 8.0, CHIP_GAP, 10), Some(1));
+        assert_eq!(frame_at_x(11.9, 8.0, CHIP_GAP, 10), Some(0));
+        assert_eq!(frame_at_x(64.0, 60.0, CHIP_GAP, 10), Some(1));
+        assert_eq!(frame_at_x(63.9, 60.0, CHIP_GAP, 10), Some(0));
+    }
+
+    #[test]
+    fn fit_chip_w_fits_and_clamps() {
+        // 40 frames into 1400 pt: (1400 + 4) / 40 - 4.
+        assert_eq!(fit_chip_w(40, 1400.0), 1404.0f32 / 40.0 - 4.0);
+        // 2160 frames cannot fit: clamped to the floor.
+        assert_eq!(fit_chip_w(2160, 1400.0), ZOOM_MIN_W);
+        // Nothing to fit reads as the default.
+        assert_eq!(fit_chip_w(0, 1400.0), CHIP_W);
+        assert_eq!(fit_chip_w(40, 0.0), CHIP_W);
+        assert_eq!(span_chip_w(40, 1400.0), fit_chip_w(40, 1400.0));
+    }
+
+    #[test]
+    fn ruler_stride_widens_as_the_pitch_narrows() {
+        // Pitch 34 (default) and 64 (max zoom): the
+        // 1-second stride's slot is wide enough.
+        assert_eq!(ruler_stride_frames(12.0, CHIP_W), 12);
+        assert_eq!(ruler_stride_frames(12.0, 60.0), 12);
+        // Pitch 12 (min zoom) at 12 fps: 1 s prices
+        // 144 pt... the stride rule works in slot
+        // points: 1 s x 12 fps x 12 pt = 144 >= 30, so
+        // even the narrowest pitch keeps 1 s at 12 fps;
+        // at 24 fps and pitch 12 it is 288 — still 1 s.
+        assert_eq!(ruler_stride_frames(12.0, 8.0), 12);
+        assert_eq!(ruler_stride_frames(24.0, 8.0), 24);
+        // The stride bites when fps is low: at 2 fps and
+        // pitch 12, 1 s prices 24 pt < 30, so 5 s.
+        assert_eq!(ruler_stride_frames(2.0, 8.0), 10);
+        // And the labels land on the stride: at 2 fps,
+        // pitch 12, only frames 0, 10, 20 of 25 label.
+        let ticks = ruler_ticks(25, 2.0, 8.0);
+        assert_eq!(ticks[0], Some("0:00".to_string()));
+        assert_eq!(ticks[10], Some("0:05".to_string()));
+        assert_eq!(ticks[20], Some("0:10".to_string()));
+        assert!(ticks
+            .iter()
+            .enumerate()
+            .all(|(f, tick)| f % 10 == 0 || tick.is_none()));
+    }
+
+    #[test]
+    fn chip_label_at_thins_with_the_width() {
+        assert_eq!(chip_label_at(2, 2.0, 60.0), Some("3 ×2".to_string()));
+        assert_eq!(chip_label_at(2, 2.0, CHIP_W), Some("3 ×2".to_string()));
+        assert_eq!(chip_label_at(2, 2.0, 20.0), Some("3".to_string()));
+        assert_eq!(chip_label_at(2, 2.0, LABEL_MIN_W), Some("3".to_string()));
+        assert_eq!(chip_label_at(2, 2.0, 10.0), None);
+    }
+
+    #[test]
+    fn overview_window_and_chip_visible_truth_tables() {
+        // Content 1000 pt, viewport 200: at the start,
+        // the middle and the end.
+        assert_eq!(overview_window(0.0, 200.0, 1000.0), [0.0, 200.0]);
+        assert_eq!(overview_window(400.0, 200.0, 1000.0), [400.0, 200.0]);
+        assert_eq!(overview_window(900.0, 200.0, 1000.0), [900.0, 100.0]);
+        assert_eq!(overview_window(0.0, 200.0, 0.0), [0.0, 0.0]);
+        // Frame 5 at the default pitch starts at 170.
+        assert!(chip_visible(0.0, 200.0, 5, CHIP_W));
+        assert!(!chip_visible(0.0, 100.0, 5, CHIP_W));
+        assert!(chip_visible(160.0, 100.0, 5, CHIP_W));
+        assert!(!chip_visible(300.0, 100.0, 5, CHIP_W));
+    }
+
+    #[test]
+    fn zoom_keys_are_distinct_and_new() {
+        let keys = [
+            "timeline-zoom-row",
+            "timeline-zoom-out",
+            "timeline-zoom-in",
+            "timeline-zoom-level",
+            "timeline-zoom-fit",
+            "timeline-zoom-loop",
+            "timeline-zoom-sel",
+            "timeline-zoom-follow",
+            "timeline-overview",
+        ];
+        let mut sorted = keys.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), keys.len(), "the zoom keys are pairwise distinct");
+        for k in keys {
+            assert!(
+                !["timeline", "timeline-ruler", "timeline-chips", "timeline-clips"]
+                    .contains(&k),
+                "{k} must not reuse an existing timeline key"
+            );
+        }
     }
 
     #[test]

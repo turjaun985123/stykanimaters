@@ -1087,10 +1087,15 @@ pub fn figures_panel(s: &State, t: &Theme) -> El {
     let rows = figure_rows(core);
     if visible.is_empty() {
         if total > 0 {
-            panel = panel.child(design::empty_state(
+            // RM28 (PL-7): the state offers its remedy —
+            // clear the filter that hid everything.
+            panel = panel.child(design::empty_state_action(
                 "magnifying-glass",
                 &format!("No figures match \"{}\".", query.trim()),
+                "figures-empty-clear-filter",
+                "Clear filter",
                 t,
+                |s: &mut State| s.figures_panel.filter = TextEdit::default(),
             ));
         }
     } else {
@@ -1113,6 +1118,11 @@ pub fn figures_panel(s: &State, t: &Theme) -> El {
     // flags; each handler also clears solo so the bulk result
     // is the effective visibility, and reports the change
     // count in the status line — the old listeners verbatim.
+    // Since RM24 (P-14) each bulk write takes exactly one
+    // undo step when it changes at least one flag (peeked
+    // inline, the layers panel's `show_all_figures` shape);
+    // before, these closures spent no step and counted no
+    // edit — a census hole.
     panel.child(
         row()
             .key("figures-panel-footer")
@@ -1120,16 +1130,25 @@ pub fn figures_panel(s: &State, t: &Theme) -> El {
             .gap(8.0)
             .center_y()
             .child(crate::chrome_view::btn("fig-vis-all", "All", false, t, |s| {
+                if s.core.project.figures.iter().any(|f| f.hidden) {
+                    s.core.snapshot_labeled("Figure visibility");
+                }
                 let changed = stykanimate_rs::layers::set_all_visible(&mut s.core.project, true);
                 s.core.solo = None;
                 s.core.status = format!("All figures shown ({changed} changed).");
             }))
             .child(crate::chrome_view::btn("fig-vis-none", "None", false, t, |s| {
+                if s.core.project.figures.iter().any(|f| !f.hidden) {
+                    s.core.snapshot_labeled("Figure visibility");
+                }
                 let changed = stykanimate_rs::layers::set_all_visible(&mut s.core.project, false);
                 s.core.solo = None;
                 s.core.status = format!("All figures hidden ({changed} changed).");
             }))
             .child(crate::chrome_view::btn("fig-vis-inv", "Invert", false, t, |s| {
+                if !s.core.project.figures.is_empty() {
+                    s.core.snapshot_labeled("Figure visibility");
+                }
                 let flipped = stykanimate_rs::layers::invert_visibility(&mut s.core.project);
                 s.core.solo = None;
                 s.core.status = format!("Figure visibility inverted ({flipped} flipped).");

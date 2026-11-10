@@ -79,10 +79,12 @@
 //!   [`chrome_surface`]. Dark: the brief value.
 //!   Light: derived midway between `bg` and `card`.
 //! * **Elevated surface** `#252C37` — [`elevated`].
-//!   Dark: the brief value. Light: the card itself —
-//!   the card is already the lightest surface, so in
-//!   light theme elevation is carried by shadow and
-//!   border, and the fill intentionally equals `card`.
+//!   Dark: the brief value. Light: the card stepped
+//!   10% toward the background — the light ladder's
+//!   third rung (see the Polish re-audit below);
+//!   before RM25 the light value simply equalled
+//!   `card`, so light elevation was carried by
+//!   shadow and border alone.
 //! * **Muted (third-level) text** `#737D8C` —
 //!   [`muted_text`]. Dark: the brief value. Light:
 //!   derived from `text_secondary` toward `bg`.
@@ -238,6 +240,103 @@
 //!   the lane's own docs claim the accent
 //!   "cannot vanish", which is 0.20 of ratio
 //!   too optimistic in that one cell state.
+//!
+//! # Polish re-audit (Roadmap Wave 1, RM25 — PL-1/PL-2)
+//!
+//! The decision-free contrast fixes from the UI/UX
+//! roadmap's PL-1, plus PL-2's light ladder. Ratios
+//! recomputed with this module's own method (Rune's
+//! colour semantics); the recomputation reproduces
+//! every Wave 9/10 figure above before any candidate
+//! is trusted. The accent itself is untouched — the
+//! decision pack below stands as written.
+//!
+//! * **`kbd` chips (S18's 2.88).** The kit chip's
+//!   ink rises from `text_secondary` to the primary
+//!   text tone, fill unchanged: the pair now measures
+//!   6.32 dark / 13.46 light on the chip over the
+//!   card, 6.00 dark / 13.30 light over the elevated
+//!   surface. Menus, help rows and the palette
+//!   footer inherit from the one builder.
+//! * **`kbd_on_accent`, adopted.** The palette's
+//!   selected row now builds its hint chip through
+//!   the on-accent variant (its first production
+//!   call site). The variant's Wave 2 colours —
+//!   white @ 0.75 ink over a white @ 0.16 fill —
+//!   measure only 2.14 dark / 1.71 light on that
+//!   row, so the builder takes a keycap treatment
+//!   instead: white @ 0.85 fill, black @ 0.85 ink,
+//!   measuring 5.12 dark / 5.15 light. The row's
+//!   own white-on-accent pair is the decision
+//!   below and does not move.
+//! * **Muted's consumer record, corrected.** The
+//!   Wave 9/10 claim "no real text renders in
+//!   muted" stopped being true in Wave 13, when
+//!   `menus::dimmed_item` began rendering an Open
+//!   recent label — real, must-read text — in
+//!   `design::text_muted` (≈ 3.8 dark / ≈ 2.0–2.6
+//!   light). RM25 retires muted as that item's
+//!   ink: the label takes `text_secondary`
+//!   (6.74 dark / 5.88 light on the card), and the
+//!   muted-live read is carried by the row's
+//!   absent hover/press light-up, as the treatment
+//!   always intended. Muted's production consumers
+//!   are glyphs again — the graph channel rows'
+//!   `glyph_muted` and the splitter grip — which
+//!   is the only duty its ratios support.
+//! * **Status-strip play segment, light (4.43).**
+//!   Fixed at the strip's own seam, not the
+//!   accent: in light the strip's playing ink is
+//!   the brief accent mixed 0.15 toward black,
+//!   measuring 5.00 on the app background. Dark
+//!   is unchanged (6.10).
+//! * **Dopesheet glyphs on the selected tint.**
+//!   The Wave 10 figures (3.07 dark / 2.80 light)
+//!   are the SINGLE tint (the current-frame cell
+//!   or the selected row). Where both stack —
+//!   the selected figure's current-frame cell —
+//!   the same derivation gives 2.31 dark / 2.51
+//!   light for the pose diamond and 2.32 dark for
+//!   the state diamond: under the 3:1 non-text
+//!   guidance in a state the lane hits constantly.
+//!   On-tint glyphs now take [`accent_on_tint`] /
+//!   [`secondary_accent_on_tint`]: the worst
+//!   (double-tint) case measures 3.54 dark / 3.57
+//!   light for the pose diamond and 3.55 dark /
+//!   3.84 light for the state diamond. The
+//!   channel dot on the double tint measures
+//!   3.06 dark / 4.70 light in `text_secondary`
+//!   and is left as it is, recorded here.
+//! * **Splitter grip, light (1.94).** Fixed at
+//!   the kit seam: in light the grip glyph takes
+//!   the full secondary tone (5.15 on the
+//!   background, clearing the 3:1 non-text
+//!   guidance); dark keeps the muted role
+//!   (5.15 there already).
+//! * **The light surface ladder.** [`elevated`]
+//!   in light is now the card mixed 0.10 toward
+//!   the background, so the light ladder is
+//!   monotonic by luminance — background 0.869,
+//!   [`chrome_surface`] 0.935, elevated 0.987,
+//!   card 1.000 — instead of ending in a degenerate
+//!   elevated == card step. The pairs measured on
+//!   the elevated surface hold (secondary 5.80,
+//!   primary 17.19). Recorded plainly: at this
+//!   audit `elevated` and `chrome_surface` have
+//!   no production consumers yet — floating
+//!   surfaces still fill with `card` — so the
+//!   ladder is designed at this seam and its
+//!   adoption by menus/popovers is a recorded
+//!   remainder, not a rendered change.
+//! * **Hard-coded themes retired.** The two
+//!   offenders named in the Wave 10 check below
+//!   are gone: `toasts_view` and the camera
+//!   `overlay` now build on `app_theme` for the
+//!   caller's appearance. Light toasts therefore
+//!   render on the light card and receive the
+//!   `*_on` severity variants (5.33 / 5.41 / 5.43
+//!   on the card; body text 17.41) they never
+//!   saw while the column was pinned dark.
 //!
 //! # The accent decision — evidence pack (no values changed)
 //!
@@ -508,6 +607,57 @@ pub fn secondary_accent(t: &Theme) -> Color {
     }
 }
 
+/// How far the on-tint glyph variants lift toward
+/// white in the dark appearance (see
+/// [`accent_on_tint`]).
+pub const TINT_GLYPH_DARK_LIFT: f32 = 0.25;
+
+/// How far the on-tint accent variant deepens toward
+/// black in the light appearance (see
+/// [`accent_on_tint`]).
+pub const TINT_GLYPH_LIGHT_DEEPEN: f32 = 0.35;
+
+/// The upstream accent adjusted for glyph duty on
+/// the selected tint (the accent at α 0.16 over the
+/// card — the dopesheet's current-frame cells and
+/// selected rows). The plain accent measures 3.07
+/// dark / 2.80 light on a single tint layer and
+/// 2.31 / 2.51 where two layers stack, dipping
+/// under the 3:1 non-text guidance; this variant
+/// lifts toward white in dark and deepens toward
+/// black in light so the worst (stacked) case
+/// measures 3.54 dark / 3.57 light, and the single
+/// layer 4.72 / 3.98 (module doc, Polish re-audit).
+/// Off-tint glyphs keep the plain accent — this is
+/// a local correction at the tint seam, not an
+/// accent change (the accent decision is the
+/// module doc's standing evidence pack, untouched).
+pub fn accent_on_tint(t: &Theme) -> Color {
+    let base = tok::accent(0, true);
+    if is_dark(t) {
+        base.mix(Color::WHITE, TINT_GLYPH_DARK_LIFT)
+    } else {
+        base.mix(Color::BLACK, TINT_GLYPH_LIGHT_DEEPEN)
+    }
+}
+
+/// [`secondary_accent`] adjusted for glyph duty on
+/// the selected tint, the companion of
+/// [`accent_on_tint`]: the secondary accent measures
+/// 2.32 on the stacked tint in dark (the state
+/// diamond's coincidence border case), so dark
+/// lifts it by the same factor; in light it already
+/// measures 4.29 single / 3.84 stacked and is
+/// returned unchanged.
+pub fn secondary_accent_on_tint(t: &Theme) -> Color {
+    let base = secondary_accent(t);
+    if is_dark(t) {
+        base.mix(Color::WHITE, TINT_GLYPH_DARK_LIFT)
+    } else {
+        base
+    }
+}
+
 /// The secondary (chrome) surface: between the app
 /// background and the panel card — app bar, status
 /// strip and other shell furniture. `Theme` has no
@@ -521,16 +671,30 @@ pub fn chrome_surface(t: &Theme) -> Color {
     }
 }
 
+/// How far the light elevated surface steps from
+/// the card toward the background (Roadmap Wave 1,
+/// RM25): enough to separate a floating surface from
+/// the panels under it, small enough that the pairs
+/// measured on the surface hold (secondary 5.80,
+/// primary 17.19 — see the module doc's Polish
+/// re-audit).
+pub const LIGHT_ELEVATED_BG_MIX: f32 = 0.10;
+
 /// The elevated surface: menus, popovers and dialogs
 /// raised above the panel card. `Theme` has no field
 /// for it. Dark: the brief's `#252C37`. Light: the
-/// card itself — already the lightest surface, so
-/// elevation there is carried by shadow and border.
+/// card stepped [`LIGHT_ELEVATED_BG_MIX`] toward the
+/// background — the third rung of the light ladder
+/// (background → chrome → elevated → card by
+/// luminance; see the module doc's Polish re-audit).
+/// Before RM25 the light value equalled the card, so
+/// light elevation rested on shadow and border
+/// alone.
 pub fn elevated(t: &Theme) -> Color {
     if is_dark(t) {
         srgb(DARK_ELEVATED)
     } else {
-        t.card
+        t.card.mix(t.bg, LIGHT_ELEVATED_BG_MIX)
     }
 }
 
@@ -657,7 +821,84 @@ mod tests {
         assert_eq!(elevated(&t).hex(), "#252c37ff");
         assert_eq!(muted_text(&t).hex(), "#737d8cff");
         let light = app_theme(false);
-        assert_eq!(elevated(&light), light.card);
+        // RM25: the light elevated surface is its own
+        // ladder rung now, no longer the card itself.
+        assert_eq!(
+            elevated(&light),
+            light.card.mix(light.bg, LIGHT_ELEVATED_BG_MIX)
+        );
+        assert_ne!(elevated(&light), light.card);
+    }
+
+    /// WCAG ratio between two opaque colours, Rune
+    /// semantics (luminance over linear values).
+    fn ratio(fg: Color, bg: Color) -> f32 {
+        let (a, b) = (fg.luminance(), bg.luminance());
+        let (hi, lo) = if a >= b { (a, b) } else { (b, a) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// The selected tint as `layers` coats of the
+    /// accent at α 0.16 over the card (one coat: a
+    /// current-frame cell or a selected row; two:
+    /// the selected row's current-frame cell).
+    fn tint(t: &Theme, layers: usize) -> Color {
+        let mut c = t.card;
+        for _ in 0..layers {
+            c = c.mix(tok::accent(0, true), 0.16);
+        }
+        c
+    }
+
+    #[test]
+    fn light_surface_ladder_is_monotonic() {
+        // RM25 (PL-2): bg < chrome < elevated < card
+        // by luminance in the light appearance — the
+        // ladder the Wave 10 record found degenerate
+        // (elevated == card).
+        let t = app_theme(false);
+        assert!(t.bg.luminance() < chrome_surface(&t).luminance());
+        assert!(chrome_surface(&t).luminance() < elevated(&t).luminance());
+        assert!(elevated(&t).luminance() < t.card.luminance());
+        // The pairs measured on the light elevated
+        // surface still clear the text bar.
+        assert!(ratio(t.text, elevated(&t)) >= 4.5);
+        assert!(ratio(t.text_secondary, elevated(&t)) >= 4.5);
+    }
+
+    #[test]
+    fn on_tint_glyph_pairs_clear_the_non_text_bar() {
+        // RM25 (PL-1): the derivation behind the
+        // module doc's dopesheet figures — the plain
+        // accent reproduces the Wave 10 audit on one
+        // tint layer (3.07 dark / 2.80 light) and
+        // dips under 3:1 where two layers stack,
+        // while the on-tint variants clear 3:1 with
+        // headroom in every case.
+        for dark in [true, false] {
+            let t = app_theme(dark);
+            let plain = tok::accent(0, true);
+            let single = tint(&t, 1);
+            let stacked = tint(&t, 2);
+            let audit = if dark { 3.07 } else { 2.80 };
+            assert!(
+                (ratio(plain, single) - audit).abs() < 0.03,
+                "plain accent on single tint, dark={dark}: {}",
+                ratio(plain, single)
+            );
+            assert!(ratio(plain, stacked) < 3.0, "stacked plain dips, dark={dark}");
+            assert!(ratio(accent_on_tint(&t), single) >= 3.4, "dark={dark}");
+            assert!(ratio(accent_on_tint(&t), stacked) >= 3.4, "dark={dark}");
+            assert!(ratio(secondary_accent_on_tint(&t), single) >= 3.4, "dark={dark}");
+            assert!(ratio(secondary_accent_on_tint(&t), stacked) >= 3.4, "dark={dark}");
+        }
+        // The light secondary needs no adjustment and
+        // gets none.
+        let light = app_theme(false);
+        assert_eq!(
+            secondary_accent_on_tint(&light),
+            secondary_accent(&light)
+        );
     }
 
     #[test]

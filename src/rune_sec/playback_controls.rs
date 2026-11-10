@@ -96,11 +96,15 @@
 //!   (multiplies the current frame's `duration`, clamps
 //!   0.25..=8.0).
 //! * **Timecode** — a read-only `current / total` readout in
-//!   `M:SS.t`, ported verbatim from the GPUI `ui/timecode.rs`
-//!   chip: frame index ÷ fps (NOT duration-weighted; the
-//!   duration-weighted total is `Project::total_time`,
-//!   `model.rs:855`, and is deliberately not what this chip
-//!   showed).
+//!   `M:SS.t`, ported from the GPUI `ui/timecode.rs` chip.
+//!   Since Roadmap Wave 1 (RM7 / F-6) both sides read on the
+//!   project's shared duration-weighted clock
+//!   (`Project::seconds_at_frame_time` / `total_seconds`):
+//!   the current side is the timeline seconds at the current
+//!   frame's start, every earlier frame contributing its
+//!   real duration. The GPUI chip's frame index ÷ fps shape
+//!   disagreed with the played and exported timeline
+//!   whenever a frame was held, and is gone.
 //! * **Playback speed** (Phase K) — `pb-speed` cycles the
 //!   shell-level `State::playback_speed` through `SPEEDS`
 //!   (0.25×–2×) via `cycle_playback_speed`. Like the loop
@@ -198,6 +202,7 @@ use crate::rune_sec::icon_btn::icon_btn;
 use crate::rune_sec::timeline_marks::graph_key_frame;
 use crate::State;
 use stykanimate_rs::editor::EditorCore;
+use stykanimate_rs::model::Project;
 
 /// The GPUI fps cycler's preset frame rates, ascending
 /// (old `app.rs`, `fps-preset` handler: `[6, 12, 24, 30,
@@ -561,18 +566,65 @@ pub fn format_timecode(total_secs: f32) -> String {
     format!("{minutes}:{seconds:02}.{tenth}")
 }
 
-/// The readout's text: `"<current> / <total>"`, where current
-/// is `current_frame / fps` seconds and total is
-/// `frame_count / fps` (the GPUI chip's semantics, ported
-/// verbatim). A non-positive `fps` falls back to 1.0 — the
-/// codebase's convention wherever a frame rate divides time —
-/// so the label still resolves instead of dividing by zero.
-pub fn timecode_label(current_frame: usize, frame_count: usize, fps: f32) -> String {
-    let fps = if fps > 0.0 { fps } else { 1.0 };
+/// The next absolute playback deadline (Roadmap Wave 1,
+/// RM7 / F-6): playback wakes are anchored to a running
+/// deadline instead of being re-scheduled as "one interval
+/// from whenever this poll happened to finish", so the work
+/// a poll does no longer accumulates as drift — the pre-RM7
+/// shape made the real period `work + 1/fps`, never `1/fps`.
+///
+/// The returned deadline is the first one strictly after
+/// `now` on the anchored grid: a poll that fires early (an
+/// unrelated wake) keeps the standing deadline; a poll that
+/// fires on time steps it by exactly one interval
+/// (`1 / (fps × speed)`) from the PREVIOUS deadline, not
+/// from `now`; a poll that fires late skips the missed
+/// deadlines wholesale (drop-to-clock — the picture resyncs
+/// to the clock rather than playing catch-up in slow
+/// motion). A standing deadline more than one interval in
+/// the future is stale — the rate or speed changed, or
+/// playback restarted — and re-anchors to `now + interval`.
+/// Rates floor at 1 fps and speeds at the audio side's
+/// sanitised range, as everywhere else time is divided.
+pub fn playback_deadline(previous: Option<f64>, now: f64, fps: f32, speed: f32) -> f64 {
+    let fps = if fps.is_finite() { fps.max(1.0) } else { 1.0 };
+    let speed = if speed.is_finite() && speed > 0.0 {
+        speed.clamp(0.05, 8.0)
+    } else {
+        1.0
+    };
+    let interval = 1.0 / (fps as f64 * speed as f64);
+    if !now.is_finite() {
+        return interval;
+    }
+    let mut deadline = previous
+        .filter(|d| d.is_finite())
+        .unwrap_or(now + interval);
+    if deadline <= now {
+        let missed = ((now - deadline) / interval).floor() + 1.0;
+        deadline += missed * interval;
+    } else if deadline > now + interval {
+        deadline = now + interval;
+    }
+    deadline
+}
+
+/// The readout's text: `"<current> / <total>"` on the
+/// project's shared duration-weighted clock (Roadmap Wave 1,
+/// RM7 / F-6): current is the timeline seconds at the start
+/// of `current_frame` — every earlier frame contributing its
+/// real duration — and total is `Project::total_seconds()`,
+/// so the readout, the played timeline and the exported
+/// timeline are the same number of seconds. The pre-RM7
+/// label divided frame counts by fps, which disagreed with
+/// all three whenever a frame was held. The project's rate
+/// floors at 1 fps inside the clock, so a bad rate still
+/// resolves instead of dividing by zero.
+pub fn timecode_label(current_frame: usize, project: &Project) -> String {
     format!(
         "{} / {}",
-        format_timecode(current_frame as f32 / fps),
-        format_timecode(frame_count as f32 / fps)
+        format_timecode(project.seconds_at_frame_time(current_frame as f32)),
+        format_timecode(project.total_seconds())
     )
 }
 
@@ -890,7 +942,7 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
     // ---- Timecode readout (read-only).
     panel = panel.child(design::section_label("Time", t));
     panel = panel.child(
-        text(timecode_label(core.current, frame_count, fps))
+        text(timecode_label(core.current, &core.project))
             .key("timecode")
             .font(numeric_font())
             .color(t.text),
@@ -1010,17 +1062,76 @@ mod tests {
     }
 
     #[test]
-    fn timecode_label_is_current_over_total_at_fps() {
-        // The GPUI chip's own example shape: 5 frames at 12 fps.
-        assert_eq!(timecode_label(0, 5, 12.0), "0:00.0 / 0:00.4");
-        assert_eq!(timecode_label(24, 48, 24.0), "0:01.0 / 0:02.0");
-        assert_eq!(timecode_label(0, 0, 12.0), "0:00.0 / 0:00.0");
+    fn timecode_label_is_duration_weighted() {
+        // Roadmap Wave 1 (RM7 / F-6): at 24 fps with frame 0
+        // held 4 beats and frame 1 held 4 beats, frame 1
+        // starts at 4/24 s (reads 0:00.2) and the project
+        // totals 11/24 s (reads 0:00.5) — the same seconds
+        // `Project::total_seconds` reports and export renders.
+        // The pre-RM7 label divided frame counts by fps and
+        // read 0:00.0 / 0:00.2 for this project.
+        let mut core = EditorCore::new();
+        core.project.fps = 24.0;
+        core.project.frames[0].duration = 4.0;
+        core.project.frames[1].duration = 4.0;
+        assert_eq!(timecode_label(0, &core.project), "0:00.0 / 0:00.5");
+        assert_eq!(timecode_label(1, &core.project), "0:00.2 / 0:00.5");
+        // Uniform durations reduce to the frame-count reading.
+        let mut plain = EditorCore::new();
+        plain.project.fps = 24.0;
+        assert_eq!(timecode_label(0, &plain.project), "0:00.0 / 0:00.2");
+        // An empty timeline reads zero over zero.
+        plain.project.frames.clear();
+        assert_eq!(timecode_label(0, &plain.project), "0:00.0 / 0:00.0");
     }
 
     #[test]
     fn timecode_label_falls_back_to_1fps_for_bad_rates() {
-        assert_eq!(timecode_label(30, 60, 0.0), "0:30.0 / 1:00.0");
-        assert_eq!(timecode_label(30, 60, -12.0), "0:30.0 / 1:00.0");
+        // The shared clock floors the rate at 1 fps, so a
+        // zero or negative rate still resolves: five 1-beat
+        // frames total five seconds at the floor.
+        let mut core = EditorCore::new();
+        core.project.fps = 0.0;
+        assert_eq!(timecode_label(2, &core.project), "0:02.0 / 0:05.0");
+        core.project.fps = -12.0;
+        assert_eq!(timecode_label(2, &core.project), "0:02.0 / 0:05.0");
+    }
+
+    #[test]
+    fn playback_deadline_anchors_to_the_previous_deadline() {
+        // Roadmap Wave 1 (RM7 / F-6): at 24 fps the interval
+        // is 1/24 s, and each on-time poll steps the deadline
+        // by exactly one interval from the PREVIOUS deadline
+        // — the poll's own work time never enters the sum, so
+        // the period is 1/fps, not work + 1/fps.
+        let interval = 1.0 / 24.0;
+        let first = playback_deadline(None, 2.0, 24.0, 1.0);
+        assert!((first - (2.0 + interval)).abs() < 1e-9, "first: {first}");
+        let second = playback_deadline(Some(first), first, 24.0, 1.0);
+        assert!(
+            (second - (2.0 + 2.0 * interval)).abs() < 1e-9,
+            "second: {second}"
+        );
+        // An early poll (an unrelated wake) keeps the
+        // standing deadline untouched.
+        let early = playback_deadline(Some(first), 2.0 + 0.5 * interval, 24.0, 1.0);
+        assert!((early - first).abs() < 1e-9, "early: {early}");
+        // A late poll drops to the clock: the missed
+        // deadlines are skipped, and the next deadline is
+        // the first grid point strictly after `now`.
+        let late_now = first + 2.3 * interval;
+        let late = playback_deadline(Some(first), late_now, 24.0, 1.0);
+        assert!(
+            (late - (first + 3.0 * interval)).abs() < 1e-9,
+            "late: {late}"
+        );
+        // Speed scales the interval: at 2x the deadline
+        // steps half-intervals.
+        let fast = playback_deadline(None, 2.0, 24.0, 2.0);
+        assert!(
+            (fast - (2.0 + interval / 2.0)).abs() < 1e-9,
+            "fast: {fast}"
+        );
     }
 
     #[test]

@@ -311,6 +311,30 @@
 //! Rotate, Bend) deliberately stays text: compactness
 //! is their point.
 //!
+//! Roadmap Wave 1 (F-3, RM4): the four primary geometry
+//! rows — Length, Thickness, Rotate, Bend — carry the
+//! design kit's number field between their existing
+//! step buttons (new keys `insp-len-value`,
+//! `insp-th-value`, `seg-rot-value`, `seg-bend-value`):
+//! click to type, drag to scrub. Length/Thickness ride
+//! RM3's core setters (`set_length` / `set_thickness`,
+//! quiet halves for scrub); Rotate/Bend gain exact-set
+//! siblings here (`set_angle_selected` /
+//! `set_bend_selected`, one snapshot per commit) with
+//! silent write halves under one lazy snapshot per
+//! scrub ([`ScrubGesture`]). The Rotate field reads the
+//! STORED pose angle — the quantity its buttons step —
+//! not the world angle of the summary readout (see
+//! [`stored_angle_deg`]). Session state lives in
+//! [`SegmentNumberState`] on `State` (IA-RM4-2); the
+//! Escape-revert sync is [`sync_number_edits`]
+//! (IA-RM4-1); the fields' help / invalid copy rides
+//! IA-RM3-1's keys. The joint-limit rows (an open side
+//! is "Off" — no honest number) and the media-transform
+//! rows (delta-only ops, no exact setters yet) keep
+//! their steppers; see RM4's findings for the follow-on
+//! recipe.
+//!
 //! Phase N adoption: the root is the kit card
 //! (`design::panel_col`), the header is
 //! `design::panel_title` (the `shapes` glyph rides
@@ -814,6 +838,375 @@ pub fn bend_degrees(core: &EditorCore) -> Option<f32> {
             .unwrap_or(0.0)
             .to_degrees(),
     )
+}
+
+// ----------------------------------------------------------------
+// F-3 number fields (Roadmap Wave 1, RM4)
+// ----------------------------------------------------------------
+
+/// The selected node's STORED bend at the current frame,
+/// in radians — [`bend_degrees`] without the degree
+/// conversion: the quantity `bend_selected` steps and
+/// the bend number field edits. `None` exactly when
+/// `bend_degrees` is (no valid node selected).
+pub fn stored_bend_rad(core: &EditorCore) -> Option<f32> {
+    bend_degrees(core).map(|d| d.to_radians())
+}
+
+/// The selected node's STORED pose angle at the current
+/// frame, in degrees — the quantity `rotate_selected`
+/// steps (`frames[current].poses[fi].angles[ni]`, raw).
+/// This is deliberately NOT `InspectorSegmentState::
+/// angle_deg`: that readout is the WORLD angle from the
+/// solved positions (its own docs carry the Wave 11
+/// precision note), while the Rotate row's buttons have
+/// always stepped the stored relative angle — so the
+/// row's number field reads and writes the stored
+/// value, the quantity its own presses move. (For a
+/// root child the two agree; deeper in the tree they
+/// differ by the ancestors' accumulated angle, and the
+/// panel's "Angle" readout line above keeps the world
+/// read.) `None` when no node is selected or the frame
+/// stores no pose angle for it — the field then does
+/// not mount and the row keeps its plain readout.
+pub fn stored_angle_deg(core: &EditorCore) -> Option<f32> {
+    let ni = core.selected_node?;
+    let fi = core.selected_figure;
+    core.project
+        .frames
+        .get(core.current)?
+        .poses
+        .get(fi)?
+        .angles
+        .get(ni)
+        .copied()
+}
+
+/// The (figure, node) an angle write may target, with
+/// `rotate_selected`'s two refusal texts posted when it
+/// may not — the shared validation of the angle writers
+/// below.
+fn angle_write_target(core: &mut EditorCore) -> Option<(usize, usize)> {
+    let Some(ni) = core.selected_node else {
+        core.status = "Select a segment first, then rotate it.".into();
+        return None;
+    };
+    let fi = core.selected_figure;
+    let has_angle = core
+        .project
+        .frames
+        .get(core.current)
+        .and_then(|f| f.poses.get(fi))
+        .and_then(|p| p.angles.get(ni))
+        .is_some();
+    if !has_angle {
+        core.status = format!(
+            "Figure {} has no pose angle for segment {} on frame {}.",
+            fi + 1,
+            ni,
+            core.current + 1
+        );
+        return None;
+    }
+    Some((fi, ni))
+}
+
+/// Set the selected node's stored pose angle to exactly
+/// `deg` degrees (Roadmap Wave 1, F-3): the exact-set
+/// sibling of `rotate_selected` — same validation and
+/// refusals, ONE snapshot, the op family's status
+/// wording. The number field's typed commit.
+pub fn set_angle_selected(core: &mut EditorCore, deg: f32) {
+    let Some((fi, ni)) = angle_write_target(core) else {
+        return;
+    };
+    core.snapshot();
+    core.project.frames[core.current].poses[fi].angles[ni] = deg;
+    core.status = format!(
+        "Segment {} angle {} on frame {}.",
+        ni,
+        format_deg(deg),
+        core.current + 1
+    );
+}
+
+/// The silent half of [`set_angle_selected`]: the write
+/// with no snapshot and no status — the number field's
+/// scrub write, under [`ScrubGesture`] bookkeeping.
+/// `false` when the target is invalid (nothing written).
+pub fn write_angle_quiet(core: &mut EditorCore, deg: f32) -> bool {
+    let Some(ni) = core.selected_node else {
+        return false;
+    };
+    let fi = core.selected_figure;
+    let Some(angle) = core
+        .project
+        .frames
+        .get_mut(core.current)
+        .and_then(|f| f.poses.get_mut(fi))
+        .and_then(|p| p.angles.get_mut(ni))
+    else {
+        return false;
+    };
+    *angle = deg;
+    true
+}
+
+/// The (figure, node, node-count) a bend write may
+/// target, with `bend_selected`'s refusal texts posted
+/// when it may not — the shared validation of the bend
+/// writers below.
+fn bend_write_target(core: &mut EditorCore) -> Option<(usize, usize, usize)> {
+    let Some(ni) = core.selected_node else {
+        core.status = "Select a segment first, then bend it.".into();
+        return None;
+    };
+    if ni == 0 {
+        core.status = "The origin has no segment to bend.".into();
+        return None;
+    }
+    let fi = core.selected_figure;
+    let nodes = match core.project.figures.get(fi) {
+        Some(fig) if ni < fig.def.nodes.len() => fig.def.nodes.len(),
+        _ => {
+            core.status = format!(
+                "Figure {} has no segment {} to bend.",
+                fi + 1,
+                ni
+            );
+            return None;
+        }
+    };
+    if core.current >= core.project.frames.len() {
+        core.status = format!("No frame {} to bend on.", core.current + 1);
+        return None;
+    }
+    Some((fi, ni, nodes))
+}
+
+/// Grow the current frame's bend table to cover
+/// (`fi`, `ni`) — `bend_selected`'s sparse-table growth,
+/// in `cycle_bend`'s pattern — and store `rad` clamped
+/// to the panel's bend range. Returns the stored value.
+fn bend_write(core: &mut EditorCore, fi: usize, ni: usize, nodes: usize, rad: f32) -> f32 {
+    let new = rad.clamp(-BEND_LIMIT_RAD, BEND_LIMIT_RAD);
+    let frame = &mut core.project.frames[core.current];
+    if frame.bends.len() <= fi {
+        frame.bends.resize(fi + 1, Vec::new());
+    }
+    if frame.bends[fi].len() < nodes {
+        frame.bends[fi].resize(nodes, 0.0);
+    }
+    frame.bends[fi][ni] = new;
+    new
+}
+
+/// Set the selected node's stored bend to exactly
+/// `rad` radians (Roadmap Wave 1, F-3): the exact-set
+/// sibling of `bend_selected` — same validation and
+/// refusals, ONE snapshot, the op family's status
+/// wording. The number field's typed commit.
+pub fn set_bend_selected(core: &mut EditorCore, rad: f32) {
+    let Some((fi, ni, nodes)) = bend_write_target(core) else {
+        return;
+    };
+    core.snapshot();
+    let new = bend_write(core, fi, ni, nodes, rad);
+    core.status = format!(
+        "Segment {} bend {} on frame {}.",
+        ni,
+        format_deg(new.to_degrees()),
+        core.current + 1
+    );
+}
+
+/// The silent half of [`set_bend_selected`]: the write
+/// with no snapshot and no status — the number field's
+/// scrub write, under [`ScrubGesture`] bookkeeping.
+/// `false` when the target is invalid (nothing written).
+pub fn write_bend_quiet(core: &mut EditorCore, rad: f32) -> bool {
+    let Some(ni) = core.selected_node else {
+        return false;
+    };
+    if ni == 0 {
+        return false;
+    }
+    let fi = core.selected_figure;
+    let nodes = match core.project.figures.get(fi) {
+        Some(fig) if ni < fig.def.nodes.len() => fig.def.nodes.len(),
+        _ => return false,
+    };
+    if core.current >= core.project.frames.len() {
+        return false;
+    }
+    bend_write(core, fi, ni, nodes, rad);
+    true
+}
+
+/// One number-field scrub gesture's undo bookkeeping —
+/// the camera panel's `ScrubGesture` discipline, kept
+/// per panel (the panels duplicate this idiom rather
+/// than share a type): the Rotate/Bend families
+/// snapshot per press, so a scrub takes ONE snapshot,
+/// lazily, at its first real change, and writes
+/// field-level after that. `press` is the value the
+/// gesture started from; the kit's cancel path writes
+/// exactly that value once more, which seals the
+/// gesture (see the camera panel's `scrub_write` for
+/// the full contract — identical here).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScrubGesture {
+    /// A snapshot has been taken for the in-flight scrub.
+    pub open: bool,
+    /// The value the in-flight scrub started from.
+    pub press: f32,
+}
+
+/// A number field's silent mid-scrub write under
+/// `gesture`'s bookkeeping (see [`ScrubGesture`]).
+fn scrub_write(
+    gesture: &mut ScrubGesture,
+    core: &mut EditorCore,
+    value: f32,
+    current: f32,
+    write: fn(&mut EditorCore, f32) -> bool,
+) {
+    if gesture.open && value == gesture.press {
+        write(core, value);
+        gesture.open = false;
+        return;
+    }
+    if !gesture.open {
+        if value == current {
+            return;
+        }
+        core.snapshot();
+        gesture.press = current;
+        gesture.open = true;
+    }
+    write(core, value);
+}
+
+/// A number field's scrub release: the final write and
+/// the one status recap. A gesture that changed nothing
+/// leaves no trace (no write, no recap).
+fn scrub_finish(
+    gesture: &mut ScrubGesture,
+    core: &mut EditorCore,
+    value: f32,
+    current: f32,
+    write: fn(&mut EditorCore, f32) -> bool,
+    status: String,
+) {
+    if gesture.open {
+        write(core, value);
+    } else if value != current {
+        core.snapshot();
+        write(core, value);
+    } else {
+        return;
+    }
+    gesture.open = false;
+    core.status = status;
+}
+
+/// The adopted fields' element keys, as consts: the
+/// kit number field takes its key as an argument rather
+/// than through `.key()`, and the gate's key-diff reads
+/// `*_KEY` consts — the keys stay diff-visible in their
+/// carried form (the AC1 const-carried pattern).
+pub const LEN_FIELD_KEY: &str = "insp-len-value";
+/// See [`LEN_FIELD_KEY`].
+pub const TH_FIELD_KEY: &str = "insp-th-value";
+/// See [`LEN_FIELD_KEY`].
+pub const ROT_FIELD_KEY: &str = "seg-rot-value";
+/// See [`LEN_FIELD_KEY`].
+pub const BEND_FIELD_KEY: &str = "seg-bend-value";
+
+/// The segment inspector's stored number-field state
+/// (Roadmap Wave 1, F-3): one [`design::NumberEdit`]
+/// session per adopted field, plus the scrub
+/// bookkeeping of the two snapshotting families
+/// (Rotate, Bend — Length/Thickness scrub through the
+/// core's `*_quiet` setters and need none). Homed on
+/// `State` by the integrator (IA-RM4-2), like the
+/// camera panel's state.
+#[derive(Clone, Debug, Default)]
+pub struct SegmentNumberState {
+    /// Length field session (`insp-len-value`).
+    pub len_edit: design::NumberEdit,
+    /// Thickness field session (`insp-th-value`).
+    pub th_edit: design::NumberEdit,
+    /// Rotate field session (`seg-rot-value`).
+    pub rot_edit: design::NumberEdit,
+    /// Bend field session (`seg-bend-value`).
+    pub bend_edit: design::NumberEdit,
+    /// Rotate scrub bookkeeping.
+    pub rot_scrub: ScrubGesture,
+    /// Bend scrub bookkeeping.
+    pub bend_scrub: ScrubGesture,
+}
+
+/// The Length field's contract: the op family's own
+/// range home and step (`EditorCore::LENGTH_MIN/MAX`,
+/// the row's `LENGTH_STEP`).
+pub fn length_spec() -> design::NumSpec {
+    design::NumSpec::new(
+        EditorCore::LENGTH_MIN,
+        EditorCore::LENGTH_MAX,
+        LENGTH_STEP,
+    )
+}
+
+/// The Thickness field's contract: `EditorCore::
+/// THICKNESS_MIN/MAX` and the row's `THICKNESS_STEP`.
+pub fn thickness_spec() -> design::NumSpec {
+    design::NumSpec::new(
+        EditorCore::THICKNESS_MIN,
+        EditorCore::THICKNESS_MAX,
+        THICKNESS_STEP,
+    )
+}
+
+/// The Rotate field's contract: degrees at the panel's
+/// one-decimal display precision (`format_deg`); the
+/// stored pose angle is unclamped by its op family, so
+/// the field funnels typed input to ±360° — one full
+/// turn either way, past which a stored angle is the
+/// same direction anyway.
+pub fn angle_spec() -> design::NumSpec {
+    let mut spec = design::NumSpec::degrees(-360.0, 360.0, 1.0);
+    spec.decimals = 1;
+    spec
+}
+
+/// The Bend field's contract: stored RADIANS (the
+/// storage unit) displayed in degrees at the panel's
+/// one-decimal precision, over the panel's own bend
+/// range (±`BEND_LIMIT_RAD`); one displayed degree per
+/// scrub step.
+pub fn bend_spec() -> design::NumSpec {
+    design::NumSpec {
+        min: -BEND_LIMIT_RAD,
+        max: BEND_LIMIT_RAD,
+        step: (1.0f32).to_radians(),
+        decimals: 1,
+        suffix: "°",
+        display_scale: 180.0 / std::f32::consts::PI,
+        points_per_step: 2.0,
+    }
+}
+
+/// Poll sync (the `sync_name_edit` idiom, called from
+/// the shell's `poll` — IA-RM4-1): revert any segment
+/// number-field session the framework has blurred —
+/// Escape lands here as a revert, per the kit's
+/// session rules ([`design::NumberEdit::reconcile`]).
+pub fn sync_number_edits(s: &mut State) {
+    s.segment_numbers.len_edit.reconcile();
+    s.segment_numbers.th_edit.reconcile();
+    s.segment_numbers.rot_edit.reconcile();
+    s.segment_numbers.bend_edit.reconcile();
 }
 
 /// Format a bend in degrees as the readout line's
@@ -2018,6 +2411,40 @@ fn stepper_row(
         .child(design::step_btn(up_key, "+", up_form, t, up))
 }
 
+/// [`stepper_row`] with the kit number field in the
+/// readout's place (Roadmap Wave 1, F-3): the same
+/// F-STEP order — label, −, field, + — with the caller
+/// building the field (`design::number_field` on the
+/// row's spec and wiring) so the row's steppers and
+/// its field stay three doors onto the one value. The
+/// step buttons keep the row's existing keys and
+/// handlers; the field carries its own new key.
+fn stepper_field_row(
+    label: &str,
+    field: El,
+    dn_key: &str,
+    up_key: &str,
+    dn_form: design::StepForm,
+    up_form: design::StepForm,
+    t: &Theme,
+    dn: impl Fn(&mut State) + 'static,
+    up: impl Fn(&mut State) + 'static,
+) -> El {
+    row()
+        .w_full()
+        .center_y()
+        .gap(8.0)
+        .child(
+            text(label)
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .grow(1.0),
+        )
+        .child(design::step_btn(dn_key, "−", dn_form, t, dn))
+        .child(field)
+        .child(design::step_btn(up_key, "+", up_form, t, up))
+}
+
 /// One colour swatch: the kit's single swatch
 /// construction ([`design::swatch`] — the Phase N
 /// adoption retired this file's hand-rolled 22×22
@@ -2179,9 +2606,28 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
     // The origin has no segment to lengthen (the op no-ops);
     // the GPUI inspector omitted the row there too.
     if !st.is_root {
-        panel = panel.child(stepper_row(
+        panel = panel.child(stepper_field_row(
             &i18n_wire::tr(&s.core, "segment_length"),
-            format_whole_number(st.length),
+            design::number_field(
+                LEN_FIELD_KEY,
+                &s.segment_numbers.len_edit,
+                &length_spec(),
+                st.length,
+                &length_spec().format(st.length),
+                &i18n_wire::tr(&s.core, "number_field_help"),
+                Some(&i18n_wire::tr(&s.core, "number_field_invalid")),
+                t,
+                design::NumWiring {
+                    access: |s: &mut State| &mut s.segment_numbers.len_edit,
+                    commit: |s: &mut State, v: f32| s.core.set_length(v),
+                    reject: |s: &mut State| {
+                        s.core.status =
+                            i18n_wire::tr(&s.core, "number_field_invalid");
+                    },
+                    scrub_write: |s: &mut State, v: f32| s.core.set_length_quiet(v),
+                    scrub_finish: |s: &mut State, v: f32| s.core.set_length(v),
+                },
+            ),
             "insp-len-dn",
             "insp-len-up",
             if st.length <= 4.0 {
@@ -2200,9 +2646,30 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
         ));
     }
     panel = panel
-        .child(stepper_row(
+        .child(stepper_field_row(
             &i18n_wire::tr(&s.core, "segment_thickness"),
-            format_whole_number(st.thickness),
+            design::number_field(
+                TH_FIELD_KEY,
+                &s.segment_numbers.th_edit,
+                &thickness_spec(),
+                st.thickness,
+                &thickness_spec().format(st.thickness),
+                &i18n_wire::tr(&s.core, "number_field_help"),
+                Some(&i18n_wire::tr(&s.core, "number_field_invalid")),
+                t,
+                design::NumWiring {
+                    access: |s: &mut State| &mut s.segment_numbers.th_edit,
+                    commit: |s: &mut State, v: f32| s.core.set_thickness(v),
+                    reject: |s: &mut State| {
+                        s.core.status =
+                            i18n_wire::tr(&s.core, "number_field_invalid");
+                    },
+                    scrub_write: |s: &mut State, v: f32| {
+                        s.core.set_thickness_quiet(v)
+                    },
+                    scrub_finish: |s: &mut State, v: f32| s.core.set_thickness(v),
+                },
+            ),
             "insp-th-dn",
             "insp-th-up",
             if st.thickness <= 1.0 {
@@ -2230,7 +2697,67 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                         .color(t.text_secondary)
                         .grow(1.0),
                 )
-                .child(design::stepper_value(&format_deg(st.angle_deg), t))
+                .child(match stored_angle_deg(&s.core) {
+                    // F-3 (RM4): the field reads the STORED
+                    // pose angle — the quantity the row's
+                    // buttons step (see `stored_angle_deg`);
+                    // with no stored angle the op refuses,
+                    // so the plain readout stays.
+                    Some(stored) => design::number_field(
+                        ROT_FIELD_KEY,
+                        &s.segment_numbers.rot_edit,
+                        &angle_spec(),
+                        stored,
+                        &angle_spec().format(stored),
+                        &i18n_wire::tr(&s.core, "number_field_help"),
+                        Some(&i18n_wire::tr(&s.core, "number_field_invalid")),
+                        t,
+                        design::NumWiring {
+                            access: |s: &mut State| {
+                                &mut s.segment_numbers.rot_edit
+                            },
+                            commit: |s: &mut State, v: f32| {
+                                set_angle_selected(&mut s.core, v)
+                            },
+                            reject: |s: &mut State| {
+                                s.core.status = i18n_wire::tr(
+                                    &s.core,
+                                    "number_field_invalid",
+                                );
+                            },
+                            scrub_write: |s: &mut State, v: f32| {
+                                let current =
+                                    stored_angle_deg(&s.core).unwrap_or(v);
+                                scrub_write(
+                                    &mut s.segment_numbers.rot_scrub,
+                                    &mut s.core,
+                                    v,
+                                    current,
+                                    write_angle_quiet,
+                                );
+                            },
+                            scrub_finish: move |s: &mut State, v: f32| {
+                                let current =
+                                    stored_angle_deg(&s.core).unwrap_or(v);
+                                let status = format!(
+                                    "Segment {} angle {} on frame {}.",
+                                    st.node,
+                                    format_deg(v),
+                                    s.core.current + 1
+                                );
+                                scrub_finish(
+                                    &mut s.segment_numbers.rot_scrub,
+                                    &mut s.core,
+                                    v,
+                                    current,
+                                    write_angle_quiet,
+                                    status,
+                                );
+                            },
+                        },
+                    ),
+                    None => design::stepper_value(&format_deg(st.angle_deg), t),
+                })
                 .child(btn("seg-rot-m5", "−5°", false, t, |s| {
                     rotate_selected(&mut s.core, -5.0)
                 }))
@@ -2272,7 +2799,80 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                             .color(t.text_secondary)
                             .grow(1.0),
                     )
-                    .child(design::stepper_value(&format_deg_display(st.bend_deg), t))
+                    .child({
+                        // F-3 (RM4): the field edits the
+                        // STORED bend (radians under a
+                        // degree display — `bend_spec`) —
+                        // the quantity the row's buttons
+                        // step. `stored_bend_rad` is None
+                        // only without a valid selection,
+                        // which the panel has already
+                        // excluded; the fallback is the
+                        // plain readout.
+                        match stored_bend_rad(&s.core) {
+                            Some(stored) => design::number_field(
+                                BEND_FIELD_KEY,
+                                &s.segment_numbers.bend_edit,
+                                &bend_spec(),
+                                stored,
+                                &bend_spec().format(stored),
+                                &i18n_wire::tr(&s.core, "number_field_help"),
+                                Some(&i18n_wire::tr(
+                                    &s.core,
+                                    "number_field_invalid",
+                                )),
+                                t,
+                                design::NumWiring {
+                                    access: |s: &mut State| {
+                                        &mut s.segment_numbers.bend_edit
+                                    },
+                                    commit: |s: &mut State, v: f32| {
+                                        set_bend_selected(&mut s.core, v)
+                                    },
+                                    reject: |s: &mut State| {
+                                        s.core.status = i18n_wire::tr(
+                                            &s.core,
+                                            "number_field_invalid",
+                                        );
+                                    },
+                                    scrub_write: |s: &mut State, v: f32| {
+                                        let current = stored_bend_rad(&s.core)
+                                            .unwrap_or(v);
+                                        scrub_write(
+                                            &mut s.segment_numbers.bend_scrub,
+                                            &mut s.core,
+                                            v,
+                                            current,
+                                            write_bend_quiet,
+                                        );
+                                    },
+                                    scrub_finish: move |s: &mut State,
+                                                          v: f32| {
+                                        let current = stored_bend_rad(&s.core)
+                                            .unwrap_or(v);
+                                        let status = format!(
+                                            "Segment {} bend {} on frame {}.",
+                                            st.node,
+                                            format_deg(v.to_degrees()),
+                                            s.core.current + 1
+                                        );
+                                        scrub_finish(
+                                            &mut s.segment_numbers.bend_scrub,
+                                            &mut s.core,
+                                            v,
+                                            current,
+                                            write_bend_quiet,
+                                            status,
+                                        );
+                                    },
+                                },
+                            ),
+                            None => design::stepper_value(
+                                &format_deg_display(st.bend_deg),
+                                t,
+                            ),
+                        }
+                    })
                     .child(btn("seg-bend-m5", "−5°", false, t, |s| {
                         bend_selected(&mut s.core, (-5.0f32).to_radians())
                     }))
@@ -3194,6 +3794,97 @@ mod tests {
         assert!(core.project.frames[core.current].bends.is_empty());
     }
 
+    // ---- F-3 number fields (Roadmap Wave 1, RM4) ----
+
+    #[test]
+    fn bend_spec_displays_degrees_over_stored_radians() {
+        let spec = bend_spec();
+        assert_eq!(spec.format((20.0f32).to_radians()), "20.0°");
+        match spec.parse("20") {
+            design::NumParse::Value(v) => {
+                assert!((v - (20.0f32).to_radians()).abs() < 1e-6)
+            }
+            other => panic!("parse: {other:?}"),
+        }
+        assert_eq!(spec.clamp(2.0), BEND_LIMIT_RAD);
+        assert_eq!(spec.clamp(-2.0), -BEND_LIMIT_RAD);
+    }
+
+    #[test]
+    fn set_bend_selected_writes_exactly_and_clamps_in_one_step() {
+        let mut core = core_with_selection(Some(1));
+        let fi = core.selected_figure;
+        let frame = core.current;
+        let depth = core.undo_depth();
+        set_bend_selected(&mut core, 0.5);
+        assert_eq!(core.undo_depth(), depth + 1, "one commit is one undo step");
+        assert_eq!(core.project.frames[frame].bends[fi][1], 0.5);
+        set_bend_selected(&mut core, 2.0);
+        assert_eq!(
+            core.project.frames[frame].bends[fi][1],
+            BEND_LIMIT_RAD,
+            "the panel clamp, applied by the write"
+        );
+        // The stored read behind the field agrees.
+        assert_eq!(stored_bend_rad(&core), Some(BEND_LIMIT_RAD));
+    }
+
+    #[test]
+    fn set_bend_selected_refuses_the_root_snapshot_free() {
+        let mut core = core_with_selection(Some(0));
+        let depth = core.undo_depth();
+        set_bend_selected(&mut core, 0.5);
+        assert_eq!(core.undo_depth(), depth);
+        assert!(core.status.contains("origin has no segment"));
+    }
+
+    #[test]
+    fn set_angle_selected_writes_the_stored_pose_angle() {
+        let mut core = core_with_selection(Some(1));
+        let fi = core.selected_figure;
+        let frame = core.current;
+        let depth = core.undo_depth();
+        set_angle_selected(&mut core, 33.0);
+        assert_eq!(core.undo_depth(), depth + 1, "one commit is one undo step");
+        assert_eq!(core.project.frames[frame].poses[fi].angles[1], 33.0);
+        assert_eq!(stored_angle_deg(&core), Some(33.0));
+        assert!(core.status.contains("angle 33.0°"), "{}", core.status);
+    }
+
+    #[test]
+    fn angle_scrub_is_one_undo_step_and_cancel_restores() {
+        let mut core = core_with_selection(Some(1));
+        let start = stored_angle_deg(&core).unwrap();
+        let mut g = ScrubGesture::default();
+        let depth = core.undo_depth();
+        scrub_write(&mut g, &mut core, start + 10.0, start, write_angle_quiet);
+        let cur = stored_angle_deg(&core).unwrap();
+        scrub_write(&mut g, &mut core, start + 20.0, cur, write_angle_quiet);
+        assert_eq!(core.undo_depth(), depth + 1, "one scrub is one undo step");
+        // Cancel: the press value comes back through the
+        // scrub write and seals the gesture.
+        let cur = stored_angle_deg(&core).unwrap();
+        scrub_write(&mut g, &mut core, start, cur, write_angle_quiet);
+        assert!(!g.open);
+        assert_eq!(stored_angle_deg(&core), Some(start));
+    }
+
+    #[test]
+    fn number_fields_construct_and_sync_reverts_blurred_sessions() {
+        let mut s = crate::init();
+        s.core.selected_node = Some(1);
+        let t = rune::tok::theme(true);
+        let _ = inspector_segment(&s, &t);
+        s.segment_numbers.len_edit.begin("64".to_string());
+        s.segment_numbers.bend_edit.begin("20".to_string());
+        let _ = inspector_segment(&s, &t);
+        s.segment_numbers.len_edit.edit.focused = false;
+        s.segment_numbers.bend_edit.edit.focused = false;
+        sync_number_edits(&mut s);
+        assert!(!s.segment_numbers.len_edit.is_open());
+        assert!(!s.segment_numbers.bend_edit.is_open());
+    }
+
     #[test]
     fn bend_degrees_is_none_without_a_valid_selection() {
         assert!(bend_degrees(&EditorCore::new()).is_none());
@@ -3417,6 +4108,10 @@ mod tests {
             show_right: true,
             key_clipboard: None,
             key_follow_graph: false,
+            key_sel: Default::default(),
+            help_panel: Default::default(),
+            camera_panel: crate::rune_sec::camera_panel::CameraPanelState::default(),
+            segment_numbers: SegmentNumberState::default(),
             export_recap: String::new(),
             export_job: None,
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
@@ -3470,6 +4165,10 @@ playback_speed: 1.0,
             show_right: true,
             key_clipboard: None,
             key_follow_graph: false,
+            key_sel: Default::default(),
+            help_panel: Default::default(),
+            camera_panel: crate::rune_sec::camera_panel::CameraPanelState::default(),
+            segment_numbers: SegmentNumberState::default(),
             export_recap: String::new(),
             export_job: None,
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
@@ -3523,6 +4222,10 @@ playback_speed: 1.0,
             show_right: true,
             key_clipboard: None,
             key_follow_graph: false,
+            key_sel: Default::default(),
+            help_panel: Default::default(),
+            camera_panel: crate::rune_sec::camera_panel::CameraPanelState::default(),
+            segment_numbers: SegmentNumberState::default(),
             export_recap: String::new(),
             export_job: None,
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),

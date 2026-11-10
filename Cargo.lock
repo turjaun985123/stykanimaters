@@ -2960,6 +2960,7 @@ dependencies = [
  "rune-kit",
  "serde",
  "serde_json",
+ "swash",
 ]
 
 [[package]]

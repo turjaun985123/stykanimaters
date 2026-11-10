@@ -51,6 +51,16 @@
 //! take the snapshot); this suite asserts neither delta for it.
 //! The declared exceptions `figure_rename` (figures) and
 //! `clear_camera_key` (camera) are likewise outside the sample.
+//!
+//! DISPOSITION (Roadmap Wave 1, RM24, P-14 — audit A15 H3):
+//! F1 was resolved by taking the snapshot: `figure_set_color`
+//! now spends exactly one (coalesced) undo step, its tool
+//! description says so, and the whole declared-exception
+//! class — `figure_rename`, `clear_camera_key` and the rest
+//! of the Wave 13 census's 21 — was promoted with it; the
+//! full-surface proof lives in tests/wave_r_undo_census.rs
+//! (MUTATING 232, EXCEPTION 0). This sample's scope is
+//! unchanged: it still asserts no delta for those tools.
 
 use serde_json::{json, Value};
 

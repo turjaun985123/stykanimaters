@@ -62,8 +62,9 @@
 //! predecessor builder; the live card is
 //! timeline_marks'.) Its lanes stack inside one
 //! horizontal scroll viewport on the shared chip
-//! pitch (`timeline_marks::CHIP_PITCH`), top to
-//! bottom:
+//! pitch (the timeline's live zoom pitch;
+//! `timeline_marks::CHIP_PITCH` at the default zoom),
+//! top to bottom:
 //!
 //! - **Ruler** (`timeline-ruler`) and **frame chips**
 //!   (`timeline-chips`, chips keyed `frame-N`):
@@ -873,7 +874,10 @@ mod tests {
         let prefs = LayoutPrefs {
             workspace: "Animate".to_string(),
             dark: false,
+            lang: stykanimate_rs::i18n::Lang::Bn,
             timeline_collapsed: true,
+            timeline_zoom: 30.0,
+            timeline_follow: false,
             sidebar_visible: false,
             palette_recents: Vec::new(),
             live_mcp: false,
@@ -883,6 +887,7 @@ mod tests {
         let out = prefs_with_workspace(&prefs, Workspace::Audio);
         assert_eq!(out.workspace, "Audio");
         assert!(!out.dark);
+        assert_eq!(out.lang, stykanimate_rs::i18n::Lang::Bn);
         assert!(out.timeline_collapsed);
         assert!(!out.sidebar_visible);
         assert!(!out.live_mcp);

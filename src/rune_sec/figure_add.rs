@@ -214,7 +214,15 @@ pub fn figure_add_panel(s: &State, t: &Theme) -> El {
         card = card.child(design::section_label("Library", t));
         let entries = library_entries(&s.core);
         if entries.is_empty() {
-            card = card.child(design::empty_state("shapes", "Library is empty", t));
+            // RM28 (PL-7): the bare-noun state rewritten
+            // to name the remedy — this panel holds no
+            // save op of its own (saving lives in the
+            // Library panel), so no button is offered.
+            card = card.child(design::empty_state(
+                "shapes",
+                "Library is empty — figures you save to the library appear here.",
+                t,
+            ));
         } else {
             let mut lib = col().key("figure-add-library").gap(design::PANEL_GAP);
             for entry in entries {

@@ -93,9 +93,11 @@ thread_local! {
 }
 
 thread_local! {
-    /// The layout-prefs shadow for the two persisted view
-    /// toggles `poll` writes back (Focused Wave, D1):
-    /// `(timeline_collapsed, sidebar_visible)` as last
+    /// The layout-prefs shadow for the persisted view
+    /// state `poll` writes back (Focused Wave, D1;
+    /// Roadmap Wave 1, RM13 added the timeline zoom
+    /// pair): `(timeline_collapsed, sidebar_visible,
+    /// timeline_zoom, timeline_follow)` as last
     /// persisted to `LayoutPrefs`. `init` seeds it from
     /// the loaded prefs; `poll` compares the live values
     /// (`State::frame_ops.timeline_collapsed`,
@@ -108,8 +110,37 @@ thread_local! {
     /// palette's panel commands, the shell layout tools —
     /// mutates `State` only; this shadow is how `poll`
     /// notices.
-    static LAYOUT_PREFS_SHADOW: std::cell::Cell<(bool, bool)> =
-        const { std::cell::Cell::new((false, true)) };
+    static LAYOUT_PREFS_SHADOW: std::cell::Cell<(bool, bool, f32, bool)> =
+        const { std::cell::Cell::new((false, true, rune_sec::timeline_marks::CHIP_W, false)) };
+
+    /// The anchored playback deadline (Roadmap Wave 1,
+    /// RM7 / F-6): the absolute shell-clock time of the
+    /// next playback wake, stepped by
+    /// `playback_controls::playback_deadline` from its own
+    /// previous value — never re-based on when the current
+    /// poll finishes — so poll work cannot accumulate as
+    /// playback drift. A thread-local for the same
+    /// State-census reason as the shadows above; `poll`
+    /// clears it whenever playback stops, so a fresh Play
+    /// press anchors a fresh grid.
+    static PLAYBACK_DEADLINE: std::cell::Cell<Option<f64>> =
+        const { std::cell::Cell::new(None) };
+
+    /// The language shadow for `poll`'s write-back
+    /// (Roadmap F-9): `EditorCore.lang` as last persisted
+    /// to `LayoutPrefs.lang`. Same discipline as
+    /// [`LAYOUT_PREFS_SHADOW`] — `init` seeds it from the
+    /// loaded prefs, `poll` compares the live
+    /// `core.lang` against it and load-modify-saves on
+    /// divergence — with the shadow in a thread-local for
+    /// the same State-census reason. Every language
+    /// writer (the Settings card's picker and the shell
+    /// settings tools, both through
+    /// `settings_popover::set_language`, and the core's
+    /// `cycle_lang`) mutates `core.lang` only; this
+    /// shadow is how `poll` notices.
+    static LANG_PREFS_SHADOW: std::cell::Cell<stykanimate_rs::i18n::Lang> =
+        const { std::cell::Cell::new(stykanimate_rs::i18n::Lang::En) };
 }
 
 /// How often `poll` re-wakes the event loop while live MCP
@@ -210,6 +241,12 @@ pub struct State {
     pub home_panel: rune_sec::home_panel::HomePanelState,
     pub frame_ops: rune_sec::frame_ops::FrameOpsState,
     pub graph_panel: rune_sec::graph_panel::GraphPanelState,
+    /// Camera panel number-field sessions (camera_panel
+    /// section, Roadmap Wave 1 F-3).
+    pub camera_panel: rune_sec::camera_panel::CameraPanelState,
+    /// Segment inspector number-field sessions
+    /// (inspector_segment section, Roadmap Wave 1 F-3).
+    pub segment_numbers: rune_sec::inspector_segment::SegmentNumberState,
     pub audio_panel: rune_sec::audio_panel::AudioPanelState,
     pub subtitle_panel: rune_sec::subtitle_panel::SubtitlePanelState,
     pub menus: rune_sec::menus::MenusState,
@@ -258,6 +295,15 @@ pub struct State {
     /// panel's drawn channel instead of the selected
     /// joint's angle channel. Session-only, default off.
     pub key_follow_graph: bool,
+    /// The shared key selection (Roadmap Wave 1, F-4):
+    /// one selected-key state consumed by the graph
+    /// panel, the dopesheet and the timeline marker row
+    /// (see `rune_sec::key_selection`). Session-only,
+    /// never serialised or snapshotted.
+    pub key_sel: rune_sec::key_selection::KeySel,
+    /// Help panel session state (help_panel section,
+    /// Roadmap Wave 1, PL-7): the Help search field.
+    pub help_panel: rune_sec::help_panel::HelpPanelState,
     /// Last export recap line (export_panel section).
     pub export_recap: String,
     /// The export panel's running background export job,
@@ -341,6 +387,13 @@ fn init() -> State {
     // and `poll` writes changes back.
     let layout = stykanimate_rs::shell::load_layout();
     core.light_theme = !layout.dark;
+    // Language likewise (Roadmap F-9): the persisted
+    // `LayoutPrefs.lang` seeds the core's UI language —
+    // the `dark` precedent above, in the same place.
+    // Before the field existed nothing seeded `lang`,
+    // so every relaunch reset the UI to English.
+    core.lang = layout.lang;
+    LANG_PREFS_SHADOW.with(|c| c.set(layout.lang));
     // Live MCP control starts with the editor when the
     // persisted preference says so (LayoutPrefs::live_mcp,
     // which defaults to off — live control starts at launch
@@ -370,8 +423,27 @@ fn init() -> State {
     // sidebar_visible -> show_left below), and the poll
     // shadow starts at the persisted pair so the first
     // poll does not write the file back unchanged.
-    LAYOUT_PREFS_SHADOW
-        .with(|c| c.set((layout.timeline_collapsed, layout.sidebar_visible)));
+    // Roadmap Wave 1 (RM13 — P-1): the zoom pair rides
+    // the same shadow; the seeded zoom is the clamped
+    // value `FrameOpsState::chip_w` will read, so a
+    // hand-edited prefs file cannot make the first
+    // poll write the file back.
+    let zoom_seed = if layout.timeline_zoom.is_finite() {
+        layout.timeline_zoom.clamp(
+            rune_sec::timeline_marks::ZOOM_MIN_W,
+            rune_sec::timeline_marks::ZOOM_MAX_W,
+        )
+    } else {
+        rune_sec::timeline_marks::CHIP_W
+    };
+    LAYOUT_PREFS_SHADOW.with(|c| {
+        c.set((
+            layout.timeline_collapsed,
+            layout.sidebar_visible,
+            zoom_seed,
+            layout.timeline_follow,
+        ))
+    });
     if let Some(msg) = rune_sec::home_panel::startup_status() {
         core.status = msg;
     }
@@ -391,9 +463,13 @@ fn init() -> State {
             // persisted prefs; `poll` writes changes
             // back (see LAYOUT_PREFS_SHADOW).
             timeline_collapsed: layout.timeline_collapsed,
+            timeline_zoom: zoom_seed,
+            timeline_follow: layout.timeline_follow,
             ..Default::default()
         },
         graph_panel: Default::default(),
+        camera_panel: Default::default(),
+        segment_numbers: Default::default(),
         audio_panel: rune_sec::audio_panel::AudioPanelState::new(),
         subtitle_panel: rune_sec::subtitle_panel::SubtitlePanelState::new(),
         menus: Default::default(),
@@ -415,6 +491,8 @@ fn init() -> State {
         show_right: true,
         key_clipboard: None,
         key_follow_graph: false,
+        key_sel: Default::default(),
+        help_panel: Default::default(),
         export_recap: String::new(),
         export_job: None,
         inspector_figure: rune_sec::inspector_figure::InspectorFigureEditState::new(),
@@ -454,13 +532,35 @@ fn stage_drag(s: &mut State, d: &mut Drag) {
     let core = &mut s.core;
     let rt = stage_view::drag_transform(core, [d.w, d.h]);
     let p = rt.to_stage([d.x, d.y]);
+    // Roadmap Wave 1 (RM15 - P-3, IA-RM15-1): feed the
+    // pointer probe from the drag's own point on every
+    // phase, so hover and the drag HUD track during
+    // drags even where pointer-move does not fire
+    // mid-gesture. On Up the probe stays (the pointer
+    // is still over the stage); the canvas's
+    // hover-change handler clears it on leave.
+    stage_view::set_stage_pointer(Some(stage_view::StagePointer {
+        local: [d.x, d.y],
+        size: [d.w, d.h],
+    }));
     match d.phase {
         Phase::Down => {
             if core.draw_mode {
                 core.begin_draw(p);
             } else if core.camera_mode {
                 core.begin_camera_drag(p);
-            } else if !core.begin_drag(p) {
+            } else if stage_view::path_drag_down(core, p) {
+                // Roadmap Wave 1 (RM16 - P-4): the press
+                // grabbed a motion-path point (overlay on,
+                // a non-current frame's root point hit):
+                // the session seeks the playhead and
+                // previews; the release lands one
+                // `nudge_path_point`. In path mode the
+                // points win over joint grabs - the current
+                // frame's point is never among them (the
+                // pose drag owns the current root), and
+                // with the overlay off this is a cheap miss.
+            } else if !core.begin_drag_with_radius(p, stage_view::pick_radius(rt.vt.scale)) {
                 // The press hit no joint (begin_drag only
                 // starts on a joint and reports the miss).
                 // Sprites composite OVER the figures and
@@ -475,6 +575,42 @@ fn stage_drag(s: &mut State, d: &mut Drag) {
                 // sprite was covering. The press starts
                 // no drag — the same gesture shape as the
                 // stroke pick below.
+                if let Some((sprite, handle)) = stage_sprites::sprite_handle_pick_at(
+                    core,
+                    s.sprites_panel.selected,
+                    p,
+                ) {
+                    // Roadmap Wave 1 (RM22 - P-12,
+                    // IA-RM22-3): the selected sprite's
+                    // handles are drawn over everything,
+                    // so a press on one arms its handle
+                    // drag (corner-scale / rotate / pivot)
+                    // before any body or segment pick;
+                    // the Move/Up phases settle it through
+                    // the sprite drag machinery it armed.
+                    s.sprites_panel.selected = Some(sprite);
+                    stage_sprites::sprite_handle_drag_down(core, sprite, handle, p);
+                    return;
+                }
+                if let Some((fi, ni, _)) = stage_view::segment_hit(
+                    core,
+                    p,
+                    stage_view::pick_radius(rt.vt.scale),
+                ) {
+                    // Roadmap Wave 1 (RM15 - P-3,
+                    // IA-RM15-5): the press hit no joint
+                    // but landed on a segment's middle -
+                    // start the drag the child joint's
+                    // grab would have started, through
+                    // the core's post-hit door. A locked
+                    // figure refuses there (status set)
+                    // and the press falls through to the
+                    // sprite / stroke picks below, exactly
+                    // as a locked joint grab falls through.
+                    if core.begin_drag_at(fi, ni, p) {
+                        return;
+                    }
+                }
                 if let Some(sprite) = stage_sprites::sprite_pick_at(core, p) {
                     s.sprites_panel.selected = Some(sprite);
                     s.stroke_selected = None;
@@ -496,14 +632,29 @@ fn stage_drag(s: &mut State, d: &mut Drag) {
                     s.stroke_selected = rune_sec::stage_layers::stroke_at_point(
                         core,
                         p,
-                        rune_sec::stage_layers::PICK_TOLERANCE,
+                        stage_view::pick_radius(rt.vt.scale),
                     );
                 }
             }
         }
         Phase::Move => {
+            // Roadmap Wave 1 (RM15 - P-3, IA-RM15-3): snap
+            // the point the drag is about to write (roots
+            // to landmarks, aim/IK to the angle step).
+            // `snap_drag_point` passes camera, draw, sprite
+            // and path points through untouched - none of
+            // them set a pose dragging kind. (The press's
+            // own first `drag_to` inside `begin_drag`
+            // stays unsnapped: the drag settles onto the
+            // snap on its first Move, IA-RM15-3's recorded
+            // caveat.)
+            let (p, _marks) = stage_view::snap_drag_point(core, p, rt.vt.scale);
             if core.draw_mode {
                 core.draw_to(p);
+            } else if stage_view::path_drag_move(core, p) {
+                // Roadmap Wave 1 (RM16 - P-4): a path-point
+                // drag owns the gesture; its moves only move
+                // the overlay's preview.
             } else if !stage_sprites::sprite_drag_move(core, p) {
                 core.drag_to(p);
             }
@@ -518,6 +669,16 @@ fn stage_drag(s: &mut State, d: &mut Drag) {
             // No record: a no-op, and the release belongs
             // to the pose/camera/draw paths below.
             stage_sprites::sprite_drag_up(core, p, d.cancelled());
+            // Roadmap Wave 1 (RM16 - P-4): settle a
+            // path-point drag beside the sprite settle. It
+            // never set `core.dragging` or draw mode, so
+            // the cancel guard below neither sees it nor
+            // undoes for it - and needs none: its moves
+            // never wrote, its cancel just drops the
+            // record, and a moved release lands exactly one
+            // `nudge_path_point` (one undo step) here,
+            // before `end_drag`'s recap runs.
+            stage_view::path_drag_up(core, p, d.cancelled());
             // Wave Q (Q2; P6's filed observation): a
             // cancelled gesture — Escape, focus loss, the
             // pointer taken away (`Drag::cancelled`, whose
@@ -568,7 +729,7 @@ fn stage_secondary(s: &mut State, e: PointerEvent) {
     };
     let rt = stage_view::drag_transform(&s.core, size);
     let p = rt.to_stage([e.x, e.y]);
-    secondary_pick_stack(s, p);
+    secondary_pick_stack_with_radius(s, p, stage_view::pick_radius(rt.vt.scale));
 }
 
 /// The right-press pick stack at stage point `p` (Wave
@@ -595,7 +756,16 @@ fn stage_secondary(s: &mut State, e: PointerEvent) {
 /// legs stay inert too rather than repealing that rule
 /// for the composite path as a whole.
 fn secondary_pick_stack(s: &mut State, p: [f32; 2]) {
-    if stage_view::secondary_select(&mut s.core, p) {
+    // The historical radius (13.0 stage units, the
+    // pre-RM15 constant): the stack's own tests call
+    // this two-argument form; the live right-press
+    // threads its screen-space radius through the twin
+    // below (IA-RM15-2).
+    secondary_pick_stack_with_radius(s, p, 13.0);
+}
+
+fn secondary_pick_stack_with_radius(s: &mut State, p: [f32; 2], radius: f32) {
+    if stage_view::secondary_select_with_radius(&mut s.core, p, radius) {
         return;
     }
     if s.core.playing {
@@ -665,8 +835,9 @@ fn stage_wheel(s: &mut State, e: WheelEvent) -> bool {
 /// `rune_sec::toasts` module docs, Wave 11). Playback:
 /// while `core.playing`, advance the playhead by the real
 /// elapsed time (clamped so a long stall doesn't jump) and
-/// schedule the next frame at the project fps interval — the
-/// Rune form of the GPUI app's 33 ms tick calling
+/// schedule the next frame on the anchored playback
+/// deadline ([`PLAYBACK_DEADLINE`], Roadmap Wave 1 RM7 /
+/// F-6) — the Rune form of the GPUI app's 33 ms tick calling
 /// `advance_play`.
 fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
     let dt = s
@@ -676,6 +847,14 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
     s.last_poll = Some(t);
     rune_sec::project_tools::sync_name_edit(s);
     rune_sec::inspector_figure::sync_figure_name_edit(s);
+    // Roadmap Wave 1 (F-3, IA-RM4-1; P-10, IA-RM20-1):
+    // the number-field sessions' blur/Escape
+    // reconciliation for the graph, camera, segment
+    // inspector and audio panels.
+    rune_sec::graph_panel::sync_number_edits(s);
+    rune_sec::camera_panel::sync_number_edits(s);
+    rune_sec::inspector_segment::sync_number_edits(s);
+    rune_sec::audio_panel::sync_number_edits(s);
     // Autosave cadence (Phase G wiring): the core counts
     // snapshot edits and writes the recovery snapshot every
     // 25; nothing called the check before, so the counter
@@ -839,12 +1018,36 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
     // load-modify-save BOTH fields so the prefs file
     // carries the pair the shell is actually showing,
     // preserving every other field.
-    let layout_pair = (s.frame_ops.timeline_collapsed, s.show_left);
+    // Roadmap Wave 1 (RM13 — P-1): the timeline zoom
+    // pair (chip width, follow) rides the same shadow —
+    // the zoom persists as the CLAMPED live width
+    // (`chip_w`), the value the strip actually shows.
+    let layout_pair = (
+        s.frame_ops.timeline_collapsed,
+        s.show_left,
+        s.frame_ops.chip_w(),
+        s.frame_ops.timeline_follow,
+    );
     if LAYOUT_PREFS_SHADOW.with(|c| c.get()) != layout_pair {
         LAYOUT_PREFS_SHADOW.with(|c| c.set(layout_pair));
         let mut prefs = stykanimate_rs::shell::load_layout();
         prefs.timeline_collapsed = layout_pair.0;
         prefs.sidebar_visible = layout_pair.1;
+        prefs.timeline_zoom = layout_pair.2;
+        prefs.timeline_follow = layout_pair.3;
+        stykanimate_rs::shell::save_layout(&prefs);
+    }
+    // Roadmap F-9: the UI language rides the same
+    // shadow-compare discipline — when `core.lang`
+    // diverges from the persisted shadow (the Settings
+    // card's picker, the shell settings tools, or
+    // `cycle_lang` changed it), load-modify-save
+    // `LayoutPrefs.lang` so the choice survives a
+    // relaunch, preserving every other field.
+    if LANG_PREFS_SHADOW.with(|c| c.get()) != s.core.lang {
+        LANG_PREFS_SHADOW.with(|c| c.set(s.core.lang));
+        let mut prefs = stykanimate_rs::shell::load_layout();
+        prefs.lang = s.core.lang;
         stykanimate_rs::shell::save_layout(&prefs);
     }
     // Playback audio follows the playing flag (Phase F): the
@@ -864,6 +1067,9 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
         // and steps move `current` without playing, and the
         // next Play press must not read them as a wrap.
         s.last_frame = s.core.current;
+        // The anchored deadline dies with playback (RM7):
+        // the next Play press anchors a fresh grid.
+        PLAYBACK_DEADLINE.with(|c| c.set(None));
         return redraw;
     }
     // Loop off (Phase G): stop on the last frame instead
@@ -881,6 +1087,7 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
         s.was_playing = false;
         s.core.stop_playback_audio();
         s.last_frame = s.core.current;
+        PLAYBACK_DEADLINE.with(|c| c.set(None));
         return true;
     }
     let prev_frame = s.last_frame;
@@ -916,8 +1123,40 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
         s.core.sync_playback_audio_on_drift();
     }
     s.last_frame = s.core.current;
-    let fps = s.core.project.fps.max(1.0);
-    tx.wake_after(Duration::from_secs_f32(1.0 / fps));
+    // Roadmap Wave 1 (RM13 — P-1, IA-RM13-5): Follow —
+    // while playing with follow on, keep the playhead's
+    // chip inside the timeline viewport: when the
+    // advance above carried it out of view, scroll the
+    // strip so the chip sits mid-viewport. The scroll
+    // record is the timeline builder's own (written on
+    // every scroll-offset change); until the strip has
+    // scrolled once there is no record and nothing to
+    // follow with.
+    if s.frame_ops.timeline_follow {
+        let w = s.frame_ops.chip_w();
+        if let Some((off, vw)) = rune_sec::timeline_marks::timeline_viewport() {
+            if !rune_sec::timeline_marks::chip_visible(off, vw, s.core.current, w) {
+                let target = (s.core.current as f32
+                    * rune_sec::timeline_marks::pitch(w)
+                    - vw / 2.0)
+                    .max(0.0);
+                tx.scroll_to_x("timeline", target);
+            }
+        }
+    }
+    // Roadmap Wave 1 (RM7 / F-6): wake on the anchored
+    // deadline, not "one interval from now" — the deadline
+    // steps from its own previous value (see
+    // `playback_deadline`), so the time this poll spent
+    // working is not added to every frame's period.
+    let deadline = rune_sec::playback_controls::playback_deadline(
+        PLAYBACK_DEADLINE.with(|c| c.get()),
+        t,
+        s.core.project.fps,
+        s.playback_speed,
+    );
+    PLAYBACK_DEADLINE.with(|c| c.set(Some(deadline)));
+    tx.wake_after(Duration::from_secs_f64((deadline - t).max(0.0)));
     true
 }
 
@@ -946,6 +1185,12 @@ fn text_focused(s: &State) -> bool {
         || s.inspector_figure.name.focused
         || s.clips_rename.field.focused
         || s.library_panel.rename.focused
+        // Roadmap Wave 1 (P-12, IA-RM22-2): the Asset
+        // Manager's rename field, gated on its session
+        // like the subtitle panel's text fields — typing
+        // there must not reach the global bindings.
+        || (s.sprites_panel.asset_renaming.is_some()
+            && s.sprites_panel.asset_rename.focused)
         || s.fx_browser.query.focused
         || s.figures_panel.filter.focused
         || s.pose_rename.field.focused
@@ -962,6 +1207,10 @@ fn text_focused(s: &State) -> bool {
         // outlive the field's last render, and a bare-flag
         // check would leave every shortcut dead afterwards.
         || (s.home_rename.armed.is_some() && s.home_rename.edit.focused)
+        // Roadmap Wave 1 (PL-7, IA-RM28-2): the Help
+        // search field — typing there must not trigger
+        // shortcuts, like every other text field.
+        || s.help_panel.search.focused
 }
 
 /// App shortcuts. The command palette gets first claim
@@ -1018,6 +1267,14 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     if text_focused(s) {
         return false;
     }
+    // Roadmap Wave 1 (PL-7, IA-RM28-5): F1 toggles Help.
+    // Placed after the text-field bail and before the
+    // Alt block, so the Shortcuts description "all but
+    // Ctrl+K pause while typing" stays exactly true.
+    if matches!(ev.key, Key::Function(1)) {
+        s.menus.help_open = !s.menus.help_open;
+        return true;
+    }
     if ev.mods.alt {
         if let Key::Text(text) = &ev.key {
             if let Some(n) = text.chars().next().and_then(|c| c.to_digit(10)) {
@@ -1050,7 +1307,33 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         // Quick-save (Phase K): exactly the app-bar Save
         // button's press — the core's plain save op, with
         // no second save path invented for the keyboard.
-        s.core.save();
+        // Roadmap Wave 1 (RM26 - PL-4): Ctrl+Shift+S is
+        // Save a copy instead - it silently quick-saved
+        // before this split.
+        if ev.mods.shift {
+            rune_sec::project_tools::save_copy_pressed(s);
+        } else {
+            s.core.save();
+        }
+        return true;
+    }
+    // Roadmap Wave 1 (RM26 - PL-4): the File/Edit chord
+    // cluster - every chord runs the same core op its
+    // menu item or palette command runs.
+    if ev.is_command('o') {
+        s.core.open_project_file();
+        return true;
+    }
+    if ev.is_command('c') {
+        s.core.copy_frame();
+        return true;
+    }
+    if ev.is_command('v') {
+        s.core.paste_frame();
+        return true;
+    }
+    if ev.is_command('d') {
+        s.core.duplicate_frame();
         return true;
     }
     match &ev.key {
@@ -1061,14 +1344,65 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
             true
         }
         Key::Left => {
-            step_frame(s, -1);
+            // Roadmap Wave 1 (RM26 - PL-4, subsuming
+            // IA-RM15-4): with a joint selected the
+            // arrows nudge it (RM15's steps: 1 pt,
+            // Shift 10, Alt 0.1); otherwise they step
+            // frames, Shift stepping ten. The
+            // text-field bail above is RM15's
+            // no-text-edit gate by construction.
+            if s.core.selected_node.is_some() {
+                let st = stage_view::nudge_step(ev.mods.shift, ev.mods.alt);
+                stage_view::nudge_selected(&mut s.core, -st, 0.0);
+            } else {
+                step_frame(s, if ev.mods.shift { -10 } else { -1 });
+            }
             true
         }
         Key::Right => {
-            step_frame(s, 1);
+            if s.core.selected_node.is_some() {
+                let st = stage_view::nudge_step(ev.mods.shift, ev.mods.alt);
+                stage_view::nudge_selected(&mut s.core, st, 0.0);
+            } else {
+                step_frame(s, if ev.mods.shift { 10 } else { 1 });
+            }
             true
         }
-        Key::Delete => {
+        Key::Up => {
+            // Nudge only (RM26 - PL-4): with no
+            // selection Up/Down stay unclaimed,
+            // exactly today's behaviour.
+            if s.core.selected_node.is_some() {
+                let st = stage_view::nudge_step(ev.mods.shift, ev.mods.alt);
+                stage_view::nudge_selected(&mut s.core, 0.0, -st);
+                true
+            } else {
+                false
+            }
+        }
+        Key::Down => {
+            if s.core.selected_node.is_some() {
+                let st = stage_view::nudge_step(ev.mods.shift, ev.mods.alt);
+                stage_view::nudge_selected(&mut s.core, 0.0, st);
+                true
+            } else {
+                false
+            }
+        }
+        Key::Home => {
+            if s.core.frame_count() > 0 {
+                s.core.goto(0);
+            }
+            true
+        }
+        Key::End => {
+            let n = s.core.frame_count();
+            if n > 0 {
+                s.core.goto(n - 1);
+            }
+            true
+        }
+        Key::Delete | Key::Backspace => {
             // Phase J priority: a selected stroke goes first,
             // then a selected particle event, then the
             // long-standing segment behaviour. The ops refuse
@@ -1081,6 +1415,14 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
             } else if let Some(i) = s.particle_selected {
                 s.core.particle_delete_event(i);
                 s.particle_selected = None;
+            } else if s.core.selected_node.is_none() {
+                // Roadmap Wave 1 (RM26 - PL-4, K6): with
+                // nothing selected the key names what it
+                // would have removed, instead of running
+                // the segment op's refusal; when a node
+                // IS selected the op's own refusal
+                // sentences stand.
+                s.core.status = "Delete: nothing selected \u{2014} the key removes a selected stroke, particle event or segment.".into();
             } else {
                 s.core.delete_segment();
             }
@@ -1100,6 +1442,51 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         }
         Key::Text(text) if text == "i" && !ev.mods.cmd && !ev.mods.ctrl && !ev.mods.alt => {
             s.core.insert_inbetween();
+            true
+        }
+        // Roadmap Wave 1 (RM26 - PL-4): the keyframing
+        // and drawing text clusters - each runs the same
+        // op its palette command runs. Alt+K is ordered
+        // before plain K; both exclude the command
+        // modifiers.
+        Key::Text(text) if text == "," && !ev.mods.cmd && !ev.mods.ctrl && !ev.mods.alt => {
+            rune_sec::command_palette::goto_prev_keyframe(s);
+            true
+        }
+        Key::Text(text) if text == "." && !ev.mods.cmd && !ev.mods.ctrl && !ev.mods.alt => {
+            rune_sec::command_palette::goto_next_keyframe(s);
+            true
+        }
+        Key::Text(text) if text == "k" && ev.mods.alt && !ev.mods.cmd && !ev.mods.ctrl => {
+            rune_sec::keyframe_tools::delete_key_here(s);
+            true
+        }
+        Key::Text(text) if text == "k" && !ev.mods.cmd && !ev.mods.ctrl && !ev.mods.alt => {
+            rune_sec::keyframe_tools::key_all_here(s);
+            true
+        }
+        Key::Text(text) if (text == "B" || text == "b") && ev.mods.shift && !ev.mods.cmd && !ev.mods.ctrl && !ev.mods.alt => {
+            s.core.cycle_brush();
+            true
+        }
+        Key::Text(text) if text == "b" && !ev.mods.cmd && !ev.mods.ctrl && !ev.mods.alt => {
+            s.core.draw_mode = !s.core.draw_mode;
+            true
+        }
+        Key::Text(text) if text == "[" && !ev.mods.cmd && !ev.mods.ctrl && !ev.mods.alt => {
+            rune_sec::stroke_inspector::step_param(
+                &mut s.core,
+                rune_sec::stroke_inspector::Param::Size,
+                -1,
+            );
+            true
+        }
+        Key::Text(text) if text == "]" && !ev.mods.cmd && !ev.mods.ctrl && !ev.mods.alt => {
+            rune_sec::stroke_inspector::step_param(
+                &mut s.core,
+                rune_sec::stroke_inspector::Param::Size,
+                1,
+            );
             true
         }
         _ => false,
@@ -1190,7 +1577,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     // effects, audio, clips, 3D, export, stats.
     let mut right = col().key("side-right").gap(12.0);
     if s.menus.help_open {
-        right = right.child(rune_sec::help_panel::help_panel(core, &t));
+        right = right.child(rune_sec::help_panel::help_panel(core, &s.help_panel, &t));
     }
     right = right.child(rune_sec::settings_popover::settings_popover(s, &t));
     if vis(Sec::InspectorSegment) {
@@ -1225,6 +1612,10 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     }
     if vis(Sec::FrameOps) {
         right = right.child(rune_sec::frame_ops::frames_section(s, &t));
+        // Roadmap Wave 1 (RM24, P-14): the History panel rides
+        // the FrameOps section - Animate-workspace only (X9),
+        // like its playhead family.
+        right = right.child(rune_sec::history_panel::history_section(s, &t));
     }
     if vis(Sec::Camera) {
         right = right.child(rune_sec::camera_panel::panel(s, &t));
@@ -1371,7 +1762,32 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                     )
                     .on_wheel(|s: &mut State, e: WheelEvent, _tx: &mut Tx| {
                         stage_wheel(s, e)
-                    }),
+                    })
+                    // Roadmap Wave 1 (RM15 - P-3, IA-RM15-1):
+                    // feed the stage pointer probe on move
+                    // (element-local point + the canvas's
+                    // laid-out size), clear it when the
+                    // pointer leaves, and wear the feedback
+                    // pass's cursor for the thing under the
+                    // pointer (or the drag in flight).
+                    .on_pointer_move_local(
+                        |s: &mut State, e: PointerEvent, _tx: &mut Tx| {
+                            crate::stage_view::set_stage_pointer(Some(
+                                crate::stage_view::StagePointer {
+                                    local: [e.x, e.y],
+                                    size: stage_size,
+                                },
+                            ));
+                        },
+                    )
+                    .on_hover_change(
+                        |_s: &mut State, hovered: bool, _tx: &mut Tx| {
+                            if !hovered {
+                                crate::stage_view::set_stage_pointer(None);
+                            }
+                        },
+                    )
+                    .cursor(crate::stage_view::stage_cursor_now(core, stage_size)),
                 )
                 .child(
                     rune_sec::toasts::toasts_view(s, s.toast_now)
@@ -1794,6 +2210,106 @@ mod key_routing_tests {
         // Delete is claimed (the op no-ops safely — status
         // only — when nothing deletable is selected).
         assert!(press(&mut s, &plain(Key::Delete)));
+    }
+
+    // Roadmap Wave 1 (RM26 - PL-4, IA-RM26-1 item 7):
+    // the chord clusters, one observable effect each.
+
+    fn shifted(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            mods: Mods {
+                shift: true,
+                cmd: false,
+                alt: false,
+                ctrl: false,
+                logo: false,
+            },
+        }
+    }
+
+    #[test]
+    fn home_and_end_jump_to_the_timeline_ends() {
+        let mut s = init();
+        let n = s.core.frame_count();
+        assert!(n > 1, "the demo project has frames to jump across");
+        assert!(press(&mut s, &plain(Key::End)));
+        assert_eq!(s.core.current, n - 1);
+        assert!(press(&mut s, &plain(Key::Home)));
+        assert_eq!(s.core.current, 0);
+    }
+
+    #[test]
+    fn shift_arrows_step_ten_frames_without_a_selection() {
+        let mut s = init();
+        assert_eq!(s.core.selected_node, None);
+        let n = s.core.frame_count() as i32;
+        let cur = s.core.current as i32;
+        assert!(press(&mut s, &shifted(Key::Right)));
+        assert_eq!(s.core.current as i32, (cur + 10).rem_euclid(n));
+        assert!(press(&mut s, &shifted(Key::Left)));
+        assert_eq!(s.core.current as i32, cur);
+    }
+
+    #[test]
+    fn ctrl_d_duplicates_the_current_frame() {
+        let mut s = init();
+        let frames = s.core.frame_count();
+        assert!(press(&mut s, &command('d')));
+        assert_eq!(s.core.frame_count(), frames + 1);
+    }
+
+    #[test]
+    fn b_toggles_draw_mode_and_shift_b_cycles_the_brush() {
+        let mut s = init();
+        let draw = s.core.draw_mode;
+        assert!(press(&mut s, &typed("b")));
+        assert_eq!(s.core.draw_mode, !draw);
+        assert!(press(&mut s, &typed("b")));
+        assert_eq!(s.core.draw_mode, draw);
+        let brush = s.core.brush_index;
+        assert!(press(&mut s, &shifted(Key::Text("B".to_string()))));
+        assert_ne!(s.core.brush_index, brush);
+    }
+
+    #[test]
+    fn backspace_is_delete_and_names_the_empty_selection() {
+        let mut s = init();
+        assert_eq!(s.core.selected_node, None);
+        assert!(press(&mut s, &plain(Key::Delete)));
+        let named = s.core.status.clone();
+        assert_eq!(
+            named,
+            "Delete: nothing selected \u{2014} the key removes a selected stroke, particle event or segment."
+        );
+        let mut s2 = init();
+        assert!(press(&mut s2, &plain(Key::Backspace)));
+        assert_eq!(s2.core.status, named, "Backspace is the same key");
+    }
+
+    #[test]
+    fn arrows_nudge_the_selected_joint_and_spend_one_step() {
+        let mut s = init();
+        let root = s.core.project.figures[0]
+            .def
+            .nodes
+            .iter()
+            .position(|n| n.parent.is_none())
+            .expect("figure 0 has a root");
+        s.core.selected_figure = 0;
+        s.core.selected_node = Some(root);
+        let before = s.core.project.frames[s.core.current].poses[0].root;
+        let depth = s.core.undo_depth();
+        assert!(press(&mut s, &plain(Key::Right)));
+        let after = s.core.project.frames[s.core.current].poses[0].root;
+        assert_eq!(after[0], before[0] + 1.0, "one plain step right");
+        assert_eq!(after[1], before[1]);
+        assert_eq!(s.core.undo_depth(), depth + 1, "one burst snapshot");
+        // Up with a selection nudges too - the frame
+        // does not move.
+        let cur = s.core.current;
+        assert!(press(&mut s, &plain(Key::Up)));
+        assert_eq!(s.core.current, cur);
     }
 }
 

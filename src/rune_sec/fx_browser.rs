@@ -797,10 +797,15 @@ pub fn fx_browser(s: &State, t: &Theme) -> El {
         // Kit empty state with the audit's glyph
         // (S13-3): the search that found nothing is a
         // magnifying glass. Text unchanged.
-        panel = panel.child(design::empty_state(
+        // RM28 (PL-7): the state offers its remedy —
+        // clear the filter that hid everything.
+        panel = panel.child(design::empty_state_action(
             "magnifying-glass",
             "No effects match the filter",
+            "fx-empty-clear-filter",
+            "Clear filter",
             t,
+            |s: &mut State| s.fx_browser.query = TextEdit::default(),
         ));
     }
     for (cat, entries) in &visible {

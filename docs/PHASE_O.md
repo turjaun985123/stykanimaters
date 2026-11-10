@@ -1228,6 +1228,21 @@ has since landed and succeeded — run `42759195547`
 on `59cb0be` — and its scan table, written above,
 is the artifact-level proof this section owed.)
 
+**Roadmap Wave 1 upkeep (RM12 + RM13, 2026-11-10):**
+the timeline card grows in its expanded form on the
+RM closing frame. RM12's lane row adds ≈28 pt of
+card height in every scene where any lane is
+applicable (Animate scenes always qualify via the
+dopesheet); RM13's zoom row adds ≈28 pt in every
+expanded scene with frames; the stage's headless
+rect shrinks by those amounts. RM13's overview
+strip adds ≈20 pt only in scenes whose content
+overflows the viewport at the default zoom — no
+current scene qualifies, so the overview is
+scene-invisible until a long-timeline scene is
+planted. Overflow verdicts remain the closing
+frame's artifact scan's to give.
+
 ## 11. Honest remainders
 
 Standing user decisions — named, not relitigated:

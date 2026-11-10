@@ -46,7 +46,7 @@
 //! |---|---|---|
 //! | Theme (dark/light) | `EditorCore.light_theme` (`editor.rs:69`) | `LayoutPrefs.dark = !light_theme`, written by `poll`'s write-back (`main.rs`) on change — the popover buttons persist exactly this way (they write the field and let `poll` save), and so does [`exec_shell_set_theme`] |
 //! | Live MCP control | the bridge itself, `live_mcp::is_enabled()` | `LayoutPrefs.live_mcp`, load-modify-save of the RESULTING state (the popover's `toggle_live_mcp` discipline) — written by [`apply_pending_bridge_actions`], see the deferred-stop section below |
-//! | Language | `EditorCore.lang` (`editor.rs:88`) | rides with the core/project side of the app (the popover's Persistence section: language lives on the core and persists with the project file); the write is `settings_popover::set_language`, status line included |
+//! | Language | `EditorCore.lang` (`editor.rs:88`) | `LayoutPrefs.lang`, seeded by `main.rs`'s `init` and written by `poll`'s write-back on change (Roadmap F-9; before that field existed the choice was session-only and this row wrongly claimed it persisted with the project file); the write is `settings_popover::set_language`, status line included |
 //! | Default easing | `Project.easing` | persists with the project file; the write is the core op `EditorCore::set_project_easing` (the easing picker's own direct setter — the Settings card itself only cycles, via `cycle_easing`) |
 //! | Guides / Camera frame / Safe frames | `State.guides` / `guides_frustum` / `guides_safe` | NONE — session-only shell flags; the card is their only writer and no prefs field exists. The tools say so rather than imply persistence |
 //! | Loop playback | `State.loop_playback` | NONE — session-only shell flag (the transport's `pb-loop` home) |
@@ -722,7 +722,7 @@ pub fn apply_setting_patch(s: &mut State, patch: SettingPatch) -> Result<Value, 
                 "setting": "language",
                 "value": { "code": lang.code(), "label": lang.label() },
                 "applied": "immediate",
-                "persisted_as": "the core's language, persisted with the project side of the app",
+                "persisted_as": "LayoutPrefs.lang (shell poll write-back, same tick)",
                 "status": s.core.status,
             }))
         }

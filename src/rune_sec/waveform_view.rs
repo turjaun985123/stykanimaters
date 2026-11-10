@@ -83,6 +83,15 @@
 //! divergence is deliberate (it is what makes the strip
 //! seekable).
 //!
+//! Roadmap Wave 1 (RM20, P-10) retires that divergence in
+//! project mode — see the Project-time bars section below:
+//! the project strip now draws every clip's peaks inside
+//! its own project span, so in project mode the waveform,
+//! the playhead and the seek all read in project time. The
+//! paragraph above stands as the record of the pre-RM20
+//! behaviour it replaced; clip mode (next section) keeps
+//! its deliberate clip-time portrait.
+//!
 //! ## Selected-clip mode (Phase I, section 17)
 //!
 //! When the audio panel has a clip selected
@@ -166,6 +175,31 @@
 //! invented edge would be a false claim about where
 //! the clip sits.
 //!
+//! ## Project-time bars (Roadmap Wave 1, RM20, P-10)
+//!
+//! Project mode's bars are no longer the last clip
+//! stretched across the strip: [`waveform_bars_project_time`]
+//! draws EVERY clip's peaks confined to the clip's own
+//! project span — the same [`span_bracket`] edges the
+//! boundary ticks and the selected clip's bracket use —
+//! so a feature in the waveform stands at the frame it
+//! sounds at, gaps between clips read as gaps, and an
+//! overlap overdraws (the later clip's bars over the
+//! earlier's, in project order). Each clip's bars scale
+//! by its own gain and dim when it is muted — in this
+//! view every clip is itself, so Phase M's "project
+//! mode never dims" rule (which was about the stretched
+//! last-clip portrait) no longer applies. A clip whose
+//! span does not resolve (unreadable file, zero length,
+//! no frames) contributes no bars, exactly as it
+//! contributes no ticks. The span bracket is NOT
+//! retired: it still marks the SELECTED clip over the
+//! project strip, now as a selection highlight rather
+//! than the only placement cue. Peaks probe once per
+//! clip at the strip's bucket count and reduce into
+//! the span's columns, so the peaks cache holds one
+//! entry per clip (its cap grew accordingly).
+//!
 //! ## Muted clips (Phase M, section 16)
 //!
 //! `AudioClip::muted` (Phase M) silences a clip in
@@ -186,7 +220,11 @@
 //! ([`bracket_color`]) when that clip is muted; the
 //! all-clip boundary ticks stay as Phase L left them,
 //! muted or not. [`clip_is_muted`] is the one read of
-//! the flag both paths share.
+//! the flag both paths share. (Roadmap Wave 1, RM20:
+//! the project-time bars supersede the first clause —
+//! each project-mode clip's bars now dim with its own
+//! mute, per the Project-time bars section above; the
+//! bracket and ticks behave exactly as written here.)
 //!
 //! ## Clip health caption (UI mission Wave 6-D)
 //!
@@ -540,13 +578,18 @@ struct CacheKey {
     buckets: usize,
 }
 
-/// Cap on cached probes. The strip only ever shows one clip
-/// (the last), and a clip is probed at few bucket counts, so
-/// a handful of entries covers real use. When an insert
-/// finds the map full it is cleared wholesale — deliberately
+/// Cap on cached probes. The strip once showed one clip
+/// (the last), and a clip is probed at few bucket counts,
+/// so a handful of entries covered real use; Roadmap
+/// Wave 1 (RM20) made project mode probe EVERY clip at
+/// the strip's bucket count, so the cap now covers a
+/// deep project's clip list (64 entries) before the
+/// wholesale clear can fire. When an insert finds the
+/// map full it is cleared wholesale — deliberately
 /// simple rather than an LRU: eviction precision buys
-/// nothing at this size, and the worst case is one re-decode.
-const PEAKS_CACHE_CAP: usize = 8;
+/// nothing at this size, and the worst case is a
+/// re-decode per evicted clip.
+const PEAKS_CACHE_CAP: usize = 64;
 
 thread_local! {
     /// Probed peaks + durations by [`CacheKey`], shared via
@@ -667,8 +710,10 @@ pub fn clip_is_muted(core: &EditorCore, index: usize) -> bool {
 /// always) or one selected clip's own peaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaveformMode {
-    /// The last clip's peaks stretched across the strip —
-    /// the strip's behaviour since Phase D.
+    /// Every clip's peaks drawn inside its own project
+    /// span (Roadmap Wave 1, RM20) — before RM20 this
+    /// was the last clip's peaks stretched across the
+    /// strip, the strip's behaviour since Phase D.
     Project,
     /// The selected clip's own peaks (0-based clip index,
     /// a valid index into `project.audio`).
@@ -788,8 +833,8 @@ pub fn clip_health_caption(
 
 /// Display columns for a strip `w` points wide: one column
 /// per ~3 points (2 pt bar + 1 pt gap), capped so a very
-/// wide strip stays cheap. Factored out of
-/// [`waveform_bars`] so the builder probes selected-clip
+/// wide strip stays cheap. Factored out of the bars
+/// builders so the builder probes selected-clip
 /// peaks at exactly the bucket count the bars will draw.
 fn strip_columns(w: f32) -> usize {
     ((w / 3.0).floor() as usize).clamp(1, 512)
@@ -802,18 +847,97 @@ fn strip_buckets(columns: usize) -> usize {
     (columns * 4).clamp(96, 2048)
 }
 
+/// The x edges of every clip's bars in the project-time
+/// strip (Roadmap Wave 1, RM20): for each clip whose
+/// span resolves — the same [`clip_span`] probe the
+/// ticks and bracket use, at the strip's bucket count —
+/// its `(index, left, right)` in element points through
+/// [`span_bracket`], in project order. A clip whose
+/// file will not decode, whose length is zero, or whose
+/// span collapses under a point contributes nothing:
+/// the strip invents no placement it cannot prove.
+/// Factored out of the shape builder so the placement
+/// is unit-testable without a `Shape`.
+pub fn project_clip_spans(
+    core: &EditorCore,
+    buckets: usize,
+    width: f32,
+) -> Vec<(usize, f32, f32)> {
+    let frame_count = core.frame_count();
+    let mut spans = Vec::new();
+    for i in 0..core.project.audio.len() {
+        let Some(span) = clip_span(core, Some(i), buckets) else {
+            continue;
+        };
+        if let Some((left, right)) = span_bracket(span, frame_count, width) {
+            if right - left >= 1.0 {
+                spans.push((i, left, right));
+            }
+        }
+    }
+    spans
+}
+
+/// Append the mirrored bar columns for `peaks` confined
+/// to the x span `[x0, x1]` — the project-time twin of
+/// [`draw_peak_bars`]: the same bar construction (one
+/// column per ~3 points, [`bar_span`] scaling, Butt
+/// caps, [`bar_colors`] dimming) with the columns laid
+/// across the span instead of the whole strip, so a
+/// clip's waveform occupies exactly the frames it
+/// sounds on.
+fn draw_peak_bars_span(
+    shape: Shape,
+    peaks: &[f32],
+    gain: f32,
+    muted: bool,
+    t: &Theme,
+    x0: f32,
+    x1: f32,
+    h: f32,
+) -> Shape {
+    let mut shape = shape;
+    let span_w = x1 - x0;
+    if span_w <= 0.0 || h <= 0.0 {
+        return shape;
+    }
+    let mid = h / 2.0;
+    let columns = strip_columns(span_w);
+    let cols = reduce_columns(peaks, columns);
+    let (outer, accent) = bar_colors(t, muted);
+    let pitch = span_w / columns as f32;
+    let bar_w = (pitch - 1.0).max(1.0);
+    for (i, &(min, max)) in cols.iter().enumerate() {
+        let x = x0 + (i as f32 + 0.5) * pitch;
+        let (top, bottom) = bar_span(max, gain, mid, mid);
+        shape = shape.line([x, top], [x, bottom], bar_w, LineCap::Butt, outer);
+        let (top, bottom) = bar_span(min, gain, mid, mid);
+        shape = shape.line([x, top], [x, bottom], bar_w, LineCap::Butt, accent);
+    }
+    shape
+}
+
 /// The waveform strip's bars as one `Shape` in
-/// canvas-element points, for the last audio clip in the
-/// project: centre line plus one column of mirrored bars per
-/// ~3 points of width. Bars are drawn with [`LineCap::Butt`]
-/// so a bar's ends land exactly on its amplitude (round caps
-/// would overshoot by half the bar width). With no clips —
-/// or an unreadable clip file — the shape is just the centre
-/// line, so the strip reads as an empty audio lane rather
-/// than a hole in the layout. No playhead here:
-/// [`waveform_shape_project`] appends the one
-/// project-mapped marker.
-fn waveform_bars(core: &EditorCore, el_size: [f32; 2], t: &Theme) -> Shape {
+/// canvas-element points, RECONCILED TO PROJECT TIME
+/// (Roadmap Wave 1, RM20): the centre line plus, for
+/// every clip in the project, that clip's peaks drawn
+/// inside its own span ([`project_clip_spans`] /
+/// [`draw_peak_bars_span`]) — replacing the pre-RM20
+/// project view, in which the LAST clip's peaks were
+/// stretched across the whole strip whatever its start
+/// or length (the divergence the module docs record).
+/// Bars are drawn with [`LineCap::Butt`] so a bar's
+/// ends land exactly on its amplitude. With no clips —
+/// or no resolvable spans — the shape is just the
+/// centre line, so the strip reads as an empty audio
+/// lane rather than a hole in the layout. Each clip
+/// probes once at the strip's bucket count (the peaks
+/// cache's key), however narrow its span: the reduction
+/// into the span's columns samples those buckets, so a
+/// narrow clip still shows its local extremes. No
+/// playhead here: [`waveform_shape_project`] appends
+/// the one project-mapped marker.
+fn waveform_bars_project_time(core: &EditorCore, el_size: [f32; 2], t: &Theme) -> Shape {
     let (w, h) = (el_size[0], el_size[1]);
     let mut shape = Shape::new();
     if w <= 0.0 || h <= 0.0 {
@@ -823,18 +947,15 @@ fn waveform_bars(core: &EditorCore, el_size: [f32; 2], t: &Theme) -> Shape {
     let centre = t.card_border;
     shape = shape.line([0.0, mid], [w, mid], 1.0, LineCap::Butt, centre);
 
-    let Some(clip) = core.project.audio.last() else {
-        return shape;
-    };
     let buckets = strip_buckets(strip_columns(w));
-    let Some((peaks, _)) = clip_peaks(clip, buckets) else {
-        return shape;
-    };
-    // Project mode never dims its bars: they show the
-    // last clip, selected or not, and Phase M dims only
-    // the selected clip's marks (its clip-mode bars and
-    // its span bracket) — hence `false` here, always.
-    draw_peak_bars(shape, &peaks, clip.gain, false, t, w, h)
+    for (i, left, right) in project_clip_spans(core, buckets, w) {
+        let clip = &core.project.audio[i];
+        let Some((peaks, _)) = clip_peaks(clip, buckets) else {
+            continue;
+        };
+        shape = draw_peak_bars_span(shape, &peaks, clip.gain, clip.muted, t, left, right, h);
+    }
+    shape
 }
 
 /// The bar colours `(outer, inner)` for one clip's
@@ -865,9 +986,11 @@ fn bar_colors(t: &Theme, muted: bool) -> (Color, Color) {
 /// Append the mirrored bar columns for `peaks` (reduced to
 /// the strip's display columns, amplitudes scaled by
 /// `gain` through [`bar_span`]) to `shape` — the drawing
-/// tail [`waveform_bars`] and [`waveform_bars_clip`] share,
-/// so project mode and selected-clip mode render peaks
-/// identically; only the peaks' source differs. `muted`
+/// tail [`waveform_bars_clip`] uses for selected-clip
+/// mode (its project-mode twin is [`draw_peak_bars_span`],
+/// the same construction confined to a clip's span), so
+/// both modes render peaks identically; only the peaks'
+/// source and placement differ. `muted`
 /// dims the bar colours through [`bar_colors`] without
 /// touching a single bar's geometry.
 fn draw_peak_bars(
@@ -896,8 +1019,9 @@ fn draw_peak_bars(
     shape
 }
 
-/// The selected-clip counterpart of [`waveform_bars`]
-/// (Phase I, section 17): centre line plus bar columns for
+/// The selected-clip counterpart of
+/// [`waveform_bars_project_time`] (Phase I, section 17):
+/// centre line plus bar columns for
 /// clip `index`'s own `peaks` (probed by the builder via
 /// [`selected_clip_peaks`], gain NOT applied there), scaled
 /// by that clip's `gain`. The mode decision has already
@@ -1033,8 +1157,9 @@ fn with_all_clip_ticks(shape: Shape, core: &EditorCore, el_size: [f32; 2], t: &T
 }
 
 /// The strip for [`waveform_el_state`]: the centre line and
-/// bars of [`waveform_bars`], plus every clip's boundary
-/// ticks ([`with_all_clip_ticks`], Phase L), the selected
+/// bars of [`waveform_bars_project_time`] (Roadmap Wave
+/// 1, RM20), plus every clip's boundary ticks
+/// ([`with_all_clip_ticks`], Phase L), the selected
 /// clip's span bracket ([`with_span_bracket`], Phase K)
 /// and the project-mapped playhead ([`with_playhead`]) —
 /// in that draw order, so each stronger mark lands over
@@ -1047,7 +1172,7 @@ fn waveform_shape_project(
 ) -> Shape {
     with_playhead(
         with_span_bracket(
-            with_all_clip_ticks(waveform_bars(core, el_size, t), core, el_size, t),
+            with_all_clip_ticks(waveform_bars_project_time(core, el_size, t), core, el_size, t),
             core,
             selected,
             el_size,
@@ -2372,5 +2497,75 @@ mod tests {
         assert!(all_clip_edges(&core, 96, -8.0).is_empty());
         assert!(all_clip_edges(&core, 96, f32::NAN).is_empty());
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- Roadmap Wave 1 (RM20): project-time bars ----
+
+    #[test]
+    fn project_clip_spans_place_each_clip_in_its_own_span() {
+        // The reconciliation's heart: two 1-second clips
+        // (12 frames each at the demo 12 fps) on a
+        // 24-frame project at width 240 — clip A at
+        // frame 0 occupies the strip's first half, clip
+        // B at frame 12 the second; NEITHER is stretched
+        // across the whole strip (the pre-RM20 project
+        // view drew the last clip across all 240 points).
+        let mut core = core_with_24_frames();
+        let path_a = temp_wav_path("rm20-spans-a");
+        let path_b = temp_wav_path("rm20-spans-b");
+        std::fs::write(&path_a, write_wav(&sine_wav())).unwrap();
+        std::fs::write(&path_b, write_wav(&sine_wav())).unwrap();
+        plant_clip(&mut core, &path_a, 0);
+        plant_clip(&mut core, &path_b, 12);
+        assert_eq!(
+            project_clip_spans(&core, 96, 240.0),
+            vec![(0, 0.0, 120.0), (1, 120.0, 240.0)]
+        );
+        // The reconciled shape builds over both clips.
+        let t = rune::tok::theme(true);
+        let _shape = waveform_shape_project(&core, None, [240.0, 56.0], &t);
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+    }
+
+    #[test]
+    fn project_clip_spans_leave_gaps_and_skip_unreadable() {
+        // A clip starting at frame 12 leaves the first
+        // half of the strip empty (a gap reads as a
+        // gap), and an unreadable clip contributes no
+        // span at all.
+        let mut core = core_with_24_frames();
+        let path = temp_wav_path("rm20-gap");
+        std::fs::write(&path, write_wav(&sine_wav())).unwrap();
+        plant_clip(&mut core, &path, 12);
+        core.project.audio.push(AudioClip {
+            path: "/nonexistent/no-such-clip.wav".to_string(),
+            start_frame: 0,
+            gain: 1.0,
+            muted: false,
+        });
+        assert_eq!(
+            project_clip_spans(&core, 96, 240.0),
+            vec![(0, 120.0, 240.0)]
+        );
+        assert!(project_clip_spans(&core, 96, 0.0).is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn draw_peak_bars_span_confines_columns_to_the_span() {
+        // The confined twin draws bars inside [x0, x1]
+        // only: building the shape is the smoke check
+        // (Shape carries no introspection), and the
+        // degenerate spans are no-ops rather than
+        // panics.
+        let t = rune::tok::theme(true);
+        let peaks = vec![0.5f32; 96];
+        let shape = draw_peak_bars_span(Shape::new(), &peaks, 1.0, false, &t, 40.0, 120.0, 56.0);
+        let _ = shape;
+        let shape = draw_peak_bars_span(Shape::new(), &peaks, 1.0, true, &t, 120.0, 40.0, 56.0);
+        let _ = shape;
+        let shape = draw_peak_bars_span(Shape::new(), &peaks, 1.0, false, &t, 10.0, 10.0, 56.0);
+        let _ = shape;
     }
 }

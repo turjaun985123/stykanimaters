@@ -933,7 +933,7 @@ use std::time::{Duration, SystemTime};
 
 use rune::tok::{self, type_, Theme};
 use rune::{el, row, text, Color, El};
-use stykanimate_rs::editor::EditorCore;
+use stykanimate_rs::editor::{EditorCore, SaveState};
 
 use crate::rune_sec::app_theme;
 use crate::rune_sec::i18n_wire;
@@ -1024,10 +1024,21 @@ pub fn runtime_label(core: &EditorCore) -> String {
 /// [`undo_text`] keeps reading the stacks alone (the
 /// module docs' Wave 13 section has the verification;
 /// the Wave 12 section records what the counter could
-/// not see before the seam existed). This fn renders
-/// the counter faithfully either way, and the name is
-/// the session's (`core.project.name`), never the
-/// file's.
+/// not see before the seam existed).
+///
+/// Roadmap Wave 1 (RM24, P-14 — A15 R4): the dot's
+/// DRIVER changed. It no longer reads the autosave
+/// counter at all: it renders the core's named-save
+/// state ([`SaveState`]) — lit while the project has
+/// never been saved to a named file, and while it
+/// carries edits since the last named save; dark only
+/// in the `Saved` state. The autosave counter still
+/// exists (the recovery segment reads it), but a dot
+/// that cleared when the RECOVERY snapshot caught up
+/// told the user "saved" about a file that was never
+/// written — the audit's dishonest-vocabulary finding.
+/// The name is the session's (`core.project.name`),
+/// never the file's.
 ///
 /// The runtime rides inside this segment instead of
 /// becoming a new one: [`segment`] floors the segment
@@ -1049,19 +1060,20 @@ pub fn project_text(core: &EditorCore) -> String {
 /// The project segment's two parts (UI mission
 /// Wave 3): the project name, and everything after
 /// it — ` · {runtime}` plus the dirty ` ●` while
-/// the project has edits the autosave has not
-/// captured. [`project_text`] is exactly the two
-/// concatenated. The split exists for the segment
-/// builder ([`project_segment`]): under width
-/// pressure the NAME is the part that truncates
-/// (second in the compression order — see the
-/// module docs), while the suffix, carrying the
-/// runtime and the strip's save-state dot, keeps
-/// its floor and stays fully visible at every
-/// width.
+/// the project's named file is not current (RM24:
+/// never saved, or edited since the last named
+/// save — see [`project_text`]). [`project_text`]
+/// is exactly the two concatenated. The split
+/// exists for the segment builder
+/// ([`project_segment`]): under width pressure the
+/// NAME is the part that truncates (second in the
+/// compression order — see the module docs), while
+/// the suffix, carrying the runtime and the strip's
+/// save-state dot, keeps its floor and stays fully
+/// visible at every width.
 pub fn project_parts(core: &EditorCore) -> (String, String) {
     let mut suffix = format!(" · {}", runtime_label(core));
-    if core.edits_since_autosave() > 0 {
+    if core.save_state() != SaveState::Saved {
         suffix.push_str(" ●");
     }
     (core.project.name.clone(), suffix)
@@ -1466,17 +1478,34 @@ struct StripColors {
     playing: Color,
 }
 
+/// How far the strip's light playing ink deepens
+/// toward black (Roadmap Wave 1, RM25 / PL-1): the
+/// brief accent as ink on the light background
+/// measured 4.43 — 0.07 under the text bar, only
+/// while playback runs (Wave 10 re-audit). The fix
+/// lives at this seam, not in the accent token: the
+/// strip's light playing ink is the accent mixed
+/// this far toward black, measuring 5.00 on the app
+/// background. The dark playing ink is the accent
+/// itself (6.10), unchanged.
+const PLAYING_INK_LIGHT_DEEPEN: f32 = 0.15;
+
 /// Resolve the strip's colours from a theme: primary
 /// segments take the theme's `text` role, the tail
 /// its `text_secondary`, the dividers its
 /// `separator`, and the rolling play segment the
-/// theme-aware brief accent ([`app_theme::accent`]).
+/// theme-aware brief accent ([`app_theme::accent`]),
+/// deepened in light per [`PLAYING_INK_LIGHT_DEEPEN`].
 fn strip_colors(t: &Theme) -> StripColors {
     StripColors {
         text: t.text,
         tail: t.text_secondary,
         divider: t.separator,
-        playing: app_theme::accent(t),
+        playing: if app_theme::is_dark(t) {
+            app_theme::accent(t)
+        } else {
+            app_theme::accent(t).mix(Color::BLACK, PLAYING_INK_LIGHT_DEEPEN)
+        },
     }
 }
 
@@ -2025,17 +2054,22 @@ mod tests {
 
     #[test]
     fn project_text_has_no_dot_on_a_fresh_core() {
-        // A fresh core has counted no edits, so the
-        // autosave-relative dirty signal reads clean.
-        // Phase I: the segment now carries the runtime
-        // too — the demo is 5 frames of duration 1.0 at
-        // 12 fps, 5/12 s, which rounds to 0:00 — so the
-        // pin is the name plus ` · 0:00`, no dot.
+        // A fresh core has counted no edits — but it
+        // has also never been saved, so since RM24 the
+        // dot reads lit: the marker answers "is my
+        // FILE current?", and for a fresh project the
+        // honest answer is no. (Pre-RM24 the dot read
+        // the autosave counter and a fresh core read
+        // clean.) Phase I: the segment carries the
+        // runtime too — the demo is 5 frames of
+        // duration 1.0 at 12 fps, 5/12 s, rounding to
+        // 0:00 — so the pin is name + ` · 0:00 ●`.
         let core = EditorCore::new();
         assert_eq!(core.edits_since_autosave(), 0);
+        assert_eq!(core.save_state(), SaveState::NeverSaved);
         assert_eq!(
             project_text(&core),
-            format!("{} · 0:00", core.project.name)
+            format!("{} · 0:00 ●", core.project.name)
         );
     }
 
@@ -2163,7 +2197,7 @@ mod tests {
         assert_eq!(core.edits_since_autosave(), 0);
         let (name, suffix) = project_parts(&core);
         assert_eq!(format!("{name}{suffix}"), project_text(&core));
-        assert!(!suffix.contains('●'), "a fresh core is not dirty");
+        assert!(suffix.contains('●'), "a fresh core is never-saved, so the dot is lit (RM24)");
 
         let mut router = stykanimate_rs::mcp::McpServer::new();
         let msg = serde_json::json!({
@@ -2230,7 +2264,9 @@ mod tests {
         .unwrap();
         core.project_files = vec![old_path];
         core.project_index = 0;
-        assert_eq!(project_text(&core), "Untitled · 0:00");
+        // RM24: a fresh core is never-saved, so the dot
+        // is lit even before the rename's counted edit.
+        assert_eq!(project_text(&core), "Untitled · 0:00 ●");
 
         let mut router = stykanimate_rs::mcp::McpServer::new();
         let msg = serde_json::json!({
@@ -2273,93 +2309,86 @@ mod tests {
     // ---- Wave 13 dirty-marking read path ----
 
     #[test]
-    fn strip_dot_follows_the_counter_not_the_undo_stack() {
-        // Wave 13: the dot renders
-        // `edits_since_autosave()` — the counter — and
-        // nothing else. A snapshotted edit lights it;
-        // stamping the counter as autosaved
-        // (`note_recovery_written`, the core's seam
-        // for recovery writes made outside
-        // `maybe_autosave`) clears it again, while the
-        // undo stack keeps its step the whole time. A
-        // strip that inferred dirtiness from the stack
-        // would stay lit after the stamp; this one
-        // follows the counter down as faithfully as up.
+    fn strip_dot_follows_the_named_save_state() {
+        // Wave 13 pinned this test as "the dot follows
+        // the autosave counter, not the undo stack".
+        // Roadmap Wave 1 (RM24, P-14 — A15 R4) changed
+        // the contract: the dot follows the NAMED-SAVE
+        // state and nothing else. A recovery stamp
+        // (`note_recovery_written`) no longer clears it —
+        // the recovery file is not the user's file — and
+        // a fresh, never-saved project reads lit from
+        // the start. Only a named save (or opening a
+        // named file) turns it off; the next edit turns
+        // it back on; the undo stack is untouched by all
+        // of it.
         let mut core = EditorCore::new();
-        assert_eq!(core.edits_since_autosave(), 0);
+        assert_eq!(core.save_state(), SaveState::NeverSaved);
         let (_, suffix) = project_parts(&core);
-        assert!(!suffix.contains('●'), "a fresh core is not dirty");
+        assert!(suffix.contains('●'), "a never-saved project reads lit");
 
         core.add_frame();
-        assert_eq!(core.edits_since_autosave(), 1);
         assert_eq!(undo_text(&core), "Undo 1");
         let (_, suffix) = project_parts(&core);
         assert_eq!(suffix, " · 0:01 ●");
 
+        // The recovery stamp covers the autosave
+        // counter — and the dot does not move.
         core.note_recovery_written();
-        assert_eq!(
-            core.edits_since_autosave(),
-            0,
-            "the stamp zeroes the counter the dot reads"
-        );
-        assert_eq!(
-            undo_text(&core),
-            "Undo 1",
-            "the undo stack is untouched by the stamp"
-        );
+        assert_eq!(core.edits_since_autosave(), 0, "the stamp zeroes the autosave counter");
         let (_, suffix) = project_parts(&core);
-        assert_eq!(suffix, " · 0:01", "the dot cleared with the counter");
-        assert_eq!(project_text(&core), "Untitled · 0:01");
-        // And the strip builds whole in the stamped
-        // state.
+        assert!(suffix.contains('●'), "a recovery write is not a save — the dot stays");
+
+        // A named save (the app bar's `save()` writes
+        // the working file) is the only thing here that
+        // clears it; the undo stack keeps its step.
+        core.save();
+        assert_eq!(core.save_state(), SaveState::Saved);
+        assert_eq!(core.edits_since_save(), Some(0));
+        assert_eq!(undo_text(&core), "Undo 1", "the undo stack is untouched by the save");
+        let (_, suffix) = project_parts(&core);
+        assert_eq!(suffix, " · 0:01", "the dot cleared with the save");
+        assert_eq!(project_text(&core), format!("{} · 0:01", core.project.name));
+        // And the strip builds whole in the saved state.
         let _ = status_strip(&core);
+        let _ = std::fs::remove_file("./project.styk.json");
     }
 
     #[test]
-    fn strip_dot_lights_for_a_mark_dirty_write_with_no_undo_step() {
-        // Wave 13 (Squad B contract): a non-undoable
-        // project write the census assigned to the
-        // `mark_dirty` seam must light the dot WITHOUT
-        // moving the undo segment — the two segments
-        // read different sources (counter vs stacks),
-        // and this is the state where they honestly
-        // disagree. The seam is driven through a
-        // landed B-squad op, `set_figure_color`
-        // (figure_ops: no snapshot; an actual colour
-        // change marks dirty exactly once), and every
-        // assertion goes through this module's fns or
-        // the counter accessor — no test in this file
-        // names `mark_dirty` itself (at this audit
-        // its call sites were in the tree ahead of
-        // the editor.rs definition), so the pin fails
-        // loudly if the seam ever bumps a counter
-        // other than the one `snapshot()` bumps.
+    fn strip_dot_and_undo_follow_a_coalesced_colour_write() {
+        // Wave 13 pinned this slot as "a mark_dirty write
+        // lights the dot with NO undo step", driven
+        // through `set_figure_color`. Roadmap Wave 1
+        // (RM24, P-14) closed that census line: the op
+        // takes a coalesced undo step now, so the two
+        // segments agree — the dot (save-state) lit AND
+        // the undo segment moved. Starting from a saved
+        // core so the dot begins dark:
         let mut core = EditorCore::new();
+        core.save();
+        assert_eq!(core.save_state(), SaveState::Saved);
         let stored = core.project.figures[0].color;
         // Re-selecting the colour already stored
-        // changes nothing and marks nothing: the
-        // strip stays clean and the stacks stay empty.
+        // changes nothing and spends nothing: the strip
+        // stays clean and the stacks stay empty.
         core.set_figure_color(0, stored);
-        assert_eq!(core.edits_since_autosave(), 0);
+        assert_eq!(core.edits_since_save(), Some(0));
         let (_, suffix) = project_parts(&core);
         assert!(!suffix.contains('●'), "a no-op write is not dirty");
 
-        // An actual colour change: one counted edit,
-        // no undo step, and the dot lit beside
-        // `Undo 0`.
+        // An actual colour change: one counted edit, one
+        // coalesced undo step, the dot lit beside
+        // `Undo 1`.
         let changed = if stored == 0xFF5D5D { 0x5DB2FF } else { 0xFF5D5D };
         core.set_figure_color(0, changed);
         assert_eq!(core.project.figures[0].color, changed);
         assert_eq!(
-            core.edits_since_autosave(),
-            1,
-            "the marked write counts exactly one edit"
+            core.edits_since_save(),
+            Some(1),
+            "the write counts exactly one edit since the save"
         );
-        assert_eq!(
-            undo_text(&core),
-            "Undo 0",
-            "a marked write is not an undo step"
-        );
+        assert_eq!(undo_text(&core), "Undo 1", "the write is one undo step since RM24");
+        assert_eq!(core.undo_label(), Some("Figure colour"));
         let (name, suffix) = project_parts(&core);
         assert_eq!(name, core.project.name);
         assert_eq!(suffix, " · 0:00 ●");
@@ -2367,13 +2396,14 @@ mod tests {
             project_text(&core),
             format!("{} · 0:00 ●", core.project.name)
         );
-        // A second marked write counts a second edit
-        // — the cadence the autosave threshold reads
-        // advances per write, not per snapshot.
+        // A second pick in the same gesture folds into
+        // the same step — the depth stays 1 while the
+        // edit count advances.
         core.set_figure_color(0, stored);
-        assert_eq!(core.edits_since_autosave(), 2);
-        assert_eq!(undo_text(&core), "Undo 0");
+        assert_eq!(core.edits_since_save(), Some(2));
+        assert_eq!(undo_text(&core), "Undo 1", "the fold spends no second step");
         let _ = status_strip(&core);
+        let _ = std::fs::remove_file("./project.styk.json");
     }
 
     #[test]
@@ -2386,9 +2416,10 @@ mod tests {
         // the project, `note_project_swapped` zeroes
         // both edit counters), and the segment is
         // read back on the other side: new name, new
-        // runtime, no dot — nothing of the dirty
-        // project survives in anything the strip
-        // renders from the counter.
+        // runtime — nothing of the dirty project
+        // survives. (RM24 addendum: the dot on the far
+        // side is the NEW project's own never-saved
+        // truth, not a leftover — see the assertions.)
         let mut core = EditorCore::new();
         core.project.name = "Before Swap".to_string();
         core.add_frame();
@@ -2402,13 +2433,18 @@ mod tests {
             0,
             "the swap restarts the dirty baseline"
         );
+        // RM24: nothing of the OLD project's state
+        // survives — and the swapped-in project's own
+        // truth is "never saved", so the dot is lit for
+        // the new project, not carried from the old one.
+        assert_eq!(core.save_state(), SaveState::NeverSaved);
         assert_eq!(
             project_text(&core),
-            "Untitled · 0:00",
-            "the strip reads the swapped-in project, clean"
+            "Untitled · 0:00 ●",
+            "the strip reads the swapped-in project: never saved, dot lit"
         );
         let (_, suffix) = project_parts(&core);
-        assert!(!suffix.contains('●'));
+        assert!(suffix.contains('●'));
         // And the strip builds whole over the swapped
         // core.
         let _ = status_strip(&core);
@@ -2781,15 +2817,16 @@ mod tests {
 
     #[test]
     fn project_parts_split_name_from_suffix() {
-        // Clean core: the suffix is the runtime
-        // alone, and the parts concatenate to
-        // `project_text` byte-for-byte (the pinned
-        // default-strip test below holds the whole
-        // string).
+        // Fresh core: the suffix is the runtime plus
+        // the dot (RM24: a fresh project is never
+        // saved, so its file is not current), and the
+        // parts concatenate to `project_text`
+        // byte-for-byte (the pinned default-strip test
+        // below holds the whole string).
         let core = EditorCore::new();
         let (name, suffix) = project_parts(&core);
         assert_eq!(name, core.project.name);
-        assert_eq!(suffix, " · 0:00");
+        assert_eq!(suffix, " · 0:00 ●");
         assert_eq!(format!("{name}{suffix}"), project_text(&core));
         // Dirty core: the dot rides in the SUFFIX —
         // the protected half — never in the name:
@@ -3196,7 +3233,11 @@ mod tests {
             extra_segments(&s.core, s.stroke_selected, s.particle_selected).is_empty()
         );
         let core = &s.core;
-        assert_eq!(project_text(core), "Untitled · 0:00");
+        // RM24: the default state is a never-saved
+        // project, so the project label carries the
+        // save-state dot (its floor follows the label's
+        // own est_text_width, as every segment's does).
+        assert_eq!(project_text(core), "Untitled · 0:00 ●");
         assert_eq!(frame_text(core), "Frame 1/5");
         assert_eq!(timecode(core.current, core.project.fps), "0:00.0");
         assert_eq!(format!("{} fps", fps_text(core.project.fps)), "12 fps");
@@ -3263,7 +3304,10 @@ mod tests {
         // segments take `text`, the tail takes
         // `text_secondary`, the dividers take
         // `separator`, and the rolling play segment
-        // takes the theme's brief accent.
+        // takes the theme's brief accent — deepened
+        // at this seam in light (RM25 / PL-1: the
+        // accent as ink on the light background
+        // measured 4.43, under the text bar).
         assert_eq!(d.text, dark.text);
         assert_eq!(d.tail, dark.text_secondary);
         assert_eq!(d.divider, dark.separator);
@@ -3271,7 +3315,18 @@ mod tests {
         assert_eq!(l.text, light.text);
         assert_eq!(l.tail, light.text_secondary);
         assert_eq!(l.divider, light.separator);
-        assert_eq!(l.playing, app_theme::accent(&light));
+        assert_eq!(
+            l.playing,
+            app_theme::accent(&light).mix(Color::BLACK, PLAYING_INK_LIGHT_DEEPEN)
+        );
+        // The playing ink clears the 4.5 text bar
+        // against the app background it paints on, in
+        // both appearances.
+        for (ink, t) in [(d.playing, &dark), (l.playing, &light)] {
+            let (a, b) = (ink.luminance(), t.bg.luminance());
+            let (hi, lo) = if a >= b { (a, b) } else { (b, a) };
+            assert!((hi + 0.05) / (lo + 0.05) >= 4.5);
+        }
         // Every role actually differs across the two
         // appearances — the regression this test guards
         // is a role silently pinned to one theme.
@@ -3288,7 +3343,7 @@ mod tests {
         assert_eq!(d.playing.hex(), "#6c8cffff");
         assert_eq!(l.text.hex(), "#171a21ff");
         assert_eq!(l.tail.hex(), "#5b6577ff");
-        assert_eq!(l.playing.hex(), "#4666d8ff");
+        assert_eq!(l.playing.hex(), "#405ec9ff");
         // The whole strip builds under both themes,
         // through the composer and through the
         // core-only wrapper (which resolves the theme

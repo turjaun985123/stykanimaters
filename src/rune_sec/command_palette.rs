@@ -229,6 +229,37 @@
 //!   `State` carries a sprite selection for a cycle
 //!   command to advance, so it would have been a dead
 //!   command — the Wave 10 dopesheet discipline.
+//! * Roadmap Wave 1 (RM26) made this palette v2
+//!   (PL-5) and wired it to the binding registry
+//!   (PL-4's other half): four commands appended
+//!   (`last-frame` — the first-frame command's missing
+//!   twin; `delete-key-here` — the keyframe tools
+//!   section's own delete, follow-aware through its
+//!   State wrapper; `brush-size-down` / `brush-size-up`
+//!   — the stroke inspector's `step_param` size rule).
+//!   Matching gained a keyword/synonym field per command
+//!   ([`command_keywords`] — "render" finds the Export
+//!   group, "fit" finds Frame all figures) and tokenised
+//!   multi-word queries (every token must match some
+//!   field). The 12-row cap is gone as a *listing* cap:
+//!   [`filter_commands`] returns every match and the
+//!   view renders one page of [`MAX_RESULTS`] rows that
+//!   follows the selection, so an empty query can
+//!   finally browse the whole table (Up/Down walk it,
+//!   PageUp/PageDown move a page) while the presented
+//!   tree stays exactly as tall as it always was.
+//!   Argument commands: a query of the form `frame 42`,
+//!   `go 42`, `goto 42` or `fps 30` offers one synthetic
+//!   row ([`argument_command`]) above the results.
+//!   Favourite commands can be pinned with Ctrl+P
+//!   ([`PaletteState::pins`], session-only — the
+//!   persistence twin of the recents store is
+//!   IA-RM26-4); pinned rows lead the empty-query list
+//!   under their own heading. And [`command_hint`] is
+//!   now a delegate to the keymap registry
+//!   (`keymap::BINDINGS`), which also generates the
+//!   help rows and the menu hints: one spelling, three
+//!   surfaces, no copies to drift.
 //! * [`fuzzy_score`] / [`filter_commands`] are pure and
 //!   thoroughly unit-tested below.
 //! * The view follows the Rune launcher example's field
@@ -271,8 +302,16 @@ use crate::rune_sec::icons;
 use crate::rune_sec::workspaces::Workspace;
 use crate::State;
 
-/// Maximum number of result rows the palette shows at once.
+/// The palette's page size: result rows rendered at
+/// once. Before RM26 this was also the listing cap (only
+/// 12 commands could ever be listed); the listing is
+/// uncapped now and the view renders the page of this
+/// size that contains the selection.
 pub const MAX_RESULTS: usize = 12;
+
+/// Maximum number of pinned favourite commands
+/// (Roadmap Wave 1, RM26 — PL-5's K10).
+pub const MAX_PINNED: usize = 10;
 
 /// Maximum number of recently-run commands remembered for
 /// the empty-query list's "Recent" section.
@@ -335,6 +374,17 @@ fn cmd_first_frame(s: &mut State) {
     let c = &mut s.core;
     if c.frame_count() > 0 {
         c.goto(0);
+    }
+}
+
+/// Last frame (Roadmap Wave 1, RM26 — A21 K1 noted
+/// `first-frame` existed with no last-frame twin
+/// anywhere: not in the palette, not on a key).
+fn cmd_last_frame(s: &mut State) {
+    let c = &mut s.core;
+    let n = c.frame_count();
+    if n > 0 {
+        c.goto(n - 1);
     }
 }
 
@@ -850,6 +900,14 @@ fn cmd_theme_dark(s: &mut State) {
 /// before this frame.") and the playhead does not move;
 /// on a hit it only `goto`s, like every other jump.
 fn cmd_prev_keyframe(s: &mut State) {
+    goto_prev_keyframe(s);
+}
+
+/// The previous-keyframe jump as a public shell op
+/// (Roadmap Wave 1, RM26): the palette command above and
+/// the `,` key binding (IA-RM26-1) run this one body, so
+/// the two doors can never disagree.
+pub fn goto_prev_keyframe(s: &mut State) {
     let c = &mut s.core;
     let keys = stykanimate_rs::stats::figure_keyframes(&c.project, c.selected_figure);
     match crate::rune_sec::playback_controls::prev_key(c.current, &keys) {
@@ -865,12 +923,49 @@ fn cmd_prev_keyframe(s: &mut State) {
 /// with the refusal in `camera_panel::goto_next_key`'s
 /// wording family.
 fn cmd_next_keyframe(s: &mut State) {
+    goto_next_keyframe(s);
+}
+
+/// The next-keyframe jump as a public shell op; the
+/// `.` key binding (IA-RM26-1) runs this same body —
+/// see [`goto_prev_keyframe`].
+pub fn goto_next_keyframe(s: &mut State) {
     let c = &mut s.core;
     let keys = stykanimate_rs::stats::figure_keyframes(&c.project, c.selected_figure);
     match crate::rune_sec::playback_controls::next_key(c.current, &keys) {
         Some(frame) => c.goto(frame),
         None => c.status = "No keyframe after this frame.".into(),
     }
+}
+
+/// Delete the key at the playhead (Roadmap Wave 1,
+/// RM26): the keyframe tools section's own delete —
+/// its State wrapper, so the palette command honours
+/// the section's follow-the-graph-channel mode exactly
+/// like the section's button does.
+fn cmd_delete_key_here(s: &mut State) {
+    crate::rune_sec::keyframe_tools::delete_key_here(s);
+}
+
+/// Brush size down (Roadmap Wave 1, RM26): the stroke
+/// inspector's own size rule — the nearest library
+/// preset with a smaller width becomes the active
+/// brush, exactly as the inspector's stepper does it.
+fn cmd_brush_size_down(s: &mut State) {
+    crate::rune_sec::stroke_inspector::step_param(
+        &mut s.core,
+        crate::rune_sec::stroke_inspector::Param::Size,
+        -1,
+    );
+}
+
+/// Brush size up: [`cmd_brush_size_down`] mirrored.
+fn cmd_brush_size_up(s: &mut State) {
+    crate::rune_sec::stroke_inspector::step_param(
+        &mut s.core,
+        crate::rune_sec::stroke_inspector::Param::Size,
+        1,
+    );
 }
 
 // -- Wave 12 shims (C5): the style domain. Until this
@@ -1393,6 +1488,7 @@ pub static COMMANDS: &[Command] = &[
     Command { key: "prev", title: "Previous frame", group: "Transport", run: cmd_prev_frame },
     Command { key: "next", title: "Next frame", group: "Transport", run: cmd_next_frame },
     Command { key: "first-frame", title: "Go to first frame", group: "Transport", run: cmd_first_frame },
+    Command { key: "last-frame", title: "Go to last frame", group: "Transport", run: cmd_last_frame },
     Command { key: "restart-playback", title: "Restart playback", group: "Transport", run: cmd_restart_playback },
     Command { key: "toggle-loop-playback", title: "Toggle loop playback", group: "Transport", run: cmd_toggle_loop_playback },
     // -- Frames ---------------------------------------------------
@@ -1449,6 +1545,7 @@ pub static COMMANDS: &[Command] = &[
     // -- Graph ----------------------------------------------------
     Command { key: "key-graph-angle", title: "Key graph angle", group: "Graph", run: cmd_key_graph_angle },
     Command { key: "key-all-channels", title: "Key all channels here", group: "Graph", run: cmd_key_all_channels },
+    Command { key: "delete-key-here", title: "Delete key at playhead", group: "Graph", run: cmd_delete_key_here },
     Command { key: "clear-graph", title: "Clear graph curves", group: "Graph", run: cmd_clear_graph },
     // -- View -----------------------------------------------------
     Command { key: "onion", title: "Toggle onion skin", group: "View", run: cmd_toggle_onion },
@@ -1457,6 +1554,8 @@ pub static COMMANDS: &[Command] = &[
     Command { key: "cycle-easing", title: "Cycle easing", group: "View", run: cmd_cycle_easing },
     // -- Draw -----------------------------------------------------
     Command { key: "cycle-brush", title: "Cycle brush", group: "Draw", run: cmd_cycle_brush },
+    Command { key: "brush-size-down", title: "Brush size down", group: "Draw", run: cmd_brush_size_down },
+    Command { key: "brush-size-up", title: "Brush size up", group: "Draw", run: cmd_brush_size_up },
     Command { key: "draw-tool", title: "Toggle brush / eraser", group: "Draw", run: cmd_toggle_draw_tool },
     Command { key: "clear-drawings", title: "Clear frame drawings", group: "Draw", run: cmd_clear_frame_drawings },
     Command { key: "mirror-strokes", title: "Mirror strokes horizontally", group: "Draw", run: cmd_mirror_strokes_x },
@@ -1608,25 +1707,108 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
     }
 }
 
-/// A command's score for a query: the best of its title, key
-/// and group fields, so "add-frame" finds *Add frame* (via the
-/// key), "export" lists the Export group, and plain words
-/// match titles.
-pub fn command_score(query: &str, cmd: &Command) -> Option<i32> {
-    [cmd.title, cmd.key, cmd.group]
+/// The synonym / keyword field for a command (Roadmap
+/// Wave 1, RM26 — PL-5's K9): the professional vocabulary
+/// the command answers to beyond its own title, as one
+/// space-separated string scored like any other field.
+/// This is a lookup table beside the command table (the
+/// `command_hint` pattern), not a fourth column on every
+/// row: most commands need no synonyms, and a sparse
+/// table keeps the ones that do honest and reviewable.
+/// The seed set covers the misses A21 verified against
+/// the table ("render", "fit", "new project", "save as"
+/// found nothing) plus the vocabulary the PL-4 bindings
+/// made common. Commands not listed have no keywords.
+pub fn command_keywords(key: &str) -> &'static str {
+    match key {
+        // Export is "render" in every other tool.
+        "export-mp4" | "export-gif" | "export-png" | "export-webm"
+        | "export-piv" | "export-stk" => "render movie video",
+        "cam-frame-all" => "fit frame all zoom fit view",
+        "cam-centre" => "center centre focus selection",
+        "save-copy" => "save as copy duplicate file",
+        "save-named" => "save as name file",
+        "save" => "write file quicksave",
+        "load" => "reload reopen file",
+        "open-project" => "open file load project",
+        "inbetween" => "tween interpolate between",
+        "add-frame" => "new frame insert",
+        "del-frame" => "remove frame delete",
+        "dup-frame" => "duplicate frame copy",
+        "copy-frame" => "copy frame clipboard",
+        "paste-frame" => "paste frame clipboard",
+        "first-frame" => "start beginning home",
+        "last-frame" => "end final",
+        "prev-keyframe" => "previous key jump",
+        "next-keyframe" => "next key jump",
+        "key-all-channels" => "insert key keyframe pose",
+        "key-graph-angle" => "insert key keyframe angle",
+        "delete-key-here" => "delete remove key keyframe",
+        "clear-graph" => "delete remove all keys curves",
+        "undo" => "revert back",
+        "redo" => "reapply forward",
+        "play" => "play pause space playback",
+        "toggle-loop-playback" => "loop repeat playback",
+        "restart-playback" => "replay restart beginning",
+        "onion" => "onion skin ghost",
+        "draw-mode" => "draw paint sketch brush mode",
+        "cycle-brush" => "brush next swap",
+        "brush-size-down" => "brush smaller size [",
+        "brush-size-up" => "brush bigger larger size ]",
+        "delete-last-stroke" => "undo stroke remove",
+        "mirror-figure" => "flip mirror horizontal",
+        "cam-zoom-in" => "zoom in magnify camera",
+        "cam-zoom-out" => "zoom out camera",
+        "toggle-live-mcp" => "mcp live control server",
+        "theme-light" => "theme light mode appearance",
+        "theme-dark" => "theme dark mode appearance",
+        "fps-up" => "fps frame rate faster",
+        "fps-down" => "fps frame rate slower",
+        _ => "",
+    }
+}
+
+/// One token's score against a command: the best of its
+/// title, key, group and keyword fields.
+fn token_score(token: &str, cmd: &Command) -> Option<i32> {
+    [cmd.title, cmd.key, cmd.group, command_keywords(cmd.key)]
         .iter()
-        .filter_map(|field| fuzzy_score(query, field))
+        .filter_map(|field| fuzzy_score(token, field))
         .max()
 }
 
+/// A command's score for a query. A single-token query is
+/// the historical behaviour: the best field score, so
+/// "add-frame" finds *Add frame* (via the key) and
+/// "export" lists the Export group. A multi-token query
+/// (Roadmap Wave 1, RM26 — PL-5's K9) is tokenised:
+/// EVERY token must match some field, and the score is
+/// the sum of the per-token bests — "export mp4" ranks
+/// the MP4 export above the rest of its group, and a
+/// token that matches nothing anywhere sinks the
+/// command instead of being silently ignored.
+pub fn command_score(query: &str, cmd: &Command) -> Option<i32> {
+    let tokens: Vec<&str> = query.split_whitespace().collect();
+    if tokens.len() <= 1 {
+        return token_score(query, cmd);
+    }
+    let mut total = 0i32;
+    for token in tokens {
+        total += token_score(token, cmd)?;
+    }
+    Some(total)
+}
+
 /// The filtered, ranked command indices for a query: best
-/// score first, table order breaking ties, capped at
-/// [`MAX_RESULTS`]. An empty (or whitespace) query yields the
-/// first `MAX_RESULTS` commands in table order.
+/// score first, table order breaking ties, EVERY match
+/// returned (Roadmap Wave 1, RM26: the 12-row listing
+/// cap is gone — the view pages through the full list,
+/// see [`page_window`]). An empty (or whitespace) query
+/// yields the whole table in table order.
 pub fn filter_commands(query: &str) -> Vec<usize> {
     let query = query.trim();
     if query.is_empty() {
-        return (0..COMMANDS.len()).take(MAX_RESULTS).collect();
+        return (0..COMMANDS.len()).collect();
     }
     let mut scored: Vec<(i32, usize)> = COMMANDS
         .iter()
@@ -1634,7 +1816,22 @@ pub fn filter_commands(query: &str) -> Vec<usize> {
         .filter_map(|(i, cmd)| command_score(query, cmd).map(|s| (s, i)))
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    scored.into_iter().map(|(_, i)| i).take(MAX_RESULTS).collect()
+    scored.into_iter().map(|(_, i)| i).collect()
+}
+
+/// The rendered page of a list of `len` rows: the
+/// [`MAX_RESULTS`]-sized window containing `selected`,
+/// as (first row, one past the last row). Pages are
+/// aligned (row 0, 12, 24, …), so the window is a pure
+/// function of the selection — no scroll state exists
+/// to desynchronise.
+pub fn page_window(selected: usize, len: usize) -> (usize, usize) {
+    if len == 0 {
+        return (0, 0);
+    }
+    let selected = selected.min(len - 1);
+    let start = (selected / MAX_RESULTS) * MAX_RESULTS;
+    (start, (start + MAX_RESULTS).min(len))
 }
 
 // ----------------------------------------------------------------
@@ -1654,20 +1851,44 @@ pub fn push_recent(recent: &mut Vec<&'static str>, key: &'static str) {
 
 /// The rows the palette actually lists, as table indices,
 /// plus how many *leading* rows are recents (the view puts
-/// a "Recent" heading over them).
-///
-/// An empty (or whitespace) query leads with the recents —
-/// resolved to table indices in most-recent-first order,
-/// unknown keys skipped, never repeated — followed by the
-/// plain table-order list ([`filter_commands`] with an
-/// empty query) with the recents removed, the whole thing
-/// capped at [`MAX_RESULTS`]. A non-empty query defers to
-/// [`filter_commands`] unchanged and reports 0 recents.
+/// a "Recent" heading over them). The no-pins form of
+/// [`display_commands_full`].
 pub fn display_commands(query: &str, recent: &[&'static str]) -> (Vec<usize>, usize) {
+    let (rows, _, recent_rows) = display_commands_full(query, recent, &[]);
+    (rows, recent_rows)
+}
+
+/// The full listing composition (Roadmap Wave 1, RM26 —
+/// PL-5's K9/K10): the rows, how many leading rows are
+/// pinned favourites, and how many after them are
+/// recents (the view puts a heading over each run).
+///
+/// An empty (or whitespace) query leads with the pins —
+/// resolved to table indices in pin order, unknown keys
+/// skipped, never repeated — then the recents the same
+/// way, then the plain table-order list
+/// ([`filter_commands`] with an empty query) with both
+/// removed. The whole table is listed; the view pages
+/// through it (see [`page_window`]). A non-empty query
+/// defers to [`filter_commands`] unchanged and reports
+/// 0 pins and 0 recents: search is search.
+pub fn display_commands_full(
+    query: &str,
+    recent: &[&'static str],
+    pins: &[&'static str],
+) -> (Vec<usize>, usize, usize) {
     if !query.trim().is_empty() {
-        return (filter_commands(query), 0);
+        return (filter_commands(query), 0, 0);
     }
     let mut rows: Vec<usize> = Vec::new();
+    for key in pins {
+        if let Some(i) = COMMANDS.iter().position(|c| c.key == *key) {
+            if !rows.contains(&i) {
+                rows.push(i);
+            }
+        }
+    }
+    let pin_rows = rows.len();
     for key in recent {
         if let Some(i) = COMMANDS.iter().position(|c| c.key == *key) {
             if !rows.contains(&i) {
@@ -1675,15 +1896,30 @@ pub fn display_commands(query: &str, recent: &[&'static str]) -> (Vec<usize>, us
             }
         }
     }
-    let recent_rows = rows.len();
+    let recent_rows = rows.len() - pin_rows;
     for i in filter_commands("") {
         if !rows.contains(&i) {
             rows.push(i);
         }
     }
-    rows.truncate(MAX_RESULTS);
-    let recent_rows = recent_rows.min(rows.len());
-    (rows, recent_rows)
+    (rows, pin_rows, recent_rows)
+}
+
+/// Pin or unpin a favourite command (Roadmap Wave 1,
+/// RM26 — PL-5's K10): pinning inserts at the front (the
+/// most recently pinned leads its section), unpinning
+/// removes. The list is capped at [`MAX_PINNED`] with
+/// the oldest pins falling off the end. Returns whether
+/// the command is pinned after the call.
+pub fn toggle_pin(pins: &mut Vec<&'static str>, key: &'static str) -> bool {
+    if pins.contains(&key) {
+        pins.retain(|&k| k != key);
+        false
+    } else {
+        pins.insert(0, key);
+        pins.truncate(MAX_PINNED);
+        true
+    }
 }
 
 // ----------------------------------------------------------------
@@ -1794,11 +2030,119 @@ fn seed_recents_cache(keys: &[&'static str]) {
     RECENTS_CACHE.with(|cache| *cache.borrow_mut() = Some(keys.to_vec()));
 }
 
-/// How many rows the palette currently lists for `s`
-/// (recents-aware): the length keyboard navigation wraps
-/// within.
+// ----------------------------------------------------------------
+// Argument commands (Roadmap Wave 1, RM26 — PL-5's K10)
+// ----------------------------------------------------------------
+
+/// A command the user typed an argument for, parsed from
+/// the query: `frame 42` / `go 42` / `goto 42` jumps the
+/// playhead, `fps 30` sets the frame rate. The frame
+/// number is the one the UI shows (1-based — the graph
+/// readout's `frame {current + 1}` convention); it is
+/// stored zero-based here.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ArgCommand {
+    GoToFrame(usize),
+    SetFps(f32),
+}
+
+/// Parse the query as an argument command. The shape is
+/// strict — a head word and exactly one numeric tail —
+/// so ordinary searches never trigger it: a bare number
+/// alone is a search, not a command, and a query with
+/// extra words falls back to the ranked list.
+pub fn argument_command(query: &str) -> Option<ArgCommand> {
+    let mut parts = query.trim().split_whitespace();
+    let head = parts.next()?.to_lowercase();
+    let tail = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    match head.as_str() {
+        "frame" | "go" | "goto" => tail
+            .parse::<usize>()
+            .ok()
+            .map(|n| ArgCommand::GoToFrame(n.saturating_sub(1))),
+        "fps" => tail
+            .parse::<f32>()
+            .ok()
+            .filter(|v| v.is_finite())
+            .map(ArgCommand::SetFps),
+        _ => None,
+    }
+}
+
+/// The argument row's title, in the words the run will
+/// make true (the frame shown 1-based, the rate in the
+/// header meta's formatting: whole rates without a
+/// fraction, others with one decimal).
+pub fn arg_title(arg: ArgCommand) -> String {
+    match arg {
+        ArgCommand::GoToFrame(idx) => format!("Go to frame {}", idx + 1),
+        ArgCommand::SetFps(f) => {
+            if f.fract() == 0.0 {
+                format!("Set frame rate to {} fps", f as i64)
+            } else {
+                format!("Set frame rate to {f:.1} fps")
+            }
+        }
+    }
+}
+
+/// The heading word on the argument row's right edge:
+/// the family the run belongs to (the goto is transport,
+/// the rate is a Frames setting).
+fn arg_group(arg: ArgCommand) -> &'static str {
+    match arg {
+        ArgCommand::GoToFrame(_) => "Transport",
+        ArgCommand::SetFps(_) => "Frames",
+    }
+}
+
+/// Run an argument command. The goto clamps to the last
+/// frame (and stands down on an empty timeline, like
+/// `cmd_first_frame`); the rate goes through the core's
+/// deliberate setter, which clamps to 1..=60 and takes
+/// its own undo step.
+fn run_argument(s: &mut State, arg: ArgCommand) {
+    let c = &mut s.core;
+    match arg {
+        ArgCommand::GoToFrame(idx) => {
+            let n = c.frame_count();
+            if n > 0 {
+                c.goto(idx.min(n - 1));
+            }
+        }
+        ArgCommand::SetFps(f) => c.set_project_fps(f),
+    }
+}
+
+/// How many rows the palette currently lists for `s`:
+/// the composed listing (pins-aware) plus one for the
+/// argument row when the query parses as one — the
+/// length keyboard navigation wraps within, and the
+/// index space the view renders: row 0 is the argument
+/// row when it exists, the listing follows.
 fn listed_len(s: &State) -> usize {
-    display_commands(&s.palette.query.text, &s.palette.recent).0.len()
+    let (rows, _, _) =
+        display_commands_full(&s.palette.query.text, &s.palette.recent, &s.palette.pins);
+    rows.len() + argument_command(&s.palette.query.text).is_some() as usize
+}
+
+/// Toggle the pin on the currently selected command
+/// (Ctrl+P while the palette is open). The argument row
+/// has no command key and cannot be pinned.
+fn toggle_selected_pin(s: &mut State) {
+    let (rows, _, _) =
+        display_commands_full(&s.palette.query.text, &s.palette.recent, &s.palette.pins);
+    let offset = argument_command(&s.palette.query.text).is_some() as usize;
+    let sel = clamped_selected(s.palette.selected, listed_len(s));
+    if offset == 1 && sel == 0 {
+        return;
+    }
+    if let Some(&ci) = rows.get(sel - offset) {
+        toggle_pin(&mut s.palette.pins, COMMANDS[ci].key);
+    }
 }
 
 /// Move a selection index by `delta` within `len` rows,
@@ -1843,6 +2187,14 @@ pub struct PaletteState {
     /// [`record_recent`] — so it survives restarts as
     /// well as open/close cycles.
     pub recent: Vec<&'static str>,
+    /// Keys of the pinned favourite commands, most
+    /// recently pinned first, capped at [`MAX_PINNED`]
+    /// (Roadmap Wave 1, RM26 — PL-5's K10). Session-only
+    /// in this wave: the recents store's persistence
+    /// twin for pins is IA-RM26-4, so a pin survives
+    /// open/close cycles but not a restart — the field's
+    /// docs say so rather than implying more.
+    pub pins: Vec<&'static str>,
 }
 
 impl PaletteState {
@@ -1852,6 +2204,7 @@ impl PaletteState {
             query: TextEdit::new(""),
             selected: 0,
             recent: Vec::new(),
+            pins: Vec::new(),
         }
     }
 }
@@ -1887,15 +2240,29 @@ pub fn close_palette(s: &mut State) {
     s.palette.query.focused = false;
 }
 
-/// Run the currently highlighted command against the shell
-/// state and close the palette. A stale selection (query
-/// changed under it) is clamped first; an empty result
-/// list just closes. The run is recorded in the recents
-/// list (and persisted — see [`record_recent`]).
+/// Run the currently highlighted row against the shell
+/// state and close the palette. Row 0 is the argument
+/// row when the query parses as one (see
+/// [`argument_command`]) — its run is not recorded in
+/// the recents (recents hold command keys, and an
+/// argument has none). A stale selection (query changed
+/// under it) is clamped first; an empty result list just
+/// closes. Command runs are recorded in the recents list
+/// (and persisted — see [`record_recent`]).
 pub fn run_selected(s: &mut State) {
-    let (results, _) = display_commands(&s.palette.query.text, &s.palette.recent);
-    let row = clamped_selected(s.palette.selected, results.len());
-    if let Some(&ci) = results.get(row) {
+    let arg = argument_command(&s.palette.query.text);
+    let sel = clamped_selected(s.palette.selected, listed_len(s));
+    if let Some(arg) = arg {
+        if sel == 0 {
+            run_argument(s, arg);
+            close_palette(s);
+            return;
+        }
+    }
+    let offset = arg.is_some() as usize;
+    let (results, _, _) =
+        display_commands_full(&s.palette.query.text, &s.palette.recent, &s.palette.pins);
+    if let Some(&ci) = results.get(sel - offset) {
         (COMMANDS[ci].run)(s);
         record_recent(&mut s.palette.recent, COMMANDS[ci].key);
     }
@@ -1916,10 +2283,12 @@ fn run_command(s: &mut State, ci: usize) {
 /// App-level key routing for the palette, for the integrator
 /// to call at the top of `AppSpec::on_key`: Ctrl+K opens it
 /// while closed; while open, Down/Up move the highlight,
-/// Enter runs the selection and Escape closes. Returns true
-/// when the key was consumed. (Field-focused typing is
-/// handled by the field's own handlers in [`palette_view`];
-/// this covers the case where focus sits elsewhere.)
+/// PageDown/PageUp move it a page, Ctrl+P pins or unpins
+/// the highlighted command, Enter runs the selection and
+/// Escape closes. Returns true when the key was consumed.
+/// (Field-focused typing is handled by the field's own
+/// handlers in [`palette_view`]; this covers the case
+/// where focus sits elsewhere.)
 pub fn palette_handle_key(s: &mut State, ev: &KeyEvent) -> bool {
     if !s.palette.open {
         if ev.is_command('k') {
@@ -1927,6 +2296,10 @@ pub fn palette_handle_key(s: &mut State, ev: &KeyEvent) -> bool {
             return true;
         }
         return false;
+    }
+    if ev.is_command('p') {
+        toggle_selected_pin(s);
+        return true;
     }
     match ev.key {
         Key::Down => {
@@ -1937,6 +2310,16 @@ pub fn palette_handle_key(s: &mut State, ev: &KeyEvent) -> bool {
         Key::Up => {
             let len = listed_len(s);
             s.palette.selected = wrap_move(s.palette.selected, len, -1);
+            true
+        }
+        Key::PageDown => {
+            let len = listed_len(s);
+            s.palette.selected = wrap_move(s.palette.selected, len, MAX_RESULTS as i32);
+            true
+        }
+        Key::PageUp => {
+            let len = listed_len(s);
+            s.palette.selected = wrap_move(s.palette.selected, len, -(MAX_RESULTS as i32));
             true
         }
         Key::Enter => {
@@ -1952,10 +2335,16 @@ pub fn palette_handle_key(s: &mut State, ev: &KeyEvent) -> bool {
 }
 
 /// The query field's own key handler (launcher pattern):
-/// Down/Up move the highlight, Escape closes. Enter is *not*
-/// handled here — a single-line field's plain Return routes
-/// to `on_submit`, which runs the selection.
+/// Down/Up move the highlight, PageDown/PageUp move it a
+/// page, Ctrl+P toggles the highlighted command's pin,
+/// Escape closes. Enter is *not* handled here — a
+/// single-line field's plain Return routes to
+/// `on_submit`, which runs the selection.
 fn palette_field_key(s: &mut State, ev: &KeyEvent) -> bool {
+    if ev.is_command('p') {
+        toggle_selected_pin(s);
+        return true;
+    }
     match ev.key {
         Key::Down => {
             let len = listed_len(s);
@@ -1967,6 +2356,16 @@ fn palette_field_key(s: &mut State, ev: &KeyEvent) -> bool {
             s.palette.selected = wrap_move(s.palette.selected, len, -1);
             true
         }
+        Key::PageDown => {
+            let len = listed_len(s);
+            s.palette.selected = wrap_move(s.palette.selected, len, MAX_RESULTS as i32);
+            true
+        }
+        Key::PageUp => {
+            let len = listed_len(s);
+            s.palette.selected = wrap_move(s.palette.selected, len, -(MAX_RESULTS as i32));
+            true
+        }
         Key::Escape => {
             close_palette(s);
             true
@@ -1976,55 +2375,65 @@ fn palette_field_key(s: &mut State, ev: &KeyEvent) -> bool {
 }
 
 /// The keyboard shortcut a command duplicates, if any
-/// (Phase N, P14 §4.4): the 17 commands whose action is
+/// (Phase N, P14 §4.4): the commands whose action is
 /// also bound to a real key in `main.rs::on_key`, so the
 /// result row can teach the key at the moment of
 /// discovery via a trailing `design::kbd` chip. Keyed by
 /// *command* key — a different namespace from
 /// `menus::shortcut_hint`'s menu-item keys, so the two
-/// tables stay separate. Spellings mirror
-/// `help_panel::shortcut_rows` exactly; the drift-guard
-/// test below fails if a spelling stops naming a real
-/// binding there. Commands not listed here have no key
-/// binding and must not grow a chip — no invented hints.
+/// tables stay separate. Commands with no entry have no
+/// key binding and must not grow a chip — no invented
+/// hints.
+///
+/// Roadmap Wave 1 (RM26, PL-5): the table itself now
+/// lives in the binding registry (`keymap::BINDINGS`),
+/// which also generates the help rows and the menu
+/// hints — this fn is a delegate, so the three surfaces
+/// share one spelling by construction. PL-4 raised the
+/// hinted count from 17 to 32 (the transport,
+/// File/Edit, keyframing and Draw clusters).
 fn command_hint(key: &str) -> Option<&'static str> {
-    Some(match key {
-        "play" => "Space",
-        "prev" => "Left",
-        "next" => "Right",
-        "add-frame" => "N",
-        "inbetween" => "I",
-        "undo" => "Ctrl+Z",
-        "redo" => "Ctrl+Shift+Z",
-        "save" => "Ctrl+S",
-        "onion" => "O",
-        "go-animate" => "Alt+1",
-        "go-draw" => "Alt+2",
-        "go-graph" => "Alt+3",
-        "go-effects" => "Alt+4",
-        "go-audio" => "Alt+5",
-        "go-build3d" => "Alt+6",
-        "go-export" => "Alt+7",
-        "go-home" => "Alt+8",
-        _ => return None,
-    })
+    crate::rune_sec::keymap::command_hint(key)
 }
 
 // ----------------------------------------------------------------
 // View
 // ----------------------------------------------------------------
 
+/// One section heading row of the results list
+/// ("Pinned" / "Recent" / "All commands").
+fn heading_row(label: &'static str, t: &Theme) -> El {
+    row()
+        .h(22.0)
+        .px(8.0)
+        .center_y()
+        .child(design::section_label(label, t))
+}
+
 /// The palette panel: a query field over a ranked result list
 /// (title left, group right; the highlighted row is
-/// accent-filled). With an empty query the recents lead under
-/// a "Recent" heading, followed by the full list under "All
-/// commands". Self-contained — the integrator renders it
-/// while `state.palette.open`, typically as an overlay above
+/// accent-filled). With an empty query the pins lead under
+/// a "Pinned" heading, the recents follow under "Recent",
+/// and the full list closes under "All commands"; an
+/// argument query leads with its argument row. Only the
+/// page containing the selection is rendered (RM26).
+/// Self-contained — the integrator renders it while
+/// `state.palette.open`, typically as an overlay above
 /// the main column.
 pub fn palette_view(s: &State, t: &Theme) -> El {
     let accent = tok::accent(0, true);
-    let (results, recent_rows) = display_commands(&s.palette.query.text, &s.palette.recent);
-    let selected = clamped_selected(s.palette.selected, results.len());
+    // Roadmap Wave 1 (RM26): the listing is the full
+    // composition (argument row + pins + recents + every
+    // match); the view renders the one page of it that
+    // contains the selection (see `page_window`), so the
+    // presented tree stays a page tall however long the
+    // listing grows.
+    let arg = argument_command(&s.palette.query.text);
+    let offset = arg.is_some() as usize;
+    let (results, pin_rows, recent_rows) =
+        display_commands_full(&s.palette.query.text, &s.palette.recent, &s.palette.pins);
+    let total = results.len() + offset;
+    let selected = clamped_selected(s.palette.selected, total);
 
     let field = design::text_field(&s.palette.query, type_::BODY.lh(26.0), s.palette.query.focused, t)
         .key("palette-query")
@@ -2061,7 +2470,7 @@ pub fn palette_view(s: &State, t: &Theme) -> El {
                 .child(field),
         );
 
-    if results.is_empty() {
+    if total == 0 {
         panel = panel.child(design::empty_state(
             "magnifying-glass",
             "No commands match",
@@ -2069,27 +2478,68 @@ pub fn palette_view(s: &State, t: &Theme) -> El {
         ));
     } else {
         let mut list = col().padding(6.0).gap(2.0);
-        for (row_i, &ci) in results.iter().enumerate() {
-            if recent_rows > 0 && row_i == 0 {
-                list = list.child(
-                    row()
-                        .h(22.0)
-                        .px(8.0)
-                        .center_y()
-                        .child(design::section_label("Recent", t)),
-                );
+        let (win_start, win_end) = page_window(selected, total);
+        for g in win_start..win_end {
+            // Section headings, printed when their
+            // boundary row falls inside this page: pins
+            // lead, recents follow, the rest is the full
+            // list (RM26 generalised the pre-existing
+            // Recent / All commands pair).
+            if g >= offset {
+                let d = g - offset;
+                let heading = if d == 0 && pin_rows > 0 {
+                    Some("Pinned")
+                } else if d == 0 && recent_rows > 0 {
+                    Some("Recent")
+                } else if d == pin_rows && pin_rows > 0 && recent_rows > 0 {
+                    Some("Recent")
+                } else if d == pin_rows + recent_rows && (pin_rows > 0 || recent_rows > 0) {
+                    Some("All commands")
+                } else {
+                    None
+                };
+                if let Some(label) = heading {
+                    list = list.child(heading_row(label, t));
+                }
             }
-            if recent_rows > 0 && row_i == recent_rows {
-                list = list.child(
-                    row()
-                        .h(22.0)
-                        .px(8.0)
-                        .center_y()
-                        .child(design::section_label("All commands", t)),
-                );
+            if g == 0 {
+                if let Some(arg) = arg {
+                    // The argument row (RM26): the typed
+                    // command itself, above every result.
+                    let on = g == selected;
+                    list = list.child(
+                        row()
+                            .key("cmd-arg")
+                            .h(34.0)
+                            .px(8.0)
+                            .radius(8.0)
+                            .center_y()
+                            .gap(8.0)
+                            .fill(if on { accent.alpha(0.85) } else { Color::TRANSPARENT })
+                            .hover(if on { accent.alpha(0.85) } else { t.control_track })
+                            .press(if on { accent } else { t.control_off })
+                            .on_press(move |s: &mut State| {
+                                run_argument(s, arg);
+                                close_palette(s);
+                            })
+                            .child(
+                                text(arg_title(arg))
+                                    .font(type_::BODY)
+                                    .color(if on { Color::WHITE } else { t.text })
+                                    .grow(1.0),
+                            )
+                            .child(
+                                text(arg_group(arg))
+                                    .font(type_::LABEL)
+                                    .color(if on { Color::WHITE } else { t.text_secondary }),
+                            ),
+                    );
+                    continue;
+                }
             }
+            let ci = results[g - offset];
             let cmd = &COMMANDS[ci];
-            let on = row_i == selected;
+            let on = g == selected;
             let mut result_row = row()
                 .key(format!("cmd-{}", cmd.key))
                 .h(34.0)
@@ -2118,28 +2568,51 @@ pub fn palette_view(s: &State, t: &Theme) -> El {
                         .color(if on { Color::WHITE } else { t.text_secondary }),
                 );
             if let Some(hint) = command_hint(cmd.key) {
-                result_row = result_row.child(design::kbd(hint, t));
+                // RM25 (PL-1): on the selected row the
+                // chip sits on the accent fill, where
+                // the plain chip measures ~1.18:1 — it
+                // takes the on-accent keycap variant
+                // (5.12 dark / 5.15 light on the row).
+                result_row = result_row.child(if on {
+                    design::kbd_on_accent(hint, t)
+                } else {
+                    design::kbd(hint, t)
+                });
             }
             list = list.child(result_row);
         }
         panel = panel.child(el().h(1.0).w_full().fill(t.separator)).child(list);
     }
 
-    panel.child(
-        row()
-            .h(26.0)
-            .px(16.0)
-            .gap(6.0)
-            .center_y()
-            .child(design::kbd("↑↓", t))
-            .child(text("navigate").font(type_::LABEL).color(t.text_secondary))
+    let mut footer = row()
+        .h(26.0)
+        .px(16.0)
+        .gap(6.0)
+        .center_y()
+        .child(design::kbd("↑↓", t))
+        .child(text("navigate").font(type_::LABEL).color(t.text_secondary))
+        .child(text("·").font(type_::LABEL).color(t.text_secondary))
+        .child(design::kbd("Enter", t))
+        .child(text("run").font(type_::LABEL).color(t.text_secondary))
+        .child(text("·").font(type_::LABEL).color(t.text_secondary))
+        .child(design::kbd("Ctrl+P", t))
+        .child(text("pin").font(type_::LABEL).color(t.text_secondary))
+        .child(text("·").font(type_::LABEL).color(t.text_secondary))
+        .child(design::kbd("Esc", t))
+        .child(text("close").font(type_::LABEL).color(t.text_secondary));
+    if total > 0 {
+        // The position readout (RM26): the listing is
+        // pageable now, so the footer says where in it
+        // the highlight stands.
+        footer = footer
             .child(text("·").font(type_::LABEL).color(t.text_secondary))
-            .child(design::kbd("Enter", t))
-            .child(text("run").font(type_::LABEL).color(t.text_secondary))
-            .child(text("·").font(type_::LABEL).color(t.text_secondary))
-            .child(design::kbd("Esc", t))
-            .child(text("close").font(type_::LABEL).color(t.text_secondary)),
-    )
+            .child(
+                text(format!("{} / {}", selected + 1, total))
+                    .font(type_::LABEL)
+                    .color(t.text_secondary),
+            );
+    }
+    panel.child(footer)
 }
 
 #[cfg(test)]
@@ -2232,8 +2705,13 @@ mod tests {
         // of the `import_layered_set` MCP tool over Y5's
         // layered-set importer: the shim resolves the set
         // staged in ./import and forwards to the same
-        // `import_layered_folder` entry the tool calls).
-        assert_eq!(total, 135, "palette should cover 135 commands, has {total}");
+        // `import_layered_folder` entry the tool calls),
+        // +4 in Roadmap Wave 1 (RM26 — last-frame, the
+        // first-frame command's missing twin;
+        // delete-key-here, the keyframe tools section's
+        // own delete; brush-size-down / brush-size-up,
+        // the stroke inspector's size steppers).
+        assert_eq!(total, 139, "palette should cover 139 commands, has {total}");
         for c in COMMANDS {
             assert!(!c.title.is_empty() && !c.group.is_empty(), "empty field on {}", c.key);
         }
@@ -3015,7 +3493,11 @@ mod tests {
 
     /// The full hint table, pinned: exactly these 17
     /// commands duplicate a real key binding.
-    const EXPECTED_HINTS: [(&str, &str); 17] = [
+    // Roadmap Wave 1 (RM26): the table is read from the
+    // keymap registry now — this pin guards the registry
+    // against the palette's expectations (17 pairs
+    // through Phase N, +15 from PL-4's clusters).
+    const EXPECTED_HINTS: [(&str, &str); 32] = [
         ("play", "Space"),
         ("prev", "Left"),
         ("next", "Right"),
@@ -3033,6 +3515,21 @@ mod tests {
         ("go-build3d", "Alt+6"),
         ("go-export", "Alt+7"),
         ("go-home", "Alt+8"),
+        ("first-frame", "Home"),
+        ("last-frame", "End"),
+        ("prev-keyframe", ","),
+        ("next-keyframe", "."),
+        ("copy-frame", "Ctrl+C"),
+        ("paste-frame", "Ctrl+V"),
+        ("dup-frame", "Ctrl+D"),
+        ("save-copy", "Ctrl+Shift+S"),
+        ("open-project", "Ctrl+O"),
+        ("key-all-channels", "K"),
+        ("delete-key-here", "Alt+K"),
+        ("draw-mode", "B"),
+        ("brush-size-down", "["),
+        ("brush-size-up", "]"),
+        ("cycle-brush", "Shift+B"),
     ];
 
     #[test]
@@ -3118,10 +3615,13 @@ mod tests {
     // -- filter_commands ----------------------------------------
 
     #[test]
-    fn empty_query_lists_table_order_capped() {
+    fn empty_query_lists_the_whole_table_in_order() {
+        // RM26: the listing is uncapped (the view pages
+        // through it) — an empty query yields every
+        // command in table order.
         let got = filter_commands("");
-        assert_eq!(got.len(), MAX_RESULTS);
-        assert_eq!(got, (0..MAX_RESULTS).collect::<Vec<_>>());
+        assert_eq!(got.len(), COMMANDS.len());
+        assert_eq!(got, (0..COMMANDS.len()).collect::<Vec<_>>());
         assert_eq!(filter_commands("   "), got);
     }
 
@@ -3160,7 +3660,7 @@ mod tests {
         assert!(got.iter().all(|&i| {
             COMMANDS[i].group == "Export" || COMMANDS[i].key == "go-export"
         }));
-        assert_eq!(got.len(), (exports.len() + 1).min(MAX_RESULTS));
+        assert_eq!(got.len(), exports.len() + 1);
     }
 
     #[test]
@@ -3169,9 +3669,16 @@ mod tests {
     }
 
     #[test]
-    fn results_are_capped_and_score_ordered() {
+    fn results_are_score_ordered_without_a_cap() {
+        // RM26: every match is returned (the view pages),
+        // still best score first.
         let got = filter_commands("e");
-        assert_eq!(got.len(), MAX_RESULTS);
+        let matches = COMMANDS
+            .iter()
+            .filter(|c| command_score("e", c).is_some())
+            .count();
+        assert_eq!(got.len(), matches);
+        assert!(got.len() > MAX_RESULTS, "the old cap would have hidden rows");
         let scores: Vec<i32> = got
             .iter()
             .map(|&i| command_score("e", &COMMANDS[i]).unwrap())
@@ -3309,7 +3816,7 @@ mod tests {
         assert_eq!(rows[0], idx_of("export-mp4"));
         assert_eq!(rows[1], idx_of("undo"));
         assert_eq!(rows[2], idx_of("play"));
-        assert_eq!(rows.len(), MAX_RESULTS);
+        assert_eq!(rows.len(), COMMANDS.len());
         // No command appears twice.
         let mut deduped = rows.clone();
         deduped.sort_unstable();
@@ -3429,6 +3936,150 @@ mod tests {
     /// presented-tree proof is the headless `palette-open`
     /// scene's job.
     #[test]
+    // -- RM26: palette v2 + the registry -------------------
+
+    #[test]
+    fn keywords_find_the_pro_vocabulary() {
+        // A21's verified misses, now found: "render" lists
+        // the export family, "fit" finds Frame all
+        // figures, "tween" finds the inbetween, "save as"
+        // leads with the copy.
+        let render = filter_commands("render");
+        assert!(render.contains(&idx_of("export-mp4")), "render: {render:?}");
+        assert_eq!(filter_commands("fit")[0], idx_of("cam-frame-all"));
+        assert_eq!(filter_commands("tween")[0], idx_of("inbetween"));
+        // "save as" ties the two save-as-shaped commands
+        // at the top (identical field scores; table order
+        // breaks the tie) — both lead, nothing else does.
+        let save_as = filter_commands("save as");
+        assert!(save_as[..2].contains(&idx_of("save-copy")), "save as: {save_as:?}");
+        assert!(save_as[..2].contains(&idx_of("save-named")), "save as: {save_as:?}");
+        // No command grows keywords it does not answer to:
+        // an unrelated command's keyword field stays empty.
+        assert_eq!(command_keywords("play"), "play pause space playback");
+        assert_eq!(command_keywords("add-sprite"), "");
+    }
+
+    #[test]
+    fn multi_token_queries_require_every_token() {
+        // Both tokens match the MP4 export (title + key).
+        let got = filter_commands("export mp4");
+        assert_eq!(COMMANDS[got[0]].key, "export-mp4");
+        // A token matching nothing sinks the command: no
+        // frame command is an export, so this is empty
+        // even though each word alone matches plenty.
+        assert!(filter_commands("export frame").is_empty());
+        // Scores remain ordered under tokenisation.
+        let got = filter_commands("frame");
+        let scores: Vec<i32> = got
+            .iter()
+            .map(|&i| command_score("frame", &COMMANDS[i]).unwrap())
+            .collect();
+        assert!(scores.windows(2).all(|w| w[0] >= w[1]), "not ranked: {scores:?}");
+    }
+
+    #[test]
+    fn argument_commands_parse_strictly() {
+        assert_eq!(argument_command("frame 42"), Some(ArgCommand::GoToFrame(41)));
+        assert_eq!(argument_command("go 1"), Some(ArgCommand::GoToFrame(0)));
+        assert_eq!(argument_command("goto 7"), Some(ArgCommand::GoToFrame(6)));
+        assert_eq!(argument_command("FPS 30"), Some(ArgCommand::SetFps(30.0)));
+        assert_eq!(argument_command("fps 29.97"), Some(ArgCommand::SetFps(29.97)));
+        // Not argument commands: bare numbers are
+        // searches; extra words, missing tails and bad
+        // numbers fall back to the ranked list.
+        assert_eq!(argument_command("42"), None);
+        assert_eq!(argument_command("frame"), None);
+        assert_eq!(argument_command("frame 4 2"), None);
+        assert_eq!(argument_command("frame x"), None);
+        assert_eq!(argument_command("export mp4"), None);
+        assert_eq!(argument_command(""), None);
+        // Titles state what the run will do, 1-based.
+        assert_eq!(arg_title(ArgCommand::GoToFrame(41)), "Go to frame 42");
+        assert_eq!(arg_title(ArgCommand::SetFps(30.0)), "Set frame rate to 30 fps");
+        assert_eq!(arg_title(ArgCommand::SetFps(29.97)), "Set frame rate to 30.0 fps");
+    }
+
+    #[test]
+    fn pins_lead_the_empty_query_and_dedup_against_recents() {
+        let pins: Vec<&'static str> = vec!["export-mp4", "undo"];
+        let recent: Vec<&'static str> = vec!["undo", "play"];
+        let (rows, pin_rows, recent_rows) = display_commands_full("", &recent, &pins);
+        assert_eq!(pin_rows, 2);
+        assert_eq!(recent_rows, 1, "undo is pinned, not repeated as a recent");
+        assert_eq!(rows[0], idx_of("export-mp4"));
+        assert_eq!(rows[1], idx_of("undo"));
+        assert_eq!(rows[2], idx_of("play"));
+        assert_eq!(rows.len(), COMMANDS.len());
+        // A non-empty query ignores pins and recents alike.
+        let (rows, pin_rows, recent_rows) = display_commands_full("undo", &recent, &pins);
+        assert_eq!((pin_rows, recent_rows), (0, 0));
+        assert_eq!(rows, filter_commands("undo"));
+        // Unknown pin keys are skipped, like recents.
+        let (rows, pin_rows, _) = display_commands_full("", &[], &["no-such-command"]);
+        assert_eq!(pin_rows, 0);
+        assert_eq!(rows.len(), COMMANDS.len());
+    }
+
+    #[test]
+    fn toggle_pin_pins_unpins_and_caps() {
+        let mut pins: Vec<&'static str> = Vec::new();
+        assert!(toggle_pin(&mut pins, "undo"));
+        assert_eq!(pins, vec!["undo"]);
+        assert!(toggle_pin(&mut pins, "play"));
+        assert_eq!(pins, vec!["play", "undo"], "newest pin leads");
+        assert!(!toggle_pin(&mut pins, "undo"), "second toggle unpins");
+        assert_eq!(pins, vec!["play"]);
+        // The cap drops the oldest pins off the end.
+        let mut pins: Vec<&'static str> = Vec::new();
+        for c in COMMANDS.iter().take(MAX_PINNED + 2) {
+            toggle_pin(&mut pins, c.key);
+        }
+        assert_eq!(pins.len(), MAX_PINNED);
+        assert_eq!(pins[0], COMMANDS[MAX_PINNED + 1].key);
+    }
+
+    #[test]
+    fn page_window_follows_the_selection_in_aligned_pages() {
+        assert_eq!(page_window(0, 139), (0, MAX_RESULTS));
+        assert_eq!(page_window(MAX_RESULTS - 1, 139), (0, MAX_RESULTS));
+        assert_eq!(page_window(MAX_RESULTS, 139), (MAX_RESULTS, 2 * MAX_RESULTS));
+        assert_eq!(page_window(138, 139), (132, 139));
+        assert_eq!(page_window(0, 0), (0, 0));
+        assert_eq!(page_window(99, 5), (0, 5), "stale selections clamp");
+    }
+
+    #[test]
+    fn registry_command_keys_all_exist_in_the_table() {
+        // The structural half of the drift guard: every
+        // command the keymap registry claims a hint for
+        // is a real command in this table (and, by the
+        // EXPECTED_HINTS pin above, with that spelling).
+        for b in crate::rune_sec::keymap::BINDINGS {
+            if let Some(key) = b.command_key {
+                assert!(
+                    COMMANDS.iter().any(|c| c.key == key),
+                    "registry names a missing command: {key}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn new_commands_run_the_ops_they_name() {
+        // Existence + table placement for the RM26 four;
+        // their shims forward to ops pinned elsewhere
+        // (goto in the transport suites, delete_key_here
+        // in keyframe_tools, step_param in the stroke
+        // inspector).
+        for key in ["last-frame", "delete-key-here", "brush-size-down", "brush-size-up"] {
+            idx_of(key);
+        }
+        assert_eq!(COMMANDS[idx_of("last-frame")].group, "Transport");
+        assert_eq!(COMMANDS[idx_of("delete-key-here")].group, "Graph");
+        assert_eq!(COMMANDS[idx_of("brush-size-down")].group, "Draw");
+    }
+
     fn palette_view_rows_construct_in_both_selection_branches() {
         for dark in [true, false] {
             let t = tok::theme(dark);

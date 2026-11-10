@@ -47,6 +47,26 @@
 //! channel (P-7) can be authored from this panel like the
 //! angle channel can.
 //!
+//! Roadmap Wave 1 (F-3, RM4) adds the selected-key number
+//! fields under the value line ([`key_number_rows`] —
+//! audit A6 R5's field row): Frame, Value, In and Out
+//! slopes for the key the canvas treats as selected
+//! ([`key_pick`]), each the design kit's number field
+//! (click to type, drag to scrub) on a per-target spec
+//! ([`key_frame_spec`] / [`key_value_spec`] /
+//! [`key_slope_spec`]). Writes ride the canvas drag's
+//! own primitives ([`drag_key_to`], direct tangent
+//! writes) and its status wording ([`key_recap`]): a
+//! typed commit is one snapshot ([`key_commit`]), a
+//! scrub is one lazy snapshot with per-write anchor
+//! resolution ([`key_scrub_write`] /
+//! [`key_scrub_finish`]). The fields resolve their pick
+//! at write time — when RM5's shared key-selection
+//! model lands, [`key_pick`] is the one resolution
+//! point it converges with. Escape-revert sync:
+//! [`sync_number_edits`] (IA-RM4-1); the fields' help /
+//! invalid copy rides IA-RM3-1's keys.
+//!
 //! ## Canvas pointer interaction
 //!
 //! The curve canvas also takes drags (`graph_drag`, factored
@@ -465,6 +485,26 @@
 //! key-padded fit for bend channels (a fixed ±0.7 fit
 //! would clip legitimately stored out-of-cycle bends).
 //!
+//! ## Key selection (Roadmap Wave 1, RM5 — F-4)
+//!
+//! The panel consumes the shell's ONE shared key
+//! selection ([`crate::rune_sec::key_selection::KeySel`],
+//! `State::key_sel` — IA-RM5-1): pressing or dragging a
+//! key selects it (`select_one`); a press on empty canvas
+//! starts a marquee in [`GraphPanelState::marquee`] and
+//! the drag range-selects live; the selected keys draw
+//! accent-filled at 5.5 pt (the dragged key keeps 6.5,
+//! unselected keys the amber 4.5); the tangent handles
+//! hang on the selection's PRIMARY key
+//! ([`handle_key_index`]) and stay there when the
+//! playhead moves — with an empty selection the panel
+//! behaves exactly as before (handles on the
+//! playhead-nearest key). The `graph-delete-keys` button
+//! under the channel actions deletes the whole selection
+//! through `delete_selected_keys` — one snapshot, one
+//! undo step. Selection itself is session state, never
+//! snapshotted.
+//!
 //! ## State the shell must provide
 //!
 //! `State` needs one field (integrator wires it):
@@ -482,6 +522,8 @@ use stykanimate_rs::model::V2;
 use crate::chrome_view::{btn, danger_btn};
 use crate::rune_sec::app_theme;
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
+use crate::rune_sec::key_selection::{delete_selected_keys, KeySel};
 use crate::rune_sec::icon_btn::icon_btn;
 use crate::rune_sec::icons::icon_el_rgb;
 use crate::stage_view::hex_color;
@@ -696,6 +738,530 @@ pub struct GraphPanelState {
     /// recorded at Down stays the grabbed key for the whole
     /// drag.
     pub drag_handle: Option<(usize, TangentSide)>,
+    /// The data-frame an in-progress canvas marquee
+    /// (Roadmap Wave 1, F-4) started at: `Some` from a
+    /// Down on EMPTY canvas until that gesture's Up.
+    /// While it is set, Moves range-select into the
+    /// shared key selection; a short-travel Up falls
+    /// through to the click-seek instead. No snapshot is
+    /// ever taken for it — selection is not an edit.
+    pub marquee: Option<f32>,
+    /// Number-field session for the selected key's frame
+    /// (Roadmap Wave 1, F-3 — see [`KeyField`]).
+    pub key_frame_edit: design::NumberEdit,
+    /// Number-field session for the selected key's value.
+    pub key_value_edit: design::NumberEdit,
+    /// Number-field session for the selected key's
+    /// in-slope.
+    pub key_in_edit: design::NumberEdit,
+    /// Number-field session for the selected key's
+    /// out-slope.
+    pub key_out_edit: design::NumberEdit,
+    /// The in-flight key-field scrub's bookkeeping (one
+    /// scrub at a time — the pointer has one drag).
+    pub key_scrub: KeyScrub,
+}
+
+/// The key fields' element keys, as consts: the kit
+/// number field takes its key as an argument rather
+/// than through `.key()`, and the gate's key-diff reads
+/// `*_KEY` consts — the keys stay diff-visible in their
+/// carried form (the AC1 const-carried pattern).
+pub const KEY_FRAME_FIELD_KEY: &str = "graph-key-frame";
+/// See [`KEY_FRAME_FIELD_KEY`].
+pub const KEY_VALUE_FIELD_KEY: &str = "graph-key-value";
+/// See [`KEY_FRAME_FIELD_KEY`].
+pub const KEY_IN_FIELD_KEY: &str = "graph-key-in";
+/// See [`KEY_FRAME_FIELD_KEY`].
+pub const KEY_OUT_FIELD_KEY: &str = "graph-key-out";
+
+/// Which of the selected key's four numbers a number
+/// field edits (Roadmap Wave 1, F-3, audit A6 R5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum KeyField {
+    /// The key's frame (whole frames, timeline-clamped).
+    #[default]
+    Frame,
+    /// The key's value (the drawn channel's units).
+    Value,
+    /// The key's in-slope (`Key::in_tan`).
+    InTan,
+    /// The key's out-slope (`Key::out_tan`).
+    OutTan,
+}
+
+/// One key-field scrub gesture's bookkeeping (Roadmap
+/// Wave 1, F-3): the gesture takes ONE snapshot,
+/// lazily, at its first real change — the canvas
+/// drag's discipline (Down snapshots, Moves write) —
+/// and resolves its key on every write through
+/// [`resolve_drag_index`] against `anchor`, exactly as
+/// a canvas key drag does, so scrubbing a key's frame
+/// past a neighbour keeps hold of the same key.
+#[derive(Clone, Debug, Default)]
+pub struct KeyScrub {
+    /// A snapshot has been taken for the in-flight scrub.
+    pub open: bool,
+    /// The channel the scrub is writing (index into
+    /// `Project::channels`), resolved at the first write.
+    pub channel: usize,
+    /// The grabbed key's index as of the last write — a
+    /// hint, re-resolved per write (see
+    /// [`GraphPanelState::drag_key`]'s stale-index note).
+    pub hint: usize,
+    /// The grabbed key's frame as of the last write.
+    pub anchor: f32,
+    /// The field's value when the gesture began — the
+    /// kit's cancel path writes exactly this back, which
+    /// seals the gesture.
+    pub press: f32,
+    /// The field being scrubbed.
+    pub field: KeyField,
+}
+
+/// The key the number fields edit: the drawn channel
+/// (resolved by INDEX, as the canvas resolves it) and
+/// its key nearest the playhead — the same key whose
+/// tangent handles the canvas draws
+/// ([`selected_key_index`]'s pick, on the drawn channel
+/// rather than the target's first match). Returns
+/// `(channel index, key index)`.
+pub fn key_pick(core: &EditorCore, st: &GraphPanelState) -> Option<(usize, usize)> {
+    let ci = effective_channel_index(core, st)?;
+    let ch = &core.project.channels[ci];
+    let idx = nearest_key(ch, core.current as f32)?;
+    Some((ci, idx))
+}
+
+/// The key whose tangent handles the canvas draws and
+/// the drag hit-tests (Roadmap Wave 1, F-4): the shared
+/// selection's primary key on the drawn channel while a
+/// live selection exists there, else the key nearest the
+/// playhead — the pre-F-4 behaviour, bit-for-bit. The
+/// builder and [`drag_down`] both resolve through here,
+/// so the drawn handles and the grabbable handles can
+/// never disagree.
+pub fn handle_key_index(
+    core: &EditorCore,
+    st: &GraphPanelState,
+    ksel: &KeySel,
+) -> Option<usize> {
+    let ci = effective_channel_index(core, st)?;
+    let ch = &core.project.channels[ci];
+    ksel.primary(ci, ch)
+        .or_else(|| nearest_key(ch, core.current as f32))
+}
+
+/// One field's current value on key `idx` of channel
+/// `ci` — the read behind every key-field write path.
+fn key_field_value(core: &EditorCore, ci: usize, idx: usize, field: KeyField) -> Option<f32> {
+    let k = core.project.channels.get(ci)?.keys.get(idx)?;
+    Some(match field {
+        KeyField::Frame => k.frame,
+        KeyField::Value => k.value,
+        KeyField::InTan => k.in_tan,
+        KeyField::OutTan => k.out_tan,
+    })
+}
+
+/// Write one field of key `idx` in channel `ci` —
+/// frame/value go through [`drag_key_to`] (the canvas
+/// drag's own write: re-sort, new index returned), the
+/// slopes write the key's tangent fields directly (the
+/// write [`drag_tangent_to`] performs). No snapshot:
+/// the caller owns the gesture's undo bookkeeping.
+fn key_write(
+    core: &mut EditorCore,
+    ci: usize,
+    idx: usize,
+    field: KeyField,
+    v: f32,
+) -> Option<usize> {
+    let ch = core.project.channels.get_mut(ci)?;
+    match field {
+        KeyField::Frame => {
+            let cur = ch.keys.get(idx)?.value;
+            drag_key_to(ch, idx, v, cur)
+        }
+        KeyField::Value => {
+            let cur = ch.keys.get(idx)?.frame;
+            drag_key_to(ch, idx, cur, v)
+        }
+        KeyField::InTan => {
+            let k = ch.keys.get_mut(idx)?;
+            k.in_tan = v;
+            Some(idx)
+        }
+        KeyField::OutTan => {
+            let k = ch.keys.get_mut(idx)?;
+            k.out_tan = v;
+            Some(idx)
+        }
+    }
+}
+
+/// The status recap for a committed key-field edit —
+/// the canvas drag's own Up-phase wording
+/// ([`drag_up`]), so a typed edit and a dragged edit
+/// report identically.
+fn key_recap(core: &EditorCore, ci: usize, idx: usize, field: KeyField) -> Option<String> {
+    let k = core.project.channels.get(ci)?.keys.get(idx)?;
+    Some(match field {
+        KeyField::Frame | KeyField::Value => format!(
+            "Graph key moved: frame {:.1}, value {:.1}.",
+            k.frame, k.value
+        ),
+        KeyField::InTan => format!(
+            "Graph {} tangent set: key frame {:.1}, slope {:.2}.",
+            TangentSide::In.label(),
+            k.frame,
+            k.in_tan
+        ),
+        KeyField::OutTan => format!(
+            "Graph {} tangent set: key frame {:.1}, slope {:.2}.",
+            TangentSide::Out.label(),
+            k.frame,
+            k.out_tan
+        ),
+    })
+}
+
+/// A key field's typed commit: resolve the pick, take
+/// exactly ONE snapshot (audit A6 R5's per-edit undo
+/// contract), write, recap. An unresolvable pick (the
+/// channel or key went away mid-session) writes
+/// nothing and spends nothing.
+pub fn key_commit(core: &mut EditorCore, st: &GraphPanelState, field: KeyField, v: f32) {
+    let Some((ci, idx)) = key_pick(core, st) else {
+        return;
+    };
+    core.snapshot();
+    if let Some(nidx) = key_write(core, ci, idx, field, v) {
+        if let Some(recap) = key_recap(core, ci, nidx, field) {
+            core.status = recap;
+        }
+    }
+}
+
+/// Resolve the in-flight scrub's key index against its
+/// channel's CURRENT order ([`resolve_drag_index`] on
+/// the stored hint/anchor — the canvas drag's rule).
+fn key_scrub_index(core: &EditorCore, scrub: &KeyScrub) -> Option<usize> {
+    let ch = core.project.channels.get(scrub.channel)?;
+    resolve_drag_index(ch, scrub.hint, scrub.anchor)
+}
+
+/// A key field's silent mid-scrub write, under
+/// `st.key_scrub`'s bookkeeping: the first write that
+/// actually changes the value takes the gesture's one
+/// snapshot and records the pick; later writes
+/// re-resolve the key per write (a frame scrub can
+/// cross neighbours). A write of exactly the press
+/// value while this field's gesture is open is the
+/// kit's cancel-restore — it writes the value back and
+/// seals the gesture.
+pub fn key_scrub_write(core: &mut EditorCore, st: &mut GraphPanelState, field: KeyField, v: f32) {
+    if st.key_scrub.open && st.key_scrub.field == field && v == st.key_scrub.press {
+        if let Some(idx) = key_scrub_index(core, &st.key_scrub) {
+            let ci = st.key_scrub.channel;
+            key_write(core, ci, idx, field, v);
+        }
+        st.key_scrub.open = false;
+        return;
+    }
+    if !st.key_scrub.open {
+        let Some((ci, idx)) = key_pick(core, st) else {
+            return;
+        };
+        let Some(cur) = key_field_value(core, ci, idx, field) else {
+            return;
+        };
+        if v == cur {
+            return;
+        }
+        core.snapshot();
+        let anchor = core.project.channels[ci].keys[idx].frame;
+        st.key_scrub = KeyScrub {
+            open: true,
+            channel: ci,
+            hint: idx,
+            anchor,
+            press: cur,
+            field,
+        };
+    }
+    let ci = st.key_scrub.channel;
+    if let Some(idx) = key_scrub_index(core, &st.key_scrub) {
+        if let Some(nidx) = key_write(core, ci, idx, field, v) {
+            st.key_scrub.hint = nidx;
+            if let Some(k) = core.project.channels[ci].keys.get(nidx) {
+                st.key_scrub.anchor = k.frame;
+            }
+        }
+    }
+}
+
+/// A key field's scrub release: the final write and
+/// the one recap (the canvas drag's wording, via
+/// [`key_recap`]). A gesture that changed nothing
+/// leaves no trace.
+pub fn key_scrub_finish(core: &mut EditorCore, st: &mut GraphPanelState, field: KeyField, v: f32) {
+    if st.key_scrub.open && st.key_scrub.field == field {
+        let ci = st.key_scrub.channel;
+        if let Some(idx) = key_scrub_index(core, &st.key_scrub) {
+            if let Some(nidx) = key_write(core, ci, idx, field, v) {
+                if let Some(recap) = key_recap(core, ci, nidx, field) {
+                    core.status = recap;
+                }
+            }
+        }
+        st.key_scrub.open = false;
+        return;
+    }
+    // No gesture opened (every Move write was a
+    // no-change) but the release value differs — the
+    // pointer moved between the last Move and the Up:
+    // one snapshot, one write, one recap.
+    let Some((ci, idx)) = key_pick(core, st) else {
+        return;
+    };
+    let Some(cur) = key_field_value(core, ci, idx, field) else {
+        return;
+    };
+    if v == cur {
+        return;
+    }
+    core.snapshot();
+    if let Some(nidx) = key_write(core, ci, idx, field, v) {
+        if let Some(recap) = key_recap(core, ci, nidx, field) {
+            core.status = recap;
+        }
+    }
+}
+
+/// The frame field's contract: whole frames across the
+/// timeline (the upper bound is the project's own last
+/// frame, read per render).
+pub fn key_frame_spec(core: &EditorCore) -> design::NumSpec {
+    design::NumSpec::new(
+        0.0,
+        core.frame_count().saturating_sub(1) as f32,
+        1.0,
+    )
+}
+
+/// The value field's contract for `target`: the drawn
+/// channel's own units and display precision (the
+/// header readout's — [`channel_value_text`]): degrees
+/// for an angle channel, radians for bend (its readout
+/// suffix), the length range for a length channel,
+/// stage units for the roots. Typed input funnels to
+/// the range; a stored value outside it still displays
+/// verbatim (the spec formats, it does not clamp the
+/// readout).
+pub fn key_value_spec(target: ChannelTarget) -> design::NumSpec {
+    match target {
+        ChannelTarget::Angle(_) => {
+            let mut spec = design::NumSpec::new(-360.0, 360.0, 1.0);
+            spec.decimals = 1;
+            spec
+        }
+        ChannelTarget::Bend(_) => design::NumSpec {
+            min: -0.7,
+            max: 0.7,
+            step: 0.01,
+            decimals: 2,
+            suffix: " rad",
+            display_scale: 1.0,
+            points_per_step: 2.0,
+        },
+        ChannelTarget::Length(_) => {
+            let mut spec = design::NumSpec::new(
+                EditorCore::LENGTH_MIN,
+                EditorCore::LENGTH_MAX,
+                4.0,
+            );
+            spec.decimals = 1;
+            spec
+        }
+        ChannelTarget::RootX | ChannelTarget::RootY => {
+            let mut spec = design::NumSpec::new(-2000.0, 2000.0, 1.0);
+            spec.decimals = 1;
+            spec
+        }
+    }
+}
+
+/// The slope fields' contract for `target`: value
+/// units per frame, in the same unit family as
+/// [`key_value_spec`].
+pub fn key_slope_spec(target: ChannelTarget) -> design::NumSpec {
+    match target {
+        ChannelTarget::Angle(_) => design::NumSpec::new(-180.0, 180.0, 0.25),
+        ChannelTarget::Bend(_) => design::NumSpec {
+            min: -0.7,
+            max: 0.7,
+            step: 0.01,
+            decimals: 2,
+            suffix: " rad",
+            display_scale: 1.0,
+            points_per_step: 2.0,
+        },
+        ChannelTarget::Length(_) => design::NumSpec::new(-220.0, 220.0, 1.0),
+        ChannelTarget::RootX | ChannelTarget::RootY => {
+            design::NumSpec::new(-500.0, 500.0, 0.25)
+        }
+    }
+}
+
+/// One key number field (see [`key_number_rows`]): the
+/// kit field on `spec`, wired to `field`'s commit /
+/// scrub paths.
+#[allow(clippy::too_many_arguments)]
+fn key_number_field(
+    s: &State,
+    field: KeyField,
+    spec: &design::NumSpec,
+    value: f32,
+    help: &str,
+    hint: &str,
+    t: &Theme,
+) -> El {
+    let (key, state): (&str, &design::NumberEdit) = match field {
+        KeyField::Frame => (KEY_FRAME_FIELD_KEY, &s.graph_panel.key_frame_edit),
+        KeyField::Value => (KEY_VALUE_FIELD_KEY, &s.graph_panel.key_value_edit),
+        KeyField::InTan => (KEY_IN_FIELD_KEY, &s.graph_panel.key_in_edit),
+        KeyField::OutTan => (KEY_OUT_FIELD_KEY, &s.graph_panel.key_out_edit),
+    };
+    design::number_field(
+        key,
+        state,
+        spec,
+        value,
+        &spec.format(value),
+        help,
+        Some(hint),
+        t,
+        design::NumWiring {
+            access: move |s: &mut State| -> &mut design::NumberEdit {
+                match field {
+                    KeyField::Frame => &mut s.graph_panel.key_frame_edit,
+                    KeyField::Value => &mut s.graph_panel.key_value_edit,
+                    KeyField::InTan => &mut s.graph_panel.key_in_edit,
+                    KeyField::OutTan => &mut s.graph_panel.key_out_edit,
+                }
+            },
+            commit: move |s: &mut State, v: f32| {
+                key_commit(&mut s.core, &s.graph_panel, field, v)
+            },
+            reject: |s: &mut State| {
+                s.core.status = i18n_wire::tr(&s.core, "number_field_invalid");
+            },
+            scrub_write: move |s: &mut State, v: f32| {
+                key_scrub_write(&mut s.core, &mut s.graph_panel, field, v)
+            },
+            scrub_finish: move |s: &mut State, v: f32| {
+                key_scrub_finish(&mut s.core, &mut s.graph_panel, field, v)
+            },
+        },
+    )
+}
+
+/// The selected-key number rows (Roadmap Wave 1, F-3 —
+/// audit A6 R5's field row): Frame + Value over In +
+/// Out slopes for [`key_pick`]'s key, mounted under the
+/// canvas while a channel is drawn and a key resolves.
+/// Each field is the kit number field (click to type,
+/// drag to scrub) on its spec; the fields resolve their
+/// pick at write time, like every other panel op, so a
+/// selection change mid-session commits onto the key
+/// then selected. `None` when no key resolves (no
+/// channel drawn, or an empty channel).
+pub fn key_number_rows(s: &State, t: &Theme) -> Option<El> {
+    let core = &s.core;
+    let (ci, idx) = key_pick(core, &s.graph_panel)?;
+    let target = core.project.channels[ci].target;
+    let k = core.project.channels[ci].keys[idx];
+    let help = i18n_wire::tr(core, "number_field_help");
+    let hint = i18n_wire::tr(core, "number_field_invalid");
+    let frame_spec = key_frame_spec(core);
+    let value_spec = key_value_spec(target);
+    let slope_spec = key_slope_spec(target);
+    let label = |name: &str| {
+        text(name)
+            .font(type_::LABEL)
+            .color(t.text_secondary)
+    };
+    Some(
+        col()
+            .gap(4.0)
+            .child(
+                row()
+                    .key("graph-key-row")
+                    .gap(4.0)
+                    .center_y()
+                    .child(design::section_label("Key", t))
+                    .child(label("Frame"))
+                    .child(key_number_field(
+                        s,
+                        KeyField::Frame,
+                        &frame_spec,
+                        k.frame,
+                        &help,
+                        &hint,
+                        t,
+                    ))
+                    .child(label("Value"))
+                    .child(key_number_field(
+                        s,
+                        KeyField::Value,
+                        &value_spec,
+                        k.value,
+                        &help,
+                        &hint,
+                        t,
+                    )),
+            )
+            .child(
+                row()
+                    .key("graph-key-tangents")
+                    .gap(4.0)
+                    .center_y()
+                    .child(design::section_label("Slopes", t))
+                    .child(label("In"))
+                    .child(key_number_field(
+                        s,
+                        KeyField::InTan,
+                        &slope_spec,
+                        k.in_tan,
+                        &help,
+                        &hint,
+                        t,
+                    ))
+                    .child(label("Out"))
+                    .child(key_number_field(
+                        s,
+                        KeyField::OutTan,
+                        &slope_spec,
+                        k.out_tan,
+                        &help,
+                        &hint,
+                        t,
+                    )),
+            ),
+    )
+}
+
+/// Poll sync (the `sync_name_edit` idiom, called from
+/// the shell's `poll` — IA-RM4-1): revert any key-field
+/// session the framework has blurred — Escape lands
+/// here as a revert, per the kit's session rules
+/// ([`design::NumberEdit::reconcile`]).
+pub fn sync_number_edits(s: &mut State) {
+    s.graph_panel.key_frame_edit.reconcile();
+    s.graph_panel.key_value_edit.reconcile();
+    s.graph_panel.key_in_edit.reconcile();
+    s.graph_panel.key_out_edit.reconcile();
 }
 
 /// Human label for a channel target, in UI casing: "Root X",
@@ -1756,7 +2322,13 @@ pub fn seek_frame(view: &GraphView, x: f32, frame_count: usize) -> Option<usize>
 /// hit: snapshot ONCE for the whole gesture, grab into `st`,
 /// return true. On a miss nothing is recorded — whether the
 /// gesture becomes a seek is decided at Up from its travel.
-pub fn drag_down(core: &mut EditorCore, st: &mut GraphPanelState, px: V2, size: [f32; 2]) -> bool {
+pub fn drag_down(
+    core: &mut EditorCore,
+    st: &mut GraphPanelState,
+    ksel: &mut KeySel,
+    px: V2,
+    size: [f32; 2],
+) -> bool {
     if size[0] <= 0.0 || size[1] <= 0.0 {
         return false;
     }
@@ -1766,13 +2338,16 @@ pub fn drag_down(core: &mut EditorCore, st: &mut GraphPanelState, px: V2, size: 
         return false;
     };
     let view = view_for(core, Some(&core.project.channels[ci]), size);
-    if let Some(sel) = nearest_key(&core.project.channels[ci], core.current as f32) {
+    if let Some(sel) = handle_key_index(core, st, ksel) {
         if let Some(side) =
             hit_tangent_handle(&view, &core.project.channels[ci], sel, px, GRAB_RADIUS)
         {
             core.snapshot();
             st.drag_handle = Some((sel, side));
             st.drag_key = None;
+            st.marquee = None;
+            // Grabbing a handle selects its key (F-4).
+            ksel.select_one(ci, core.project.channels[ci].keys[sel].frame);
             return true;
         }
     }
@@ -1783,9 +2358,20 @@ pub fn drag_down(core: &mut EditorCore, st: &mut GraphPanelState, px: V2, size: 
             st.drag_anchor = core.project.channels[ci].keys[i].frame;
             st.drag_key = Some(i);
             st.drag_handle = None;
+            st.marquee = None;
+            // Pressing a key selects it (F-4) — the
+            // selection then follows the drag (drag_move).
+            ksel.select_one(ci, st.drag_anchor);
             true
         }
-        None => false,
+        None => {
+            // Empty canvas: a marquee starts (F-4). No
+            // snapshot — selection is not an edit — and
+            // the gesture still reports unowned, so a
+            // short Up can fall through to the click-seek.
+            st.marquee = Some(view.to_data(px).0);
+            false
+        }
     }
 }
 
@@ -1798,7 +2384,13 @@ pub fn drag_down(core: &mut EditorCore, st: &mut GraphPanelState, px: V2, size: 
 /// snapshot covers the whole gesture. Returns true when
 /// something was written; a stale grab (channel gone, key
 /// gone) ends the drag.
-pub fn drag_move(core: &mut EditorCore, st: &mut GraphPanelState, px: V2, size: [f32; 2]) -> bool {
+pub fn drag_move(
+    core: &mut EditorCore,
+    st: &mut GraphPanelState,
+    ksel: &mut KeySel,
+    px: V2,
+    size: [f32; 2],
+) -> bool {
     if let Some((idx, side)) = st.drag_handle {
         if size[0] <= 0.0 || size[1] <= 0.0 {
             return false;
@@ -1814,6 +2406,25 @@ pub fn drag_move(core: &mut EditorCore, st: &mut GraphPanelState, px: V2, size: 
         let view = view_for(core, Some(&core.project.channels[ci]), size);
         let data = view.to_data(px);
         return drag_tangent_to(&mut core.project.channels[ci], idx, side, data);
+    }
+    // Marquee (F-4): no key or handle grabbed and a
+    // marquee is open — the range between its start and
+    // the pointer's data frame is the live selection.
+    // Nothing is written to the project; returns false.
+    if st.drag_key.is_none() {
+        if let Some(start) = st.marquee {
+            if size[0] <= 0.0 || size[1] <= 0.0 {
+                return false;
+            }
+            let Some(ci) = effective_channel_index(core, st) else {
+                return false;
+            };
+            let view = view_for(core, Some(&core.project.channels[ci]), size);
+            let (frame, _) = view.to_data(px);
+            let ch = &core.project.channels[ci];
+            ksel.select_range(ch, ci, start, frame);
+            return false;
+        }
     }
     let Some(hint) = st.drag_key else {
         return false;
@@ -1835,8 +2446,12 @@ pub fn drag_move(core: &mut EditorCore, st: &mut GraphPanelState, px: V2, size: 
     let ch = &mut core.project.channels[ci];
     match drag_key_to(ch, idx, frame, value) {
         Some(new_idx) => {
+            let old_anchor = st.drag_anchor;
             st.drag_key = Some(new_idx);
             st.drag_anchor = ch.keys[new_idx].frame;
+            // The selection follows the dragged key
+            // across the re-sort (F-4).
+            ksel.replace_frame(ci, old_anchor, st.drag_anchor);
             true
         }
         None => {
@@ -1859,6 +2474,7 @@ pub fn drag_move(core: &mut EditorCore, st: &mut GraphPanelState, px: V2, size: 
 pub fn drag_up(
     core: &mut EditorCore,
     st: &mut GraphPanelState,
+    ksel: &mut KeySel,
     px: V2,
     size: [f32; 2],
     travel: f32,
@@ -1888,6 +2504,13 @@ pub fn drag_up(
     if let Some(hint) = st.drag_key.take() {
         if cancelled {
             core.undo();
+            // The rollback restored the pre-drag keys;
+            // drop any selection frame the drag carried
+            // to a position no key occupies any more.
+            if let Some(ci) = effective_channel_index(core, st) {
+                let ch = &core.project.channels[ci];
+                ksel.retain_live(ci, ch);
+            }
             return true;
         }
         if let Some(ci) = effective_channel_index(core, st) {
@@ -1901,6 +2524,34 @@ pub fn drag_up(
             }
         }
         return true;
+    }
+    // Marquee settle (F-4): a long empty-canvas drag
+    // finalises the range selection and reports it; a
+    // short one falls through to the click-seek below
+    // with the selection untouched; a cancelled one
+    // leaves the selection as last drawn (the timeline
+    // range drag's precedent).
+    if let Some(start) = st.marquee.take() {
+        if !cancelled && travel > CLICK_TRAVEL && size[0] > 0.0 {
+            if let Some(ci) = effective_channel_index(core, st) {
+                let frame = {
+                    let view = view_for(core, Some(&core.project.channels[ci]), size);
+                    view.to_data(px).0
+                };
+                let (n, label) = {
+                    let ch = &core.project.channels[ci];
+                    ksel.select_range(ch, ci, start, frame);
+                    (ksel.indices(ci, ch).len(), channel_label(ch.target))
+                };
+                core.status = format!(
+                    "Selected {} key{} on {}.",
+                    n,
+                    if n == 1 { "" } else { "s" },
+                    label
+                );
+            }
+            return true;
+        }
     }
     if cancelled || travel > CLICK_TRAVEL || size[0] <= 0.0 {
         return false;
@@ -1930,10 +2581,10 @@ fn graph_drag(s: &mut State, d: &mut Drag) {
     let size = [d.w, d.h];
     match d.phase {
         Phase::Down => {
-            drag_down(&mut s.core, &mut s.graph_panel, px, size);
+            drag_down(&mut s.core, &mut s.graph_panel, &mut s.key_sel, px, size);
         }
         Phase::Move => {
-            drag_move(&mut s.core, &mut s.graph_panel, px, size);
+            drag_move(&mut s.core, &mut s.graph_panel, &mut s.key_sel, px, size);
         }
         Phase::Up => {
             let travel =
@@ -1941,6 +2592,7 @@ fn graph_drag(s: &mut State, d: &mut Drag) {
             drag_up(
                 &mut s.core,
                 &mut s.graph_panel,
+                &mut s.key_sel,
                 px,
                 size,
                 travel,
@@ -1977,6 +2629,7 @@ fn graph_shape(
     t: &Theme,
     drag: Option<usize>,
     sel: Option<usize>,
+    marked: &[usize],
     drag_handle: Option<(usize, TangentSide)>,
     idx: Option<usize>,
 ) -> Shape {
@@ -2009,6 +2662,11 @@ fn graph_shape(
         for (i, handle) in view.key_handles(ch).into_iter().enumerate() {
             shape = if drag == Some(i) {
                 shape.fill(diamond(handle, 6.5).to_vec(), accent)
+            } else if marked.contains(&i) {
+                // Selected keys (F-4): accent at 5.5 —
+                // between the plain key and the dragged
+                // key, so all three states read apart.
+                shape.fill(diamond(handle, 5.5).to_vec(), accent)
             } else {
                 shape.fill(diamond(handle, 4.5).to_vec(), amber)
             };
@@ -2109,10 +2767,15 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
     let mut chan_list = col().key("graph-channel-list").gap(4.0);
     let rows = channel_rows(core);
     if rows.is_empty() {
-        chan_list = chan_list.child(design::empty_state(
+        // RM28 (PL-7): the state offers its filling
+        // action — this panel's own Key angle op.
+        chan_list = chan_list.child(design::empty_state_action(
             "chart-line",
             "No graph channels yet — select a joint on the stage, then Key angle starts the first one.",
+            "graph-empty-key-angle",
+            "Key angle",
             t,
+            |s| s.core.key_graph_angle(),
         ));
     }
     for (i, label, count) in rows {
@@ -2351,11 +3014,19 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
         resolve_drag_index(ch, hint, s.graph_panel.drag_anchor)
     });
     // The selected key, whose tangent handles the canvas
-    // draws and the drag hit-tests: the key nearest the
-    // playhead ON THE DRAWN CHANNEL (which the index, not
-    // the target, resolved — a picked duplicate shows its
-    // own handles).
-    let sel_idx = ch.and_then(|c| nearest_key(c, core.current as f32));
+    // draws and the drag hit-tests: the shared selection's
+    // primary key ON THE DRAWN CHANNEL while a live
+    // selection exists there (F-4 — handles follow the
+    // selection and survive playhead moves), else the key
+    // nearest the playhead on that channel, as before.
+    let sel_idx = handle_key_index(core, &s.graph_panel, &s.key_sel);
+    // The drawn channel's selected key indices (F-4),
+    // resolved against the live channel for the canvas's
+    // accent diamonds.
+    let marked: Vec<usize> = match drawn_idx {
+        Some(ci) => s.key_sel.indices(ci, &core.project.channels[ci]),
+        None => Vec::new(),
+    };
 
     let mut panel = design::panel_col("graph-panel", t)
         .child(
@@ -2418,6 +3089,15 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
                 t,
                 |s: &mut State| delete_drawn_channel(&mut s.core, &mut s.graph_panel),
             ))
+            .child(btn(
+                "graph-delete-keys",
+                "Delete selected keys",
+                false,
+                t,
+                |s: &mut State| {
+                    delete_selected_keys(&mut s.core, &mut s.key_sel);
+                },
+            ))
             .child(
                 row()
                     .key("graph-shift-row")
@@ -2461,6 +3141,7 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
                 t,
                 drag_idx,
                 sel_idx,
+                &marked,
                 s.graph_panel.drag_handle,
                 drawn_idx,
             ))
@@ -2487,6 +3168,14 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         );
+    }
+    // Selected-key number fields (Roadmap Wave 1, F-3 —
+    // A6 R5): directly under the value line, so the
+    // readout and its editors read as one block. Absent
+    // exactly when `key_pick` fails (no channel drawn or
+    // an empty channel).
+    if let Some(rows) = key_number_rows(s, t) {
+        panel = panel.child(rows);
     }
     if ch.is_none() {
         // The hint names the authoring action the TARGET
@@ -2519,6 +3208,103 @@ mod tests {
             target,
             keys,
         }
+    }
+
+    // ---- F-3 key number fields (Roadmap Wave 1, RM4) ----
+
+    fn core_with_root_channel() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.channels = vec![channel(
+            ChannelTarget::RootX,
+            vec![Key::flat(0.0, 0.0), Key::flat(10.0, 100.0)],
+        )];
+        core
+    }
+
+    #[test]
+    fn key_specs_carry_the_readout_conventions() {
+        // Bend values read "{v:.2} rad" (channel_value_text)
+        // — the field's format agrees.
+        assert_eq!(
+            key_value_spec(ChannelTarget::Bend(2)).format(0.35),
+            "0.35 rad"
+        );
+        assert_eq!(
+            key_value_spec(ChannelTarget::Angle(1)).clamp(400.0),
+            360.0
+        );
+        assert_eq!(
+            key_value_spec(ChannelTarget::Length(1)).clamp(999.0),
+            EditorCore::LENGTH_MAX
+        );
+        let core = EditorCore::new();
+        assert_eq!(
+            key_frame_spec(&core).max,
+            (core.frame_count() - 1) as f32,
+            "the frame field spans exactly the timeline"
+        );
+    }
+
+    #[test]
+    fn key_commit_writes_each_field_in_one_undo_step() {
+        let mut core = core_with_root_channel();
+        let st = GraphPanelState::default();
+        assert_eq!(key_pick(&core, &st), Some((0, 0)));
+        let depth = core.undo_depth();
+        key_commit(&mut core, &st, KeyField::Value, 42.0);
+        assert_eq!(core.undo_depth(), depth + 1);
+        assert_eq!(core.project.channels[0].keys[0].value, 42.0);
+        assert!(
+            core.status.starts_with("Graph key moved: frame 0.0, value 42.0."),
+            "{}",
+            core.status
+        );
+        key_commit(&mut core, &st, KeyField::InTan, 0.5);
+        assert_eq!(core.undo_depth(), depth + 2);
+        assert_eq!(core.project.channels[0].keys[0].in_tan, 0.5);
+        assert!(core.status.contains("in tangent set"), "{}", core.status);
+        key_commit(&mut core, &st, KeyField::Frame, 5.0);
+        assert_eq!(core.project.channels[0].keys[0].frame, 5.0);
+    }
+
+    #[test]
+    fn key_value_scrub_is_one_undo_step_and_cancel_restores() {
+        let mut core = core_with_root_channel();
+        let mut st = GraphPanelState::default();
+        let depth = core.undo_depth();
+        key_scrub_write(&mut core, &mut st, KeyField::Value, 50.0);
+        key_scrub_write(&mut core, &mut st, KeyField::Value, 60.0);
+        assert_eq!(core.undo_depth(), depth + 1, "one scrub is one undo step");
+        assert_eq!(core.project.channels[0].keys[0].value, 60.0);
+        // Cancel: the press value (0.0) returns through the
+        // scrub write and seals the gesture.
+        key_scrub_write(&mut core, &mut st, KeyField::Value, 0.0);
+        assert!(!st.key_scrub.open);
+        assert_eq!(core.project.channels[0].keys[0].value, 0.0);
+    }
+
+    #[test]
+    fn key_frame_scrub_crosses_neighbours_and_keeps_the_key() {
+        let mut core = core_with_root_channel();
+        let mut st = GraphPanelState::default();
+        let depth = core.undo_depth();
+        // Grab the frame-0 key (value 0) and scrub it past
+        // its neighbour: the anchor resolution keeps the
+        // SAME key in hand across the re-sort.
+        key_scrub_write(&mut core, &mut st, KeyField::Frame, 12.0);
+        key_scrub_write(&mut core, &mut st, KeyField::Frame, 14.0);
+        let keys = &core.project.channels[0].keys;
+        assert_eq!(keys.len(), 2);
+        assert_eq!((keys[0].frame, keys[0].value), (10.0, 100.0));
+        assert_eq!((keys[1].frame, keys[1].value), (14.0, 0.0));
+        key_scrub_finish(&mut core, &mut st, KeyField::Frame, 14.0);
+        assert!(!st.key_scrub.open);
+        assert_eq!(core.undo_depth(), depth + 1, "the whole scrub is one step");
+        assert!(
+            core.status.starts_with("Graph key moved: frame 14.0"),
+            "{}",
+            core.status
+        );
     }
 
     #[test]
@@ -3292,19 +4078,19 @@ mod tests {
         // Down on key 1's handle grabs it.
         let view = drag_view(&core, ChannelTarget::RootX, size);
         let grab = view.to_px(4.0, 80.0);
-        assert!(drag_down(&mut core, &mut st, grab, size));
+        assert!(drag_down(&mut core, &mut st, &mut KeySel::default(), grab, size));
         assert_eq!(st.drag_key, Some(1));
         assert!(approx(st.drag_anchor, 4.0));
 
         // Move to data (6, 10): the key follows, still sorted.
         let dest = view.to_px(6.0, 10.0);
-        assert!(drag_move(&mut core, &mut st, dest, size));
+        assert!(drag_move(&mut core, &mut st, &mut KeySel::default(), dest, size));
         let keys = &core.project.channels[0].keys;
         assert!(approx(keys[1].frame, 6.0) && approx(keys[1].value, 10.0));
         assert_eq!(st.drag_key, Some(1));
 
         // Up ends the drag and reports the final position.
-        assert!(drag_up(&mut core, &mut st, dest, size, 40.0, false));
+        assert!(drag_up(&mut core, &mut st, &mut KeySel::default(), dest, size, 40.0, false));
         assert_eq!(st.drag_key, None);
         assert!(
             core.status.contains("Graph key moved"),
@@ -3316,25 +4102,25 @@ mod tests {
         // fitted end (frame 8) but the demo has only 5 frames,
         // so the seek clamps to frame index 4.
         let far = [470.0, 165.0];
-        assert!(!drag_down(&mut core, &mut st, far, size));
+        assert!(!drag_down(&mut core, &mut st, &mut KeySel::default(), far, size));
         core.goto(0);
-        assert!(drag_up(&mut core, &mut st, far, size, 1.0, false));
+        assert!(drag_up(&mut core, &mut st, &mut KeySel::default(), far, size, 1.0, false));
         assert_eq!(core.current, 4);
         // A long drag over empty canvas does NOT seek, and
         // neither does a cancelled click.
         core.goto(0);
-        assert!(!drag_up(&mut core, &mut st, far, size, 30.0, false));
+        assert!(!drag_up(&mut core, &mut st, &mut KeySel::default(), far, size, 30.0, false));
         assert_eq!(core.current, 0);
-        assert!(!drag_up(&mut core, &mut st, far, size, 1.0, true));
+        assert!(!drag_up(&mut core, &mut st, &mut KeySel::default(), far, size, 1.0, true));
         assert_eq!(core.current, 0);
 
         // A cancelled key drag rolls back through the Down
         // snapshot: the key returns to (6, 10).
         let grab2 = drag_view(&core, ChannelTarget::RootX, size).to_px(6.0, 10.0);
-        assert!(drag_down(&mut core, &mut st, grab2, size));
+        assert!(drag_down(&mut core, &mut st, &mut KeySel::default(), grab2, size));
         let dest2 = drag_view(&core, ChannelTarget::RootX, size).to_px(2.0, 70.0);
-        assert!(drag_move(&mut core, &mut st, dest2, size));
-        assert!(drag_up(&mut core, &mut st, dest2, size, 200.0, true));
+        assert!(drag_move(&mut core, &mut st, &mut KeySel::default(), dest2, size));
+        assert!(drag_up(&mut core, &mut st, &mut KeySel::default(), dest2, size, 200.0, true));
         assert_eq!(st.drag_key, None);
         let keys = &core.project.channels[0].keys;
         assert!(
@@ -3497,17 +4283,17 @@ mod tests {
         // own diamond still starts a KEY drag — the handles
         // sit a third of a segment away from it.
         let kp = view.to_px(4.0, 80.0);
-        assert!(drag_down(&mut core, &mut st, kp, size));
+        assert!(drag_down(&mut core, &mut st, &mut KeySel::default(), kp, size));
         assert_eq!(st.drag_key, Some(1));
         assert_eq!(st.drag_handle, None);
-        assert!(drag_up(&mut core, &mut st, kp, size, 0.0, false));
+        assert!(drag_up(&mut core, &mut st, &mut KeySel::default(), kp, size, 0.0, false));
 
         // Down on the middle key's Out handle grabs the
         // handle, not the key.
         let (hf, hv) =
             tangent_handle_data(&core.project.channels[0], 1, TangentSide::Out).unwrap();
         let grab = view.to_px(hf, hv);
-        assert!(drag_down(&mut core, &mut st, grab, size));
+        assert!(drag_down(&mut core, &mut st, &mut KeySel::default(), grab, size));
         assert_eq!(st.drag_handle, Some((1, TangentSide::Out)));
         assert_eq!(st.drag_key, None);
 
@@ -3516,13 +4302,13 @@ mod tests {
         // tangent edits touch no key frame or value — so the
         // pre-drag view still maps the pointer exactly.
         let dest = view.to_px(6.0, 30.0);
-        assert!(drag_move(&mut core, &mut st, dest, size));
+        assert!(drag_move(&mut core, &mut st, &mut KeySel::default(), dest, size));
         let k = core.project.channels[0].keys[1];
         assert!(approx(k.out_tan, -25.0), "out tangent follows: {}", k.out_tan);
         assert!(approx(k.in_tan, 0.0), "in tangent untouched");
 
         // Up reports the tangent and ends the gesture.
-        assert!(drag_up(&mut core, &mut st, dest, size, 30.0, false));
+        assert!(drag_up(&mut core, &mut st, &mut KeySel::default(), dest, size, 30.0, false));
         assert_eq!(st.drag_handle, None);
         assert!(
             core.status.contains("out tangent set"),
@@ -3537,11 +4323,11 @@ mod tests {
             tangent_handle_data(&core.project.channels[0], 1, TangentSide::Out).unwrap();
         let view2 = drag_view(&core, ChannelTarget::RootX, size);
         let grab2 = view2.to_px(hf2, hv2);
-        assert!(drag_down(&mut core, &mut st, grab2, size));
+        assert!(drag_down(&mut core, &mut st, &mut KeySel::default(), grab2, size));
         let dest2 = view2.to_px(6.0, 130.0);
-        assert!(drag_move(&mut core, &mut st, dest2, size));
+        assert!(drag_move(&mut core, &mut st, &mut KeySel::default(), dest2, size));
         assert!(approx(core.project.channels[0].keys[1].out_tan, 25.0));
-        assert!(drag_up(&mut core, &mut st, dest2, size, 30.0, true));
+        assert!(drag_up(&mut core, &mut st, &mut KeySel::default(), dest2, size, 30.0, true));
         assert_eq!(st.drag_handle, None);
         assert!(
             approx(core.project.channels[0].keys[1].out_tan, -25.0),
@@ -4293,13 +5079,13 @@ mod tests {
         // index-based view and grab its frame-3 key.
         let view = view_for(&core, Some(&core.project.channels[1]), size);
         let grab = view.to_px(3.0, 4.0);
-        assert!(drag_down(&mut core, &mut st, grab, size));
+        assert!(drag_down(&mut core, &mut st, &mut KeySel::default(), grab, size));
         assert_eq!(st.drag_key, Some(1));
         // Move it to data (2, 9): the second twin's key
         // follows; the first twin is untouched.
         let dest = view.to_px(2.0, 9.0);
-        assert!(drag_move(&mut core, &mut st, dest, size));
-        assert!(drag_up(&mut core, &mut st, dest, size, 40.0, false));
+        assert!(drag_move(&mut core, &mut st, &mut KeySel::default(), dest, size));
+        assert!(drag_up(&mut core, &mut st, &mut KeySel::default(), dest, size, 40.0, false));
         let keys = &core.project.channels[1].keys;
         assert!(
             keys.iter()
@@ -4635,5 +5421,89 @@ mod tests {
             effective_channel_index(&core, &GraphPanelState::default()),
             Some(0)
         );
+    }
+
+    // ---- Key selection (Roadmap Wave 1, RM5 — F-4) ----
+
+    fn core_three_keys() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.channels = vec![channel(
+            ChannelTarget::RootX,
+            vec![
+                Key::flat(0.0, 0.0),
+                Key::flat(4.0, 80.0),
+                Key::flat(8.0, 20.0),
+            ],
+        )];
+        core
+    }
+
+    #[test]
+    fn down_on_a_key_selects_it_and_the_selection_follows_the_drag() {
+        let mut core = core_three_keys();
+        let mut st = GraphPanelState::default();
+        let mut sel = KeySel::default();
+        let size = [480.0, 170.0];
+        let view = drag_view(&core, ChannelTarget::RootX, size);
+        let grab = view.to_px(4.0, 80.0);
+        assert!(drag_down(&mut core, &mut st, &mut sel, grab, size));
+        assert_eq!(sel.frames(), vec![4.0]);
+        let dest = view.to_px(6.0, 10.0);
+        assert!(drag_move(&mut core, &mut st, &mut sel, dest, size));
+        assert_eq!(sel.frames(), vec![6.0], "selection rode the key to its new frame");
+        assert!(drag_up(&mut core, &mut st, &mut sel, dest, size, 40.0, false));
+        assert_eq!(sel.primary(0, &core.project.channels[0]), Some(1));
+    }
+
+    #[test]
+    fn handle_key_prefers_the_selection_and_survives_playhead_moves() {
+        let mut core = core_three_keys();
+        let st = GraphPanelState::default();
+        let mut sel = KeySel::default();
+        core.goto(0);
+        assert_eq!(handle_key_index(&core, &st, &sel), Some(0));
+        sel.select_one(0, 8.0);
+        assert_eq!(handle_key_index(&core, &st, &sel), Some(2));
+        core.goto(4);
+        assert_eq!(
+            handle_key_index(&core, &st, &sel),
+            Some(2),
+            "handles stay on the selected key when the playhead moves"
+        );
+        sel.clear();
+        assert_eq!(handle_key_index(&core, &st, &sel), Some(1));
+    }
+
+    #[test]
+    fn marquee_range_selects_and_a_short_up_still_seeks() {
+        let mut core = core_three_keys();
+        let mut st = GraphPanelState::default();
+        let mut sel = KeySel::default();
+        let size = [480.0, 170.0];
+        let view = drag_view(&core, ChannelTarget::RootX, size);
+        // Points BELOW the fitted value range: no key or
+        // handle is within grab distance of either.
+        let start = view.to_px(9.0, -30.0);
+        let end = view.to_px(3.0, -30.0);
+        assert!(!drag_down(&mut core, &mut st, &mut sel, start, size));
+        assert!(st.marquee.map_or(false, |m| approx(m, 9.0)));
+        assert!(!drag_move(&mut core, &mut st, &mut sel, end, size));
+        assert_eq!(sel.frames(), vec![4.0, 8.0], "the range grew live");
+        assert!(drag_up(&mut core, &mut st, &mut sel, end, size, 100.0, false));
+        assert_eq!(sel.frames(), vec![4.0, 8.0]);
+        assert!(
+            core.status.starts_with("Selected 2 keys on"),
+            "{}",
+            core.status
+        );
+        // A short empty-canvas gesture keeps the old
+        // click-seek and leaves the selection untouched.
+        let mut st2 = GraphPanelState::default();
+        let mut sel2 = KeySel::default();
+        core.goto(0);
+        assert!(!drag_down(&mut core, &mut st2, &mut sel2, start, size));
+        assert!(drag_up(&mut core, &mut st2, &mut sel2, start, size, 1.0, false));
+        assert_eq!(core.current, core.frame_count() - 1, "click past the end clamps");
+        assert!(sel2.is_empty());
     }
 }

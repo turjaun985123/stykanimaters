@@ -571,6 +571,32 @@ threed_* keys are integrator-side and not in the tree
 i18n.rs / i18n_wire.rs count lines must move with it
 (IA-S15-1 in S15's findings).
 
+Roadmap F-10 note (RM11, 2026-11-10): the standing
+parity audit is automated. (a) Check 11 (below) joins
+this gate: the i18n catalogue's key counts and the help
+panel's row counts are parsed live from i18n.rs /
+help_panel.rs and compared against the claims those
+files' own headers and pins make — superseding the
+Wave 11 note above ("Help rows are NOT censused by
+this gate and never have been") and the Wave S note
+(the catalogue "counted directly from i18n.rs, not by
+this gate"), which stand as their waves' history.
+Baseline at landing: 28 tables x 695 keys, sequences
+identical; help 61 rows (10 Shortcuts + 8 Workspaces +
+2 Posing + 5 Timeline + 0 Drawing + 36 Features).
+(b) scripts/mcp_schema_audit.py mechanises Wave AB's
+hand audit (AB1/AB2): every docs/MCP.md catalogue
+row's Required/Optional is compared against the tool's
+argument schema — check 9's name sync extended to the
+schemas the census leaves out. Its first live catch:
+subtitle_set_style's optional `font` (Roadmap RM2)
+reached the schema before the catalogue row; the row
+was corrected in the same pass. (c) The live-MCP
+probe's tool floor in .github/workflows/headless.yml
+no longer hard-codes 370: it derives from this
+script's MCP_SURFACE_FLOOR via scripts/mcp_tool_floor.py,
+so the floor has exactly one ledgered home.
+
 Approximations are deliberate and documented inline:
 block capture is brace counting over comment/string-
 blanked source (the repo's established scan idiom), and
@@ -859,7 +885,17 @@ def entry_field(chunk: str) -> str | None:
 # xc-progress-bundle (F6's artefact, above). Floor
 # raised 1019 -> 1020 so Wave AC closes from the
 # integrated truth.
-KEY_TOTAL_FLOOR = 1020
+#
+# Roadmap Wave 1 close (integrator, 2026-11-10): the
+# settled tree reads 1092 total unique keys (952
+# static + 140 dynamic, 64 files) under this counter
+# — the wave's additions itemised in
+# uiux-roadmap/INTEGRATION.md (RM12's lane row, RM13's
+# nine zoom keys, RM24's history panel, RM26's palette
+# v2 and the seats' panel work over the AC close).
+# Floor raised 1020 -> 1092 so Roadmap Wave 1 closes
+# from the integrated truth.
+KEY_TOTAL_FLOOR = 1092
 
 
 def inventory_counts() -> tuple[int, int, int, int]:
@@ -2316,7 +2352,13 @@ def _mcp_builtins() -> tuple[list[str], list[str]]:
 # subtitle tools, doc sync exact (check 9 here and
 # scripts/mcp_census.py both PASS on that baseline).
 # Floor raised 390 -> 392.
-MCP_SURFACE_FLOOR = 392
+# Roadmap Wave 1 integration (IAs RM17-1/RM21-3/RM30-1)
+# on the settled tree: the surface reads 396 = 45
+# built-ins (44 + apply_ops) + 331 registry (330 +
+# insert_breakdown) + 9 io + 4 subtitle io + 7 subtitle
+# tools (5 + subtitle_shift_all + subtitle_retime),
+# doc sync exact. Floor raised 392 -> 396.
+MCP_SURFACE_FLOOR = 396
 
 
 def check_mcp_surface() -> tuple[bool, list[str]]:
@@ -2564,6 +2606,9 @@ PARITY_MAP: dict[str, list[str]] = {
     "prev": ["set_frame"],
     "next": ["set_frame"],
     "first-frame": ["set_frame"],
+    # Roadmap Wave 1 (RM26, IA-RM26-5): the End-key
+    # twin of first-frame — the same tool covers it.
+    "last-frame": ["set_frame"],
     "restart-playback": ["set_playback"],
     "prev-keyframe": ["goto_prev_keyframe"],
     "next-keyframe": ["goto_next_keyframe"],
@@ -2632,6 +2677,11 @@ PARITY_MAP: dict[str, list[str]] = {
     # Graph
     "key-graph-angle": ["graph_key_angle"],
     "key-all-channels": ["graph_key_all_channels"],
+    # Roadmap Wave 1 (RM26, IA-RM26-5): the playhead
+    # key deletion is graph_delete_key with the channel
+    # and frame named — the same remove_key the shell's
+    # composed delete_key_here_core performs.
+    "delete-key-here": ["graph_delete_key"],
     "clear-graph": ["graph_clear_channels", "graph_clear_channel_keys"],
     "shift-channel-right": ["graph_shift_keys"],
     "fill-keys-range": ["graph_fill_keys"],
@@ -2641,6 +2691,14 @@ PARITY_MAP: dict[str, list[str]] = {
     "cycle-easing": ["set_project_easing"],
     # Draw
     "cycle-brush": ["cycle_brush"],
+    # Roadmap Wave 1 (RM26, IA-RM26-5): the [/] size
+    # steppers ARE step_brush_param with param "size"
+    # (verified against its catalogue row: it steps the
+    # stroke inspector's Preset size stepper by one
+    # preset in the named direction) — mapped, not
+    # excluded.
+    "brush-size-down": ["step_brush_param"],
+    "brush-size-up": ["step_brush_param"],
     "draw-tool": ["set_draw_tool"],
     "clear-drawings": ["clear_frame_strokes"],
     "mirror-strokes": ["mirror_strokes"],
@@ -2950,6 +3008,260 @@ def check_parity() -> tuple[bool, list[str]]:
 
 
 # ----------------------------------------------------------------
+# Check 11 — standing parity counts (Roadmap F-10, RM11):
+# the i18n catalogue's key counts and the help panel's row
+# counts join the gate. Both were previously counted only by
+# hand / by in-file unit pins: the Wave 11 note in this
+# file's header records that help rows "are NOT censused by
+# this gate and never have been", and the Wave S note that
+# the i18n catalogue "is counted directly from i18n.rs, not
+# by this gate". Those sentences stand as their waves'
+# history; this check is the change. Like check 5, every
+# number here is DERIVED from source and then compared
+# against the claims the tree itself makes (the i18n.rs and
+# i18n_wire.rs headers, the help panel's module-doc
+# breakdown and its in-file row pin) — no expected count is
+# hard-coded, so a deliberate key/row addition moves the
+# claims and this check together, and drift between a claim
+# and the live parse fails loudly. The schema <-> catalogue
+# half of F-10 is scripts/mcp_schema_audit.py (check 9's
+# name sync extended to argument schemas).
+# ----------------------------------------------------------------
+
+
+def _pair_entry_firsts(chunk: str) -> list[str]:
+    """First string of each `("...", ...)` tuple entry in a
+    source chunk, line-anchored: entries are either one-line
+    `("key", "value"),` or the two-line form where `(` sits
+    alone and the key follows on the next line (the
+    `status_ready` tuple in i18n.rs; multi-line help rows).
+    This is the anchored parse the counts below stand on —
+    a naive `("` count over-counts (strings inside values,
+    the test module's PARTIAL fixture table)."""
+    firsts: list[str] = []
+    lines = chunk.splitlines()
+    i = 0
+    while i < len(lines):
+        m = re.match(r'^\s*\("((?:[^"\\]|\\.)*)",', lines[i])
+        if m:
+            firsts.append(m.group(1))
+            i += 1
+            continue
+        if re.match(r"^\s*\(\s*$", lines[i]) and i + 1 < len(lines):
+            m2 = re.match(r'^\s*"((?:[^"\\]|\\.)*)",\s*$', lines[i + 1])
+            if m2:
+                firsts.append(m2.group(1))
+                i += 2
+                continue
+        i += 1
+    return firsts
+
+
+def check_i18n_help_counts() -> tuple[bool, list[str]]:
+    ok = True
+    lines: list[str] = []
+
+    # ---- i18n: languages, tables, key sequences ---------------
+    i18n = read("src/i18n.rs")
+    wire = read("src/rune_sec/i18n_wire.rs")
+    m = re.search(r"pub fn all\(\) -> \[Lang; (\d+)\]", i18n)
+    n_lang = int(m.group(1)) if m else 0
+    if not m:
+        ok = False
+        lines.append("  i18n: Lang::all() arity not found in i18n.rs")
+    all_span = i18n[i18n.index("pub fn all()"):]
+    all_span = all_span[:all_span.index("\n    }")]
+    lang_entries = re.findall(r"Lang::(\w+)", all_span)
+    if len(lang_entries) != n_lang:
+        ok = False
+        lines.append(
+            f"  i18n: Lang::all() arity says {n_lang} but lists "
+            f"{len(lang_entries)} variants"
+        )
+    tf = i18n[i18n.index("fn table_for"):i18n.index("fn resolve")]
+    table_names = re.findall(r"Lang::\w+ => ([A-Z0-9_]+),", tf)
+    if len(table_names) != n_lang:
+        ok = False
+        lines.append(
+            f"  i18n: table_for maps {len(table_names)} tables for "
+            f"{n_lang} languages"
+        )
+    tables: dict[str, list[str]] = {}
+    for name in table_names:
+        sm = re.search(rf"static {name}: &\[", i18n)
+        if not sm:
+            ok = False
+            lines.append(f"  i18n: static table {name} not found")
+            continue
+        body = i18n[sm.end():]
+        body = body[:body.index("\n];")]
+        tables[name] = _pair_entry_firsts(body)
+    counts = {name: len(keys) for name, keys in tables.items()}
+    distinct_counts = sorted(set(counts.values()))
+    en_keys = tables.get("EN", [])
+    if len(distinct_counts) != 1:
+        ok = False
+        lines.append(f"  i18n: table key counts differ: {counts}")
+    for name, keys in tables.items():
+        if len(keys) != len(set(keys)):
+            ok = False
+            lines.append(f"  i18n: table {name} has duplicate keys")
+        if keys != en_keys:
+            drift = [k for k in en_keys if k not in keys][:3] or \
+                    [k for k in keys if k not in en_keys][:3]
+            ok = False
+            lines.append(
+                f"  i18n: table {name} key sequence != EN "
+                f"(first drift: {drift})"
+            )
+    n_keys = distinct_counts[0] if len(distinct_counts) == 1 else 0
+    lines.append(
+        f"i18n catalogue: {len(tables)} tables x {n_keys} keys "
+        f"({n_lang} languages via Lang::all/table_for) — every "
+        "table's key sequence identical to EN, no duplicates "
+        "(live parse of i18n.rs)"
+    )
+    claim = re.search(r"exactly the same (\d+) keys", i18n)
+    if not claim or int(claim.group(1)) != n_keys:
+        ok = False
+        lines.append(
+            "  i18n claim drift: i18n.rs header 'exactly the same "
+            f"{claim.group(1) if claim else '?'} keys' vs live {n_keys}"
+        )
+    claim2 = re.search(r"(\d+) languages × (\d+) keys", wire)
+    if not claim2 or (int(claim2.group(1)), int(claim2.group(2))) != \
+            (n_lang, n_keys):
+        ok = False
+        lines.append(
+            "  i18n claim drift: i18n_wire.rs header "
+            f"'{claim2.group(0) if claim2 else '?'}' vs live "
+            f"{n_lang} languages x {n_keys} keys"
+        )
+    else:
+        lines.append(
+            "i18n claims: i18n.rs header and i18n_wire.rs header "
+            "both match the live parse"
+        )
+
+    # ---- help panel: sections and rows -------------------------
+    help_src = read("src/rune_sec/help_panel.rs")
+    prod = help_src.split("#[cfg(test)]")[0]
+    g_span = prod[prod.index("pub fn group_rows"):]
+    g_span = g_span[:g_span.index("\nfn help_text_key")]
+    sections = _pair_entry_firsts(g_span)
+    s_span = prod[prod.index("pub fn section_rows"):]
+    s_span = s_span[:s_span.index("pub fn section_note")]
+    # Roadmap Wave 1 re-base (RM26's integrator note):
+    # the five key sections are no longer literal tables
+    # in help_panel.rs — they are generated from the
+    # binding registry, so they are counted from
+    # keymap.rs's BINDINGS (one `section: "Name"` field
+    # per binding). Features stays a literal table in
+    # help_panel.rs and is counted from its arm as
+    # before.
+    keymap_src = read("src/rune_sec/keymap.rs")
+    kb = keymap_src[keymap_src.index("pub static BINDINGS"):]
+    kb = kb[:kb.index("\n];")]
+    per_section: dict[str, int] = {}
+    for name in sections:
+        if name != "Features":
+            per_section[name] = len(
+                re.findall(rf'section: "{re.escape(name)}"', kb))
+            continue
+        am = re.search(rf'"{re.escape(name)}" => vec!\[', s_span)
+        if not am:
+            ok = False
+            lines.append(f"  help: no section_rows arm for {name!r}")
+            per_section[name] = 0
+            continue
+        rest = s_span[am.end():]
+        if rest.startswith("]"):
+            per_section[name] = 0
+            continue
+        end = rest.index("\n        ],")
+        per_section[name] = len(_pair_entry_firsts(rest[:end]))
+    total_rows = sum(per_section.values())
+    breakdown = " + ".join(
+        f"{per_section[s]} {s}" for s in sections)
+    lines.append(
+        f"help rows: {total_rows} total ({breakdown}) across "
+        f"{len(sections)} sections — live parse of "
+        "group_rows in help_panel.rs, the five key sections "
+        "from keymap.rs BINDINGS, Features literal in "
+        "help_panel.rs"
+    )
+    pin = re.search(r"assert_eq!\(shortcut_rows\(\)\.len\(\), (\d+)\)",
+                    help_src)
+    pin_name = re.search(r"fn shortcut_rows_has_exactly_(\d+)_rows",
+                         help_src)
+    if not pin or int(pin.group(1)) != total_rows or \
+            not pin_name or int(pin_name.group(1)) != total_rows:
+        ok = False
+        lines.append(
+            f"  help pin drift: in-file pin says "
+            f"{pin.group(1) if pin else '?'}/"
+            f"{pin_name.group(1) if pin_name else '?'} vs live "
+            f"{total_rows}"
+        )
+    # The module-doc breakdown wraps across `//!` lines, so
+    # flatten comment continuations before matching it.
+    flat_help = re.sub(r"\n//!\s?", " ", help_src)
+    doc = re.search(
+        r"holds \*\*(\d+) rows\*\*: (\d+) Shortcuts \+ (\d+) "
+        r"Workspaces \+ (\d+) Posing \+ (\d+) Timeline \+ "
+        r"(\d+) Drawing \+ (\d+) Features", flat_help)
+    if not doc:
+        ok = False
+        lines.append("  help: module-doc row breakdown claim not found")
+    else:
+        want = {"Shortcuts": int(doc.group(2)),
+                "Workspaces": int(doc.group(3)),
+                "Posing": int(doc.group(4)),
+                "Timeline": int(doc.group(5)),
+                "Drawing": int(doc.group(6)),
+                "Features": int(doc.group(7))}
+        if int(doc.group(1)) != total_rows or \
+                any(per_section.get(k) != v for k, v in want.items()):
+            ok = False
+            lines.append(
+                f"  help doc drift: module doc claims {doc.group(1)} "
+                f"rows {want} vs live {total_rows} {per_section}"
+            )
+        else:
+            lines.append(
+                "help claims: module-doc breakdown and the in-file "
+                "row pin both match the live parse"
+            )
+    return ok, lines
+
+
+# ----------------------------------------------------------------
+# Check 12 — i18n coverage (Roadmap PL-9, RM27; IA-RM27-2):
+# RM27's instrument joins the gate. It derives every
+# language's translated count from i18n.rs and fails on a
+# regression below scripts/i18n_coverage.py's
+# BASELINE_TRANSLATED ratchet, or when the settings
+# picker's per-language tier label disagrees with the
+# measured tier (es-419 measured through its base chain).
+# ----------------------------------------------------------------
+
+
+def check_i18n_coverage() -> tuple[bool, list[str]]:
+    proc = subprocess.run(
+        [sys.executable,
+         os.path.join(ROOT, "scripts", "i18n_coverage.py")],
+        capture_output=True, text=True)
+    out = (proc.stdout + proc.stderr).strip().splitlines()
+    lines = [ln.strip() for ln in out if ln.startswith("RESULT")]
+    if proc.returncode != 0:
+        lines += [ln.strip() for ln in out
+                  if "regression" in ln or "drift" in ln][:6]
+    if not lines:
+        lines = ["  i18n_coverage.py produced no RESULT line"]
+    return proc.returncode == 0, lines
+
+
+# ----------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------
 
@@ -3016,6 +3328,20 @@ def main() -> int:
 
     ok, lines = check_parity()
     report("10. PARITY (palette commands <-> MCP tools, Wave 14)", ok, lines)
+
+    ok, lines = check_i18n_help_counts()
+    report(
+        "11. STANDING PARITY COUNTS (i18n tables + help rows, Roadmap F-10)",
+        ok,
+        lines,
+    )
+
+    ok, lines = check_i18n_coverage()
+    report(
+        "12. I18N COVERAGE (per-language tiers + baselines, Roadmap PL-9)",
+        ok,
+        lines,
+    )
 
     print()
     if failures:

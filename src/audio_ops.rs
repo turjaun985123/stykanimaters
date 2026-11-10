@@ -131,6 +131,20 @@
 //! (`audio_trim`), the file normalise (`audio_normalize`)
 //! and the `*_last` DSP originals all live in `editor.rs`.
 //!
+//! Roadmap Wave 1 (RM20, P-10): the five fixed-parameter
+//! DSP primaries — fade, echo, lowpass, pitch, compress —
+//! gain parameterised twins (`audio_fade_at_with` and
+//! family) that take the effect's values from the caller,
+//! sanitised by `sanitise_param`; the fixed primaries
+//! delegate at the published constants (`FADE_IN_SECS`,
+//! `ECHO_DELAY_SECS`, …), so their behaviour and status
+//! sentences are byte-identical, and each `*_with` op
+//! keeps the census rule above: exactly one snapshot,
+//! after all fallible work. The audio panel's effect
+//! settings ride these twins; the MCP handlers still call
+//! the fixed primaries (parameter parity for MCP is an
+//! integrator decision, recorded in RM20's findings).
+//!
 //! `audio_derived_path` below is a copy of the private helper
 //! of the same name in `editor.rs`: it is private to that
 //! module, so this file cannot call it — the body is kept
@@ -146,8 +160,40 @@ use crate::editor::EditorCore;
 /// ops (echo 0.18 s / 35 %, low-pass 1200 Hz, pitch +2).
 /// No MCP tool exposes `audio_edit::fade`, so there is no
 /// MCP default to mirror.
-const FADE_IN_SECS: f32 = 0.25;
-const FADE_OUT_SECS: f32 = 0.25;
+pub const FADE_IN_SECS: f32 = 0.25;
+pub const FADE_OUT_SECS: f32 = 0.25;
+
+/// Default echo delay (seconds) for `audio_echo_at` — the
+/// fixed parameter of the `editor.rs` original. Roadmap
+/// Wave 1 (RM20, P-10): the parameterised
+/// [`EditorCore::audio_echo_at_with`] takes the value from
+/// the caller; the fixed op delegates at this constant.
+pub const ECHO_DELAY_SECS: f32 = 0.18;
+/// Default echo feedback (0..=1) for `audio_echo_at`.
+pub const ECHO_FEEDBACK: f32 = 0.35;
+/// Default low-pass cutoff (Hz) for `audio_lowpass_at`.
+pub const LOWPASS_HZ: f32 = 1200.0;
+/// Default pitch shift (semitones) for `audio_pitch_at`.
+pub const PITCH_SEMITONES: f32 = 2.0;
+/// Default compressor threshold for `audio_compress_at`.
+pub const COMP_THRESHOLD: f32 = 0.5;
+/// Default compressor ratio for `audio_compress_at`.
+pub const COMP_RATIO: f32 = 4.0;
+
+/// Sanitise one effect parameter for the parameterised
+/// `*_with` ops (Roadmap Wave 1, RM20): a non-finite
+/// request falls back to the op's `default`; a finite one
+/// clamps into `min..=max`. The status line of a `*_with`
+/// op names the SANITISED values, so what was applied is
+/// always what the line reports — and at the defaults the
+/// sentence is byte-identical to the fixed op's.
+fn sanitise_param(value: f32, default: f32, min: f32, max: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(min, max)
+    } else {
+        default
+    }
+}
 
 /// Path for an audio edit product: same directory as
 /// `source`, with the source file stem plus `suffix` (for
@@ -369,11 +415,28 @@ impl EditorCore {
     /// the product is `<stem>.fade.wav` and the source file
     /// is never overwritten. One snapshot on success; an
     /// out-of-range index only sets the status.
+    ///
+    /// Roadmap Wave 1 (RM20, P-10): delegates to
+    /// [`Self::audio_fade_at_with`] at the fixed lengths, so
+    /// the one-click op and the parameterised op can never
+    /// drift apart.
     pub fn audio_fade_at(&mut self, index: usize) {
+        self.audio_fade_at_with(index, FADE_IN_SECS, FADE_OUT_SECS);
+    }
+
+    /// Roadmap Wave 1 (RM20, P-10): [`Self::audio_fade_at`]
+    /// with caller-chosen fade lengths (seconds). The
+    /// lengths sanitise through [`sanitise_param`] (0..=10 s
+    /// each, non-finite → the fixed defaults) and the status
+    /// names the sanitised values, so at the defaults the
+    /// sentence is byte-identical to the fixed op's.
+    pub fn audio_fade_at_with(&mut self, index: usize, fade_in_secs: f32, fade_out_secs: f32) {
         if self.project.audio.get(index).is_none() {
             self.status = format!("Audio fade failed: no clip {}.", index + 1);
             return;
         }
+        let fade_in_secs = sanitise_param(fade_in_secs, FADE_IN_SECS, 0.0, 10.0);
+        let fade_out_secs = sanitise_param(fade_out_secs, FADE_OUT_SECS, 0.0, 10.0);
         let clip = self.project.audio[index].clone();
         let mut wav = match crate::audio_edit::read_wav(&clip.path) {
             Ok(wav) => wav,
@@ -382,7 +445,7 @@ impl EditorCore {
                 return;
             }
         };
-        crate::audio_edit::fade(&mut wav, FADE_IN_SECS, FADE_OUT_SECS);
+        crate::audio_edit::fade(&mut wav, fade_in_secs, fade_out_secs);
         let source = PathBuf::from(&clip.path);
         let out = audio_derived_path(&source, ".fade.wav");
         if out == source {
@@ -396,7 +459,7 @@ impl EditorCore {
         self.snapshot();
         self.project.audio[index].path = out.to_string_lossy().into_owned();
         self.status = format!(
-            "Fade ({FADE_IN_SECS:.2}s in, {FADE_OUT_SECS:.2}s out) applied to audio clip {}: {}.",
+            "Fade ({fade_in_secs:.2}s in, {fade_out_secs:.2}s out) applied to audio clip {}: {}.",
             index + 1,
             out.display()
         );
@@ -680,11 +743,26 @@ impl EditorCore {
     /// write does the clip point to the new file (behind one
     /// undo snapshot). An out-of-range index only sets the
     /// status.
+    ///
+    /// Roadmap Wave 1 (RM20, P-10): delegates to
+    /// [`Self::audio_echo_at_with`] at the fixed parameters.
     pub fn audio_echo_at(&mut self, index: usize) {
+        self.audio_echo_at_with(index, ECHO_DELAY_SECS, ECHO_FEEDBACK);
+    }
+
+    /// Roadmap Wave 1 (RM20, P-10): [`Self::audio_echo_at`]
+    /// with a caller-chosen delay (seconds, 0.01..=2.0) and
+    /// feedback (0..=0.95); non-finite values fall back to
+    /// the fixed defaults (see [`sanitise_param`]). The
+    /// status names the sanitised values — byte-identical
+    /// to the fixed op's sentence at the defaults.
+    pub fn audio_echo_at_with(&mut self, index: usize, delay_secs: f32, feedback: f32) {
         if self.project.audio.get(index).is_none() {
             self.status = format!("Audio echo failed: no clip {}.", index + 1);
             return;
         }
+        let delay_secs = sanitise_param(delay_secs, ECHO_DELAY_SECS, 0.01, 2.0);
+        let feedback = sanitise_param(feedback, ECHO_FEEDBACK, 0.0, 0.95);
         let clip = self.project.audio[index].clone();
         let mut wav = match crate::audio_edit::read_wav(&clip.path) {
             Ok(wav) => wav,
@@ -693,7 +771,7 @@ impl EditorCore {
                 return;
             }
         };
-        crate::audio_edit::echo(&mut wav, 0.18, 0.35);
+        crate::audio_edit::echo(&mut wav, delay_secs, feedback);
         let source = PathBuf::from(&clip.path);
         let out = audio_derived_path(&source, ".echo.wav");
         if out == source {
@@ -707,8 +785,9 @@ impl EditorCore {
         self.snapshot();
         self.project.audio[index].path = out.to_string_lossy().into_owned();
         self.status = format!(
-            "Echo applied to audio clip {} (0.18s delay, 35% feedback): {}.",
+            "Echo applied to audio clip {} ({delay_secs:.2}s delay, {:.0}% feedback): {}.",
             index + 1,
+            feedback * 100.0,
             out.display()
         );
     }
@@ -720,11 +799,25 @@ impl EditorCore {
     /// [`Self::audio_echo_at`]; the product is
     /// `<stem>.lowpass.wav`. An out-of-range index only sets
     /// the status.
+    ///
+    /// Roadmap Wave 1 (RM20, P-10): delegates to
+    /// [`Self::audio_lowpass_at_with`] at the fixed cutoff.
     pub fn audio_lowpass_at(&mut self, index: usize) {
+        self.audio_lowpass_at_with(index, LOWPASS_HZ);
+    }
+
+    /// Roadmap Wave 1 (RM20, P-10):
+    /// [`Self::audio_lowpass_at`] with a caller-chosen
+    /// cutoff (Hz, 40..=16000; non-finite → the fixed
+    /// default, see [`sanitise_param`]). The status names
+    /// the sanitised cutoff — byte-identical to the fixed
+    /// op's sentence at the default.
+    pub fn audio_lowpass_at_with(&mut self, index: usize, cutoff_hz: f32) {
         if self.project.audio.get(index).is_none() {
             self.status = format!("Audio low-pass failed: no clip {}.", index + 1);
             return;
         }
+        let cutoff_hz = sanitise_param(cutoff_hz, LOWPASS_HZ, 40.0, 16000.0);
         let clip = self.project.audio[index].clone();
         let mut wav = match crate::audio_edit::read_wav(&clip.path) {
             Ok(wav) => wav,
@@ -733,7 +826,7 @@ impl EditorCore {
                 return;
             }
         };
-        crate::audio_edit::lowpass(&mut wav, 1200.0);
+        crate::audio_edit::lowpass(&mut wav, cutoff_hz);
         let source = PathBuf::from(&clip.path);
         let out = audio_derived_path(&source, ".lowpass.wav");
         if out == source {
@@ -750,7 +843,7 @@ impl EditorCore {
         self.snapshot();
         self.project.audio[index].path = out.to_string_lossy().into_owned();
         self.status = format!(
-            "Low-pass filter (1200 Hz) applied to audio clip {}: {}.",
+            "Low-pass filter ({cutoff_hz:.0} Hz) applied to audio clip {}: {}.",
             index + 1,
             out.display()
         );
@@ -819,11 +912,25 @@ impl EditorCore {
     /// `<stem>.pitch.wav` and the source file is never
     /// overwritten. An out-of-range index only sets the
     /// status.
+    ///
+    /// Roadmap Wave 1 (RM20, P-10): delegates to
+    /// [`Self::audio_pitch_at_with`] at the fixed shift.
     pub fn audio_pitch_at(&mut self, index: usize) {
+        self.audio_pitch_at_with(index, PITCH_SEMITONES);
+    }
+
+    /// Roadmap Wave 1 (RM20, P-10): [`Self::audio_pitch_at`]
+    /// with a caller-chosen shift in semitones
+    /// (−24..=+24; non-finite → the fixed +2, see
+    /// [`sanitise_param`]). The status names the sanitised
+    /// shift — byte-identical to the fixed op's sentence at
+    /// the default.
+    pub fn audio_pitch_at_with(&mut self, index: usize, semitones: f32) {
         if self.project.audio.get(index).is_none() {
             self.status = format!("Audio pitch shift failed: no clip {}.", index + 1);
             return;
         }
+        let semitones = sanitise_param(semitones, PITCH_SEMITONES, -24.0, 24.0);
         let clip = self.project.audio[index].clone();
         let mut wav = match crate::audio_edit::read_wav(&clip.path) {
             Ok(wav) => wav,
@@ -832,7 +939,7 @@ impl EditorCore {
                 return;
             }
         };
-        crate::audio_edit::pitch_shift(&mut wav, 2.0);
+        crate::audio_edit::pitch_shift(&mut wav, semitones);
         let source = PathBuf::from(&clip.path);
         let out = audio_derived_path(&source, ".pitch.wav");
         if out == source {
@@ -849,7 +956,7 @@ impl EditorCore {
         self.snapshot();
         self.project.audio[index].path = out.to_string_lossy().into_owned();
         self.status = format!(
-            "Pitch shift (+2 semitones) applied to audio clip {}: {}.",
+            "Pitch shift ({semitones:+.0} semitones) applied to audio clip {}: {}.",
             index + 1,
             out.display()
         );
@@ -865,11 +972,28 @@ impl EditorCore {
     /// `<stem>.comp.wav` and the source file is never
     /// overwritten. An out-of-range index only sets the
     /// status.
+    ///
+    /// Roadmap Wave 1 (RM20, P-10): delegates to
+    /// [`Self::audio_compress_at_with`] at the fixed
+    /// parameters.
     pub fn audio_compress_at(&mut self, index: usize) {
+        self.audio_compress_at_with(index, COMP_THRESHOLD, COMP_RATIO);
+    }
+
+    /// Roadmap Wave 1 (RM20, P-10):
+    /// [`Self::audio_compress_at`] with a caller-chosen
+    /// threshold (0.05..=1.0) and ratio (1.0..=20.0);
+    /// non-finite values fall back to the fixed defaults
+    /// (see [`sanitise_param`]). The status names the
+    /// sanitised values — byte-identical to the fixed op's
+    /// sentence at the defaults.
+    pub fn audio_compress_at_with(&mut self, index: usize, threshold: f32, ratio: f32) {
         if self.project.audio.get(index).is_none() {
             self.status = format!("Audio compress failed: no clip {}.", index + 1);
             return;
         }
+        let threshold = sanitise_param(threshold, COMP_THRESHOLD, 0.05, 1.0);
+        let ratio = sanitise_param(ratio, COMP_RATIO, 1.0, 20.0);
         let clip = self.project.audio[index].clone();
         let mut wav = match crate::audio_edit::read_wav(&clip.path) {
             Ok(wav) => wav,
@@ -878,7 +1002,7 @@ impl EditorCore {
                 return;
             }
         };
-        crate::audio_edit::compress(&mut wav, 0.5, 4.0);
+        crate::audio_edit::compress(&mut wav, threshold, ratio);
         let source = PathBuf::from(&clip.path);
         let out = audio_derived_path(&source, ".comp.wav");
         if out == source {
@@ -895,7 +1019,7 @@ impl EditorCore {
         self.snapshot();
         self.project.audio[index].path = out.to_string_lossy().into_owned();
         self.status = format!(
-            "Compressor (threshold 0.5, ratio 4.0) applied to audio clip {}: {}.",
+            "Compressor (threshold {threshold:.1}, ratio {ratio:.1}) applied to audio clip {}: {}.",
             index + 1,
             out.display()
         );
@@ -1725,6 +1849,132 @@ mod tests {
         assert_eq!(project_json(&via_last), project_json(&via_at));
         assert_eq!(via_last.status, via_at.status);
         assert_eq!(via_last.edits_since_autosave(), via_at.edits_since_autosave());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn with_variants_at_defaults_match_the_fixed_ops() {
+        // Roadmap Wave 1 (RM20): the parameterised twins at
+        // the published defaults must be indistinguishable
+        // from the fixed primaries — same project, same
+        // status sentence, same snapshot cost — because the
+        // fixed ops now delegate to them.
+        let dir = temp_dir("with-defaults");
+        let a = write_ramp_wav(&dir, "a.wav");
+        let cases: Vec<(
+            &str,
+            fn(&mut EditorCore, usize),
+            fn(&mut EditorCore, usize),
+        )> = vec![
+            (
+                "fade",
+                |c, i| c.audio_fade_at(i),
+                |c, i| c.audio_fade_at_with(i, FADE_IN_SECS, FADE_OUT_SECS),
+            ),
+            (
+                "echo",
+                |c, i| c.audio_echo_at(i),
+                |c, i| c.audio_echo_at_with(i, ECHO_DELAY_SECS, ECHO_FEEDBACK),
+            ),
+            (
+                "lowpass",
+                |c, i| c.audio_lowpass_at(i),
+                |c, i| c.audio_lowpass_at_with(i, LOWPASS_HZ),
+            ),
+            (
+                "pitch",
+                |c, i| c.audio_pitch_at(i),
+                |c, i| c.audio_pitch_at_with(i, PITCH_SEMITONES),
+            ),
+            (
+                "compress",
+                |c, i| c.audio_compress_at(i),
+                |c, i| c.audio_compress_at_with(i, COMP_THRESHOLD, COMP_RATIO),
+            ),
+        ];
+        for (name, fixed, with) in cases {
+            let mut via_fixed = core_with(vec![clip(&a, 0)]);
+            let mut via_with = core_with(vec![clip(&a, 0)]);
+            fixed(&mut via_fixed, 0);
+            with(&mut via_with, 0);
+            assert_eq!(via_fixed.status, via_with.status, "{name}: status");
+            assert_eq!(
+                project_json(&via_fixed),
+                project_json(&via_with),
+                "{name}: project"
+            );
+            assert_eq!(
+                via_fixed.edits_since_autosave(),
+                via_with.edits_since_autosave(),
+                "{name}: snapshot cost"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fade_with_zero_lengths_leaves_the_samples_whole() {
+        // A 0 s fade is the identity: the product equals the
+        // source sample for sample, and the status names the
+        // lengths the caller asked for.
+        let dir = temp_dir("fade-with-zero");
+        let a = write_ramp_wav(&dir, "a.wav");
+        let mut core = core_with(vec![clip(&a, 0)]);
+        core.audio_fade_at_with(0, 0.0, 0.0);
+        let expected = dir.join("a.fade.wav").to_string_lossy().into_owned();
+        assert_eq!(
+            core.status,
+            format!("Fade (0.00s in, 0.00s out) applied to audio clip 1: {expected}.")
+        );
+        let product = crate::audio_edit::read_wav(&expected).unwrap();
+        let source = crate::audio_edit::read_wav(&a).unwrap();
+        assert_eq!(product.samples, source.samples);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pitch_with_minus_twelve_doubles_the_frame_count() {
+        // −12 semitones is a rate halving: the product holds
+        // twice the source's frames (the `pitch_shift`
+        // resample contract), and the status names the
+        // caller's shift with its sign.
+        let dir = temp_dir("pitch-with");
+        let a = write_ramp_wav(&dir, "a.wav");
+        let mut core = core_with(vec![clip(&a, 0)]);
+        core.audio_pitch_at_with(0, -12.0);
+        let expected = dir.join("a.pitch.wav").to_string_lossy().into_owned();
+        assert_eq!(
+            core.status,
+            format!("Pitch shift (-12 semitones) applied to audio clip 1: {expected}.")
+        );
+        let product = crate::audio_edit::read_wav(&expected).unwrap();
+        assert_eq!(product.frames(), 16000);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn with_variants_sanitise_out_of_range_and_nan() {
+        // Out-of-range values clamp and non-finite values
+        // fall back to the defaults — and the status names
+        // the SANITISED values actually applied.
+        let dir = temp_dir("with-sanitise");
+        let a = write_ramp_wav(&dir, "a.wav");
+        let mut core = core_with(vec![clip(&a, 0)]);
+        core.audio_echo_at_with(0, 99.0, f32::NAN);
+        let expected = dir.join("a.echo.wav").to_string_lossy().into_owned();
+        assert_eq!(
+            core.status,
+            format!("Echo applied to audio clip 1 (2.00s delay, 35% feedback): {expected}.")
+        );
+        let mut core = core_with(vec![clip(&a, 0)]);
+        core.audio_compress_at_with(0, 5.0, 0.0);
+        let expected = dir.join("a.comp.wav").to_string_lossy().into_owned();
+        assert_eq!(
+            core.status,
+            format!(
+                "Compressor (threshold 1.0, ratio 1.0) applied to audio clip 1: {expected}."
+            )
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

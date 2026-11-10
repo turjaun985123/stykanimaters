@@ -69,10 +69,9 @@
 //! identically, from one source of truth. The write itself
 //! keeps this panel's own discipline: the stepped colour
 //! goes through [`set_background`], the same direct field
-//! write + status string the swatches use, and — per the
-//! snapshot note below — no undo snapshot (the stage-preset
-//! write, `set_stage_preset`, snapshots nothing either;
-//! nothing in this module does). Stepping off a swatch
+//! write + status string the swatches use, under a
+//! coalesced undo step (the snapshot note below — RM24
+//! closed this module's no-snapshot era). Stepping off a swatch
 //! colour simply leaves every swatch unhighlighted while
 //! the header shows the raw hex; stepping back onto a
 //! swatch colour lights it again, because the highlight is
@@ -110,18 +109,20 @@
 //! different colours (the preset Sky and Forest are not
 //! the swatch Sky and Forest). A press writes through
 //! [`set_background`], the swatches' own handler body:
-//! same field write, same status string, no snapshot.
+//! same field write, same status string, same coalesced
+//! undo step.
 //! The first preset, Midnight, is the engine default
 //! (`Project::new_demo`'s `background`, 0x232830), so a
 //! fresh project lights exactly one preset chip.
 //!
-//! No undo snapshots, on purpose: weather writes were never
-//! snapshotted. The GPUI listeners wrote `project.weather`
-//! directly (the wiring note above), and in this engine a
-//! snapshot exists only where a backing fn calls
-//! `EditorCore::snapshot()` — none of this module's fns do,
-//! steppers included. A drag therefore costs exactly as
-//! many undo entries as the steppers: zero.
+//! Undo discipline (Roadmap Wave 1, RM24, P-14): weather
+//! writes were never snapshotted in the GPUI era — the
+//! listeners wrote `project.weather` directly (the wiring
+//! note above) and Wave 13 only counted them dirty. RM24
+//! closed that census: every real change in this module
+//! now takes an undo step, labelled and — for the
+//! stepper/slider families — coalesced, so a drag costs
+//! exactly as many undo entries as a stepper run: one.
 //!
 //! Phase N (adoption) restyles the panel to the charter's
 //! card language: the root is the kit's `design::panel_col`,
@@ -253,36 +254,35 @@ pub fn weather_summary(weather: Option<Weather>) -> String {
 /// off applies the kind's preset. Status strings are the GPUI
 /// listeners' own.
 pub fn set_weather_kind(core: &mut EditorCore, kind: Option<WeatherKind>) {
-    // Wave 13 (census E3): no undo snapshots (the module's
-    // documented weather discipline), but a real change
-    // counts for dirty/autosave via the seam.
+    // Roadmap Wave 1 (RM24, P-14 — A15 H3): a real change
+    // takes exactly one undo step (Wave 13, census E3,
+    // only counted it dirty).
     let before = core.project.weather;
-    match kind {
-        None => {
-            core.project.weather = None;
-            core.status = "Weather: off.".into();
-        }
+    let (next, label): (Option<Weather>, &'static str) = match kind {
+        None => (None, "Weather: off."),
         Some(kind) => {
-            core.project.weather = Some(match core.project.weather {
+            let next = Some(match before {
                 Some(mut w) => {
                     w.kind = kind;
                     w
                 }
                 None => kind_preset(kind),
             });
-            core.status = match kind {
+            let label = match kind {
                 WeatherKind::Rain => "Weather: rain.",
                 WeatherKind::Snow => "Weather: snow.",
                 WeatherKind::Fireflies => "Weather: fireflies.",
                 WeatherKind::Fog => "Weather: fog.",
                 WeatherKind::Storm => "Weather: storm.",
-            }
-            .into();
+            };
+            (next, label)
         }
+    };
+    if next != before {
+        core.snapshot_labeled("Weather");
+        core.project.weather = next;
     }
-    if core.project.weather != before {
-        core.mark_dirty();
-    }
+    core.status = label.into();
 }
 
 /// The Scene group's old `weather` button, truthfully: cycle
@@ -304,10 +304,11 @@ pub fn cycle_weather(core: &mut EditorCore) {
             }
         },
     };
-    // Wave 13 (census E3): mark on a real change only.
+    // Roadmap Wave 1 (RM24, P-14): one undo step on a
+    // real change (the cycle always changes the weather).
     if core.project.weather != next {
+        core.snapshot_labeled("Weather");
         core.project.weather = next;
-        core.mark_dirty();
     }
     core.status = label.into();
 }
@@ -318,13 +319,14 @@ pub fn cycle_weather(core: &mut EditorCore) {
 pub fn step_weather_amount(core: &mut EditorCore, delta: f32) {
     match core.project.weather {
         Some(mut w) => {
-            // Wave 13 (census E3): a step clamped to the
-            // stored value marks nothing.
+            // Roadmap Wave 1 (RM24, P-14): a real step
+            // takes a coalesced undo step; a step clamped
+            // to the stored value spends nothing.
             let stepped = (w.amount + delta).clamp(0.0, 200.0);
             if stepped != w.amount {
+                core.snapshot_coalesced("Weather amount");
                 w.amount = stepped;
                 core.project.weather = Some(w);
-                core.mark_dirty();
             }
             core.status = format!("Weather amount: {:.0}.", w.amount);
         }
@@ -339,12 +341,13 @@ pub fn step_weather_amount(core: &mut EditorCore, delta: f32) {
 pub fn step_weather_wind(core: &mut EditorCore, delta: f32) {
     match core.project.weather {
         Some(mut w) => {
-            // Wave 13 (census E3): as `step_weather_amount`.
+            // Roadmap Wave 1 (RM24, P-14): as
+            // `step_weather_amount`.
             let stepped = (w.wind + delta).clamp(-200.0, 200.0);
             if stepped != w.wind {
+                core.snapshot_coalesced("Weather wind");
                 w.wind = stepped;
                 core.project.weather = Some(w);
-                core.mark_dirty();
             }
             core.status = format!("Weather wind: {}.", w.wind);
         }
@@ -433,6 +436,14 @@ fn amount_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
             if core.project.weather.is_none() {
                 core.status = "Weather is off — pick a kind first.".into();
             } else {
+                // Roadmap Wave 1 (RM24, P-14): the gesture
+                // takes its one undo step up front (labelled,
+                // never folded — a fold would leave the Up
+                // rollback nothing of its own to pop); the
+                // Moves write raw through the setter, and
+                // Up rolls the step back if the gesture
+                // lands where it started.
+                core.snapshot_labeled("Weather amount");
                 set_weather_amount(core, amount_at(d.x, d.w), false);
             }
         }
@@ -447,18 +458,17 @@ fn amount_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
                 if let Some(mut w) = core.project.weather {
                     w.amount = d.data;
                     core.project.weather = Some(w);
+                    core.rollback_coalesced("Weather amount");
                 }
             } else if core.project.weather.is_some() {
                 set_weather_amount(core, amount_at(d.x, d.w), true);
-                // Wave 13 (census E4): one counted edit per
-                // gesture — the setters never mark (a drag
-                // fires them per Move); at Up, a final value
-                // that differs from the press value stashed
-                // in `d.data` marks exactly once. A cancelled
-                // drag restored the press value above and
-                // marks nothing.
-                if core.project.weather.map(|w| w.amount) != Some(d.data) {
-                    core.mark_dirty();
+                // RM24: a gesture that ends on its press
+                // value spent nothing — roll the Down step
+                // back (the Wave 13 E4 mark-at-release
+                // pattern, inverted for a snapshotting
+                // world).
+                if core.project.weather.map(|w| w.amount) == Some(d.data) {
+                    core.rollback_coalesced("Weather amount");
                 }
             }
         }
@@ -475,6 +485,9 @@ fn wind_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
             if core.project.weather.is_none() {
                 core.status = "Weather is off — pick a kind first.".into();
             } else {
+                // Roadmap Wave 1 (RM24, P-14): as
+                // `amount_drag` — one labelled step at Down.
+                core.snapshot_labeled("Weather wind");
                 set_weather_wind(core, wind_at(d.x, d.w), false);
             }
         }
@@ -489,13 +502,14 @@ fn wind_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
                 if let Some(mut w) = core.project.weather {
                     w.wind = d.data;
                     core.project.weather = Some(w);
+                    core.rollback_coalesced("Weather wind");
                 }
             } else if core.project.weather.is_some() {
                 set_weather_wind(core, wind_at(d.x, d.w), true);
-                // Wave 13 (census E4): as `amount_drag` —
-                // one mark per gesture, at Up.
-                if core.project.weather.map(|w| w.wind) != Some(d.data) {
-                    core.mark_dirty();
+                // RM24: as `amount_drag` — a no-net-change
+                // gesture rolls its step back.
+                if core.project.weather.map(|w| w.wind) == Some(d.data) {
+                    core.rollback_coalesced("Weather wind");
                 }
             }
         }
@@ -506,15 +520,18 @@ fn wind_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
 /// each axis moves by its delta and clamps to 200..=4000,
 /// reporting the new size in the status line.
 pub fn adjust_stage(core: &mut EditorCore, dw: f32, dh: f32) {
-    // Wave 13 (census E5): the settings-tweak family —
-    // no undo step, but a step that actually moves an
-    // axis counts for dirty/autosave; a fully-clamped
-    // step marks nothing.
+    // Roadmap Wave 1 (RM24, P-14 — A15 H3): the Wave 13
+    // (census E5) mark-only line is closed — a step that
+    // actually moves an axis takes a coalesced undo step;
+    // a fully-clamped step spends nothing.
     let before = core.project.stage;
-    core.project.stage[0] = (core.project.stage[0] + dw).clamp(200.0, 4000.0);
-    core.project.stage[1] = (core.project.stage[1] + dh).clamp(200.0, 4000.0);
-    if core.project.stage != before {
-        core.mark_dirty();
+    let after = [
+        (before[0] + dw).clamp(200.0, 4000.0),
+        (before[1] + dh).clamp(200.0, 4000.0),
+    ];
+    if after != before {
+        core.snapshot_coalesced("Stage size");
+        core.project.stage = after;
     }
     core.status = format!(
         "Stage size: {} x {}.",
@@ -549,10 +566,11 @@ pub fn stage_matches_preset(stage: [f32; 2], w: f32, h: f32) -> bool {
 /// the project field (the stepper pattern — no op exists)
 /// and report it with [`adjust_stage`]'s status string.
 pub fn set_stage_preset(core: &mut EditorCore, w: f32, h: f32) {
-    // Wave 13 (census E5): mark only when the size differs.
+    // Roadmap Wave 1 (RM24, P-14): one undo step when the
+    // size differs (Wave 13, census E5, only marked it).
     if core.project.stage != [w, h] {
+        core.snapshot_labeled("Stage size");
         core.project.stage = [w, h];
-        core.mark_dirty();
     }
     core.status = format!("Stage size: {} x {}.", w as i32, h as i32);
 }
@@ -743,16 +761,16 @@ pub const BACKGROUND_SWATCHES: [(&str, u32); 16] = [
 /// Background swatch handler body: set the stage background
 /// colour and report it in the status line.
 pub fn set_background(core: &mut EditorCore, rgb: u32) {
-    // Wave 13 (census E7): the appearance-tweak family —
-    // no undo step in the panel (the MCP sibling
-    // snapshots deliberately; the asymmetry is the
-    // census's recorded call), but a real change counts
-    // for dirty/autosave. This one site covers swatches,
-    // presets and `step_background_channel`.
+    // Roadmap Wave 1 (RM24, P-14 — A15 H3): the Wave 13
+    // (census E7) panel/MCP asymmetry is closed — a real
+    // change takes a coalesced undo step, like the MCP
+    // sibling always did, so a channel-stepper run is one
+    // step. This one site covers swatches, presets and
+    // `step_background_channel`.
     let rgb = rgb & 0xFF_FFFF;
     if core.project.background != rgb {
+        core.snapshot_coalesced("Background colour");
         core.project.background = rgb;
-        core.mark_dirty();
     }
     core.status = format!("Background: #{:06X}.", core.project.background);
 }
@@ -794,9 +812,9 @@ pub fn bg_preset_active(core: &EditorCore, i: usize) -> bool {
 /// by [`step_channel`]'s step (8, clamped 0..=255) in
 /// direction `dir` (−1 / +1) and write the composed colour
 /// back through [`set_background`] — the swatches' own
-/// direct field write, so a stepped colour and a swatch
-/// colour land identically, status string included, and
-/// with this module's usual zero undo snapshots. A bad
+/// handler, so a stepped colour and a swatch colour land
+/// identically, status string included, under the same
+/// coalesced undo step. A bad
 /// channel index is a no-op (the `inspector_style`
 /// stepper's discipline).
 pub fn step_background_channel(core: &mut EditorCore, channel: usize, dir: i32) {
@@ -1955,16 +1973,20 @@ mod tests {
     fn bg_preset_press_sets_the_background_through_the_panel_op() {
         // The chip handler body is this module's
         // `set_background` — the swatches' own op — so a
-        // press lands the colour on the field, reports the
-        // hex in the status line, and (panel discipline)
-        // takes no undo snapshot.
+        // press lands the colour on the field and reports
+        // the hex in the status line. Undo discipline
+        // since RM24: the first press (Midnight) IS the
+        // fresh project's background, so it spends
+        // nothing; every later press changes the colour
+        // but folds into the one coalesced step.
         let mut core = EditorCore::new();
         for &(name, rgb) in &BG_PRESETS {
             set_background(&mut core, rgb);
             assert_eq!(core.project.background, rgb, "preset {name}");
             assert_eq!(core.status, format!("Background: #{:06X}.", rgb));
-            assert_eq!(core.undo_depth(), 0, "preset {name} must not snapshot");
         }
+        assert_eq!(core.undo_depth(), 1, "the whole preset run is one coalesced step");
+        assert_eq!(core.undo_label(), Some("Background colour"));
     }
 
     #[test]

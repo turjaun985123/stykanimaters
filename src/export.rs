@@ -478,10 +478,18 @@ fn collect_frame_art(
             frame_f,
         ))
     };
-    let raw_poses = project.poses_at(frame_f);
+    // Roadmap Wave 1 (RM6, F-5): the raw pose sample is only
+    // read when no channelled evaluation replaced it — the
+    // unconditional `poses_at` this replaced paid a full
+    // timeline sample on channelled projects and discarded
+    // it. Values read are unchanged in both branches.
+    let raw_poses;
     let poses: &Vec<crate::model::Pose> = match &channelled {
         Some(r) => &r.poses,
-        None => &raw_poses,
+        None => {
+            raw_poses = project.poses_at(frame_f);
+            &raw_poses
+        }
     };
     // Collect drawables: segments (a, b, color, half-width), head
     // rings (centre, color, half-width, alpha), shape circles and
@@ -891,17 +899,35 @@ fn frame_has_media(project: &Project) -> bool {
             .any(|c| c.def.nodes.iter().any(|n| n.media.is_some()))
 }
 
-/// Build the subtitle burn-in overlay for one frame
+/// Build the subtitle burn-in overlay items for one frame
 /// (extracted from the raster funnel in Wave X, X8, so
 /// the RGB and RGBA funnels stamp identical subtitles):
-/// a clone of the project with every other media source
-/// cleared, its texts replaced by the live cues' stamp
-/// items. `None` when no cue is live at the frame.
+/// exactly the live cues' stamp items, as the
+/// [`crate::media::MediaItem::Text`] list the one media
+/// funnel would derive from them. `None` when no cue is
+/// live at the frame.
+///
+/// Roadmap Wave 1 (RM6, F-5): this used to build its
+/// stamps by CLONING the whole project — asset byte table
+/// included — clearing every other media source on the
+/// clone, pushing the stamps as text instances and letting
+/// `media_items` re-derive the items, once per rendered
+/// frame. The items are now built directly. They are the
+/// same items by construction: a text instance's placement
+/// (see `media_items`' instance pass) centres the text on
+/// its key's (x, y) with glyph height `size * key.scale`
+/// — every stamp key below carries scale 1.0 — runs it
+/// along the key angle (0.0), and carries alpha 1.0
+/// (an instance key has no opacity channel read there);
+/// the segment and sprite passes of the cleared clone
+/// contributed nothing, because the clone cleared their
+/// sources — segment media on figure and clip defs, and
+/// the sprite list — before the funnel ran.
 fn subtitle_overlay(
     project: &Project,
     frame_f: f32,
     scale: f32,
-) -> Option<crate::model::Project> {
+) -> Option<Vec<crate::media::MediaItem>> {
     let cue_frame = frame_f.round().max(0.0) as usize;
     let live_cues = crate::subtitles::live_subtitle_cues(project, cue_frame);
     if live_cues.is_empty() {
@@ -921,7 +947,10 @@ fn subtitle_overlay(
     // glyphs at the same size on the same centre (the
     // stamp's +0.5-cell glyph-block offset about its
     // anchor is the bitmap font's own, shared with the
-    // stage's `label_boxes` placement). Wave R (R1)
+    // stage's `label_boxes` placement — Roadmap Wave 1,
+    // RM2: that offset belongs to the Pixel renderer; the
+    // shaped renderer centres its line on the same anchor
+    // exactly, so the bands agree either way). Wave R (R1)
     // retired this block's former proportional sizing —
     // glyph height 6% of the stage height, a 1.35x line
     // step and a 1.1x-size anchor — under which the
@@ -965,26 +994,12 @@ fn subtitle_overlay(
     // is 1.0 and the stamps are byte-identical.
     let size = crate::subtitles::subtitle_font_size(style) * scale;
     let cell = size / 5.0;
-    // The funnel draws only what `media_items` derives
-    // from a project, so the cues ride a text-only
-    // overlay: a clone of the project with every other
-    // media source cleared (sprites, stage texts, and
-    // segment media on figure and clip defs), leaving
-    // exactly the subtitles' text items. Paid only on
-    // frames where any cue is live.
-    let mut overlay = project.clone();
-    overlay.sprites.clear();
-    overlay.texts.clear();
-    for fig in &mut overlay.figures {
-        for node in &mut fig.def.nodes {
-            node.media = None;
-        }
-    }
-    for clip in &mut overlay.clips {
-        for node in &mut clip.def.nodes {
-            node.media = None;
-        }
-    }
+    // The stamps: one MediaItem::Text per stamp — the
+    // backing-colour outline at the eight one-cell offsets
+    // first, then the centred text-colour stamp, in list
+    // order, exactly the items the pre-RM6 overlay project
+    // produced through the funnel (see the fn docs).
+    let mut stamps: Vec<crate::media::MediaItem> = Vec::new();
     let cx = project.stage[0] / 2.0 * scale;
     let mut lines_before = 0usize;
     for cue in &live_cues {
@@ -1015,24 +1030,20 @@ fn subtitle_overlay(
                 project.stage[1],
                 from_edge,
             ) * scale;
-            let stamp = |x: f32, y: f32, color: u32| -> crate::model::TextInstance {
-                crate::model::TextInstance {
+            // The stamp item, built directly (RM6): the
+            // item the funnel's text-instance pass derived
+            // from the pre-RM6 overlay project's stamp
+            // instance — pos the key's (x, y), angle the
+            // key's 0.0, size the instance size at key scale
+            // 1.0, alpha the instance pass's fixed 1.0.
+            let stamp = |x: f32, y: f32, color: u32| -> crate::media::MediaItem {
+                crate::media::MediaItem::Text {
+                    pos: [x, y],
+                    angle_deg: 0.0,
                     content: (*line).to_string(),
                     size,
                     color,
-                    keys: vec![crate::model::InstanceKey {
-                        frame: 0.0,
-                        x,
-                        y,
-                        scale: 1.0,
-                        angle: 0.0,
-                        opacity: 1.0,
-                        flip_x: false,
-                        flip_y: false,
-                        scale_y: 0.0,
-                        pivot_x: 0.5,
-                        pivot_y: 0.5,
-                    }],
+                    alpha: 1.0,
                 }
             };
             for (dx, dy) in [
@@ -1045,13 +1056,56 @@ fn subtitle_overlay(
                 (-cell, cell),
                 (cell, cell),
             ] {
-                overlay.texts.push(stamp(cx + dx, y + dy, style.box_color));
+                stamps.push(stamp(cx + dx, y + dy, style.box_color));
             }
-            overlay.texts.push(stamp(cx, y, style.text_color));
+            stamps.push(stamp(cx, y, style.text_color));
         }
         lines_before += lines.len();
     }
-    Some(overlay)
+    Some(stamps)
+}
+
+/// Draw the burn-in stamps through the legacy bitmap
+/// renderer — Roadmap Wave 1 (RM2, F-2): the style's
+/// explicit Pixel font choice. The stamps are the same
+/// layout [`subtitle_overlay`] built (nine per line:
+/// eight backing-colour offsets, then the centred text
+/// colour); only the glyph renderer differs. The stamps
+/// live in output (pixel) space, so each draws at its
+/// position directly.
+fn burn_in_stamps_pixel(img: &mut image::RgbaImage, stamps: &[crate::media::MediaItem]) {
+    for item in stamps {
+        if let crate::media::MediaItem::Text {
+            pos,
+            content,
+            size,
+            color,
+            alpha,
+            ..
+        } = item
+        {
+            crate::media::composite_bitmap_text(img, *pos, content, *size, *color, *alpha);
+        }
+    }
+}
+
+/// Draw one frame's burn-in overlay through the
+/// renderer the style's font selects (RM2, F-2): Shaped
+/// (the default) rides the media funnel's shaped text
+/// path via `composite_items` — the stamps' items shape
+/// and rasterise with real fonts, script by script;
+/// Pixel stamps through the bitmap renderer directly.
+fn burn_in_subtitles(
+    project: &Project,
+    overlay: &[crate::media::MediaItem],
+    img: &mut image::RgbaImage,
+) {
+    match project.subtitle_style.sanitised().font {
+        crate::subtitles::SubtitleFont::Pixel => burn_in_stamps_pixel(img, overlay),
+        crate::subtitles::SubtitleFont::Shaped => {
+            crate::media::composite_items(project, overlay, img, &|p| p)
+        }
+    }
 }
 
 /// The shared raster funnel behind [`render_frame_at`] and
@@ -1214,8 +1268,10 @@ fn render_frame_at_scaled_inner(
     }
     // Wave P (P26): subtitle burn-in. When cues are live at
     // this frame, their text is drawn into the finished frame
-    // through the SAME text path stage texts take —
-    // `composite_media`'s built-in 3x5 bitmap-font stamp — so
+    // through the same text path stage texts take — since
+    // Roadmap Wave 1 (RM2, F-2) the shaped renderer by
+    // default, the 3x5 bitmap stamp only under the style's
+    // explicit Pixel font or on a font-less system — so
     // every raster format built on this funnel (GIF, MP4,
     // WebM, PNG/JPEG sequences, spritesheet, contact sheet)
     // carries subtitles with no per-format work.
@@ -1227,7 +1283,11 @@ fn render_frame_at_scaled_inner(
     // in stored order.
     if let Some(overlay) = subtitle_overlay(project, frame_f, scale) {
         let mut rgba = image::DynamicImage::ImageRgb8(out).to_rgba8();
-        crate::media::composite_media(&overlay, frame_f, &mut rgba, &|p| p);
+        // Roadmap Wave 1 (RM6, F-5): the overlay is the
+        // stamp item list itself, composited directly —
+        // no cloned project through `composite_media`.
+        // RM2 routes the draw by the style's font.
+        burn_in_subtitles(project, &overlay, &mut rgba);
         out = image::DynamicImage::ImageRgba8(rgba).to_rgb8();
     }
     out
@@ -1390,9 +1450,12 @@ fn render_frame_at_scaled_inner_alpha(
         });
     }
     // Subtitle burn-in, the RGB funnel's tail at parity:
-    // the same overlay, stamped through the same funnel.
+    // the same overlay, drawn through the same
+    // font-selected renderer (Roadmap Wave 1, RM6: as an
+    // item list, composited directly — no cloned overlay
+    // project; RM2: shaped by default, Pixel on request).
     if let Some(overlay) = subtitle_overlay(project, frame_f, scale) {
-        crate::media::composite_media(&overlay, frame_f, &mut out, &|p| p);
+        burn_in_subtitles(project, &overlay, &mut out);
     }
     out
 }
@@ -1460,48 +1523,55 @@ pub fn render_contact_sheet(
     sheet
 }
 
-/// Authored frame indices expanded by per-frame durations
-/// (a frame with duration 2 appears twice, rounded, min once).
+/// How many output frames one pass over `beats` timeline beats
+/// takes at the project fps: one sample per beat, with a final
+/// partial beat still sampled (the ceiling), and a whole timeline
+/// always sampling at least once. A hair of epsilon keeps a beat
+/// total that float summation lands a fraction above an integer
+/// (2.0 stored as 2.0000002) from buying a phantom extra frame.
+fn sample_count_for_beats(beats: f32) -> usize {
+    if !(beats > 0.0) {
+        return 0;
+    }
+    (beats - 1e-4).ceil().max(1.0) as usize
+}
+
+/// Authored frame indices for one full pass, sampled on the
+/// project's shared duration-weighted clock (Roadmap Wave 1,
+/// RM7 / F-6): sample `k` shows the authored frame live at beat
+/// `k`, so a frame with duration 2 appears twice and fractional
+/// holds are honoured as authored — a 1.5-beat hold followed by
+/// a 0.5-beat hold occupies two output frames, both sampled
+/// inside the long hold, and the short hold's beat is the
+/// timeline's second beat exactly. The pre-RM7 shape rounded
+/// each duration to a whole repetition count, so what the
+/// editor played and what export rendered disagreed about the
+/// project's own duration.
 pub fn expanded_frames(project: &Project) -> Vec<usize> {
-    let mut out = Vec::new();
-    for (i, frame) in project.frames.iter().enumerate() {
-        let reps = (frame.duration.round() as usize).max(1);
-        for _ in 0..reps {
-            out.push(i);
-        }
-    }
-    out
+    let last = project.frames.len().saturating_sub(1);
+    (0..sample_count_for_beats(project.timeline_beats()))
+        .map(|k| {
+            (project.frame_time_at_beats(k as f32).floor() as usize).min(last)
+        })
+        .collect()
 }
 
-/// Fractional authored-frame time for a playback time in seconds,
-/// walking the per-frame durations.
-fn authored_at(project: &Project, seconds: f32) -> f32 {
-    let fps = project.fps.max(1.0);
-    let mut t = seconds * fps; // in frame units
-    for (i, frame) in project.frames.iter().enumerate() {
-        if t < frame.duration {
-            return i as f32 + t / frame.duration;
-        }
-        t -= frame.duration;
-    }
-    (project.frames.len() - 1) as f32
-}
-
-/// Frame times (fractional authored frames) for a full pass at the
-/// project fps: tween-sampled when tween playback is on, otherwise
-/// the duration-expanded authored frames.
+/// Frame times (fractional authored frames) for a full pass at
+/// the project fps, sampled on the shared duration-weighted
+/// clock: tween playback keeps each sample's fractional time,
+/// otherwise the sample floors to the authored frame live at
+/// that beat — the same grid [`expanded_frames`] reports.
 fn sample_times(project: &Project) -> Vec<f32> {
-    if project.tween_playback {
-        let count = (project.total_seconds() * project.fps.max(1.0)).ceil().max(1.0) as usize;
-        (0..count)
-            .map(|k| authored_at(project, k as f32 / project.fps.max(1.0)))
-            .collect()
-    } else {
-        expanded_frames(project)
-            .into_iter()
-            .map(|i| i as f32)
-            .collect()
-    }
+    (0..sample_count_for_beats(project.timeline_beats()))
+        .map(|k| {
+            let t = project.frame_time_at_beats(k as f32);
+            if project.tween_playback {
+                t
+            } else {
+                t.floor()
+            }
+        })
+        .collect()
 }
 
 /// Clamp an inclusive authored-frame range `from..=to` to the
@@ -1528,28 +1598,26 @@ fn clamp_frame_range(project: &Project, from: usize, to: usize) -> std::io::Resu
 }
 
 /// Frame times for the authored range `from..=to` only, following
-/// the same sampling rules as [`sample_times`]: with tween
-/// playback the range's span is sampled at the project fps
-/// starting at the range's offset in the timeline; without it, the
-/// range's authored frames are expanded by their own durations.
-/// For the full range this returns exactly what `sample_times`
-/// returns.
+/// the same sampling rules as [`sample_times`]: the range's span
+/// is sampled at the project fps starting at the range's offset
+/// in the timeline, on the shared duration-weighted clock
+/// (Roadmap Wave 1, RM7 / F-6) — tween playback keeps each
+/// sample's fractional time, otherwise it floors to the authored
+/// frame live at that beat. For the full range this returns
+/// exactly what `sample_times` returns.
 fn sample_times_range(project: &Project, from: usize, to: usize) -> Vec<f32> {
-    if project.tween_playback {
-        let fps = project.fps.max(1.0);
-        let start: f32 = project.frames[..from].iter().map(|f| f.duration).sum();
-        let span: f32 = project.frames[from..=to].iter().map(|f| f.duration).sum();
-        let count = ((span / fps) * fps).ceil().max(1.0) as usize;
-        (0..count)
-            .map(|k| authored_at(project, (start + k as f32) / fps))
-            .collect()
-    } else {
-        expanded_frames(project)
-            .into_iter()
-            .filter(|&i| (from..=to).contains(&i))
-            .map(|i| i as f32)
-            .collect()
-    }
+    let start = project.beats_at_frame_time(from as f32);
+    let end = project.beats_at_frame_time((to + 1) as f32);
+    (0..sample_count_for_beats(end - start))
+        .map(|k| {
+            let t = project.frame_time_at_beats(start + k as f32);
+            if project.tween_playback {
+                t
+            } else {
+                t.floor()
+            }
+        })
+        .collect()
 }
 
 /// Encode the given frame times as a looping GIF at the project
@@ -2798,6 +2866,22 @@ fn unique_temp(tag: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("styk-{tag}-{}-{seq}", std::process::id()))
 }
 
+/// The `-framerate` argument for a project rate, passed to
+/// ffmpeg exactly as authored (Roadmap Wave 1, RM7 / F-6): a
+/// fractional broadcast rate stays fractional — 29.97 reaches
+/// ffmpeg as "29.97", never truncated to the integer 29 the
+/// pre-RM7 `as i32` cast produced (a standing A/V drift
+/// source, since the picture then ran at 29 fps against audio
+/// placed on the 29.97 clock). The rate is floored at 1 fps
+/// like every other division by it in the codebase, and a
+/// non-finite rate falls back to 1. Whole rates print whole
+/// ("24"), fractional rates print in `f32`'s shortest
+/// round-trip form ("29.97", "23.976").
+fn ffmpeg_framerate(fps: f32) -> String {
+    let fps = if fps.is_finite() { fps.max(1.0) } else { 1.0 };
+    format!("{fps}")
+}
+
 /// Encode the whole timeline (see `sample_times`) with ffmpeg
 /// using the given video args.
 fn ffmpeg_encode(
@@ -2861,7 +2945,7 @@ fn ffmpeg_encode_times(
     let mut args: Vec<String> = vec![
         "-y".into(),
         "-framerate".into(),
-        format!("{}", project.fps.max(1.0) as i32),
+        ffmpeg_framerate(project.fps),
         "-i".into(),
         tmp.join("frame-%04d.png").to_string_lossy().into_owned(),
     ];
@@ -2951,7 +3035,7 @@ fn ffmpeg_encode_times_scaled(
     let mut args: Vec<String> = vec![
         "-y".into(),
         "-framerate".into(),
-        format!("{}", project.fps.max(1.0) as i32),
+        ffmpeg_framerate(project.fps),
         "-i".into(),
         tmp.join("frame-%04d.png").to_string_lossy().into_owned(),
     ];
@@ -3583,22 +3667,17 @@ fn clip_window(
 /// frame within the full timeline, and the exported video's
 /// own length (`sample_count` frames at the project fps). The
 /// start is counted in the same frame units
-/// [`sample_times_range`] samples from — raw per-frame
-/// durations under tween playback, duration-rounded
-/// repetitions otherwise — so the window names exactly the
-/// span of the timeline the range's frames were sampled from,
-/// on the same `start_frame / fps` clock the mux paths place
-/// clips on.
+/// [`sample_times_range`] samples from — the shared
+/// duration-weighted clock's raw per-frame durations, tween
+/// playback or not (Roadmap Wave 1, RM7 / F-6; the pre-RM7
+/// non-tween leg counted duration-rounded repetitions, so the
+/// window disagreed with the timeline the editor played) —
+/// so the window names exactly the span of the timeline the
+/// range's frames were sampled from, on the same
+/// `start_frame / fps` clock the mux paths place clips on.
 fn range_window(project: &Project, from: usize, sample_count: usize) -> (f32, f32) {
     let fps = project.fps.max(1.0);
-    let start_units: f32 = if project.tween_playback {
-        project.frames[..from].iter().map(|f| f.duration).sum()
-    } else {
-        project.frames[..from]
-            .iter()
-            .map(|f| (f.duration.round() as usize).max(1) as f32)
-            .sum()
-    };
+    let start_units = project.beats_at_frame_time(from as f32);
     (start_units / fps, sample_count as f32 / fps)
 }
 
@@ -4383,6 +4462,227 @@ mod mux_tests {
         let _ = std::fs::remove_file(&a);
     }
 
+    // ---- F-1 verification tail (Roadmap Wave 1, RM1): the
+    // ---- rendered proof behind AC0's plan-level pins ----
+    //
+    // AC0 pinned the full path's DECISIONS (segment shapes,
+    // refusal sentences). This family pins what those
+    // decisions RENDER: the actual mixed samples. It is
+    // built on `full_mix_segments`, the segment build AC0
+    // added for the full path, so on the pre-AC0 tree the
+    // family does not compile (E0425 — the full path had no
+    // segment build at all; it mixed through the WAV-only
+    // mixer and fell back to the earliest clip on failure).
+    // The sample assertions below encode exactly what that
+    // fallback got wrong: every clip present, at its own
+    // placement, with its own gain applied.
+
+    /// Write a REAL WAV of `secs` seconds at `rate` Hz whose
+    /// every sample is `value`, and return its path. The
+    /// values the pins below use (0.25, 0.5) survive the
+    /// PCM16 write/read round trip exactly (they land on
+    /// multiples of 1/32768), and the gains (0.5, 0.25) are
+    /// powers of two, so rendered samples are assertable
+    /// exactly, never within a tolerance.
+    fn temp_const_wav(tag: &str, secs: f32, rate: u32, value: f32) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "styk-mux-{tag}-{}.wav",
+            std::process::id()
+        ));
+        let data = crate::audio_edit::WavData {
+            sample_rate: rate,
+            channels: 1,
+            samples: vec![value; (secs * rate as f32).round() as usize],
+        };
+        std::fs::write(&path, crate::audio_edit::write_wav(&data)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// Write a REAL MP3: a 440 Hz tone WAV at 44.1 kHz
+    /// encoded with the system ffmpeg (installed in CI; the
+    /// range export pins already depend on it) and return
+    /// the MP3's path. MP3 coding is lossy, so the pins over
+    /// its decoded samples assert bands, never exact values.
+    fn temp_tone_mp3(tag: &str, secs: f32) -> String {
+        let rate = 44100u32;
+        let wav = std::env::temp_dir().join(format!(
+            "styk-mux-{tag}-src-{}.wav",
+            std::process::id()
+        ));
+        let n = (secs * rate as f32).round() as usize;
+        let samples = (0..n)
+            .map(|i| {
+                (2.0 * std::f32::consts::PI * 440.0 * i as f32 / rate as f32).sin() * 0.5
+            })
+            .collect();
+        let data = crate::audio_edit::WavData {
+            sample_rate: rate,
+            channels: 1,
+            samples,
+        };
+        std::fs::write(&wav, crate::audio_edit::write_wav(&data)).unwrap();
+        let mp3 = wav.with_extension("mp3");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-i",
+                wav.to_str().unwrap_or(""),
+                "-codec:a",
+                "libmp3lame",
+                mp3.to_str().unwrap_or(""),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("ffmpeg runs (CI installs it)");
+        assert!(status.success(), "ffmpeg encoded the MP3 fixture");
+        let _ = std::fs::remove_file(&wav);
+        mp3.to_string_lossy().into_owned()
+    }
+
+    /// Peak |sample| of `data` over the frame window
+    /// `[from_frame, to_frame)`, clamped to the data.
+    fn peak_between(
+        data: &crate::audio_edit::WavData,
+        from_frame: usize,
+        to_frame: usize,
+    ) -> f32 {
+        let ch = data.channels.max(1) as usize;
+        let from = (from_frame * ch).min(data.samples.len());
+        let to = (to_frame * ch).min(data.samples.len());
+        data.samples[from..to]
+            .iter()
+            .fold(0.0f32, |m, s| m.max(s.abs()))
+    }
+
+    #[test]
+    fn full_mix_renders_identically_to_the_range_mix_with_gains_applied() {
+        // The parity pin: for a window covering the whole
+        // timeline, the full path (mux_plan → full_mix_segments)
+        // and the range path (range_plan_outcome) must build
+        // the SAME segment list — same clips, placements,
+        // lengths and gains — and therefore render the same
+        // samples. Three WAV clips with distinct gains,
+        // probed with the real probe.
+        let bed = temp_const_wav("rm1-bed", 2.0, 1000, 0.25);
+        let voice = temp_const_wav("rm1-voice", 1.0, 1000, 0.25);
+        let sting = temp_const_wav("rm1-sting", 1.0, 1000, 0.5);
+        let project = project_with_gains(vec![
+            (bed.as_str(), 0, 0.5),
+            (voice.as_str(), 5, 1.0),
+            (sting.as_str(), 15, 0.25),
+        ]);
+        let MuxPlan::Mixed(triples) = mux_plan(&project) else {
+            panic!("three audible clips plan as Mixed");
+        };
+        let full_segments = full_mix_segments(&triples, &probe_duration_secs).unwrap();
+        let outcome = range_plan_outcome(&project, 0.0, 60.0, &probe_duration_secs);
+        let RangeMuxPlan::Mixed(range_segments) = outcome.plan else {
+            panic!("the full-timeline range window plans as Mixed");
+        };
+        assert_eq!(
+            full_segments, range_segments,
+            "the full and range paths schedule the same segments"
+        );
+        let full_mix = mix_range_segments(&full_segments).unwrap();
+        let range_mix = mix_range_segments(&range_segments).unwrap();
+        assert_eq!(full_mix, range_mix, "and render the same mix");
+        // The mix's own arithmetic, sample-exact: bed sounds
+        // at 0.25 × 0.5 = 0.125 throughout [0s, 2s); the
+        // voice adds its unity 0.25 over [0.5s, 1.5s); the
+        // sting adds 0.5 × 0.25 = 0.125 over [1.5s, 2.5s).
+        assert_eq!(full_mix.frames(), 2500);
+        let at = |frame: usize| full_mix.samples[frame];
+        assert_eq!(at(250), 0.125, "bed alone, gained to 0.125");
+        assert_eq!(at(1000), 0.375, "bed + voice overlap sums both gains");
+        assert_eq!(at(1750), 0.25, "bed + sting overlap sums both gains");
+        assert_eq!(at(2250), 0.125, "sting alone past the bed's end");
+        let _ = std::fs::remove_file(&bed);
+        let _ = std::fs::remove_file(&voice);
+        let _ = std::fs::remove_file(&sting);
+    }
+
+    #[test]
+    fn full_mix_includes_a_non_wav_clip_beside_a_wav_clip() {
+        // The membership pin, end to end through the full
+        // path's machinery with real files: a unity WAV bed
+        // on [0s, 1s) and a gained MP3 tone placed at 2s.
+        // The rendered mix must carry BOTH — the pre-AC0
+        // full path, whose mixer could not read the MP3,
+        // shipped the bed alone and called it success.
+        let bed = temp_const_wav("rm1-mp3bed", 1.0, 44100, 0.25);
+        let song = temp_tone_mp3("rm1-song", 1.0);
+        let project = project_with_gains(vec![
+            (bed.as_str(), 0, 1.0),
+            (song.as_str(), 20, 0.5),
+        ]);
+        let MuxPlan::Mixed(triples) = mux_plan(&project) else {
+            panic!("two audible clips plan as Mixed");
+        };
+        let segments = full_mix_segments(&triples, &probe_duration_secs).unwrap();
+        assert_eq!(segments.len(), 2, "both clips are scheduled");
+        assert_eq!(segments[1].path, song);
+        assert_eq!(segments[1].placement_secs, 2.0);
+        assert_eq!(segments[1].gain, 0.5);
+        let mixed = mix_range_segments(&segments).unwrap();
+        let rate = mixed.sample_rate as usize;
+        assert_eq!(mixed.channels, 1);
+        // Both clips sound: the mix runs well past the
+        // bed's lone 1s end (bed-only would stop at 1.0s).
+        assert!(
+            mixed.frames() > (2.5 * rate as f32) as usize,
+            "the MP3 carries the mix past 2.5s: {} frames",
+            mixed.frames()
+        );
+        // The bed's region peaks at its exact authored level.
+        assert_eq!(peak_between(&mixed, 100, rate / 2), 0.25);
+        // The gap between the clips is true silence.
+        assert_eq!(
+            peak_between(&mixed, (1.25 * rate as f32) as usize, (1.75 * rate as f32) as usize),
+            0.0,
+            "nothing bleeds into the gap"
+        );
+        // The MP3's region sounds at its gained level:
+        // a 0.5-amplitude tone at gain 0.5 peaks near 0.25
+        // (banded — MP3 coding is lossy, membership and gain
+        // are what is pinned, not codec artefacts).
+        let mp3_peak = peak_between(
+            &mixed,
+            (2.25 * rate as f32) as usize,
+            (2.75 * rate as f32) as usize,
+        );
+        assert!(
+            (0.1..=0.35).contains(&mp3_peak),
+            "the MP3 sounds at its gained level: peak {mp3_peak}"
+        );
+        let _ = std::fs::remove_file(&bed);
+        let _ = std::fs::remove_file(&song);
+    }
+
+    #[test]
+    fn gained_lone_mp3_renders_at_its_gain_not_unity() {
+        // The rendered mirror of AC0's segment pin for the
+        // gained lone MP3: the segment build keeping the
+        // gain is only half the promise — the rendered mix
+        // must actually be quieter. A 0.5-amplitude tone at
+        // gain 0.25 peaks near 0.125; routed down the old
+        // direct path (the pre-AC0 behaviour) it would peak
+        // near 0.5 with the gain silently unapplied.
+        let song = temp_tone_mp3("rm1-lone", 1.0);
+        let segments =
+            full_mix_segments(&[(song.clone(), 0.0, 0.25)], &probe_duration_secs).unwrap();
+        let mixed = mix_range_segments(&segments).unwrap();
+        let peak = peak_between(&mixed, 0, mixed.frames());
+        assert!(
+            peak < 0.2,
+            "gain 0.25 scales the tone down: peak {peak} (unity would be ~0.5)"
+        );
+        assert!(
+            peak > 0.05,
+            "but the clip still sounds: peak {peak} (silence would be 0)"
+        );
+        let _ = std::fs::remove_file(&song);
+    }
 }
 
 #[cfg(test)]
@@ -4541,16 +4841,21 @@ mod range_mux_tests {
     // ---- range_window: where the range sits in the timeline ----
 
     #[test]
-    fn range_window_counts_expanded_repetitions_without_tween() {
+    fn range_window_counts_fractional_durations_without_tween() {
+        // Roadmap Wave 1 (RM7 / F-6): the window start is the
+        // shared duration-weighted clock's raw beat count —
+        // 2.0 + 0.5 beats before frame 2 — with no per-frame
+        // rounding and no minimum-repetition inflation. The
+        // pre-RM7 non-tween leg counted rounded repetitions
+        // (2 + 1), placing the window 0.5 beats late.
         let mut project = Project::new_demo();
-        project.fps = 10.0;
+        project.fps = 24.0;
         project.tween_playback = false;
         project.frames[0].duration = 2.0;
-        project.frames[1].duration = 0.4; // rounds to 0, min one rep
-        // Frames before `from` occupy 2 + 1 expanded samples.
+        project.frames[1].duration = 0.5;
         let (start, len) = range_window(&project, 2, 25);
-        assert_eq!(start, 0.3);
-        assert_eq!(len, 2.5);
+        assert!((start - 2.5 / 24.0).abs() < 1e-6, "start {start}");
+        assert!((len - 25.0 / 24.0).abs() < 1e-6, "len {len}");
         // The first frame's window starts at zero.
         assert_eq!(range_window(&project, 0, 25).0, 0.0);
     }
@@ -4558,15 +4863,67 @@ mod range_mux_tests {
     #[test]
     fn range_window_sums_raw_durations_with_tween() {
         let mut project = Project::new_demo();
-        project.fps = 10.0;
+        project.fps = 24.0;
         project.tween_playback = true;
         project.frames[0].duration = 2.0;
         project.frames[1].duration = 0.4;
         // Tween sampling walks the raw durations: 2.0 + 0.4
-        // frame units = 0.24s at 10 fps.
+        // frame units = 0.1s at 24 fps.
         let (start, len) = range_window(&project, 2, 25);
-        assert!((start - 0.24).abs() < 1e-6, "start {start}");
-        assert_eq!(len, 2.5);
+        assert!((start - 0.1).abs() < 1e-6, "start {start}");
+        assert!((len - 25.0 / 24.0).abs() < 1e-6, "len {len}");
+    }
+
+    #[test]
+    fn export_sampling_honours_fractional_durations_without_rounding() {
+        // Roadmap Wave 1 (RM7 / F-6): export samples the same
+        // duration-weighted timeline the editor plays. Beats:
+        // frame 0 holds [0, 1.5), frame 1 [1.5, 2), frame 2
+        // [2, 4), frame 3 [4, 5), frame 4 [5, 6) — six beats,
+        // six output samples at beats 0..5. The pre-RM7
+        // expansion rounded each duration to whole repetitions
+        // ([2, 1, 2, 1, 1]) and produced seven samples whose
+        // total disagreed with the project's own duration.
+        let mut project = Project::new_demo();
+        project.fps = 24.0;
+        project.tween_playback = false;
+        project.frames[0].duration = 1.5;
+        project.frames[1].duration = 0.5;
+        project.frames[2].duration = 2.0;
+        project.frames[3].duration = 1.0;
+        project.frames[4].duration = 1.0;
+        assert_eq!(expanded_frames(&project), vec![0, 0, 2, 2, 3, 4]);
+        assert_eq!(
+            sample_times(&project),
+            vec![0.0, 0.0, 2.0, 2.0, 3.0, 4.0],
+            "the non-tween grid is the expanded grid, as frame times"
+        );
+        // A range export of the half-beat frame alone samples
+        // it at its own start: the range grid is local, so a
+        // sub-beat frame is never lost from its own range.
+        assert_eq!(sample_times_range(&project, 1, 1), vec![1.0]);
+        // With tween playback the same grid keeps its
+        // fractional times: beat 1 sits two-thirds through
+        // frame 0's 1.5-beat hold, beat 3 halfway through
+        // frame 2's 2-beat hold.
+        project.tween_playback = true;
+        let tween = sample_times(&project);
+        assert_eq!(tween.len(), 6);
+        assert!((tween[1] - 2.0 / 3.0).abs() < 1e-5, "tween[1]: {}", tween[1]);
+        assert!((tween[3] - 2.5).abs() < 1e-5, "tween[3]: {}", tween[3]);
+        // The full range samples exactly the full pass.
+        assert_eq!(sample_times_range(&project, 0, 4), tween);
+    }
+
+    #[test]
+    fn ffmpeg_framerate_passes_fractional_rates_exactly() {
+        // Roadmap Wave 1 (RM7 / F-6): whole rates print whole,
+        // fractional broadcast rates reach ffmpeg untruncated.
+        assert_eq!(ffmpeg_framerate(24.0), "24");
+        assert_eq!(ffmpeg_framerate(29.97), "29.97");
+        assert_eq!(ffmpeg_framerate(23.976), "23.976");
+        assert_eq!(ffmpeg_framerate(0.0), "1", "the 1 fps floor still applies");
+        assert_eq!(ffmpeg_framerate(f32::NAN), "1");
     }
 
     // ---- probe_duration_secs ----
@@ -10534,12 +10891,15 @@ mod spray_render_tests {
 // and the line height 24, so the stacked line centres sit
 // at 372 / 348 / 324 from the top at the bottom anchor
 // (28 / 52 / 76 at the top anchor) — edge -/+ (16 margin +
-// offset x 24 line height + 12 half line). A line's
-// text-colour face spans [centre - 8, centre + 11] rows:
-// the 3x5 stamp at cell 4 puts pixel centres at
-// (row - 1.5) x 4 about the anchor and each paints a 4x4
-// block. The bands below (a midpoint partition of the
-// stack) each contain exactly one line's face:
+// offset x 24 line height + 12 half line). The bands below
+// (a midpoint partition of the stack) each contain exactly
+// one line's face under EITHER glyph renderer: the 3x5
+// stamp's face spans [centre - 8, centre + 11] rows (cell
+// 4: pixel centres at (row - 1.5) x 4 about the anchor,
+// each a 4x4 block), and since Roadmap Wave 1 (RM2, F-2)
+// the default shaped renderer's capital ink at this size
+// spans roughly [centre - 8, centre + 7] — inside the same
+// bands:
 //   bottom: B0 = 360..=390, B1 = 336..=359, B2 = 312..=335
 //   top:    T0 =  16..= 40, T1 =  41..= 64, T2 =  65..= 88
 // Before R1 the raster sized its stamps proportionally
@@ -10556,7 +10916,7 @@ mod spray_render_tests {
 mod wave_p_subtitle_burn_in_tests {
     use super::render_frame;
     use crate::model::{Frame, Project};
-    use crate::subtitles::{SubtitleCue, SubtitlePosition, SubtitleStyle};
+    use crate::subtitles::{SubtitleCue, SubtitleFont, SubtitlePosition, SubtitleStyle};
     use image::{ImageBuffer, Rgb};
 
     const WHITE: [u8; 3] = [255, 255, 255];
@@ -10641,6 +11001,140 @@ mod wave_p_subtitle_burn_in_tests {
             white_in(&img, 360..=390) > 0,
             "the cue's text-colour face must paint in the bottom band"
         );
+    }
+
+    #[test]
+    fn burn_in_band_is_unaffected_by_other_media() {
+        // Roadmap Wave 1 (RM6, F-5): the burn-in items are
+        // built directly from the live cues — the pre-RM6
+        // path derived them from a cloned project with all
+        // other media cleared. The band must therefore be
+        // byte-identical whether or not the frame carries
+        // media, while the media itself still paints
+        // (proving the fixture's media is live, not absent).
+        use crate::model::{
+            FigureDef, FigureInstance, ImageAsset, InstanceKey, NodeDef, NodeStyle,
+            Pose, SegmentMedia, Shape, SpriteInstance, TextInstance,
+        };
+        let bare = fixture(vec![cue(0, 30, "HELLO")], SubtitleStyle::default());
+        let mut media = fixture(vec![cue(0, 30, "HELLO")], SubtitleStyle::default());
+        // A 6x3 red PNG as asset 0.
+        let png = {
+            let img = image::RgbaImage::from_pixel(6, 3, image::Rgba([255, 0, 0, 255]));
+            let mut buf = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(&mut buf, image::ImageFormat::Png)
+                .expect("encode fixture png");
+            buf.into_inner()
+        };
+        media.assets.push(ImageAsset { name: "red".into(), png });
+        let node = |name: &str,
+                    parent: Option<usize>,
+                    length: f32,
+                    m: Option<SegmentMedia>|
+         -> NodeDef {
+            NodeDef {
+                min_angle: None,
+                max_angle: None,
+                name: name.into(),
+                parent,
+                length,
+                rest_angle: 0.0,
+                head: false,
+                bend: 1.0,
+                thickness: 5.0,
+                color: None,
+                ik_end: false,
+                shape: Shape::Line,
+                style: NodeStyle::default(),
+                media: m,
+            }
+        };
+        let key = |x: f32, y: f32| InstanceKey {
+            frame: 0.0,
+            x,
+            y,
+            scale: 1.0,
+            angle: 0.0,
+            opacity: 1.0,
+            flip_x: false,
+            flip_y: false,
+            scale_y: 0.0,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
+        };
+        // One figure across the top of the stage (root at
+        // (60, 60), one 60-long segment along +x) carrying
+        // the image on its segment; one sprite instance and
+        // one stage text beside it — all far above the
+        // subtitle band.
+        media.figures.push(FigureInstance {
+            name: "carrier".into(),
+            color: 0x00FF00,
+            def: FigureDef {
+                nodes: vec![
+                    node("root", None, 0.0, None),
+                    node(
+                        "seg",
+                        Some(0),
+                        60.0,
+                        Some(SegmentMedia::Image {
+                            asset: 0,
+                            offset: [0.0, 0.0],
+                            scale: 1.0,
+                            angle_offset: 0.0,
+                            flip: false,
+                            opacity: 1.0,
+                        }),
+                    ),
+                ],
+            },
+            hidden: false,
+            clip: None,
+            states: Vec::new(),
+            locked: false,
+            opacity: 1.0,
+        });
+        media.frames[0].poses = vec![Pose {
+            root: [60.0, 60.0],
+            angles: vec![0.0, 0.0],
+        }];
+        media.sprites.push(SpriteInstance {
+            asset: 0,
+            keys: vec![key(60.0, 40.0)],
+        });
+        media.texts.push(TextInstance {
+            content: "AB".into(),
+            size: 20.0,
+            color: 0x0000FF,
+            keys: vec![key(240.0, 60.0)],
+        });
+
+        let a = render_frame(&media, 0);
+        let b = render_frame(&bare, 0);
+        // The media really paints: the upper frame differs.
+        let mut upper_diffs = 0usize;
+        for y in 0..330u32 {
+            for x in 0..a.width() {
+                if a.get_pixel(x, y) != b.get_pixel(x, y) {
+                    upper_diffs += 1;
+                }
+            }
+        }
+        assert!(upper_diffs > 0, "the fixture's media must paint above the band");
+        // The subtitle band (the burn-in's full extent is
+        // rows 360..=387 at this fixture; 330 leaves
+        // margin) is byte-identical with and without the
+        // frame's other media.
+        for y in 330..a.height() {
+            for x in 0..a.width() {
+                assert_eq!(
+                    a.get_pixel(x, y),
+                    b.get_pixel(x, y),
+                    "burn-in band pixel ({x}, {y}) changed with the frame's media"
+                );
+            }
+        }
     }
 
     #[test]
@@ -10759,18 +11253,20 @@ mod wave_p_subtitle_burn_in_tests {
             font_scale: 2.0,
             text_color: 0xFF0000,
             box_color: 0x00FF00,
+            font: SubtitleFont::Shaped,
         };
         let project = fixture(vec![cue(0, 30, "HELLO")], style);
         let img = render_frame(&project, 0);
         let red = [255, 0, 0];
         let green = [0, 255, 0];
         // Top-anchored at scale 2.0 (font size 40, line
-        // height 48): the line centre is 16 + 24 = 40 and
-        // the red face spans rows 24..63 (cell 8: pixel
-        // centres at (row - 1.5) x 8 about the anchor, each
-        // an 8x8 block). It must reach rows 48..63, which
-        // an unscaled top cue (face rows 20..39) could
-        // never touch.
+        // height 48): the line centre is 16 + 24 = 40.
+        // Under the shaped renderer the red capitals' ink
+        // spans roughly rows 25..54 about that centre
+        // (RM2); it must reach rows 48..63's neighbourhood
+        // — asserted as rows 48..=63 — which an unscaled
+        // top cue (ink ending near row 35) could never
+        // touch.
         assert!(
             count_in_rows(&img, 48..=63, red) > 0,
             "the scaled cue's text colour must paint in the top band"
@@ -10783,6 +11279,66 @@ mod wave_p_subtitle_burn_in_tests {
             count_in_rows(&img, 200..=399, red),
             0,
             "a top-anchored cue paints nothing in the bottom half"
+        );
+    }
+
+    #[test]
+    fn burn_in_bengali_cue_shapes_glyphs_under_the_default_style() {
+        // Roadmap Wave 1 (RM2, F-2) — the P0-2 acceptance
+        // pin at the burn-in surface: a Bengali cue under
+        // the DEFAULT style renders as shaped glyphs:
+        // text-colour ink in the bottom band, and a frame
+        // that differs from the same cue under the Pixel
+        // style (whose bitmap renderer can only stamp the
+        // line as question marks). Before RM2 the two
+        // renders were the same stamp — and both were `?`.
+        let cues = vec![cue(0, 30, "বাংলা")];
+        let shaped = fixture(cues.clone(), SubtitleStyle::default());
+        let pixel = fixture(
+            cues,
+            SubtitleStyle {
+                font: SubtitleFont::Pixel,
+                ..SubtitleStyle::default()
+            },
+        );
+        let shaped_img = render_frame(&shaped, 0);
+        let pixel_img = render_frame(&pixel, 0);
+        assert!(
+            white_in(&shaped_img, 360..=390) > 0,
+            "the shaped Bengali cue must paint text-colour ink in the bottom band"
+        );
+        assert!(
+            white_in(&pixel_img, 360..=390) > 0,
+            "the pixel-style Bengali cue still paints (as the stamp)"
+        );
+        assert_ne!(
+            shaped_img.as_raw(),
+            pixel_img.as_raw(),
+            "shaped and pixel renders of a Bengali cue must differ"
+        );
+    }
+
+    #[test]
+    fn burn_in_pixel_style_paints_the_bottom_band() {
+        // The Pixel style is a real, working renderer, not
+        // a stub: a Latin cue under it paints its face in
+        // the bottom band and nowhere above it.
+        let project = fixture(
+            vec![cue(0, 30, "HELLO")],
+            SubtitleStyle {
+                font: SubtitleFont::Pixel,
+                ..SubtitleStyle::default()
+            },
+        );
+        let img = render_frame(&project, 0);
+        assert!(
+            white_in(&img, 360..=390) > 0,
+            "the pixel-style cue must paint in the bottom band"
+        );
+        assert_eq!(
+            white_in(&img, 0..=335),
+            0,
+            "the pixel-style cue paints nothing above its band"
         );
     }
 }

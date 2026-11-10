@@ -45,10 +45,13 @@
 //!   ordering ever changes this module fails empty, never
 //!   wrong.
 //!
-//! Sprite items carry `alpha = 1.0` in the pass (an instance
-//! key has no opacity channel), and the prim alphas below
-//! are that alpha times the family's factors — applied
-//! exactly once, here, the `stage_text` doctrine.
+//! Sprite items carry their sampled key's opacity in the
+//! pass, and the prim alphas below are that alpha times
+//! the family's factors — applied exactly once, here,
+//! the `stage_text` doctrine. (An earlier wording claimed
+//! instance keys had no opacity channel; the field is
+//! Wave 13's, and RM22's P-12 pass made the text-instance
+//! items honour it symmetrically.)
 //!
 //! ## The prim contract (for the integrator's stage pass)
 //!
@@ -202,6 +205,29 @@
 //! drag — all hold their grab target the same way, and
 //! the pin `sprite_drag_keeps_the_grab_frame_across_a_
 //! mid_gesture_frame_step` holds this one to it.
+//!
+//! ## Transform handles (Roadmap Wave 1, RM22 — P-12)
+//!
+//! The selected sprite also draws handle glyphs —
+//! corner squares, a pivot cross, a rotate knob on a
+//! link above the top edge — as `CornerMark` segments
+//! over the ONE geometry [`sprite_handles`] computes,
+//! so the drawn handle is the grabbable handle
+//! ([`handle_at`]). Drags carry a [`SpriteDragMode`]:
+//! the settle, identity and one-undo-step disciplines
+//! above are mode-blind, only the target computation
+//! differs ([`handle_target`]). A body press arms a
+//! CORNER drag when it lands on a corner (corner points
+//! sit on the quad, so the existing pick reaches them);
+//! it never arms the pivot — the pivot sits at the quad
+//! centre, the move gesture's home point — and it
+//! cannot arm the rotate knob, which sits outside the
+//! quad where the body pick never fires. Those two arm
+//! through [`sprite_handle_drag_down`], which the
+//! shell's press routing calls after consulting
+//! [`sprite_handle_pick_at`] with the PRIOR selection —
+//! wiring that lives in `main.rs` and is filed as
+//! IA-RM22-3 in the seat's findings.
 
 use std::cell::RefCell;
 
@@ -268,8 +294,8 @@ pub struct SpriteQuad {
     /// Quad centre (the average of the corners — exact
     /// for the parallelogram a sprite quad always is).
     pub centre: V2,
-    /// The media item's alpha (1.0 for sprite instances
-    /// today — an instance key has no opacity channel).
+    /// The media item's alpha: the sprite's sampled key
+    /// opacity, clamped to 0..=1 by the pass.
     pub alpha: f32,
 }
 
@@ -502,6 +528,64 @@ pub fn sprite_prims(
                 }
             }
         }
+        if is_selected {
+            // Transform handles (Roadmap Wave 1, RM22 —
+            // P-12): the corner squares, the pivot cross
+            // and the rotate knob with its link, drawn as
+            // CornerMark segments — the prim contract and
+            // its stage consumer are unchanged, and the
+            // glyphs sit exactly where [`handle_at`]
+            // hit-tests ([`sprite_handles`]).
+            if let Some(inst) = project.sprites.get(sprite) {
+                if let Some(key) = InstanceKey::sample(&inst.keys, frame_f) {
+                    let handles = sprite_handles(&quad, &key);
+                    let h = HANDLE_MARK_HALF;
+                    let square = |out: &mut Vec<SpritePrim>, m: V2| {
+                        let pts = [
+                            [m[0] - h, m[1] - h],
+                            [m[0] + h, m[1] - h],
+                            [m[0] + h, m[1] + h],
+                            [m[0] - h, m[1] + h],
+                        ];
+                        for i in 0..4 {
+                            out.push(SpritePrim::CornerMark {
+                                sprite,
+                                a: pts[i],
+                                b: pts[(i + 1) % 4],
+                                width: CORNER_MARK_WIDTH,
+                            });
+                        }
+                    };
+                    for c in handles.corners {
+                        square(&mut out, c);
+                    }
+                    // The pivot cross: the square's two
+                    // diagonals at the pivot point.
+                    let pv = handles.pivot;
+                    for (a, b) in [
+                        ([pv[0] - h, pv[1] - h], [pv[0] + h, pv[1] + h]),
+                        ([pv[0] - h, pv[1] + h], [pv[0] + h, pv[1] - h]),
+                    ] {
+                        out.push(SpritePrim::CornerMark {
+                            sprite,
+                            a,
+                            b,
+                            width: CORNER_MARK_WIDTH,
+                        });
+                    }
+                    // The rotate knob and its link from the
+                    // top edge's midpoint.
+                    let top_mid = scale(add(quad.corners[0], quad.corners[1]), 0.5);
+                    out.push(SpritePrim::CornerMark {
+                        sprite,
+                        a: top_mid,
+                        b: handles.rotate,
+                        width: OUTLINE_WIDTH,
+                    });
+                    square(&mut out, handles.rotate);
+                }
+            }
+        }
         // The label spec: above the top edge, running
         // along it (module docs, SpritePrim::Label).
         let top_mid = scale(add(quad.corners[0], quad.corners[1]), 0.5);
@@ -529,6 +613,150 @@ pub fn sprite_prims(
 /// [`sprite_prims`] at the core's display frame.
 pub fn sprite_prims_at(core: &EditorCore, selected: Option<usize>) -> Vec<SpritePrim> {
     sprite_prims(&core.project, core.display_frame(), selected)
+}
+
+/// Handle grab radius in ELEMENT POINTS (Roadmap Wave 1,
+/// RM22 — P-12): like the drag jitter gate (AA8/RM15),
+/// a grab target is a physical size, so the stage-unit
+/// radius converts through the view scale
+/// ([`handle_radius`]).
+pub const HANDLE_RADIUS_PX: f32 = 7.0;
+
+/// The rotate handle's distance beyond the quad's top
+/// edge, in stage units (the name label's link class:
+/// clear of the quad, on the centre's outward ray).
+pub const ROTATE_LINK: f32 = 22.0;
+
+/// Half-size of a handle glyph's square, in stage
+/// units — the prim stream's scale-1 reading, the
+/// corner-mark family's convention (a consumer wanting
+/// screen-constant handles scales widths, not these).
+pub const HANDLE_MARK_HALF: f32 = 4.0;
+
+/// The handle grab radius in stage units at view
+/// `scale`: [`HANDLE_RADIUS_PX`] on screen, whatever
+/// the zoom. At scale 1 the radius is 7 stage units.
+pub fn handle_radius(scale: f32) -> f32 {
+    if scale > 0.0 {
+        HANDLE_RADIUS_PX / scale
+    } else {
+        HANDLE_RADIUS_PX
+    }
+}
+
+/// One transform handle of the selected sprite
+/// (Roadmap Wave 1, RM22 — P-12).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpriteHandle {
+    /// A quad corner (its index into the quad's corner
+    /// array): dragging scales the key — per-axis
+    /// factors around the anchor, so a corner drag is
+    /// the two-axis scale the steppers author one axis
+    /// at a time.
+    Corner(usize),
+    /// The knob beyond the top edge: dragging rotates
+    /// the key about its anchor (the pivot point).
+    Rotate,
+    /// The pivot point itself: dragging slides the
+    /// key's pivot through the image while the image
+    /// stays exactly where it is on stage — the anchor
+    /// compensates by the same offset (see
+    /// [`handle_target`]).
+    Pivot,
+}
+
+/// The selected sprite's handle positions for one
+/// frame, in stage coordinates: where [`sprite_prims`]
+/// draws the glyphs and where [`handle_at`] hit-tests
+/// them — one geometry for both, so the drawn handle
+/// is the grabbable handle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpriteHandles {
+    /// The quad's own corners (the scale handles).
+    pub corners: [V2; 4],
+    /// The rotate knob's centre.
+    pub rotate: V2,
+    /// The pivot point's stage position.
+    pub pivot: V2,
+}
+
+/// Handle positions for `quad` under sampled key
+/// `key`. The pivot's stage position is the quad's
+/// bilinear form at the key's image-relative anchor —
+/// exact, because a sprite quad is always a
+/// parallelogram (the media pass's affine placement).
+/// The rotate knob sits beyond the top edge's midpoint
+/// on the outward ray (away from the centre) at
+/// [`ROTATE_LINK`] — the label anchor's direction,
+/// further out, so knob and label never share a point.
+pub fn sprite_handles(quad: &SpriteQuad, key: &InstanceKey) -> SpriteHandles {
+    let c = &quad.corners;
+    let pivot = add(
+        add(c[0], scale(sub(c[1], c[0]), key.pivot_x)),
+        scale(sub(c[3], c[0]), key.pivot_y),
+    );
+    let top_mid = scale(add(c[0], c[1]), 0.5);
+    let outward = sub(top_mid, quad.centre);
+    let out_len = len(outward);
+    let rotate = if out_len > f32::EPSILON {
+        add(top_mid, scale(outward, ROTATE_LINK / out_len))
+    } else {
+        top_mid
+    };
+    SpriteHandles {
+        corners: *c,
+        rotate,
+        pivot,
+    }
+}
+
+/// The handle at stage point `p`, if any: the nearest
+/// handle centre within `radius` stage units (ties go
+/// to the earlier-considered handle — pivot, then
+/// corners in quad order, then the rotate knob — so a
+/// small sprite's crowded centre resolves to the pivot
+/// the point is probably aiming at).
+pub fn handle_at(handles: &SpriteHandles, p: V2, radius: f32) -> Option<SpriteHandle> {
+    let mut best: Option<(SpriteHandle, f32)> = None;
+    let mut consider = |h: SpriteHandle, at: V2| {
+        let d = len(sub(p, at));
+        if d <= radius && best.map_or(true, |(_, bd)| d < bd) {
+            best = Some((h, d));
+        }
+    };
+    consider(SpriteHandle::Pivot, handles.pivot);
+    for (i, c) in handles.corners.iter().enumerate() {
+        consider(SpriteHandle::Corner(i), *c);
+    }
+    consider(SpriteHandle::Rotate, handles.rotate);
+    best.map(|(h, _)| h)
+}
+
+/// The handle a stage press at `p` would grab on the
+/// SELECTED sprite, if any — the pick the shell's
+/// press routing consults BEFORE the body pick, so a
+/// handle press never falls through to a move (the
+/// rotate knob sits outside the quad, where the body
+/// pick cannot see it at all). The shell wiring is
+/// IA-RM22-3; this fn is its whole engine half.
+/// `None` when nothing is selected, the selection is
+/// stale, the sprite has no sampled key or quad at the
+/// display frame, or no handle is within reach.
+pub fn sprite_handle_pick_at(
+    core: &EditorCore,
+    selected: Option<usize>,
+    p: V2,
+) -> Option<(usize, SpriteHandle)> {
+    let sprite = selected?;
+    core.project.sprites.get(sprite)?;
+    let frame_f = core.display_frame();
+    let key = core.sprite_sample(sprite, frame_f)?;
+    let quad = sprite_quads(&core.project, frame_f)
+        .into_iter()
+        .find(|q| q.sprite == sprite)?;
+    let handles = sprite_handles(&quad, &key);
+    let radius = handle_radius(crate::stage_view::last_display_scale());
+    handle_at(&handles, p, radius).map(|h| (sprite, h))
 }
 
 /// True when stage point `p` lies inside the quad
@@ -608,6 +836,41 @@ pub fn sprite_pick_at(core: &EditorCore, p: V2) -> Option<usize> {
 /// roughly one window point.
 pub const DRAG_THRESHOLD: f32 = 2.0;
 
+/// The jitter threshold in ELEMENT POINTS (Roadmap
+/// Wave 1, RM15 — P-3 / R-A2-1): hand jitter is a physical
+/// quantity, the same at any zoom, so the gate converts
+/// through the scale the stage last drew at
+/// (`stage_view::last_display_scale`) — see
+/// [`drag_threshold`]. [`DRAG_THRESHOLD`] remains the
+/// stage-unit value at scale 1 (2 pt at the fit view was
+/// 2 stage units), so the fit view's gate is unchanged.
+pub const DRAG_THRESHOLD_PX: f32 = 2.0;
+
+/// The jitter threshold in stage units at view `scale`:
+/// [`DRAG_THRESHOLD_PX`] on screen, whatever the zoom. At
+/// scale 1 this is [`DRAG_THRESHOLD`] exactly.
+pub fn drag_threshold(scale: f32) -> f32 {
+    if scale > 0.0 {
+        DRAG_THRESHOLD_PX / scale
+    } else {
+        DRAG_THRESHOLD
+    }
+}
+
+/// What a sprite drag is doing (Roadmap Wave 1, RM22 —
+/// P-12): the plain move every drag was before handles,
+/// or one transform handle's drag. The mode is fixed at
+/// the grab and never changes mid-gesture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpriteDragMode {
+    /// The pointer moves the key's position by its
+    /// delta from the press point.
+    Move,
+    /// A handle drag: the target key is computed from
+    /// the handle's own math ([`handle_target`]).
+    Handle(SpriteHandle),
+}
+
 /// One stage sprite drag in flight (see the module docs,
 /// "Dragging"): everything the settle needs, captured at
 /// the grab — the sprite's identity (index + the asset it
@@ -637,6 +900,9 @@ pub struct SpriteDrag {
     /// behaviour), else the stage-centre default. Only
     /// `x` / `y` ever change on it.
     pub base: InstanceKey,
+    /// The gesture's mode, fixed at the grab
+    /// ([`SpriteDragMode`]).
+    pub mode: SpriteDragMode,
     /// Whether the pointer has travelled at least
     /// [`DRAG_THRESHOLD`] from the press point — the
     /// jitter gate (Wave AA, AA8): until it has, no
@@ -707,19 +973,150 @@ fn restore_orig_keys(core: &mut EditorCore, record: &SpriteDrag) {
     }
 }
 
-/// The key the drag would store for pointer point `p`:
-/// the recorded base with `x` / `y` shifted by the
-/// pointer's delta from the press point. `None` when the
+/// The key the drag would store for pointer point `p`,
+/// dispatched on the record's mode. `None` when the
 /// result would be non-finite (a wild pointer conversion)
 /// — such an application writes nothing, since the
 /// committing op would refuse the same values.
-fn drag_target(record: &SpriteDrag, p: V2) -> Option<InstanceKey> {
+fn drag_target(project: &Project, record: &SpriteDrag, p: V2) -> Option<InstanceKey> {
+    match record.mode {
+        SpriteDragMode::Move => move_target(record, p),
+        SpriteDragMode::Handle(handle) => handle_target(project, record, handle, p),
+    }
+}
+
+/// The move drag's target: the recorded base with `x` /
+/// `y` shifted by the pointer's delta from the press
+/// point.
+fn move_target(record: &SpriteDrag, p: V2) -> Option<InstanceKey> {
     let key = InstanceKey {
         x: record.base.x + (p[0] - record.press[0]),
         y: record.base.y + (p[1] - record.press[1]),
         ..record.base
     };
     (key.x.is_finite() && key.y.is_finite()).then_some(key)
+}
+
+/// A handle drag's target (Roadmap Wave 1, RM22 —
+/// P-12), computed from the recorded base and the
+/// pointer, in the key's own terms:
+///
+/// - **Rotate**: the base angle plus the pointer's
+///   angular travel around the anchor (the pivot's
+///   stage position, `[base.x, base.y]`), in degrees —
+///   the principal `atan2` delta, since one Move event
+///   cannot legitimately carry more than ±180°.
+/// - **Corner**: per-axis scale factors — the pointer's
+///   anchor-relative offset projected onto the key's
+///   rotated axes, divided by the press's own
+///   projections (a zero projection keeps that axis's
+///   factor at 1). `scale` takes the u factor and a
+///   materialised `scale_y` the v factor, both floored
+///   at the panel's `SCALE_MIN` (never capped — stored
+///   scales above the steppers' range are legitimate
+///   data a drag must not shrink); a following
+///   `scale_y` (stored 0.0) stays following — only
+///   `scale` is written.
+/// - **Pivot**: the pointer's stage delta, un-rotated
+///   into image-relative units (divided by the flipped
+///   axis extents), slides the pivot — clamped to the
+///   panel's pivot range — and the anchor compensates
+///   by exactly the stage offset the slide implies, so
+///   the image's corners do not move: what changes is
+///   which point of the image the key's position names.
+fn handle_target(
+    project: &Project,
+    record: &SpriteDrag,
+    handle: SpriteHandle,
+    p: V2,
+) -> Option<InstanceKey> {
+    let base = record.base;
+    let anchor = [base.x, base.y];
+    let rad = base.angle.to_radians();
+    let u = [rad.cos(), rad.sin()];
+    let v = [-rad.sin(), rad.cos()];
+    let dot = |a: V2, b: V2| a[0] * b[0] + a[1] * b[1];
+    let key = match handle {
+        SpriteHandle::Rotate => {
+            let a0 = (record.press[1] - anchor[1]).atan2(record.press[0] - anchor[0]);
+            let a1 = (p[1] - anchor[1]).atan2(p[0] - anchor[0]);
+            InstanceKey {
+                angle: base.angle + (a1 - a0).to_degrees(),
+                ..base
+            }
+        }
+        SpriteHandle::Corner(_) => {
+            let press_rel = sub(record.press, anchor);
+            let p_rel = sub(p, anchor);
+            let du = dot(press_rel, u);
+            let dv = dot(press_rel, v);
+            let fu = if du.abs() > f32::EPSILON {
+                dot(p_rel, u) / du
+            } else {
+                1.0
+            };
+            let fv = if dv.abs() > f32::EPSILON {
+                dot(p_rel, v) / dv
+            } else {
+                1.0
+            };
+            // Floored at the panel's SCALE_MIN, never
+            // capped: stored scales legitimately exceed
+            // the steppers' authoring range (imports
+            // write them), and a drag must not silently
+            // shrink what it did not resize — but a
+            // factor at or below zero would author a
+            // scale the compositor skips entirely.
+            let scale = (base.scale * fu).max(crate::rune_sec::sprites_panel::SCALE_MIN);
+            let scale_y = if base.scale_y == 0.0 {
+                0.0
+            } else {
+                (base.eff_scale_y() * fv).max(crate::rune_sec::sprites_panel::SCALE_MIN)
+            };
+            InstanceKey {
+                scale,
+                scale_y,
+                ..base
+            }
+        }
+        SpriteHandle::Pivot => {
+            let (w, h) = media::png_dims(project, record.asset)?;
+            let wu = w as f32 * base.scale;
+            let hv = h as f32 * base.eff_scale_y();
+            if wu <= 0.0 || hv <= 0.0 {
+                return None;
+            }
+            let delta = sub(p, record.press);
+            let fx = if base.flip_x { -1.0 } else { 1.0 };
+            let fy = if base.flip_y { -1.0 } else { 1.0 };
+            let pivot_x = (base.pivot_x + dot(delta, u) / (fx * wu)).clamp(
+                crate::rune_sec::sprites_panel::PIVOT_MIN,
+                crate::rune_sec::sprites_panel::PIVOT_MAX,
+            );
+            let pivot_y = (base.pivot_y + dot(delta, v) / (fy * hv)).clamp(
+                crate::rune_sec::sprites_panel::PIVOT_MIN,
+                crate::rune_sec::sprites_panel::PIVOT_MAX,
+            );
+            let off = add(
+                scale(u, fx * (pivot_x - base.pivot_x) * wu),
+                scale(v, fy * (pivot_y - base.pivot_y) * hv),
+            );
+            InstanceKey {
+                x: base.x + off[0],
+                y: base.y + off[1],
+                pivot_x,
+                pivot_y,
+                ..base
+            }
+        }
+    };
+    (key.x.is_finite()
+        && key.y.is_finite()
+        && key.scale.is_finite()
+        && key.angle.is_finite()
+        && key.pivot_x.is_finite()
+        && key.pivot_y.is_finite())
+    .then_some(key)
 }
 
 /// Write `key` onto sprite `sprite`'s key list IN PLACE:
@@ -778,13 +1175,19 @@ fn sprite_drag_apply(core: &mut EditorCore, p: V2) {
         // starts moving with the full delta, no jump.
         let dx = p[0] - record.press[0];
         let dy = p[1] - record.press[1];
-        if dx * dx + dy * dy < DRAG_THRESHOLD * DRAG_THRESHOLD {
+        // The gate in screen space (RM15, R-A2-1): the
+        // threshold converts through the scale the stage
+        // last drew at, so 2 pt of hand jitter is 2 pt at
+        // every zoom — at the fit view (scale 1) this is
+        // exactly the stage-unit gate it replaces.
+        let threshold = drag_threshold(crate::stage_view::last_display_scale());
+        if dx * dx + dy * dy < threshold * threshold {
             return;
         }
         record.moved = true;
         SPRITE_DRAG.with(|cell| *cell.borrow_mut() = Some(record.clone()));
     }
-    if let Some(key) = drag_target(&record, p) {
+    if let Some(key) = drag_target(&core.project, &record, p) {
         write_key_live(core, record.sprite, key);
     }
 }
@@ -800,6 +1203,64 @@ fn sprite_drag_apply(core: &mut EditorCore, p: V2) {
 /// a cancel first, so no gesture's live writes can leak
 /// into this one.
 pub fn sprite_drag_down(core: &mut EditorCore, sprite: usize, p: V2) {
+    let mode = drag_mode_at(core, sprite, p);
+    begin_drag(core, sprite, p, mode);
+}
+
+/// Arm a HANDLE drag on sprite `sprite` (Roadmap Wave
+/// 1, RM22 — P-12): the press routing's half of the
+/// rotate/pivot story — the shell consults
+/// [`sprite_handle_pick_at`] with the PRIOR selection
+/// before its body pick and calls this with the handle
+/// it found (the wiring is IA-RM22-3). The settle,
+/// identity and undo disciplines are the move drag's
+/// own ([`begin_drag`]); only the mode differs.
+pub fn sprite_handle_drag_down(
+    core: &mut EditorCore,
+    sprite: usize,
+    handle: SpriteHandle,
+    p: V2,
+) {
+    begin_drag(core, sprite, p, SpriteDragMode::Handle(handle));
+}
+
+/// The mode a body press at `p` on sprite `sprite`
+/// arms: a corner-handle drag when the press lands on
+/// one of the sprite's CURRENT (display-frame) corners
+/// — corner points sit on the quad, so the pick that
+/// preceded this call already fired for them — and
+/// the plain move otherwise. The pivot is deliberately
+/// NOT armed here: it sits at the quad's centre, the
+/// move gesture's home point since Wave Z, and stealing
+/// it would change every centre press in the shell; the
+/// rotate knob sits outside the quad, where this press
+/// path never sees a point. Both arm through
+/// [`sprite_handle_drag_down`] instead.
+fn drag_mode_at(core: &EditorCore, sprite: usize, p: V2) -> SpriteDragMode {
+    let frame_f = core.display_frame();
+    if let Some(quad) = sprite_quads(&core.project, frame_f)
+        .into_iter()
+        .find(|q| q.sprite == sprite)
+    {
+        if let Some(inst) = core.project.sprites.get(sprite) {
+            if let Some(key) = InstanceKey::sample(&inst.keys, frame_f) {
+                let handles = sprite_handles(&quad, &key);
+                let radius = handle_radius(crate::stage_view::last_display_scale());
+                if let Some(SpriteHandle::Corner(i)) = handle_at(&handles, p, radius) {
+                    return SpriteDragMode::Handle(SpriteHandle::Corner(i));
+                }
+            }
+        }
+    }
+    SpriteDragMode::Move
+}
+
+/// The shared grab (extracted from [`sprite_drag_down`]
+/// when handle drags joined it, RM22): settle any
+/// leftover record as a cancel, refuse while playing
+/// or on a stale index, and record the grab with its
+/// `mode`. Takes no snapshot and sets no status.
+fn begin_drag(core: &mut EditorCore, sprite: usize, p: V2, mode: SpriteDragMode) {
     if let Some(old) = SPRITE_DRAG.with(|cell| cell.borrow_mut().take()) {
         if drag_identity_holds(core, &old) {
             restore_orig_keys(core, &old);
@@ -818,6 +1279,7 @@ pub fn sprite_drag_down(core: &mut EditorCore, sprite: usize, p: V2) {
         press: p,
         frame,
         base: crate::rune_sec::sprites_panel::base_key(core, inst, frame as f32),
+        mode,
         moved: false,
         orig_keys: inst.keys.clone(),
     };
@@ -889,12 +1351,38 @@ pub fn sprite_drag_up(core: &mut EditorCore, p: V2, cancelled: bool) {
         // restore and nothing to commit.
         return;
     }
-    let Some(final_key) = drag_target(&record, p) else {
+    let Some(final_key) = drag_target(&core.project, &record, p) else {
         restore_orig_keys(core, &record);
         return;
     };
     restore_orig_keys(core, &record);
     core.set_sprite_key_full(record.sprite, record.frame, final_key);
+}
+
+/// The sprite drag's HUD line (Roadmap Wave 1, RM15 —
+/// P-3 / R-A2-3): the dragged instance's live key position
+/// while a drag is armed, in the stage feedback layer's
+/// readout format (`stage_view::drag_hud_lines` is the
+/// core-drag twin, and the stage's feedback pass
+/// concatenates the two). The position is the key the
+/// live writes have placed at the drag's frame — after
+/// the jitter gate trips that key exists in the list;
+/// before it, the grab's base key is what a release would
+/// write, so it is what the HUD says. `None` when no drag
+/// is armed or the record no longer names its sprite.
+pub fn sprite_drag_hud(core: &EditorCore) -> Option<String> {
+    let record = SPRITE_DRAG.with(|cell| cell.borrow().clone())?;
+    if !drag_identity_holds(core, &record) {
+        return None;
+    }
+    let inst = core.project.sprites.get(record.sprite)?;
+    let (x, y) = inst
+        .keys
+        .iter()
+        .find(|k| k.frame == record.frame as f32)
+        .map(|k| (k.x, k.y))
+        .unwrap_or((record.base.x, record.base.y));
+    Some(format!("SPRITE {:.0}, {:.0}", x, y))
 }
 
 #[cfg(test)]
@@ -1001,7 +1489,7 @@ mod tests {
         assert_eq!(quads[1].sprite, 1);
         assert_eq!(quads[0].asset, 0);
         assert_eq!(quads[0].name, "badge.png");
-        assert_eq!(quads[0].alpha, 1.0, "instance keys have no opacity channel");
+        assert_eq!(quads[0].alpha, 1.0, "the fixture's keys are fully opaque");
         // And they ARE the media pass's corners, item for
         // item, at every sampled frame — including frame 1
         // (keys interpolate) and frame 2 (rotated 90°).
@@ -1690,5 +2178,134 @@ mod tests {
         assert_eq!(core.project.sprites[0].keys.len(), 2, "no key authored at the stepped-to frame");
         core.undo();
         assert_eq!(keys_json(&core, 0), before);
+    }
+
+    #[test]
+    fn drag_threshold_is_a_screen_constant_at_every_zoom() {
+        // RM15 (R-A2-1): 2 pt of hand jitter is 2 pt at any
+        // zoom — the stage-unit gate divides by the scale.
+        assert_eq!(drag_threshold(1.0), DRAG_THRESHOLD, "scale 1 is the old gate");
+        assert_eq!(drag_threshold(2.0), 1.0);
+        assert_eq!(drag_threshold(0.5), 4.0);
+        assert_eq!(drag_threshold(0.0), DRAG_THRESHOLD, "degenerate scale reads 1:1");
+    }
+
+    #[test]
+    fn sprite_drag_hud_names_the_live_key_position() {
+        // RM15 (R-A2-3): while a sprite drag is armed the
+        // HUD line reports the position the live writes
+        // have placed at the grab frame; unarmed, no line.
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+        assert_eq!(sprite_drag_hud(&core), None, "no drag armed");
+        sprite_drag_down(&mut core, 0, [300.0, 200.0]);
+        assert!(sprite_drag_move(&mut core, [360.0, 260.0]));
+        assert_eq!(sprite_drag_hud(&core), Some("SPRITE 360, 260".to_string()));
+        sprite_drag_up(&mut core, [360.0, 260.0], false);
+        assert_eq!(sprite_drag_hud(&core), None, "the drag is over");
+    }
+
+    #[test]
+    fn handles_sit_on_the_quad_corners_pivot_and_knob() {
+        // Roadmap Wave 1 (RM22, P-12): sprite 0 at frame 0
+        // is a 40x20 quad at (300,200) with a centre pivot.
+        let project = project_with_sprites();
+        let quads = sprite_quads(&project, 0.0);
+        let key = InstanceKey::sample(&project.sprites[0].keys, 0.0).unwrap();
+        let handles = sprite_handles(&quads[0], &key);
+        assert_eq!(handles.corners, quads[0].corners, "scale handles ARE the corners");
+        assert!(close(handles.pivot, [300.0, 200.0]), "pivot {:?}", handles.pivot);
+        assert!(
+            close(handles.rotate, [300.0, 190.0 - ROTATE_LINK]),
+            "the knob floats above the top edge: {:?}",
+            handles.rotate
+        );
+        // Hit-testing: nearest centre within the radius.
+        assert_eq!(handle_at(&handles, [320.0, 210.0], 7.0), Some(SpriteHandle::Corner(2)));
+        assert_eq!(handle_at(&handles, [300.0, 200.0], 7.0), Some(SpriteHandle::Pivot));
+        assert_eq!(handle_at(&handles, [300.0, 168.0], 7.0), Some(SpriteHandle::Rotate));
+        assert_eq!(handle_at(&handles, [0.0, 0.0], 7.0), None);
+        // The radius is a screen constant (the AA8/RM15
+        // discipline): 7 pt at any zoom.
+        assert_eq!(handle_radius(1.0), 7.0);
+        assert_eq!(handle_radius(2.0), 3.5);
+        assert_eq!(handle_radius(0.0), 7.0, "degenerate scale reads 1:1");
+    }
+
+    #[test]
+    fn corner_press_arms_a_scale_drag_in_one_undo_step() {
+        // RM22: pressing sprite 0's bottom-right corner
+        // and dragging it out doubles the key's scale —
+        // position, angle and the follow-`scale_y`
+        // sentinel are untouched, and the gesture spends
+        // exactly one undo step.
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+        let depth = core.undo_depth();
+        sprite_drag_down(&mut core, 0, [320.0, 210.0]);
+        assert!(sprite_drag_move(&mut core, [340.0, 220.0]));
+        sprite_drag_up(&mut core, [340.0, 220.0], false);
+        let key = core.project.sprites[0].keys[0];
+        assert_eq!(key.scale, 20.0, "both axis factors were 2: {key:?}");
+        assert_eq!(key.scale_y, 0.0, "a following scale_y keeps following");
+        assert_eq!((key.x, key.y), (300.0, 200.0), "a scale drag never moves the anchor");
+        assert_eq!(key.angle, 0.0);
+        assert_eq!(core.undo_depth(), depth + 1, "one undo step for the gesture");
+    }
+
+    #[test]
+    fn rotate_drag_turns_the_key_about_its_anchor() {
+        // RM22: the rotate knob drag — press above the
+        // sprite, drag a quarter turn clockwise (y-down):
+        // the key's angle gains exactly that travel and
+        // nothing else changes.
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+        let depth = core.undo_depth();
+        sprite_handle_drag_down(&mut core, 0, SpriteHandle::Rotate, [300.0, 168.0]);
+        assert!(sprite_drag_move(&mut core, [332.0, 200.0]));
+        sprite_drag_up(&mut core, [332.0, 200.0], false);
+        let key = core.project.sprites[0].keys[0];
+        assert!((key.angle - 90.0).abs() < 0.01, "angle {}", key.angle);
+        assert_eq!((key.x, key.y, key.scale), (300.0, 200.0, 10.0));
+        assert_eq!(core.undo_depth(), depth + 1);
+    }
+
+    #[test]
+    fn pivot_drag_slides_the_pivot_and_the_image_stays_put() {
+        // RM22: dragging the pivot +10 stage units on a
+        // 40-unit-wide placement slides the pivot a
+        // quarter of the image; the anchor compensates by
+        // the same +10, so the drawn corners are
+        // bit-identical before and after the gesture.
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+        let before = media_sprite_corners(&core.project, 0.0);
+        sprite_handle_drag_down(&mut core, 0, SpriteHandle::Pivot, [300.0, 200.0]);
+        assert!(sprite_drag_move(&mut core, [310.0, 200.0]));
+        sprite_drag_up(&mut core, [310.0, 200.0], false);
+        let key = core.project.sprites[0].keys[0];
+        assert!((key.pivot_x - 0.75).abs() < 1e-6, "pivot_x {}", key.pivot_x);
+        assert_eq!(key.pivot_y, 0.5);
+        assert!((key.x - 310.0).abs() < 0.01, "the anchor followed: {}", key.x);
+        assert_eq!(key.y, 200.0);
+        let after = media_sprite_corners(&core.project, 0.0);
+        assert_eq!(before, after, "the image never moved on stage");
+    }
+
+    #[test]
+    fn centre_press_still_arms_a_move_not_the_pivot() {
+        // RM22's guard on drag_mode_at: the quad centre
+        // is the move gesture's home point (every pre-
+        // handle drag test presses there) — the pivot
+        // handle must not steal it.
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+        sprite_drag_down(&mut core, 0, [300.0, 200.0]);
+        assert!(sprite_drag_move(&mut core, [320.0, 220.0]));
+        sprite_drag_up(&mut core, [320.0, 220.0], false);
+        let key = core.project.sprites[0].keys[0];
+        assert_eq!((key.x, key.y), (320.0, 220.0), "the key moved by the delta");
+        assert_eq!((key.pivot_x, key.pivot_y), (0.5, 0.5), "the pivot is untouched");
     }
 }

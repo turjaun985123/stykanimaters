@@ -1527,6 +1527,7 @@ mod tests {
             font_scale,
             text_color: 0xFFEE00,
             box_color: 0x112233,
+            font: Default::default(),
         }
     }
 

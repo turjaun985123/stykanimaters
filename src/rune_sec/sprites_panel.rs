@@ -185,14 +185,58 @@
 //! [`btn`] while a sprite is selected, the muted-live
 //! form with the handler kept (a press earns the
 //! "Select a sprite first." refusal) while none is.
+//!
+//! ## The Asset Manager (Roadmap Wave 1, RM22 — P-12)
+//!
+//! The panel gains a fourth area: the project's asset
+//! TABLE itself — one row per asset with a decoded
+//! thumbnail, its dimensions / stored size / reference
+//! census ([`asset_meta`] over `media::asset_rows`, the
+//! F-5 decoded cache's public door), and the three
+//! lifecycle actions the GUI could not perform at all
+//! before this wave (the table was MCP-only — A8 §2.1):
+//! **Import** (native file dialog → the shared
+//! `media::import_asset_file` op), **Rename** (the
+//! library panel's rename-session discipline over
+//! `media::rename_asset`) and **Remove**
+//! (`media::remove_asset` — refused with the census
+//! while anything references the asset, so the refusal
+//! sentence the MCP tool posts is the sentence the
+//! panel shows). Place stays the Add picker's own
+//! button and is repeated on each manager row. The
+//! mutations are the media module's factored GUI ops,
+//! shared with the MCP handlers, so the surfaces can
+//! never drift on gates or undo discipline: one press
+//! is at most one undo step, and a refusal changes
+//! nothing but the status line.
+//!
+//! Thumbnails are the stage-bitmap spike's in-GUI
+//! proof (RM22's findings carry the full report): a
+//! stored asset's bytes decode once into a
+//! `rune::Image` through `ImageCache::rgba` — the Home
+//! contact sheet's recipe — and the handle is cached
+//! in panel state against the asset's name + byte
+//! length, so a table edit that changes what an index
+//! holds re-decodes exactly that row. The stage itself
+//! still draws sprite PLACEHOLDERS: Rune's `Shape` has
+//! no bitmap primitive at the pinned rev, and the
+//! stage's element-tree wiring (where a bitmap layer
+//! would mount) is integrator surface — the spike's
+//! priced wiring is IA-RM22-4 in the seat's findings.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 use rune::tok::{type_, Theme};
-use rune::{col, row, text, El};
+use rune::{col, el, row, text, El, TextEdit};
 use stykanimate_rs::editor::EditorCore;
+use stykanimate_rs::media::{self, AssetRow};
 use stykanimate_rs::model::{InstanceKey, SpriteInstance};
 
 use crate::chrome_view::{btn, btn_inert, btn_muted_live};
 use crate::rune_sec::design;
+use crate::rune_sec::icon_btn::icon_btn;
+use crate::rune_sec::project_tools::human_size;
 use crate::State;
 
 /// X/Y stepper step, in stage units.
@@ -240,11 +284,39 @@ pub struct SpritesPanelState {
     /// deletions adjust it so it keeps naming the
     /// same instance ([`selected_after_removal`]).
     pub selected: Option<usize>,
+    /// Asset Manager (RM22): the rename session's text
+    /// buffer — Rune's edit state, the library panel's
+    /// rename discipline. [`start_asset_rename`] loads
+    /// it with the asset's current name;
+    /// [`apply_asset_rename`] reads it back. Meaningful
+    /// only while [`Self::asset_renaming`] is `Some`.
+    pub asset_rename: TextEdit,
+    /// Asset Manager (RM22): index into
+    /// `Project.assets` of the asset the rename editor
+    /// is open on, if a session is open. A manager
+    /// removal adjusts it with
+    /// [`asset_index_after_removal`] — the session dies
+    /// with its asset rather than sliding onto the
+    /// asset that took its index.
+    pub asset_renaming: Option<usize>,
+    /// Asset Manager (RM22): decoded thumbnails by
+    /// asset index — each entry stores the (name, byte
+    /// length) the image was decoded from, so a table
+    /// edit that changes what an index holds (rename,
+    /// removal shift, project swap) invalidates exactly
+    /// the entries that no longer match. Session-only,
+    /// like the Home panel's thumbnail cache.
+    pub asset_thumbs: RefCell<HashMap<usize, (String, usize, Option<rune::Image>)>>,
 }
 
 impl Default for SpritesPanelState {
     fn default() -> Self {
-        SpritesPanelState { selected: None }
+        SpritesPanelState {
+            selected: None,
+            asset_rename: TextEdit::default(),
+            asset_renaming: None,
+            asset_thumbs: RefCell::new(HashMap::new()),
+        }
     }
 }
 
@@ -334,6 +406,330 @@ pub fn asset_options(core: &EditorCore) -> Vec<AssetOption> {
             name: a.name.clone(),
         })
         .collect()
+}
+
+/// The Asset Manager's per-asset meta line: decoded
+/// dimensions (or the undecodable marker — an asset
+/// whose bytes no longer decode is a fact the manager
+/// states, not hides), the stored size in the shell's
+/// shared human format, and the reference census in
+/// words. Pure — composed from one [`AssetRow`].
+pub fn asset_meta(row: &AssetRow) -> String {
+    let dims = match row.dims {
+        Some((w, h)) => format!("{w} × {h}"),
+        None => "undecodable".to_string(),
+    };
+    let refs = match row.total_refs() {
+        0 => "unused".to_string(),
+        1 => "1 ref".to_string(),
+        n => format!("{n} refs"),
+    };
+    format!("{dims} · {} · {refs}", human_size(row.bytes as u64))
+}
+
+/// A remembered asset index after asset `removed` is
+/// taken out of the table: the removed asset's own
+/// index dies with it (a rename session must never
+/// slide onto the asset that took its place — the
+/// reason this is NOT the sprite selection's
+/// [`selected_after_removal`], whose instance DOES
+/// slide), a later index shifts down one, an earlier
+/// one is untouched. Pure.
+pub fn asset_index_after_removal(index: Option<usize>, removed: usize) -> Option<usize> {
+    match index {
+        None => None,
+        Some(i) if i == removed => None,
+        Some(i) if i > removed => Some(i - 1),
+        some => some,
+    }
+}
+
+/// Thumbnail pixel width for Asset Manager rows (the
+/// Home contact sheet's thumbnail width class).
+pub const ASSET_THUMB_W_PX: u32 = 56;
+/// Thumbnail display width in points for Asset
+/// Manager rows; the height follows the image's own
+/// aspect, as on the Home rows.
+pub const ASSET_THUMB_W_PT: f32 = 40.0;
+
+/// Render one asset's thumbnail into a Rune image at
+/// thumbnail width — the Home contact sheet's recipe
+/// (`ImageCache::rgba` on a cache created for the
+/// fill, the decode waited out so the handle owns its
+/// pixels after the cache drops). The pixels come
+/// from the shared decoded-asset cache
+/// (`media::asset_pixels`, IA-RM22-1) — this fn no
+/// longer decodes the stored bytes itself. `None`
+/// when the asset is missing or does not decode: a
+/// row without a thumbnail is the honest outcome,
+/// never a placeholder.
+fn render_asset_thumbnail(
+    project: &stykanimate_rs::model::Project,
+    index: usize,
+) -> Option<rune::Image> {
+    let (w, h, rgba) = media::asset_pixels(project, index)?;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let thumb_h = ((ASSET_THUMB_W_PX as f32 * h as f32 / w as f32).round() as u32).max(1);
+    let small = image::imageops::resize(
+        &*rgba,
+        ASSET_THUMB_W_PX,
+        thumb_h,
+        image::imageops::FilterType::Triangle,
+    );
+    let cache = rune::ImageCache::new(std::sync::Arc::new(|| {}));
+    let image = cache.rgba(ASSET_THUMB_W_PX, thumb_h, small.into_raw());
+    image.wait().ok()?;
+    Some(image)
+}
+
+/// The cached thumbnail for asset `index`, decoded on
+/// first use and re-decoded whenever the (name, byte
+/// length) stored against the cache entry no longer
+/// matches what the index now holds. The decode source
+/// is RM6's decoded-asset cache, exposed as
+/// `media::asset_pixels` (IA-RM22-1): the thumbnail
+/// and every other consumer read the same pixels from
+/// the one decode.
+fn asset_thumbnail(s: &State, index: usize) -> Option<rune::Image> {
+    let asset = s.core.project.assets.get(index)?;
+    let name = asset.name.clone();
+    let len = asset.png.len();
+    if let Some((n, l, img)) = s.sprites_panel.asset_thumbs.borrow().get(&index) {
+        if *n == name && *l == len {
+            return img.clone();
+        }
+    }
+    let img = render_asset_thumbnail(&s.core.project, index);
+    s.sprites_panel
+        .asset_thumbs
+        .borrow_mut()
+        .insert(index, (name, len, img.clone()));
+    img
+}
+
+/// A thumbnail element at [`ASSET_THUMB_W_PT`] wide,
+/// its height from the image's own aspect, clipped to
+/// a 4 pt radius — the Home row thumbnail's shape at
+/// manager scale.
+fn asset_thumb_el(image: &rune::Image) -> El {
+    let [w, h] = image.size().unwrap_or([ASSET_THUMB_W_PX, ASSET_THUMB_W_PX]);
+    let disp_h = ASSET_THUMB_W_PT * h as f32 / w.max(1) as f32;
+    el()
+        .w(ASSET_THUMB_W_PT)
+        .h(disp_h)
+        .radius(4.0)
+        .pixels(image.pixels())
+}
+
+/// Import press (Asset Manager): the native file
+/// dialog, then the shared import op. No dialog tool
+/// on the system and a cancelled dialog are both
+/// status-only outcomes (the editor's own open-project
+/// discipline in `dialogs`' fallback contract) — the
+/// press never invents a path. A refused import (bad
+/// magic, oversize, undecodable) posts the op's own
+/// refusal sentence; a successful one posts its
+/// "Asset imported" status.
+fn import_asset_dialog(s: &mut State) {
+    if stykanimate_rs::dialogs::available_tool().is_none() {
+        s.core.status =
+            "No dialog tool (zenity/kdialog) on this system — import with the MCP asset_import tool instead."
+                .into();
+        return;
+    }
+    let filters = vec![stykanimate_rs::dialogs::FileFilter::new(
+        "Images",
+        &["*.png", "*.jpg", "*.jpeg"],
+    )];
+    let Some(path) = stykanimate_rs::dialogs::open_file("Import image", &filters) else {
+        s.core.status = "Import cancelled.".into();
+        return;
+    };
+    let path = path.to_string_lossy().into_owned();
+    if let Err(e) = media::import_asset_file(&mut s.core, &path, None) {
+        s.core.status = e;
+    }
+}
+
+/// Rename press (Asset Manager): open the rename
+/// editor on asset `i`, loaded with its current name
+/// (the library panel's session discipline). A stale
+/// index opens nothing.
+fn start_asset_rename(s: &mut State, i: usize) {
+    let Some(asset) = s.core.project.assets.get(i) else {
+        return;
+    };
+    let name = asset.name.clone();
+    s.sprites_panel.asset_rename = TextEdit::new(name);
+    s.sprites_panel.asset_rename.focused = true;
+    s.sprites_panel.asset_renaming = Some(i);
+}
+
+/// Apply press (Asset Manager rename editor): the
+/// shared rename op decides — a real rename (one undo
+/// step, its own status) or a same-name no-op closes
+/// the session; a refusal (blank name) keeps the
+/// editor open with the refusal in the status line,
+/// so the user can fix the text instead of losing it.
+fn apply_asset_rename(s: &mut State) {
+    let Some(i) = s.sprites_panel.asset_renaming else {
+        return;
+    };
+    let raw = s.sprites_panel.asset_rename.text.clone();
+    match media::rename_asset(&mut s.core, i, &raw) {
+        Ok(_) => {
+            s.sprites_panel.asset_renaming = None;
+            s.sprites_panel.asset_rename = TextEdit::default();
+        }
+        Err(e) => {
+            s.core.status = e;
+        }
+    }
+}
+
+/// Cancel press (Asset Manager rename editor): the
+/// session closes, the buffer resets, nothing was
+/// ever written.
+fn cancel_asset_rename(s: &mut State) {
+    s.sprites_panel.asset_renaming = None;
+    s.sprites_panel.asset_rename = TextEdit::default();
+}
+
+/// Remove press (Asset Manager): the shared removal
+/// op — on success its status posts and the rename
+/// session is fixed up ([`asset_index_after_removal`]);
+/// on refusal the census sentence the op returns
+/// lands in the status line verbatim and the table is
+/// untouched.
+fn remove_asset_row(s: &mut State, i: usize) {
+    match media::remove_asset(&mut s.core, i) {
+        Ok(_) => {
+            s.sprites_panel.asset_renaming =
+                asset_index_after_removal(s.sprites_panel.asset_renaming, i);
+            s.sprites_panel.asset_thumbs.borrow_mut().remove(&i);
+        }
+        Err(e) => {
+            s.core.status = e;
+        }
+    }
+}
+
+/// The rename editor row rendered under the asset
+/// being renamed: the name field plus Apply and
+/// Cancel (the library panel's editor-row anatomy;
+/// keys are unindexed — only one session can be open,
+/// and the row's position names its target).
+fn asset_rename_editor_row(s: &State, t: &Theme) -> El {
+    row()
+        .key("asset-rename-row")
+        .gap(8.0)
+        .center_y()
+        .child(
+            design::text_field(
+                &s.sprites_panel.asset_rename,
+                type_::BODY.lh(26.0),
+                s.sprites_panel.asset_rename.focused,
+                t,
+            )
+            .key("asset-rename-field")
+            .single_line()
+            .grow(1.0)
+            .color(t.text)
+            .placeholder("New name", t.text_secondary)
+            .on_edit(|s: &mut State| &mut s.sprites_panel.asset_rename),
+        )
+        .child(icon_btn(
+            "asset-rename-apply",
+            "check",
+            "Apply",
+            false,
+            t,
+            |s: &mut State| apply_asset_rename(s),
+        ))
+        .child(icon_btn(
+            "asset-rename-cancel",
+            "xmark",
+            "Cancel",
+            false,
+            t,
+            |s: &mut State| cancel_asset_rename(s),
+        ))
+}
+
+/// The Asset Manager area (RM22): the import press
+/// and one row per asset in the table — thumbnail,
+/// name, meta line, and the Place / Rename / Remove
+/// presses — with the rename editor under its target
+/// row while a session is open. An empty table states
+/// itself once, under the import press that can fix
+/// it.
+fn asset_manager(s: &State, t: &Theme) -> El {
+    let rows = media::asset_rows(&s.core.project);
+    let mut sec = col().key("sprite-assets").gap(2.0);
+    sec = sec.child(design::section_label("Assets", t));
+    sec = sec.child(btn(
+        "asset-import",
+        "Import image…",
+        false,
+        t,
+        |s: &mut State| import_asset_dialog(s),
+    ));
+    if rows.is_empty() {
+        sec = sec.child(
+            design::empty_state("image", "No image assets in this project yet.", t)
+                .key("asset-empty"),
+        );
+    }
+    for row in &rows {
+        let i = row.index;
+        let renaming = s.sprites_panel.asset_renaming == Some(i);
+        let mut r = design::list_row(&format!("asset-row-{i}"), renaming, t);
+        if let Some(img) = asset_thumbnail(s, i) {
+            r = r.child(asset_thumb_el(&img).key(format!("asset-thumb-{i}")));
+        }
+        r = r
+            .child(
+                text(sprite_label(&row.name))
+                    .font(type_::LABEL)
+                    .color(t.text)
+                    .grow(1.0)
+                    .truncate(),
+            )
+            .child(
+                text(asset_meta(row))
+                    .font(type_::LABEL)
+                    .color(t.text_secondary)
+                    .truncate(),
+            )
+            .child(btn(
+                &format!("asset-place-{i}"),
+                "Place",
+                false,
+                t,
+                move |s: &mut State| add_from_asset(s, i),
+            ))
+            .child(btn(
+                &format!("asset-rename-{i}"),
+                "Rename",
+                false,
+                t,
+                move |s: &mut State| start_asset_rename(s, i),
+            ))
+            .child(btn(
+                &format!("asset-remove-{i}"),
+                "Remove",
+                false,
+                t,
+                move |s: &mut State| remove_asset_row(s, i),
+            ));
+        sec = sec.child(r);
+        if renaming {
+            sec = sec.child(asset_rename_editor_row(s, t));
+        }
+    }
+    sec
 }
 
 /// The frame the edit area writes keys at: the
@@ -1445,6 +1841,7 @@ pub fn sprites_panel(s: &State, t: &Theme) -> El {
         .child(design::divider(t))
         .child(list)
         .child(add)
+        .child(asset_manager(s, t))
         .child(edit)
 }
 
@@ -2169,6 +2566,100 @@ mod tests {
         s.sprites_panel.selected = None;
         move_selected(&mut s, 1);
         assert_eq!(s.core.status, "Select a sprite first.");
+    }
+
+    /// A tiny encoder-made PNG for thumbnail fixtures
+    /// (the media test suite's recipe).
+    fn png_bytes(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba([10, 20, 30, 255]));
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        buf
+    }
+
+    #[test]
+    fn asset_meta_names_dims_size_and_refs() {
+        // Roadmap Wave 1 (RM22, P-12): the manager row's
+        // meta line — decoded dims, human size, census.
+        let row = AssetRow {
+            index: 0,
+            name: "hero.png".into(),
+            bytes: 2048,
+            dims: Some((4, 2)),
+            segments: 1,
+            clip_segments: 0,
+            sprites: 2,
+        };
+        assert_eq!(asset_meta(&row), "4 × 2 · 2.0 KB · 3 refs");
+        let one = AssetRow {
+            sprites: 0,
+            segments: 1,
+            ..row.clone()
+        };
+        assert_eq!(asset_meta(&one), "4 × 2 · 2.0 KB · 1 ref");
+        let spare = AssetRow {
+            index: 1,
+            name: "spare".into(),
+            bytes: 512,
+            dims: None,
+            segments: 0,
+            clip_segments: 0,
+            sprites: 0,
+        };
+        assert_eq!(asset_meta(&spare), "undecodable · 512 B · unused");
+    }
+
+    #[test]
+    fn asset_index_after_removal_kills_shifts_and_keeps() {
+        // The rename session's fix-up: its own asset's
+        // removal closes it (never slides), a later
+        // index follows its asset down, an earlier one
+        // is untouched.
+        assert_eq!(asset_index_after_removal(Some(2), 2), None);
+        assert_eq!(asset_index_after_removal(Some(3), 2), Some(2));
+        assert_eq!(asset_index_after_removal(Some(1), 2), Some(1));
+        assert_eq!(asset_index_after_removal(None, 2), None);
+    }
+
+    #[test]
+    fn asset_manager_builds_decodes_and_renames() {
+        // Roadmap Wave 1 (RM22, P-12): the manager area
+        // builds over a real decodable asset, the
+        // thumbnail cache fills with a decoded image,
+        // and the rename session opens, builds and
+        // applies through the shared op.
+        let t = rune::tok::theme(true);
+        let mut s = crate::init();
+        s.core = core_with(&["a.png"], &[]);
+        s.core.project.assets[0].png = png_bytes(4, 2);
+        let _ = sprites_panel(&s, &t);
+        let cached = s
+            .sprites_panel
+            .asset_thumbs
+            .borrow()
+            .get(&0)
+            .map(|(_, _, img)| img.is_some())
+            .unwrap_or(false);
+        assert!(cached, "the row's thumbnail decoded and cached");
+        start_asset_rename(&mut s, 0);
+        assert_eq!(s.sprites_panel.asset_renaming, Some(0));
+        assert_eq!(s.sprites_panel.asset_rename.text, "a.png");
+        let _ = sprites_panel(&s, &t);
+        // Applying the unchanged name is the op's no-op:
+        // session closed, no undo step spent.
+        let depth = s.core.undo_depth();
+        apply_asset_rename(&mut s);
+        assert_eq!(s.sprites_panel.asset_renaming, None);
+        assert_eq!(s.core.undo_depth(), depth, "a no-op rename spends nothing");
+        // A real rename lands through the shared op in
+        // one step.
+        start_asset_rename(&mut s, 0);
+        s.sprites_panel.asset_rename.text = "hero.png".to_string();
+        apply_asset_rename(&mut s);
+        assert_eq!(s.core.project.assets[0].name, "hero.png");
+        assert_eq!(s.core.undo_depth(), depth + 1);
     }
 
     #[test]

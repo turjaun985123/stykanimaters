@@ -289,15 +289,16 @@ fn closing(f: impl Fn(&mut State) + 'static) -> impl Fn(&mut State) + 'static {
 /// The spellings match the
 /// help panel's shortcut table (`help_panel.rs`). Pinned
 /// by the `shortcut_hints_name_only_real_bindings` test.
+///
+/// Roadmap Wave 1 (RM26, PL-5): the table itself now
+/// lives in the binding registry (`keymap::BINDINGS`) —
+/// this fn is a delegate, so the menu hints, the help
+/// rows and the palette chips share one spelling by
+/// construction. PL-4 added the Edit menu's Copy/Paste
+/// frame pair (Ctrl+C / Ctrl+V — the items call the same
+/// `copy_frame` / `paste_frame` ops the chords run).
 fn shortcut_hint(key: &str) -> Option<&'static str> {
-    match key {
-        "save" => Some("Ctrl+S"),
-        "undo" => Some("Ctrl+Z"),
-        "redo" => Some("Ctrl+Shift+Z"),
-        "onion" => Some("O"),
-        "menu-palette" => Some("Ctrl+K"),
-        _ => None,
-    }
+    crate::rune_sec::keymap::menu_hint(key)
 }
 
 /// The fixed width (pt) of the leading icon slot every
@@ -438,6 +439,7 @@ fn menu_icon(key: &str) -> Option<&'static str> {
         // View: visibility (eye), the guides sub-toggles
         // (crosshairs), the sidebar switches (list).
         "onion" => Some("eye"),
+        "view-paths" => Some("bezier-curve"),
         "view-guides" => Some("eye"),
         "view-guides-frustum" => Some("crosshairs"),
         "view-guides-safe" => Some("crosshairs"),
@@ -564,10 +566,15 @@ fn item(
 /// kit's MUTED-LIVE treatment, the menu form of
 /// `chrome_view::btn_muted_live` (P05 §4's rule): the
 /// resting card fill with NO hover or press light-up,
-/// and glyph + label in the design kit's muted-text
-/// role (`design::text_muted` — present but quiet), so
-/// the row reads as listed-but-inert rather than as a
-/// live control. The press handler is KEPT (through the
+/// so the row reads as listed-but-inert rather than as
+/// a live control. Glyph + label take
+/// `text_secondary`: the label is a project name the
+/// user must read to choose it — real text — and
+/// Roadmap Wave 1 (RM25 / PL-1) retired the muted
+/// role as its ink (it measured ≈ 3.8 dark / ≈ 2.0–2.6
+/// light, under every text bar); the muted-live read
+/// is carried by the absent light-up, as the
+/// treatment always intended. The press handler is KEPT (through the
 /// same [`closing`] wrapper as every item): the one
 /// caller is an Open recent entry whose file is gone,
 /// and its press's refusal status ("Recent project not
@@ -592,7 +599,7 @@ fn dimmed_item(
     t: &Theme,
     f: impl Fn(&mut State) + 'static,
 ) -> El {
-    let muted = crate::rune_sec::design::text_muted(t);
+    let ink = t.text_secondary;
     let icon = match menu_icon(key) {
         Some(name) if crate::rune_sec::icons::has_icon(name) => Some(name),
         _ => None,
@@ -609,7 +616,7 @@ fn dimmed_item(
         .on_press(closing(f))
         .center_y()
         .gap(12.0)
-        .child(slot_and_label(icon, label, muted))
+        .child(slot_and_label(icon, label, ink))
         .child(row().grow(1.0))
 }
 
@@ -1177,6 +1184,16 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
                 .child(item("onion", &i18n_wire::tr(core, "menu_onion_skin"), core.onion, t, |s| {
                     s.core.onion = !s.core.onion;
                 }))
+                // Motion path (Roadmap Wave 1, RM16 — P-4):
+                // the same field-flip pattern as Onion, one
+                // row down — `core.show_paths` is a public
+                // core field (no op exists), and the stage's
+                // motion-path pass reads it directly. No
+                // shell key is bound to it, so it gets no
+                // shortcut hint (see `shortcut_hint`).
+                .child(item("view-paths", &i18n_wire::tr(core, "menu_motion_path"), core.show_paths, t, |s| {
+                    s.core.show_paths = !s.core.show_paths;
+                }))
                 .child(item("view-guides", &i18n_wire::tr(core, "menu_stage_guides"), s.guides, t, |s| {
                     crate::rune_sec::settings_popover::toggle_guides(s);
                 }))
@@ -1322,6 +1339,7 @@ mod tests {
             ("menu_mute_clip", "Mute audio clip"),
             ("menu_unmute_clip", "Unmute audio clip"),
             ("menu_onion_skin", "Onion skin"),
+            ("menu_motion_path", "Motion path"),
             ("menu_stage_guides", "Stage guides"),
             ("menu_camera_frame", "Camera frame"),
             ("menu_safe_frames", "Safe frames"),
@@ -1348,11 +1366,19 @@ mod tests {
         // Ctrl+S arm (`is_command('s')` → `core.save()`,
         // the Save item's own op) — the hint names the
         // binding only because the binding exists.
+        // Roadmap Wave 1 (RM26, PL-4): the Edit menu's
+        // Copy/Paste frame pair joined the list — the
+        // items call `core.copy_frame()` /
+        // `core.paste_frame()`, the exact ops the new
+        // Ctrl+C / Ctrl+V chords run (IA-RM26-1). The
+        // spellings are read from the keymap registry.
         assert_eq!(shortcut_hint("save"), Some("Ctrl+S"));
         assert_eq!(shortcut_hint("undo"), Some("Ctrl+Z"));
         assert_eq!(shortcut_hint("redo"), Some("Ctrl+Shift+Z"));
         assert_eq!(shortcut_hint("onion"), Some("O"));
         assert_eq!(shortcut_hint("menu-palette"), Some("Ctrl+K"));
+        assert_eq!(shortcut_hint("copy-frame"), Some("Ctrl+C"));
+        assert_eq!(shortcut_hint("paste-frame"), Some("Ctrl+V"));
         // Every other item key used by `menu_dropdown`
         // has no binding and must stay hint-less — if a
         // future binding is added to the shell, add its
@@ -1361,13 +1387,12 @@ mod tests {
         for key in [
             "load",
             "export",
-            "copy-frame",
-            "paste-frame",
             "edit-delete-stroke",
             "edit-delete-particle",
             "edit-swap-next",
             "edit-mute-clip",
             "view-guides",
+            "view-paths",
             "view-guides-frustum",
             "view-guides-safe",
             "view-speed",
@@ -1401,6 +1426,7 @@ mod tests {
             ("edit-delete-particle", "trash-can"),
             ("edit-swap-next", "arrow-right-arrow-left"),
             ("onion", "eye"),
+            ("view-paths", "bezier-curve"),
             ("view-guides", "eye"),
             ("view-guides-frustum", "crosshairs"),
             ("view-guides-safe", "crosshairs"),
@@ -1746,11 +1772,16 @@ mod tests {
         let _ = dimmed_item("file-recent-1", "Gone", &t, |_| {});
         let _ = dimmed_item("unmapped-key", "Gone", &t, |_| {});
 
-        // The dimmed ink is the kit's muted-text role,
-        // visibly distinct from the live label colour.
-        let muted = crate::rune_sec::design::text_muted(&t);
-        assert_ne!(muted, t.text, "dimmed ink must differ from live ink");
-        assert_eq!(muted, t.text_secondary.alpha(0.6));
+        // The dimmed ink is the secondary tone
+        // (RM25 / PL-1: the muted role was retired as
+        // this label's ink — real text under every
+        // text bar), visibly distinct from the live
+        // label colour; the row's dimmed read comes
+        // from its absent hover/press light-up.
+        assert_ne!(
+            t.text_secondary, t.text,
+            "dimmed ink must differ from live ink"
+        );
 
         // The dimmed entry's press is the existing
         // honest refusal, not a silent no-op: the

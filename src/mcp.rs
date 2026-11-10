@@ -98,6 +98,7 @@ pub fn all_tools() -> Vec<Tool> {
         tool_server_info(),
         tool_get_state(),
         tool_set_frame(),
+        tool_apply_ops(),
         // Wave-9 parity built-ins (see the parity section below).
         tool_duplicate_frame(),
         tool_swap_frames(),
@@ -679,6 +680,33 @@ fn tool_get_state() -> Tool {
                 "weather_wind": project.weather.as_ref().map(|w| w.wind),
             }))
         },
+    }
+}
+
+fn tool_apply_ops() -> Tool {
+    Tool {
+        name: "apply_ops",
+        description: "Apply a batch of other tools' calls as one transaction. 'ops' is an array of {name, arguments} entries, applied in order. All ops are validated before anything runs — unknown, malformed and ineligible ops are reported together and nothing is applied — then the batch executes against a scratch copy of the session; if any op fails, nothing is committed (the project, the session and the undo stack are exactly as before the call), and if every op succeeds the batch is committed as exactly one undo step (zero when the project did not change). Ineligible inside a batch: the file-IO and subtitle-IO tools, undo, redo, apply_ops itself, save_named_project, fig3_save_to_library, audio_mixdown and the frame/range clipboard tools (copy_frame, paste_frame, copy_range, paste_range). On success the result is {applied, undo_steps, results} with each op's own result in order. Failures are structured JSON in the error text: a 'kind' (empty_batch, batch_too_large, malformed_ops, validation_failed, op_failed or op_panicked), the failing op's index and name where applicable, and the op's own error message verbatim.",
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "ops": {
+                    "type": "array",
+                    "description": "The batch: {name, arguments} entries naming other tools on this server, applied in order; 'arguments' may be omitted, meaning {}. At most 1000 entries.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "arguments": { "type": "object" },
+                        },
+                        "required": ["name"],
+                    },
+                },
+            },
+            "required": ["ops"],
+            "additionalProperties": false,
+        }),
+        handler: |core, args| apply_ops(core, args),
     }
 }
 
@@ -2223,6 +2251,409 @@ fn tool_goto_prev_key() -> Tool {
 }
 
 // ---------------------------------------------------------------------
+// Roadmap Wave 1 (RM30, P-17): apply_ops — MCP transactions
+//
+// One call applies a batch of other tools' calls as ONE
+// transaction. The semantics, in order:
+//
+//   0. ENVELOPE: `ops` must be a non-empty array of at most
+//      [`APPLY_OPS_MAX_OPS`] entries.
+//   1. VALIDATION: every entry is shape-checked, resolved
+//      against the registry and eligibility-checked BEFORE
+//      anything runs; every problem found is reported
+//      together (index, op name, kind, message) and nothing
+//      is applied. An unknown op name inside a batch is a
+//      tool-level failure reported here — the `-32602`
+//      protocol error belongs to the `tools/call` envelope
+//      itself, whose name (`apply_ops`) is a real tool.
+//   2. EXECUTION: the batch runs in order against a SCRATCH
+//      core seeded from the live core's public session
+//      state (project, playhead, selection, library, clip
+//      session, preferences). The first op failure — or
+//      panic, caught per op like the router catches handler
+//      panics — stops the batch; the scratch core is simply
+//      dropped, so a failed batch leaves the project, the
+//      session and the undo stack EXACTLY as they were.
+//      There is no rollback path to get wrong.
+//   3. COMMIT: on full success the scratch state is copied
+//      back over the live core. When the project changed,
+//      exactly ONE undo entry — labelled "Apply ops",
+//      holding the pre-batch project — is pushed first (via
+//      the core's own snapshot choke point, so the edit
+//      counters and revision move exactly once); when the
+//      batch changed no project state (a read-only or
+//      playhead-only batch) no undo entry is taken, matching
+//      what those tools cost outside a batch.
+//
+// Eligibility (phase 1): an op may name any registered tool
+// EXCEPT
+//   * the file-IO family (`mcp_io`) and the subtitle-IO
+//     family (`mcp_subtitle_io`) — their effects leave the
+//     project (files written, projects loaded wholesale)
+//     and cannot be part of an all-or-nothing project
+//     transaction;
+//   * `undo` / `redo` — they move the very history the
+//     one-step accounting is stated against;
+//   * `apply_ops` itself — no nesting;
+//   * `save_named_project`, `fig3_save_to_library` and
+//     `audio_mixdown` — built-ins that nevertheless WRITE
+//     files (the mixdown renders out/mixdown.wav);
+//   * `copy_frame` / `paste_frame` / `copy_range` /
+//     `paste_range` — the frame clipboard is private
+//     session state a scratch commit cannot carry back, so
+//     a batched copy would silently vanish at commit;
+//     outside a batch they work exactly as before.
+//
+// State the commit does NOT carry, by design: the undo/redo
+// stacks (replaced by the single entry above), the edit
+// counters and revision (the live core's own bookkeeping,
+// moved once by the commit snapshot), the evaluate-once
+// cache (invalidated by that revision move), the missing-
+// audio report (derived state, refreshed by the core's own
+// funnels) and the drag/gesture privates (no gesture is in
+// flight during a `tools/call`).
+//
+// Structured errors (P-17's second clause — the first tool
+// to speak them): every failure is a JSON object in the
+// error text carrying a machine-readable `kind` —
+// `empty_batch`, `batch_too_large`, `malformed_ops`,
+// `validation_failed` (with a `failures` array whose
+// entries carry `malformed_op`, `unknown_tool`,
+// `ineligible_tool` or `nested_transaction`), `op_failed`
+// or `op_panicked` — plus the op's index and name where
+// applicable and the op's own error message verbatim, so
+// no client ever has to pattern-match free text.
+//
+// Registration in `all_tools()` is the integrator's
+// (IA-RM30-1 — the Tool entry spec sits below, beside the
+// handler); until it lands, the handler below is exercised
+// directly by this module's tests, exactly as it will run
+// once registered.
+// ---------------------------------------------------------------------
+
+/// The largest batch one `apply_ops` call accepts. The
+/// roadmap's acceptance shape — a 500-op episode build in
+/// at most 5 `apply_ops` calls — fits in a single call with
+/// room to spare; the cap exists so a malformed client
+/// cannot ask for an unbounded scratch run.
+const APPLY_OPS_MAX_OPS: usize = 1000;
+
+/// Tool names never eligible inside an `apply_ops` batch
+/// (see the section comment for the reason for each).
+const APPLY_OPS_DENIED: &[&str] = &[
+    "undo",
+    "redo",
+    "save_named_project",
+    "fig3_save_to_library",
+    "audio_mixdown",
+    "copy_frame",
+    "paste_frame",
+    "copy_range",
+    "paste_range",
+];
+
+/// One parsed batch entry, after envelope validation.
+struct BatchOp {
+    name: String,
+    args: Value,
+}
+
+// The Tool entry spec for this handler (name, description,
+// schema — the literal the integrator pastes into
+// `all_tools()`) lives in IA-RM30-1 in the seat's findings,
+// NOT here: this file's census refuses an unregistered
+// constructor, and the schema audit's source scan cannot
+// skip a commented literal, so the spec rides the IA
+// exactly as RM17's did.
+
+/// The `apply_ops` handler against the live registry.
+fn apply_ops(core: &mut crate::editor::EditorCore, args: &Value) -> Result<Value, String> {
+    apply_ops_with_tools(core, &all_tools(), args)
+}
+
+/// The transaction engine, parameterised over the tool
+/// registry so the tests can extend it (a panicking tool)
+/// without touching the live surface.
+fn apply_ops_with_tools(
+    core: &mut crate::editor::EditorCore,
+    tools: &[Tool],
+    args: &Value,
+) -> Result<Value, String> {
+    // -- Phase 0: the envelope ------------------------------
+    let Some(ops) = args.get("ops") else {
+        return Err(json!({
+            "kind": "malformed_ops",
+            "message": "missing required argument: ops",
+        })
+        .to_string());
+    };
+    let Some(ops) = ops.as_array() else {
+        return Err(json!({
+            "kind": "malformed_ops",
+            "message": "'ops' must be an array of {name, arguments} objects",
+        })
+        .to_string());
+    };
+    if ops.is_empty() {
+        return Err(json!({
+            "kind": "empty_batch",
+            "message": "the batch is empty: nothing to apply",
+        })
+        .to_string());
+    }
+    if ops.len() > APPLY_OPS_MAX_OPS {
+        return Err(json!({
+            "kind": "batch_too_large",
+            "limit": APPLY_OPS_MAX_OPS,
+            "message": format!(
+                "the batch carries {} ops; the limit is {APPLY_OPS_MAX_OPS}",
+                ops.len()
+            ),
+        })
+        .to_string());
+    }
+
+    // -- Phase 1: validate every op before anything runs ---
+    // The IO families are computed from their own registries
+    // (never a hand-maintained name list), so a tool that
+    // joins either family is ineligible here automatically.
+    let io_names: std::collections::HashSet<&str> = crate::mcp_io::tools()
+        .iter()
+        .map(|t| t.name)
+        .chain(crate::mcp_subtitle_io::tools().iter().map(|t| t.name))
+        .collect();
+    let mut failures: Vec<Value> = Vec::new();
+    let mut batch: Vec<BatchOp> = Vec::with_capacity(ops.len());
+    for (index, raw) in ops.iter().enumerate() {
+        let fail = |failures: &mut Vec<Value>, op: Value, kind: &str, message: String| {
+            failures.push(json!({
+                "index": index,
+                "op": op,
+                "kind": kind,
+                "message": message,
+            }));
+        };
+        if !raw.is_object() {
+            fail(
+                &mut failures,
+                Value::Null,
+                "malformed_op",
+                "each op must be an object of the form {name, arguments}".to_string(),
+            );
+            continue;
+        }
+        let Some(name) = raw.get("name").and_then(Value::as_str) else {
+            fail(
+                &mut failures,
+                Value::Null,
+                "malformed_op",
+                "each op needs a string 'name'".to_string(),
+            );
+            continue;
+        };
+        let op_args = match raw.get("arguments") {
+            None | Some(Value::Null) => json!({}),
+            Some(a) if a.is_object() => a.clone(),
+            Some(_) => {
+                fail(
+                    &mut failures,
+                    Value::String(name.to_string()),
+                    "malformed_op",
+                    format!("op '{name}': 'arguments' must be an object"),
+                );
+                continue;
+            }
+        };
+        if name == "apply_ops" {
+            fail(
+                &mut failures,
+                Value::String(name.to_string()),
+                "nested_transaction",
+                "apply_ops cannot run inside apply_ops: batches do not nest".to_string(),
+            );
+            continue;
+        }
+        if APPLY_OPS_DENIED.contains(&name) {
+            fail(
+                &mut failures,
+                Value::String(name.to_string()),
+                "ineligible_tool",
+                format!(
+                    "'{name}' cannot run inside apply_ops (it writes files, moves the undo history, or keeps state a batch commit cannot carry)"
+                ),
+            );
+            continue;
+        }
+        if io_names.contains(name) {
+            fail(
+                &mut failures,
+                Value::String(name.to_string()),
+                "ineligible_tool",
+                format!(
+                    "'{name}' is a file-IO tool: its effects leave the project, so it cannot run inside apply_ops"
+                ),
+            );
+            continue;
+        }
+        if !tools.iter().any(|t| t.name == name) {
+            fail(
+                &mut failures,
+                Value::String(name.to_string()),
+                "unknown_tool",
+                format!("unknown tool: {name}"),
+            );
+            continue;
+        }
+        batch.push(BatchOp {
+            name: name.to_string(),
+            args: op_args,
+        });
+    }
+    if !failures.is_empty() {
+        return Err(json!({
+            "kind": "validation_failed",
+            "message": format!(
+                "{} of {} op(s) failed validation; nothing was applied",
+                failures.len(),
+                ops.len()
+            ),
+            "failures": failures,
+        })
+        .to_string());
+    }
+
+    // -- Phase 2: execute against a scratch core -----------
+    let before_project = serde_json::to_string(&core.project).unwrap_or_default();
+    let mut scratch = seed_scratch_core(core);
+    let mut results: Vec<Value> = Vec::with_capacity(batch.len());
+    for (index, op) in batch.iter().enumerate() {
+        let tool = tools
+            .iter()
+            .find(|t| t.name == op.name)
+            .expect("phase 1 resolved every op name");
+        // A panicking op is a failed op (the router's own
+        // posture for handlers), never a crashed batch: the
+        // scratch core absorbs it and is dropped.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (tool.handler)(&mut scratch, &op.args)
+        }));
+        match outcome {
+            Ok(Ok(value)) => results.push(value),
+            Ok(Err(message)) => {
+                return Err(json!({
+                    "kind": "op_failed",
+                    "op_index": index,
+                    "op": op.name,
+                    "message": message,
+                })
+                .to_string());
+            }
+            Err(_) => {
+                return Err(json!({
+                    "kind": "op_panicked",
+                    "op_index": index,
+                    "op": op.name,
+                    "message": format!("tool panicked: {}", op.name),
+                })
+                .to_string());
+            }
+        }
+    }
+
+    // -- Phase 3: commit ------------------------------------
+    // The project comparison is the same serialised form
+    // the undo stack itself stores, so "changed" here means
+    // exactly "an undo entry would differ".
+    let project_changed =
+        serde_json::to_string(&scratch.project).unwrap_or_default() != before_project;
+    let undo_steps = if project_changed {
+        // Snapshot BEFORE the copy-back: the entry must
+        // hold the pre-batch project. This is the batch's
+        // one and only undo step.
+        core.snapshot_labeled("Apply ops");
+        1
+    } else {
+        0
+    };
+    commit_scratch_core(core, scratch);
+    Ok(json!({
+        "applied": batch.len(),
+        "undo_steps": undo_steps,
+        "results": results,
+    }))
+}
+
+/// Seed the scratch core a batch executes against: a fresh
+/// core (its own empty history — the ops' snapshots land
+/// there and are discarded at commit) overwritten with the
+/// live core's public session state. Every public field is
+/// copied; the private state a commit cannot carry is the
+/// eligibility boundary documented in the section comment.
+fn seed_scratch_core(core: &crate::editor::EditorCore) -> crate::editor::EditorCore {
+    let mut scratch = crate::editor::EditorCore::new();
+    scratch.project = core.project.clone();
+    scratch.current = core.current;
+    scratch.selected_figure = core.selected_figure;
+    scratch.selected_node = core.selected_node;
+    scratch.dragging = core.dragging;
+    scratch.onion = core.onion;
+    scratch.playing = core.playing;
+    scratch.camera_mode = core.camera_mode;
+    scratch.status = core.status.clone();
+    scratch.progress_sink = core.progress_sink.clone();
+    scratch.playhead = core.playhead;
+    scratch.loop_range = core.loop_range;
+    scratch.show_paths = core.show_paths;
+    scratch.light_theme = core.light_theme;
+    scratch.library = core.library.clone();
+    scratch.library_index = core.library_index;
+    scratch.draw_mode = core.draw_mode;
+    scratch.setup_mode = core.setup_mode;
+    scratch.draw_tool = core.draw_tool;
+    scratch.brush_index = core.brush_index;
+    scratch.onion_frames = core.onion_frames;
+    scratch.project_files = core.project_files.clone();
+    scratch.project_index = core.project_index;
+    scratch.lang = core.lang;
+    scratch.solo = core.solo;
+    scratch.clip_edit = core.clip_edit.clone();
+    scratch
+}
+
+/// Copy a fully successful batch's scratch state back over
+/// the live core (the exact field set [`seed_scratch_core`]
+/// seeded — history, counters and derived caches are the
+/// live core's own and are deliberately not among them).
+fn commit_scratch_core(core: &mut crate::editor::EditorCore, scratch: crate::editor::EditorCore) {
+    core.project = scratch.project;
+    core.current = scratch.current;
+    core.selected_figure = scratch.selected_figure;
+    core.selected_node = scratch.selected_node;
+    core.dragging = scratch.dragging;
+    core.onion = scratch.onion;
+    core.playing = scratch.playing;
+    core.camera_mode = scratch.camera_mode;
+    core.status = scratch.status;
+    core.progress_sink = scratch.progress_sink;
+    core.playhead = scratch.playhead;
+    core.loop_range = scratch.loop_range;
+    core.show_paths = scratch.show_paths;
+    core.light_theme = scratch.light_theme;
+    core.library = scratch.library;
+    core.library_index = scratch.library_index;
+    core.draw_mode = scratch.draw_mode;
+    core.setup_mode = scratch.setup_mode;
+    core.draw_tool = scratch.draw_tool;
+    core.brush_index = scratch.brush_index;
+    core.onion_frames = scratch.onion_frames;
+    core.project_files = scratch.project_files;
+    core.project_index = scratch.project_index;
+    core.lang = scratch.lang;
+    core.solo = scratch.solo;
+    core.clip_edit = scratch.clip_edit;
+}
+
+// ---------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------
 
@@ -2249,6 +2680,226 @@ mod tests {
             serde_json::from_str(text).unwrap_or(Value::String(text.to_string())),
             is_error,
         )
+    }
+
+    // -- Roadmap Wave 1 (RM30, P-17): apply_ops -----------
+    //
+    // The handler is exercised directly (registration is
+    // IA-RM30-1); the engine's registry parameter lets one
+    // test extend the surface with a panicking tool.
+
+    /// Run one batch and parse its outcome: the Ok value,
+    /// or the structured error object the Err text carries.
+    fn batch_outcome(
+        core: &mut crate::editor::EditorCore,
+        args: Value,
+    ) -> Result<Value, Value> {
+        apply_ops(core, &args).map_err(|text| {
+            serde_json::from_str(&text)
+                .unwrap_or_else(|_| panic!("error text is not structured JSON: {text}"))
+        })
+    }
+
+    #[test]
+    fn apply_ops_commits_a_successful_batch_as_exactly_one_undo_step() {
+        let mut core = crate::editor::EditorCore::new();
+        let before_project = serde_json::to_string(&core.project).unwrap();
+        let before_depth = core.undo_depth();
+        let before_frames = core.project.frames.len();
+        let out = batch_outcome(
+            &mut core,
+            json!({ "ops": [
+                { "name": "duplicate_frame" },
+                { "name": "duplicate_frame" },
+            ] }),
+        )
+        .expect("a batch of valid ops applies");
+        assert_eq!(out["applied"], 2);
+        assert_eq!(out["undo_steps"], 1);
+        assert_eq!(out["results"].as_array().unwrap().len(), 2);
+        assert_eq!(core.project.frames.len(), before_frames + 2);
+        assert_eq!(
+            core.undo_depth(),
+            before_depth + 1,
+            "two mutating ops, one undo step"
+        );
+        // And that one step is the WHOLE batch: a single
+        // undo restores the pre-batch project byte-for-byte.
+        core.undo();
+        assert_eq!(serde_json::to_string(&core.project).unwrap(), before_project);
+    }
+
+    #[test]
+    fn apply_ops_failure_applies_nothing() {
+        let mut core = crate::editor::EditorCore::new();
+        let before_project = serde_json::to_string(&core.project).unwrap();
+        let before_depth = core.undo_depth();
+        let before_current = core.current;
+        let err = batch_outcome(
+            &mut core,
+            json!({ "ops": [
+                { "name": "duplicate_frame" },
+                { "name": "set_frame", "arguments": { "frame": 9999 } },
+            ] }),
+        )
+        .expect_err("the second op is out of range and must fail the batch");
+        assert_eq!(err["kind"], "op_failed");
+        assert_eq!(err["op_index"], 1);
+        assert_eq!(err["op"], "set_frame");
+        assert!(
+            err["message"].as_str().unwrap().contains("out of range"),
+            "the op's own message rides verbatim: {err}"
+        );
+        assert_eq!(
+            serde_json::to_string(&core.project).unwrap(),
+            before_project,
+            "the first op's edit is NOT committed"
+        );
+        assert_eq!(core.undo_depth(), before_depth, "no undo step taken");
+        assert_eq!(core.current, before_current, "the playhead did not move");
+    }
+
+    #[test]
+    fn apply_ops_validation_reports_every_bad_op_and_applies_nothing() {
+        let mut core = crate::editor::EditorCore::new();
+        let before_project = serde_json::to_string(&core.project).unwrap();
+        let before_depth = core.undo_depth();
+        let err = batch_outcome(
+            &mut core,
+            json!({ "ops": [
+                { "name": "nope_tool" },
+                { "name": "duplicate_frame" },
+                { "name": "also_nope" },
+            ] }),
+        )
+        .expect_err("unknown ops fail validation");
+        assert_eq!(err["kind"], "validation_failed");
+        let failures = err["failures"].as_array().unwrap();
+        assert_eq!(failures.len(), 2, "BOTH bad ops are reported: {err}");
+        assert_eq!(failures[0]["index"], 0);
+        assert_eq!(failures[0]["kind"], "unknown_tool");
+        assert_eq!(failures[1]["index"], 2);
+        assert_eq!(failures[1]["kind"], "unknown_tool");
+        assert_eq!(serde_json::to_string(&core.project).unwrap(), before_project);
+        assert_eq!(core.undo_depth(), before_depth);
+    }
+
+    #[test]
+    fn apply_ops_malformed_op_shapes_are_collected_in_validation() {
+        let mut core = crate::editor::EditorCore::new();
+        let err = batch_outcome(
+            &mut core,
+            json!({ "ops": [
+                { "arguments": {} },
+                { "name": 42 },
+                { "name": "get_state", "arguments": 5 },
+            ] }),
+        )
+        .expect_err("malformed ops fail validation");
+        assert_eq!(err["kind"], "validation_failed");
+        let failures = err["failures"].as_array().unwrap();
+        assert_eq!(failures.len(), 3, "every malformed op is reported: {err}");
+        for f in failures {
+            assert_eq!(f["kind"], "malformed_op", "{f}");
+        }
+    }
+
+    #[test]
+    fn apply_ops_refuses_ineligible_and_nested_ops() {
+        // (op name, expected failure kind): the IO family,
+        // the history tools, the file-writing built-ins and
+        // the private-clipboard tools are ineligible;
+        // apply_ops itself is the nesting refusal.
+        for (name, kind) in [
+            ("save_project", "ineligible_tool"),
+            ("export_bundle", "ineligible_tool"),
+            ("undo", "ineligible_tool"),
+            ("redo", "ineligible_tool"),
+            ("save_named_project", "ineligible_tool"),
+            ("fig3_save_to_library", "ineligible_tool"),
+            ("audio_mixdown", "ineligible_tool"),
+            ("copy_frame", "ineligible_tool"),
+            ("paste_range", "ineligible_tool"),
+            ("apply_ops", "nested_transaction"),
+        ] {
+            let mut core = crate::editor::EditorCore::new();
+            let before_depth = core.undo_depth();
+            let err = batch_outcome(&mut core, json!({ "ops": [{ "name": name }] }))
+                .expect_err(&format!("{name} must be refused inside a batch"));
+            assert_eq!(err["kind"], "validation_failed", "{name}: {err}");
+            assert_eq!(err["failures"][0]["kind"], kind, "{name}: {err}");
+            assert_eq!(err["failures"][0]["op"], name, "{name}: {err}");
+            assert_eq!(core.undo_depth(), before_depth, "{name}: nothing applied");
+        }
+    }
+
+    #[test]
+    fn apply_ops_envelope_errors_are_structured() {
+        let mut core = crate::editor::EditorCore::new();
+        let err = batch_outcome(&mut core, json!({}))
+            .expect_err("a missing ops argument is an envelope error");
+        assert_eq!(err["kind"], "malformed_ops");
+        let err = batch_outcome(&mut core, json!({ "ops": {} }))
+            .expect_err("a non-array ops argument is an envelope error");
+        assert_eq!(err["kind"], "malformed_ops");
+        let err = batch_outcome(&mut core, json!({ "ops": [] }))
+            .expect_err("an empty batch is an envelope error");
+        assert_eq!(err["kind"], "empty_batch");
+        let big: Vec<Value> = (0..=APPLY_OPS_MAX_OPS)
+            .map(|_| json!({ "name": "get_state" }))
+            .collect();
+        let err = batch_outcome(&mut core, json!({ "ops": big }))
+            .expect_err("an oversized batch is an envelope error");
+        assert_eq!(err["kind"], "batch_too_large");
+        assert_eq!(err["limit"], APPLY_OPS_MAX_OPS);
+    }
+
+    #[test]
+    fn apply_ops_read_only_batch_takes_no_undo_step() {
+        let mut core = crate::editor::EditorCore::new();
+        let before_depth = core.undo_depth();
+        let out = batch_outcome(
+            &mut core,
+            json!({ "ops": [
+                { "name": "get_state" },
+                { "name": "get_state" },
+            ] }),
+        )
+        .expect("read-only ops apply");
+        assert_eq!(out["applied"], 2);
+        assert_eq!(out["undo_steps"], 0);
+        assert!(out["results"][0]["frame_count"].is_number());
+        assert_eq!(core.undo_depth(), before_depth, "no phantom edit step");
+    }
+
+    #[test]
+    fn apply_ops_panicking_op_is_reported_and_applies_nothing() {
+        let mut tools = all_tools();
+        tools.push(Tool {
+            name: "test_panics",
+            description: "Test-only tool that panics.",
+            schema: empty_args_schema(),
+            handler: |_, _| panic!("boom"),
+        });
+        let mut core = crate::editor::EditorCore::new();
+        let before_project = serde_json::to_string(&core.project).unwrap();
+        let before_depth = core.undo_depth();
+        let err_text = apply_ops_with_tools(
+            &mut core,
+            &tools,
+            &json!({ "ops": [
+                { "name": "duplicate_frame" },
+                { "name": "test_panics" },
+            ] }),
+        )
+        .expect_err("a panicking op fails the batch");
+        let err: Value = serde_json::from_str(&err_text)
+            .unwrap_or_else(|_| panic!("the error text must be structured JSON: {err_text}"));
+        assert_eq!(err["kind"], "op_panicked");
+        assert_eq!(err["op_index"], 1);
+        assert_eq!(err["op"], "test_panics");
+        assert_eq!(serde_json::to_string(&core.project).unwrap(), before_project);
+        assert_eq!(core.undo_depth(), before_depth);
     }
 
     #[test]

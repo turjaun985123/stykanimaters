@@ -256,9 +256,15 @@
 //!
 //! Theme maps onto the EXISTING `LayoutPrefs.dark`
 //! (`shell.rs`; `dark = !core.light_theme`, default dark),
-//! while language, stage size and default easing all live
-//! on the core/project and persist with the project file
-//! itself. The startup-workspace picker reuses the
+//! and language onto `LayoutPrefs.lang` (Roadmap F-9:
+//! seeded into `EditorCore.lang` by `main.rs`'s `init`,
+//! written back by `poll`'s shadow compare on change —
+//! it was session-only before that field existed, and
+//! an earlier version of this section wrongly said it
+//! persisted with the project file), while stage size
+//! and default easing live on the core/project and
+//! persist with the project file itself. The
+//! startup-workspace picker reuses the
 //! EXISTING `LayoutPrefs.workspace` through
 //! `workspaces::select_workspace` (above). The theme
 //! flip is loaded and saved by the Rune shell: `main.rs`
@@ -399,13 +405,101 @@ pub fn set_theme(core: &mut EditorCore, light: bool) {
 // ---- Language ----
 
 /// One pickable language row of the picker: element key,
-/// button label (the language's native name) and the value
-/// it applies.
+/// button label (the language's native name), the value
+/// it applies, and its measured translation tier
+/// ([`lang_tier`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LangEntry {
     pub key: String,
     pub label: &'static str,
     pub lang: Lang,
+    pub tier: LangTier,
+}
+
+impl LangEntry {
+    /// The button's full label: the native name plus the
+    /// tier suffix, so the picker's honesty survives at a
+    /// glance — a language that will render mostly English
+    /// says so on its own button.
+    pub fn display_label(&self) -> String {
+        format!("{}{}", self.label, self.tier.suffix())
+    }
+}
+
+/// How completely a language's table is genuinely
+/// translated, in the bands the coverage instrument
+/// (`scripts/i18n_coverage.py`, Roadmap PL-9) measures:
+/// `Full` at ≥85% of values differing from the English
+/// placeholder text, `Partial` at 40–85%, `Basic` below
+/// 40% (most labels still render in English). The suffix
+/// is the word the picker button carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LangTier {
+    Full,
+    Partial,
+    Basic,
+}
+
+impl LangTier {
+    /// The picker's suffix for this tier (leading space
+    /// included; ASCII so the width model in this module
+    /// charges it exactly).
+    pub fn suffix(self) -> &'static str {
+        match self {
+            LangTier::Full => " (full)",
+            LangTier::Partial => " (partial)",
+            LangTier::Basic => " (basic)",
+        }
+    }
+}
+
+/// The measured tier of each language (PL-9 machinery,
+/// seat RM27). The classification is data, reviewed per
+/// translation tranche: `scripts/i18n_coverage.py`
+/// re-measures every table from `i18n.rs` and FAILS when
+/// this match drifts from the measured bands, so the
+/// labels cannot quietly go stale. First measurement
+/// (2026-11-10, 697 keys): the eight genuine-tier tables
+/// sit at 89.5–95.6% translated; the nineteen placeholder
+/// tables at 4.0–5.2%; no language is in the Partial band
+/// yet — tranches will move languages through it.
+/// `Es419` is Full BY FALLBACK: its own table measures
+/// Basic (5.0%), but the PL-9 base-language chain
+/// (IA-RM27-1: es-419 resolves through es before English)
+/// serves the es table for its placeholder cells, for an
+/// effective 92.8% — the tier names what the user will
+/// actually see once the chain lands in the same wave.
+pub fn lang_tier(lang: Lang) -> LangTier {
+    match lang {
+        Lang::En => LangTier::Full,
+        Lang::Bn => LangTier::Full,
+        Lang::Es => LangTier::Full,
+        Lang::Ar => LangTier::Basic,
+        Lang::Cs => LangTier::Basic,
+        Lang::Da => LangTier::Basic,
+        Lang::De => LangTier::Full,
+        Lang::El => LangTier::Basic,
+        Lang::Es419 => LangTier::Full,
+        Lang::Fi => LangTier::Basic,
+        Lang::Fr => LangTier::Full,
+        Lang::He => LangTier::Basic,
+        Lang::Hr => LangTier::Basic,
+        Lang::Hu => LangTier::Basic,
+        Lang::Id => LangTier::Basic,
+        Lang::It => LangTier::Full,
+        Lang::Kk => LangTier::Basic,
+        Lang::Nb => LangTier::Basic,
+        Lang::Nl => LangTier::Basic,
+        Lang::Pl => LangTier::Basic,
+        Lang::PtBr => LangTier::Full,
+        Lang::Ro => LangTier::Basic,
+        Lang::Ru => LangTier::Full,
+        Lang::Sl => LangTier::Basic,
+        Lang::Tr => LangTier::Basic,
+        Lang::Uk => LangTier::Basic,
+        Lang::Vi => LangTier::Basic,
+        Lang::ZhHans => LangTier::Full,
+    }
 }
 
 /// All languages of the i18n table, in picker order, derived
@@ -420,6 +514,7 @@ pub fn language_entries() -> Vec<LangEntry> {
             key: format!("settings-lang-{}", l.code()),
             label: l.label(),
             lang: *l,
+            tier: lang_tier(*l),
         })
         .collect()
 }
@@ -428,7 +523,11 @@ pub fn language_entries() -> Vec<LangEntry> {
 /// `EditorCore.lang` (`editor.rs:82`) and write the status
 /// line the core's own `cycle_lang` writes
 /// (`editor.rs:1906`), so the feedback reads identically
-/// whichever path changed the language.
+/// whichever path changed the language. Persistence is
+/// the shell's: `main.rs`'s `poll` shadow-compares
+/// `core.lang` and writes `LayoutPrefs.lang` on change
+/// (Roadmap F-9), so this setter — like the theme
+/// buttons — writes the field and lets `poll` save.
 pub fn set_language(core: &mut EditorCore, lang: Lang) {
     core.lang = lang;
     core.status = format!("Language: {}", lang.label());
@@ -452,14 +551,15 @@ pub fn stepped_stage_size(stage: [f32; 2], dw: f32, dh: f32) -> [f32; 2] {
 /// behaviour. There is no core op for this; the field is
 /// pub and the renderer consumes it directly.
 pub fn apply_stage_step(core: &mut EditorCore, dw: f32, dh: f32) {
-    // Wave 13 (census E6): same ruling as the scene
-    // panel's stage steppers (E5) — write + mark only on
-    // a real change, so the count never depends on which
-    // surface stepped the stage.
+    // Roadmap Wave 1 (RM24, P-14): same ruling as the
+    // scene panel's stage steppers — a coalesced undo
+    // step only on a real change, so the step count
+    // never depends on which surface stepped the stage
+    // (Wave 13, census E6, only marked it).
     let next = stepped_stage_size(core.project.stage, dw, dh);
     if next != core.project.stage {
+        core.snapshot_coalesced("Stage size");
         core.project.stage = next;
-        core.mark_dirty();
     }
     core.status = format!(
         "Stage size: {} x {}.",
@@ -779,11 +879,15 @@ fn note_line(t: &Theme, label: &str) -> El {
 
 /// One language button: applies its language via
 /// [`set_language`]; highlighted when it is the core's
-/// current language.
+/// current language. The label is the entry's display
+/// label — native name plus tier suffix ([`LangTier`]),
+/// so an untranslated language is never presented as if
+/// it were a full localisation.
 fn language_button(entry: LangEntry, current: Lang, t: &Theme) -> El {
     let key = entry.key.clone();
     let lang = entry.lang;
-    btn(&key, entry.label, lang == current, t, move |s: &mut State| {
+    let label = entry.display_label();
+    btn(&key, &label, lang == current, t, move |s: &mut State| {
         set_language(&mut s.core, lang);
     })
 }
@@ -1253,7 +1357,18 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
             }
             grid = grid.child(lang_row);
         }
-        card = card.child(design::section_label("Language", t)).child(grid);
+        card = card
+            .child(design::section_label("Language", t))
+            .child(grid)
+            // The tier legend (PL-9): what the button
+            // suffixes mean, in the card's own note prose.
+            // A Basic language still switches — most of
+            // its labels simply render in English until
+            // its translation tranche lands.
+            .child(note_line(
+                t,
+                "full = translated · partial = partly translated · basic = most labels still in English",
+            ));
 
         panel = panel.child(card);
     }
@@ -1321,6 +1436,50 @@ mod tests {
         keys.sort();
         keys.dedup();
         assert_eq!(keys.len(), 28);
+    }
+
+    #[test]
+    fn lang_tier_matches_the_measured_bands() {
+        // PL-9 (RM27): the picker classification, pinned
+        // per language. The coverage instrument
+        // (scripts/i18n_coverage.py) re-measures the real
+        // tables and fails on drift from these bands, so
+        // a tranche that crosses a band must move the arm
+        // here in the same change.
+        for lang in Lang::all() {
+            let want = match lang {
+                Lang::En
+                | Lang::Bn
+                | Lang::Es
+                | Lang::De
+                | Lang::Fr
+                | Lang::It
+                | Lang::PtBr
+                | Lang::Ru
+                | Lang::ZhHans => LangTier::Full,
+                // Full by fallback: es-419's own table is
+                // Basic; the base-language chain serves es
+                // for its placeholder cells (IA-RM27-1).
+                Lang::Es419 => LangTier::Full,
+                _ => LangTier::Basic,
+            };
+            assert_eq!(lang_tier(lang), want, "{lang:?}");
+        }
+        // No language measures in the Partial band yet;
+        // the band (and its suffix) exists for tranches
+        // in flight.
+        assert_eq!(LangTier::Full.suffix(), " (full)");
+        assert_eq!(LangTier::Partial.suffix(), " (partial)");
+        assert_eq!(LangTier::Basic.suffix(), " (basic)");
+        // Entries carry the tier and compose the display
+        // label from it; keys and native names unchanged.
+        let entries = language_entries();
+        let es419 = entries.iter().find(|e| e.lang == Lang::Es419).unwrap();
+        assert_eq!(es419.display_label(), "Español (Latinoamérica) (full)");
+        let cs = entries.iter().find(|e| e.lang == Lang::Cs).unwrap();
+        assert_eq!(cs.tier, LangTier::Basic);
+        assert_eq!(cs.display_label(), "Čeština (basic)");
+        assert!(entries.iter().all(|e| e.tier == lang_tier(e.lang)));
     }
 
     #[test]
@@ -1423,6 +1582,10 @@ mod tests {
             show_right: true,
             key_clipboard: None,
             key_follow_graph: false,
+            key_sel: Default::default(),
+            help_panel: Default::default(),
+            camera_panel: Default::default(),
+            segment_numbers: Default::default(),
             export_recap: String::new(),
             export_job: None,
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
@@ -1491,6 +1654,10 @@ playback_speed: 1.0,
             show_right: true,
             key_clipboard: None,
             key_follow_graph: false,
+            key_sel: Default::default(),
+            help_panel: Default::default(),
+            camera_panel: Default::default(),
+            segment_numbers: Default::default(),
             export_recap: String::new(),
             export_job: None,
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
@@ -1842,13 +2009,19 @@ playback_speed: 1.0,
     #[test]
     fn language_rows_overflow_unwrapped_and_wrap_inside_the_card() {
         let entries = language_entries();
-        let widths: Vec<f32> = entries.iter().map(|e| button_width(e.label)).collect();
+        // Widths are measured on the DISPLAY label (native
+        // name + tier suffix, PL-9) — the text the button
+        // actually paints since the tier labels landed.
+        let widths: Vec<f32> = entries
+            .iter()
+            .map(|e| button_width(&e.display_label()))
+            .collect();
         // The widest single button fits even the
         // narrowest column — wrapping can always place
         // every button, so no label needs truncating.
-        // (The widest is es-419's native name.)
+        // (The widest is es-419's native name + suffix.)
         let widest = widths.iter().copied().fold(0.0f32, f32::max);
-        assert_eq!(widest, 181.0);
+        assert_eq!(widest, 216.0);
         assert!(widest <= CARD_CONTENT_W_MIN, "{widest} must fit the narrowest card");
 
         // Per chunk row, in grid order: the one-line
@@ -1856,7 +2029,7 @@ playback_speed: 1.0,
         // remainder, proven — every row is over), and
         // the wrapped packing the `.w_full()` row now
         // produces (every line inside the card).
-        let expected_one_line = [340.0, 332.0, 416.0, 356.0, 377.0, 443.0, 392.0];
+        let expected_one_line = [493.0, 511.0, 582.0, 535.0, 569.0, 609.0, 571.0];
         for (i, chunk) in widths.chunks(LANG_COLUMNS).enumerate() {
             let one_line = chunk.iter().sum::<f32>() + 6.0 * (chunk.len() - 1) as f32;
             assert_eq!(one_line, expected_one_line[i], "row {i} one-line width");

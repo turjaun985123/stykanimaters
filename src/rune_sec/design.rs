@@ -126,6 +126,41 @@
 //!   `Drag`, and the splitter's contract is precisely
 //!   to hide that behind a pointer-x delta (see its
 //!   own docs for the exact semantics).
+//!
+//! ## Roadmap Wave 1 — the numeric primitive (F-3)
+//!
+//! * [`NumSpec`] / [`NumberEdit`] / [`number_field`]
+//!   are the kit's click-to-type numeric field (audit
+//!   A7 items R1–R3, roadmap F-3): the StepForm
+//!   discipline generalised — the field's form, its
+//!   clamps and its steppers all compute from the one
+//!   spec the caller's setter clamps with, so the
+//!   three cannot disagree. The display form is also
+//!   a drag-scrub surface (the kit's second adapting
+//!   builder, after [`v_splitter`]); [`bounded_value_row`]
+//!   composes slider + field + steppers for bounded
+//!   values. [`text_field`] gains the invalid state
+//!   ([`text_field_flagged`]) these fields need — the
+//!   state its docs used to declare unreachable,
+//!   because word fields never validate; number fields
+//!   do, live, from the buffer.
+//! * **Adoption recipe** (RM4's panels, and any later
+//!   one): (1) store a [`NumberEdit`] per field in the
+//!   panel's state struct; (2) write the [`NumSpec`]
+//!   from the op's own range home (e.g.
+//!   `NumSpec::new(EditorCore::LENGTH_MIN,
+//!   EditorCore::LENGTH_MAX, 4.0)`); (3) render
+//!   [`number_field`] with a [`NumWiring`] whose
+//!   `commit` calls the exact setter, `reject` posts
+//!   the explanation to `core.status`, `scrub_write`
+//!   is a SILENT idempotent write (a `*_quiet` setter
+//!   or the family's write half) and `scrub_finish`
+//!   announces once; (4) call [`NumberEdit::reconcile`]
+//!   from the panel's poll sync fn — that is where an
+//!   Escape (the framework blurs the field) lands as a
+//!   revert. New copy (help text, the reject status)
+//!   is the panel's i18n, passed in — the kit invents
+//!   no strings.
 
 use rune::tok::{self, type_, Theme};
 use rune::{
@@ -135,6 +170,7 @@ use stykanimate_rs::graph::TangentPreset;
 use stykanimate_rs::graph_panel::preset_preview;
 
 use crate::chrome_view;
+use crate::rune_sec::app_theme;
 use crate::rune_sec::icons;
 use crate::State;
 
@@ -254,10 +290,15 @@ pub fn divider_keyed(key: &str, t: &Theme) -> El {
 
 /// A keyboard-shortcut chip: px 5 / py 1, radius 4,
 /// `control_off` fill, the label in MONO_CAPTION with
-/// the Mono family applied, `text_secondary` ink
-/// (charter §11). Used by help rows, menu hints and the
-/// palette footer; supersedes help_panel's local
-/// `key_cap`.
+/// the Mono family applied, primary-text ink
+/// (charter §11, as amended by Roadmap Wave 1 RM25 /
+/// PL-1: the charter's `text_secondary` ink measured
+/// 2.88:1 on this chip — S18's rendered figure —
+/// under the 4.5 text bar for must-read hint text;
+/// the primary tone measures 6.32 dark / 13.46
+/// light on the chip over the card, fill unchanged).
+/// Used by help rows, menu hints and the palette
+/// footer; supersedes help_panel's local `key_cap`.
 pub fn kbd(label: &str, t: &Theme) -> El {
     el()
         .px(5.0)
@@ -267,36 +308,54 @@ pub fn kbd(label: &str, t: &Theme) -> El {
         .child(
             text(label)
                 .font(type_::MONO_CAPTION.mono())
-                .color(t.text_secondary),
+                .color(t.text),
         )
 }
 
 /// [`kbd`] for accent fills (UI mission wave 2, audit
 /// S17/S18): the command palette's selected row fills
 /// with the accent at 0.85, where the plain chip —
-/// `control_off` fill, `text_secondary` ink — measures
+/// `control_off` fill, secondary ink — measures
 /// ~1.18:1 and is effectively unreadable. This variant
 /// keeps the chip (same padding, radius and mono
-/// caption) and takes its colours from the treatment
-/// the menus already use for hints on their active
-/// (accent) row: white ink at 75% alpha (menus.rs
-/// `hint_el`), here over a white fill at 16% alpha so
-/// the chip still reads as a chip on the accent. The
-/// colours are white-derived, not theme-derived, so
-/// `t` is accepted only for signature parity with
-/// [`kbd`] — call sites can swap the two freely.
+/// caption) and inverts it into a keycap: a white fill
+/// at 85% alpha with black ink at 85% alpha.
+///
+/// The wave-2 colours (white @ 0.75 ink over a white
+/// @ 0.16 fill, mirroring the menus' active-row hint)
+/// were never adopted — zero call sites — and measure
+/// only 2.14 dark / 1.71 light on the palette row when
+/// recomputed (Roadmap Wave 1, RM25 / PL-1): white ink
+/// on an accent-family fill cannot clear the 4.5 text
+/// bar while the accent itself stands (the standing
+/// D-1 decision), so the chip inverts instead of
+/// borrowing the row's ink. The keycap pair measures
+/// 5.12 dark / 5.15 light on the row. The colours are
+/// not theme-derived, so `t` is accepted only for
+/// signature parity with [`kbd`] — call sites can swap
+/// the two freely.
 pub fn kbd_on_accent(label: &str, t: &Theme) -> El {
     let _ = t;
+    let (fill, ink) = kbd_on_accent_pair();
     el()
         .px(5.0)
         .py(1.0)
         .radius(4.0)
-        .fill(Color::WHITE.alpha(0.16))
+        .fill(fill)
         .child(
             text(label)
                 .font(type_::MONO_CAPTION.mono())
-                .color(Color::WHITE.alpha(0.75)),
+                .color(ink),
         )
+}
+
+/// The (fill, ink) pair [`kbd_on_accent`] paints —
+/// factored out so the pair's contrast is pinnable
+/// without a rendered tree (the `strip_colors`
+/// precedent). See the builder's doc for the
+/// measured figures.
+fn kbd_on_accent_pair() -> (Color, Color) {
+    (Color::WHITE.alpha(0.85), Color::BLACK.alpha(0.85))
 }
 
 /// A panel's empty state: a centred 20 pt glyph over a
@@ -325,6 +384,30 @@ pub fn empty_state(icon: &str, message: &str, t: &Theme) -> El {
             .wrap()
             .w_full(),
     )
+}
+
+/// [`empty_state`] with the action that fills it
+/// (Roadmap Wave 1, RM28 — PL-7's actionable empty
+/// states): the same glyph and message, then the chrome
+/// `btn` whose press performs the filling action — the
+/// panel's own real op (add the first figure, key the
+/// first channel, clear the filter that hid
+/// everything). The handler is a caller-supplied
+/// `State` closure, exactly like every other kit
+/// control. A state whose remedy is not an op the
+/// panel owns — a stage click, a name to type first —
+/// keeps the plain [`empty_state`]: this builder
+/// exists so the remedy is one press, and it must
+/// never carry a fake button.
+pub fn empty_state_action(
+    icon: &str,
+    message: &str,
+    key: &str,
+    label: &str,
+    t: &Theme,
+    f: impl Fn(&mut State) + 'static,
+) -> El {
+    empty_state(icon, message, t).child(chrome_view::btn(key, label, false, t, f))
 }
 
 /// The shared list-row styling (charter §5): min
@@ -567,12 +650,20 @@ pub fn field_caret() -> (Color, Color) {
 ///   a hover border colour does not exist in the
 ///   pinned rev. Named here as an engine limit per
 ///   charter rule 3, not imitated.
-/// * **Invalid / disabled:** no builder form, by
-///   design — no field in the shell validates its text
-///   (invalid is unreachable upstream; see the Wave P
-///   P5 findings) and no field is ever disabled
-///   (rename fields unmount instead). A state with no
-///   reachable path is not drawn.
+/// * **Invalid:** a builder form since Roadmap Wave 1
+///   (F-3) — [`text_field_flagged`] adds the error-ink
+///   border, because number fields DO validate their
+///   text (live, from the buffer). When this doc was
+///   written no field in the shell validated (the Wave
+///   P P5 findings), so the state was unreachable and,
+///   per the rule below, undrawn; the numeric
+///   primitive made it reachable and it is drawn
+///   there, not here — word fields keep this builder
+///   and its never-invalid form.
+/// * **Disabled:** no builder form, by design — no
+///   field is ever disabled (rename fields unmount
+///   instead). A state with no reachable path is not
+///   drawn.
 ///
 /// Keys, placeholders, submit/edit handlers and
 /// `.grow` stay at the call site, chained onto the
@@ -581,13 +672,47 @@ pub fn field_caret() -> (Color, Color) {
 /// and the states, the caller owns the field's
 /// identity and behaviour.
 pub fn text_field(edit: &TextEdit, font: TextStyle, focused: bool, t: &Theme) -> El {
+    text_field_flagged(edit, font, focused, false, t)
+}
+
+/// A text field's border colour with the invalid state
+/// included (Roadmap Wave 1, F-3): the theme's error
+/// ink when the field's content is invalid — it beats
+/// the focus accent on purpose, so the error stays
+/// visible while the user is typing the fix — else
+/// [`field_border`]'s focus/rest pair. Pure, pinnable,
+/// like `field_border`.
+pub fn field_border_state(focused: bool, invalid: bool, t: &Theme) -> Color {
+    if invalid {
+        app_theme::error_on(t)
+    } else {
+        field_border(focused, t)
+    }
+}
+
+/// [`text_field`] with the invalid state drawn: the
+/// same box, fills, caret and states, but the border
+/// comes from [`field_border_state`], so an invalid
+/// field carries the error-ink hairline in place of
+/// the focus/rest pair. The number fields
+/// ([`number_field`]) are the consumers; a caller
+/// computes `invalid` from its own validation, live —
+/// the builder draws the state, it does not judge the
+/// text.
+pub fn text_field_flagged(
+    edit: &TextEdit,
+    font: TextStyle,
+    focused: bool,
+    invalid: bool,
+    t: &Theme,
+) -> El {
     let (caret, selection) = field_caret();
     text_input(edit, font)
         .single_line()
         .color(t.text)
         .caret(caret, selection)
         .fill(t.control_off)
-        .border(1.0, field_border(focused, t))
+        .border(1.0, field_border_state(focused, invalid, t))
         .radius(CONTROL_RADIUS)
         .px(8.0)
         .py(3.0)
@@ -652,6 +777,644 @@ pub fn slider_track(frac: f32, t: &Theme) -> El {
                 .radius(SLIDER_KNOB / 2.0)
                 .fill(t.knob),
         )
+}
+
+/// Points of pointer travel below which a press on a
+/// number field's display still counts as a click
+/// (begin typing) rather than a scrub: Rune's own
+/// click-run distance (`Drag`'s docs — a press that
+/// drags past 4 pt ends the run), reused so the field
+/// and the framework agree on what a click is.
+pub const NUM_CLICK_TRAVEL: f32 = 4.0;
+
+/// One numeric field's contract (Roadmap Wave 1, F-3
+/// — audit A7 R1–R3): the range its op clamps with,
+/// the step its buttons take, and how the stored
+/// value is written for display. Everything a
+/// [`number_field`] does — the stepper forms, the
+/// clamp, the parse, the format, the slider fraction,
+/// the scrub — computes from this one struct, which
+/// the caller writes FROM the op's own range home
+/// (e.g. `EditorCore::LENGTH_MIN..=LENGTH_MAX`), so
+/// the field can never disagree with the setter it
+/// commits through: the StepForm discipline
+/// ([`StepForm`]) generalised from buttons to the
+/// whole field.
+///
+/// All values are in the STORED domain (the domain
+/// the setter receives) except formatting/parsing,
+/// which pass through `display_scale`: the displayed
+/// number is `value × display_scale`. `suffix` is the
+/// unit mark shown after the number and accepted
+/// after typed input. `points_per_step` is the scrub
+/// rate: points of pointer travel per `step`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NumSpec {
+    /// Lowest storable value (the op's clamp floor).
+    pub min: f32,
+    /// Highest storable value (the op's clamp ceiling).
+    pub max: f32,
+    /// One stepper press / one scrub step.
+    pub step: f32,
+    /// Decimals in the displayed number.
+    pub decimals: usize,
+    /// Unit mark after the number ("°", "%", "×", "").
+    pub suffix: &'static str,
+    /// Displayed number = stored value × this.
+    pub display_scale: f32,
+    /// Pointer points travelled per scrub step.
+    pub points_per_step: f32,
+}
+
+/// Decimals a step size implies for display: whole
+/// steps read whole, finer steps keep just the
+/// precision the step can express.
+fn decimals_for_step(step: f32) -> usize {
+    if step >= 1.0 {
+        0
+    } else if step >= 0.1 {
+        1
+    } else if step >= 0.01 {
+        2
+    } else {
+        3
+    }
+}
+
+impl NumSpec {
+    /// A plain spec: no suffix, stored values displayed
+    /// as themselves, decimals derived from `step`,
+    /// 2 pt of scrub travel per step.
+    pub fn new(min: f32, max: f32, step: f32) -> Self {
+        NumSpec {
+            min,
+            max,
+            step,
+            decimals: decimals_for_step(step),
+            suffix: "",
+            display_scale: 1.0,
+            points_per_step: 2.0,
+        }
+    }
+
+    /// A percent spec: the stored value is a fraction
+    /// (0.05..=1.0 opacity domain), displayed ×100 with
+    /// a "%" mark; decimals derive from the DISPLAYED
+    /// step, so a 0.05 stored step reads "5%".
+    pub fn percent(min: f32, max: f32, step: f32) -> Self {
+        let mut spec = Self::new(min, max, step);
+        spec.suffix = "%";
+        spec.display_scale = 100.0;
+        spec.decimals = decimals_for_step(step * 100.0);
+        spec
+    }
+
+    /// A degrees spec: the stored value IS the degree
+    /// count (the graph/camera angle domain), displayed
+    /// with a "°" mark.
+    pub fn degrees(min: f32, max: f32, step: f32) -> Self {
+        let mut spec = Self::new(min, max, step);
+        spec.suffix = "°";
+        spec
+    }
+
+    /// Clamp a value into the range. A non-finite input
+    /// reads as the floor rather than poisoning the
+    /// stored project (the [`clamp_frac`] discipline);
+    /// on every finite input this is exactly the clamp
+    /// the range's op applies.
+    pub fn clamp(&self, value: f32) -> f32 {
+        if value.is_finite() {
+            value.clamp(self.min, self.max)
+        } else {
+            self.min
+        }
+    }
+
+    /// The value one step of `dir` (−1/+1) from `value`
+    /// lands on, clamped.
+    pub fn stepped(&self, value: f32, dir: i32) -> f32 {
+        self.clamp(value + dir as f32 * self.step)
+    }
+
+    /// The form a stepper button for `dir` takes at
+    /// `value` (see [`StepForm`]): [`StepForm::Noop`]
+    /// when the step can only push against the clamp
+    /// it would land on, [`StepForm::Live`] otherwise.
+    /// Computed from the same numbers the op clamps
+    /// with, so the button and the op cannot disagree.
+    /// (A gated control's [`StepForm::MutedLive`] is the
+    /// caller's to layer on, as with `step_btn` today.)
+    pub fn step_form(&self, value: f32, dir: i32) -> StepForm {
+        if self.stepped(value, dir) == self.clamp(value) {
+            StepForm::Noop
+        } else {
+            StepForm::Live
+        }
+    }
+
+    /// The displayed number for a stored value, WITHOUT
+    /// the suffix — the text a type session seeds with
+    /// (a field being edited shows the bare number, as
+    /// in Blender). A negative zero reads as "0".
+    pub fn edit_text(&self, value: f32) -> String {
+        let shown = value * self.display_scale;
+        let shown = if shown == 0.0 { 0.0 } else { shown };
+        format!("{:.*}", self.decimals, shown)
+    }
+
+    /// The full readout text: [`NumSpec::edit_text`]
+    /// plus the suffix.
+    pub fn format(&self, value: f32) -> String {
+        format!("{}{}", self.edit_text(value), self.suffix)
+    }
+
+    /// Parse typed input (see [`NumParse`]): a bare
+    /// number, or a number with ONE trailing unit mark
+    /// — the field's own suffix, or any of the shell's
+    /// unit marks (a user types what a readout showed
+    /// them, whichever panel's suffix they learned).
+    /// The result is converted back to the stored
+    /// domain and NOT clamped — clamping is the commit
+    /// path's visible act, through [`NumSpec::clamp`].
+    /// Spellings of NaN/infinity parse as `f32` in
+    /// Rust; they are rejected here, so a field can
+    /// never write a non-finite value into a project.
+    pub fn parse(&self, text: &str) -> NumParse {
+        let mut body = text.trim();
+        if body.is_empty() {
+            return NumParse::Empty;
+        }
+        for suffix in [self.suffix, "°", "%", "×", "x"] {
+            if !suffix.is_empty() && body.ends_with(suffix) {
+                body = body[..body.len() - suffix.len()].trim_end();
+                break;
+            }
+        }
+        if body.is_empty() {
+            return NumParse::Empty;
+        }
+        match body.parse::<f32>() {
+            Ok(v) if v.is_finite() => NumParse::Value(v / self.display_scale),
+            _ => NumParse::Invalid,
+        }
+    }
+
+    /// The value's fraction along the range — the
+    /// fraction [`slider_track`] draws, and the inverse
+    /// of [`NumSpec::value_at_frac`] (the mapping the
+    /// layers/scene sliders each keep a private copy of
+    /// today, generalised to the spec's range).
+    pub fn frac_of(&self, value: f32) -> f32 {
+        let span = self.max - self.min;
+        if span > 0.0 {
+            clamp_frac((self.clamp(value) - self.min) / span)
+        } else {
+            0.0
+        }
+    }
+
+    /// The value at a slider fraction — see
+    /// [`NumSpec::frac_of`].
+    pub fn value_at_frac(&self, frac: f32) -> f32 {
+        self.min + clamp_frac(frac) * (self.max - self.min)
+    }
+
+    /// The value a scrub lands on: the press (anchor)
+    /// value plus the pointer's travel at the spec's
+    /// rate, clamped. Non-finite travel (a NaN out of
+    /// some drag maths) holds the anchor, per the
+    /// `clamp_frac` discipline.
+    ///
+    /// KNOWN LIMIT, recorded not faked: audit A7 R2
+    /// asks for Shift = fine / Ctrl = coarse scrub
+    /// rates, but `Drag` in the pinned Rune rev carries
+    /// no modifier state, so a mid-drag rate change is
+    /// not expressible; the one rate is the spec's.
+    pub fn scrubbed(&self, anchor: f32, dx_points: f32) -> f32 {
+        if !dx_points.is_finite() || self.points_per_step <= 0.0 {
+            return self.clamp(anchor);
+        }
+        self.clamp(anchor + (dx_points / self.points_per_step) * self.step)
+    }
+}
+
+/// What parsing a number field's text yields (see
+/// [`NumSpec::parse`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NumParse {
+    /// A finite number, in the stored domain, not yet
+    /// clamped.
+    Value(f32),
+    /// Nothing (or only a unit mark) was typed.
+    Empty,
+    /// Text that is not a finite number.
+    Invalid,
+}
+
+/// A number field's live validity, derived from its
+/// buffer on every render (see [`NumberEdit::validity`])
+/// — the classification the invalid border draws from.
+/// Derived, never stored, so it cannot drift from the
+/// text it describes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NumValidity {
+    /// The buffer parses to a finite number.
+    Valid,
+    /// The buffer is empty (or only a unit mark).
+    Empty,
+    /// The buffer does not parse.
+    Invalid,
+}
+
+/// A number field's session state (Roadmap Wave 1,
+/// F-3): the typing buffer plus the session bookkeeping,
+/// stored by the adopting panel next to its other field
+/// states (the `TextEdit` fields' idiom). The kit owns
+/// the state machine; the panel owns the instance.
+///
+/// The session rules (audit A7 R1, Blender's):
+/// * [`NumberEdit::begin`] opens a session seeded with
+///   the current value's [`NumSpec::edit_text`], the
+///   fresh buffer claiming keyboard focus (the shell's
+///   palette/begin-rename pattern).
+/// * Enter commits — the builder's submit path parses,
+///   clamps and hands the value to the caller's setter,
+///   then [`NumberEdit::close`]s. An unparseable Enter
+///   reverts and lets the caller's reject hook explain
+///   in the status line.
+/// * Escape reverts: the framework blurs the field on
+///   Escape (main.rs's `on_key` docs), and the panel's
+///   poll sync calls [`NumberEdit::reconcile`], which
+///   reverts a session the framework has blurred. A
+///   click-away blur lands in the same place — in this
+///   framework the two are indistinguishable, and a
+///   reverted value is one click from being retyped,
+///   while a silently committed half-typed value is a
+///   wrong number in the project.
+#[derive(Clone, Default)]
+pub struct NumberEdit {
+    /// The typing buffer (the shell's `TextEdit`).
+    pub edit: TextEdit,
+    /// A type session is open on this field.
+    pub armed: bool,
+    /// The text the open session was seeded with — what
+    /// a revert restores.
+    pub seed: String,
+}
+
+impl NumberEdit {
+    /// A closed, empty session state.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Open a session seeded with `seed` (the current
+    /// value's [`NumSpec::edit_text`]): the fresh buffer
+    /// claims keyboard focus, as the shell's fields do.
+    pub fn begin(&mut self, seed: String) {
+        let mut edit = TextEdit::new(seed.clone());
+        edit.focused = true;
+        self.edit = edit;
+        self.seed = seed;
+        self.armed = true;
+    }
+
+    /// Whether a type session is open.
+    pub fn is_open(&self) -> bool {
+        self.armed
+    }
+
+    /// The buffer's current text.
+    pub fn text(&self) -> &str {
+        &self.edit.text
+    }
+
+    /// The buffer's live validity under `spec` — what
+    /// the field's border draws from. An unopened
+    /// session's buffer is empty, hence
+    /// [`NumValidity::Empty`]; consumers only read this
+    /// while a session is open.
+    pub fn validity(&self, spec: &NumSpec) -> NumValidity {
+        match spec.parse(&self.edit.text) {
+            NumParse::Value(_) => NumValidity::Valid,
+            NumParse::Empty => NumValidity::Empty,
+            NumParse::Invalid => NumValidity::Invalid,
+        }
+    }
+
+    /// Close the session after a commit: the value has
+    /// been written by the caller's setter; the buffer
+    /// is left as typed (the display re-derives from
+    /// the stored value on the next render).
+    pub fn close(&mut self) {
+        self.armed = false;
+    }
+
+    /// Abandon the session: the buffer returns to the
+    /// seed text and the field stands down — nothing
+    /// was written, and the display (which never stopped
+    /// deriving from the stored value) is unchanged.
+    pub fn revert(&mut self) {
+        let seed = std::mem::take(&mut self.seed);
+        self.edit.replace_text(seed);
+        self.edit.focused = false;
+        self.armed = false;
+    }
+
+    /// The poll-sync reconciliation (the shell's
+    /// `sync_name_edit` idiom): a session the framework
+    /// has blurred — Escape, or focus moving elsewhere
+    /// — is reverted, and `true` is returned so the
+    /// panel can note it if it cares. A session still
+    /// holding focus is left exactly as it is.
+    pub fn reconcile(&mut self) -> bool {
+        if self.armed && !self.edit.focused {
+            self.revert();
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// The five closures a [`number_field`] needs, bundled
+/// (Roadmap Wave 1, F-3) — the caller's half of the
+/// field, in one named construction so an adopting
+/// panel writes it once per field:
+///
+/// * `access` — projects the caller's [`State`] to the
+///   panel's stored [`NumberEdit`] (the `.on_edit`
+///   accessor idiom; must be a non-capturing projection
+///   — it is cloned for the field's two bindings).
+/// * `commit` — Enter with a parseable value: receives
+///   the value CLAMPED through the spec; calls the
+///   field's exact setter. The session is already
+///   closed when this runs.
+/// * `reject` — Enter with unparseable/empty text: the
+///   session has already reverted; post the explanation
+///   to `core.status` here (the copy is the panel's
+///   i18n — see IA-RM3-1).
+/// * `scrub_write` — a mid-scrub write: SILENT (no
+///   status recap, no toast feed) and idempotent (a
+///   cancelled scrub calls it once more with the press
+///   value). A `*_quiet` setter or the op family's
+///   write half; for a snapshotting family, the panel
+///   takes its one gesture snapshot in its own drag
+///   bookkeeping, as the pose drag does — never one
+///   snapshot per Move.
+/// * `scrub_finish` — the scrub's release: the final
+///   value, for the caller's one announcing write /
+///   status recap.
+pub struct NumWiring<A, C, R, W, F> {
+    /// `State` → the stored [`NumberEdit`].
+    pub access: A,
+    /// Enter-commit: the clamped value.
+    pub commit: C,
+    /// Enter on unparseable text (already reverted).
+    pub reject: R,
+    /// Silent mid-scrub write.
+    pub scrub_write: W,
+    /// Scrub release: the final value.
+    pub scrub_finish: F,
+}
+
+/// Translate a number field's display drag into the
+/// wiring's calls (the [`number_field`] display form's
+/// adapter — the kit's second adapting builder, on the
+/// [`v_splitter`] precedent): a press anchors the
+/// rendered value in `Drag::data` (the layers slider's
+/// slot); travel at or past [`NUM_CLICK_TRAVEL`] is a
+/// scrub — silent writes from the anchor, `tx.instant()`
+/// while scrubbing (the layers idiom); a release with
+/// less travel is a CLICK and opens the type session,
+/// seeded from the press value; a release after travel
+/// finishes the scrub; a cancelled drag restores the
+/// press value silently. The anchor is written only on
+/// the press, from that frame's rendered value, so the
+/// shell's per-frame tree rebuilds cannot drift it —
+/// moves read `Drag::data` and `Drag::dx` alone.
+fn number_drag<A, C, R, W, F>(
+    s: &mut State,
+    d: &mut Drag,
+    tx: &mut Tx,
+    spec: &NumSpec,
+    press_value: f32,
+    wiring: &NumWiring<A, C, R, W, F>,
+) where
+    A: Fn(&mut State) -> &mut NumberEdit,
+    W: Fn(&mut State, f32),
+    F: Fn(&mut State, f32),
+{
+    match d.phase {
+        Phase::Down => {
+            d.data = press_value;
+        }
+        Phase::Move => {
+            if d.dx.abs() >= NUM_CLICK_TRAVEL {
+                (wiring.scrub_write)(s, spec.scrubbed(d.data, d.dx));
+                tx.instant();
+            }
+        }
+        Phase::Up => {
+            if d.cancelled() {
+                (wiring.scrub_write)(s, d.data);
+            } else if d.dx.abs() < NUM_CLICK_TRAVEL {
+                let seed = spec.edit_text(d.data);
+                (wiring.access)(s).begin(seed);
+            } else {
+                (wiring.scrub_finish)(s, spec.scrubbed(d.data, d.dx));
+            }
+        }
+    }
+}
+
+/// A click-to-type number field (Roadmap Wave 1, F-3):
+/// one builder, two forms, swapped on the session
+/// state the caller stores ([`NumberEdit`]).
+///
+/// **Display form** (no session open): [`stepper_value`]'s
+/// box — mono value, centred, at least 34 pt wide —
+/// with the hover/press overlays and a drag surface:
+/// a click opens the type session, a horizontal drag
+/// scrubs (see [`number_drag`] for the exact contract).
+/// `label` wires as the element's help text (the wave
+/// 6 convention). Rune exposes no cursor control, so
+/// the text-entry / scrub affordance is carried by the
+/// overlays and that help text — the `v_splitter`
+/// situation, named rather than faked.
+///
+/// **Editing form** (session open): the kit text field
+/// ([`text_field_flagged`]) in the readout's mono
+/// face, bound to the stored buffer through the
+/// wiring's `access`; the border follows the buffer's
+/// live validity — error ink while the text does not
+/// parse, with `invalid_hint` (the caller's copy)
+/// under the field while it is invalid. Enter commits
+/// or reverts per the session rules ([`NumberEdit`]);
+/// Escape reverts through the panel's poll sync
+/// ([`NumberEdit::reconcile`]).
+///
+/// `key` is the caller's, on the root in BOTH forms —
+/// the key names the VALUE, not the widget, so the
+/// element census sees one element across the swap.
+/// `value` is the stored value this render (the scrub's
+/// press anchor); `display` is its readout text
+/// (normally `spec.format(value)` — the caller's to
+/// format, as `stepper_value`'s text always was).
+#[allow(clippy::too_many_arguments)]
+pub fn number_field<A, C, R, W, F>(
+    key: &str,
+    state: &NumberEdit,
+    spec: &NumSpec,
+    value: f32,
+    display: &str,
+    label: &str,
+    invalid_hint: Option<&str>,
+    t: &Theme,
+    wiring: NumWiring<A, C, R, W, F>,
+) -> El
+where
+    A: Fn(&mut State) -> &mut NumberEdit + Clone + 'static,
+    C: Fn(&mut State, f32) + 'static,
+    R: Fn(&mut State) + 'static,
+    W: Fn(&mut State, f32) + 'static,
+    F: Fn(&mut State, f32) + 'static,
+{
+    let spec = *spec;
+    if state.armed {
+        let invalid = state.validity(&spec) == NumValidity::Invalid;
+        let access = wiring.access.clone();
+        let field = text_field_flagged(
+            &state.edit,
+            type_::MONO_CAPTION.mono(),
+            state.edit.focused,
+            invalid,
+            t,
+        )
+        .key(key)
+        .min_w(34.0)
+        .on_edit(move |s: &mut State| &mut (access)(s).edit)
+        .on_submit(move |s: &mut State, _tx: &mut Tx| {
+            let text = (wiring.access)(s).text().to_string();
+            match spec.parse(&text) {
+                NumParse::Value(v) => {
+                    let v = spec.clamp(v);
+                    (wiring.access)(s).close();
+                    (wiring.commit)(s, v);
+                }
+                NumParse::Empty | NumParse::Invalid => {
+                    (wiring.access)(s).revert();
+                    (wiring.reject)(s);
+                }
+            }
+        });
+        if invalid {
+            if let Some(hint) = invalid_hint {
+                return col()
+                    .gap(2.0)
+                    .child(field)
+                    .child(text(hint).font(type_::LABEL).color(app_theme::error_on(t)));
+            }
+        }
+        field
+    } else {
+        el()
+            .key(key)
+            .help(label)
+            .min_w(34.0)
+            .center()
+            .hover(t.hover)
+            .press(t.press)
+            .on_drag(move |s: &mut State, d: &mut Drag, tx: &mut Tx| {
+                number_drag(s, d, tx, &spec, value, &wiring);
+            })
+            .child(
+                text(display)
+                    .font(type_::MONO_CAPTION.mono())
+                    .color(t.text),
+            )
+    }
+}
+
+/// The bounded-value composite (Roadmap Wave 1, F-3 —
+/// audit A7 R3): one row composing the kit slider, a
+/// [`number_field`] and the two steppers, for a bounded
+/// continuous value — replacing the per-panel choice
+/// between a bare slider and bare steppers (layers'
+/// opacity and scene's Amount are hand-built copies of
+/// this shape). Layout follows the panels' `stepper_row`
+/// order, with the slider before the steppers: growing
+/// label, slider, −, field, +.
+///
+/// * The slider root carries the caller's `slider_key`
+///   and `slider_drag` UNTOUCHED — the absolute-position
+///   drag semantics stay the caller's (scene/layers keep
+///   theirs); the track visual is [`slider_track`] at
+///   the spec's own fraction ([`NumSpec::frac_of`]), and
+///   a caller maps a track position back with
+///   [`NumSpec::value_at_frac`].
+/// * The steppers are [`step_btn`]s whose forms come
+///   from the spec ([`NumSpec::step_form`]); `step`
+///   receives the direction (−1/+1) — normally the op's
+///   own step call, kept so a stepper press stays the
+///   op's, not a synthesized setter call.
+/// * The field is [`number_field`] on the same spec and
+///   wiring — slider, steppers and field are three
+///   doors onto the one value, and the spec is the one
+///   contract they share.
+#[allow(clippy::too_many_arguments)]
+pub fn bounded_value_row<A, C, R, W, F, D>(
+    slider_key: &str,
+    field_key: &str,
+    dn_key: &str,
+    up_key: &str,
+    label: &str,
+    state: &NumberEdit,
+    spec: &NumSpec,
+    value: f32,
+    display: &str,
+    invalid_hint: Option<&str>,
+    t: &Theme,
+    wiring: NumWiring<A, C, R, W, F>,
+    step: impl Fn(&mut State, i32) + Clone + 'static,
+    slider_drag: D,
+) -> El
+where
+    A: Fn(&mut State) -> &mut NumberEdit + Clone + 'static,
+    C: Fn(&mut State, f32) + 'static,
+    R: Fn(&mut State) + 'static,
+    W: Fn(&mut State, f32) + 'static,
+    F: Fn(&mut State, f32) + 'static,
+    D: Fn(&mut State, &mut Drag, &mut Tx) + 'static,
+{
+    let step_up = step.clone();
+    row()
+        .w_full()
+        .center_y()
+        .gap(8.0)
+        .child(
+            text(label)
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .grow(1.0),
+        )
+        .child(
+            el()
+                .key(slider_key)
+                .size(SLIDER_W, SLIDER_H)
+                .on_drag(slider_drag)
+                .child(slider_track(spec.frac_of(value), t)),
+        )
+        .child(step_btn(dn_key, "−", spec.step_form(value, -1), t, move |s: &mut State| {
+            step(s, -1)
+        }))
+        .child(number_field(
+            field_key, state, spec, value, display, label, invalid_hint, t, wiring,
+        ))
+        .child(step_btn(up_key, "+", spec.step_form(value, 1), t, move |s: &mut State| {
+            step_up(s, 1)
+        }))
 }
 
 /// Splitter hit-strip width: the 1 pt hairline centred
@@ -788,12 +1551,29 @@ pub fn v_splitter(
     if icons::has_icon("grip-vertical") {
         bar = bar
             .child(splitter_line(t))
-            .child(icons::icon_el("grip-vertical", SPLITTER_GRIP, text_muted(t)))
+            .child(icons::icon_el("grip-vertical", SPLITTER_GRIP, splitter_grip_color(t)))
             .child(splitter_line(t));
     } else {
         bar = bar.child(splitter_line(t));
     }
     bar
+}
+
+/// The splitter grip's glyph colour (Roadmap Wave 1,
+/// RM25 / PL-1 marginal sweep): the muted role in
+/// dark, where it measures 5.15 on the background and
+/// clears the 3:1 non-text guidance; in light the
+/// same role measures 1.94 there, so the grip takes
+/// the full secondary tone instead (5.15 on the light
+/// background). The grip is a glyph, never text, and
+/// the hairlines beside it carry the divider in both
+/// appearances.
+fn splitter_grip_color(t: &Theme) -> Color {
+    if app_theme::is_dark(t) {
+        text_muted(t)
+    } else {
+        t.text_secondary
+    }
 }
 
 /// One colour swatch construction for the whole shell
@@ -979,6 +1759,80 @@ mod tests {
         }
     }
 
+    /// WCAG ratio between two opaque colours (Rune
+    /// semantics — luminance over linear values).
+    fn ratio(fg: Color, bg: Color) -> f32 {
+        let (a, b) = (fg.luminance(), bg.luminance());
+        let (hi, lo) = if a >= b { (a, b) } else { (b, a) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// `fg` (carrying its alpha) composited over an
+    /// opaque `bg`.
+    fn over(fg: Color, bg: Color) -> Color {
+        bg.mix(Color { a: 1.0, ..fg }, fg.a)
+    }
+
+    #[test]
+    fn kbd_ink_clears_the_text_bar_on_the_chip() {
+        // RM25 (PL-1): the primary ink on the
+        // unchanged `control_off` chip clears 4.5 on
+        // the surfaces the chip sits on (card and
+        // elevated, both appearances); the retired
+        // secondary ink reproduces S18's failing
+        // figure in dark.
+        for dark in [true, false] {
+            let t = app_theme::app_theme(dark);
+            for surface in [t.card, app_theme::elevated(&t)] {
+                let chip = over(t.control_off, surface);
+                assert!(ratio(t.text, chip) >= 4.5, "dark={dark}");
+            }
+        }
+        let t = app_theme::app_theme(true);
+        let chip = over(t.control_off, t.card);
+        assert!(ratio(t.text_secondary, chip) < 4.5);
+        let _ = kbd("Ctrl+S", &t);
+    }
+
+    #[test]
+    fn kbd_on_accent_pair_clears_the_text_bar_on_the_palette_row() {
+        // RM25 (PL-1): the keycap pair against the
+        // command palette's selected row — the accent
+        // at 0.85 over the panel card — in both
+        // appearances.
+        let (fill, ink) = kbd_on_accent_pair();
+        for dark in [true, false] {
+            let t = app_theme::app_theme(dark);
+            let row = over(accent().alpha(0.85), t.card);
+            let chip = over(fill, row);
+            let painted = over(ink, chip);
+            assert!(
+                ratio(painted, chip) >= 4.5,
+                "dark={dark}: {}",
+                ratio(painted, chip)
+            );
+        }
+        let t = app_theme::app_theme(true);
+        let _ = kbd_on_accent("Enter", &t);
+    }
+
+    #[test]
+    fn splitter_grip_clears_the_non_text_bar_in_both_themes() {
+        // RM25 (PL-1): the grip glyph against the app
+        // background clears the 3:1 non-text guidance
+        // in both appearances — dark via the muted
+        // role, light via the full secondary tone.
+        for dark in [true, false] {
+            let t = app_theme::app_theme(dark);
+            let grip = over(splitter_grip_color(&t), t.bg);
+            assert!(ratio(grip, t.bg) >= 3.0, "dark={dark}");
+        }
+        let d = app_theme::app_theme(true);
+        assert_eq!(splitter_grip_color(&d), text_muted(&d));
+        let l = app_theme::app_theme(false);
+        assert_eq!(splitter_grip_color(&l), l.text_secondary);
+    }
+
     #[test]
     fn field_border_is_accent_only_when_focused() {
         for dark in [true, false] {
@@ -1006,6 +1860,170 @@ mod tests {
             (caret.r, caret.g, caret.b)
         );
         assert_eq!(selection.a, 0.30);
+    }
+
+    /// A [`NumWiring`] for construction smoke tests:
+    /// builders only STORE the closures while building
+    /// (handlers run on events, never during a build),
+    /// so the access projection is never called here —
+    /// it panics if that ever stops being true.
+    fn test_wiring() -> NumWiring<
+        fn(&mut State) -> &mut NumberEdit,
+        fn(&mut State, f32),
+        fn(&mut State),
+        fn(&mut State, f32),
+        fn(&mut State, f32),
+    > {
+        fn access(_: &mut State) -> &mut NumberEdit {
+            panic!("construction only")
+        }
+        fn sink_v(_: &mut State, _: f32) {}
+        fn sink(_: &mut State) {}
+        NumWiring {
+            access,
+            commit: sink_v,
+            reject: sink,
+            scrub_write: sink_v,
+            scrub_finish: sink_v,
+        }
+    }
+
+    #[test]
+    fn field_border_state_puts_invalid_above_focus() {
+        // The invalid border must survive focus (the
+        // user sees it WHILE fixing the text), and the
+        // non-invalid states are field_border's own.
+        for dark in [true, false] {
+            let t = tok::theme(dark);
+            assert_eq!(
+                field_border_state(false, true, &t),
+                app_theme::error_on(&t)
+            );
+            assert_eq!(
+                field_border_state(true, true, &t),
+                app_theme::error_on(&t)
+            );
+            assert_eq!(field_border_state(true, false, &t), field_border(true, &t));
+            assert_eq!(
+                field_border_state(false, false, &t),
+                field_border(false, &t)
+            );
+            assert_ne!(field_border_state(true, true, &t), field_border(true, &t));
+        }
+    }
+
+    #[test]
+    fn num_spec_clamps_and_steps_on_its_own_numbers() {
+        let spec = NumSpec::new(4.0, 220.0, 4.0);
+        assert_eq!(spec.clamp(2.0), 4.0);
+        assert_eq!(spec.clamp(120.0), 120.0);
+        assert_eq!(spec.clamp(500.0), 220.0);
+        // A NaN reads as the floor, never into a project.
+        assert_eq!(spec.clamp(f32::NAN), 4.0);
+        assert_eq!(spec.stepped(120.0, 1), 124.0);
+        assert_eq!(spec.stepped(120.0, -1), 116.0);
+        assert_eq!(spec.stepped(220.0, 1), 220.0);
+        // Forms: Noop only where the step pushes on the
+        // clamp it would land on — the StepForm rule,
+        // computed from the spec's own numbers.
+        assert_eq!(spec.step_form(220.0, 1), StepForm::Noop);
+        assert_eq!(spec.step_form(4.0, -1), StepForm::Noop);
+        assert_eq!(spec.step_form(220.0, -1), StepForm::Live);
+        assert_eq!(spec.step_form(4.0, 1), StepForm::Live);
+        assert_eq!(spec.step_form(120.0, 1), StepForm::Live);
+    }
+
+    #[test]
+    fn num_spec_formats_and_parses_in_display_units() {
+        let len = NumSpec::new(4.0, 220.0, 4.0);
+        assert_eq!(len.format(120.0), "120");
+        assert_eq!(len.edit_text(120.0), "120");
+        assert_eq!(len.format(-0.0), "0", "no negative zero in a readout");
+        assert_eq!(len.parse("120"), NumParse::Value(120.0));
+        assert_eq!(len.parse(" 36 "), NumParse::Value(36.0));
+        assert_eq!(len.parse(""), NumParse::Empty);
+        assert_eq!(len.parse("abc"), NumParse::Invalid);
+        // NaN/infinity spellings parse as f32 in Rust;
+        // the field refuses them.
+        assert_eq!(len.parse("NaN"), NumParse::Invalid);
+        assert_eq!(len.parse("inf"), NumParse::Invalid);
+        // Parse does NOT clamp — the commit path does,
+        // visibly, through the same spec.
+        assert_eq!(len.parse("999"), NumParse::Value(999.0));
+        assert_eq!(len.clamp(999.0), 220.0);
+
+        let deg = NumSpec::degrees(-180.0, 180.0, 5.0);
+        assert_eq!(deg.format(-45.0), "-45°");
+        assert_eq!(deg.edit_text(-45.0), "-45");
+        assert_eq!(deg.parse("30°"), NumParse::Value(30.0));
+        assert_eq!(deg.parse("30"), NumParse::Value(30.0));
+        // Any of the shell's unit marks is accepted, not
+        // only the field's own suffix.
+        assert_eq!(deg.parse("30%"), NumParse::Value(30.0));
+        assert_eq!(deg.parse("°"), NumParse::Empty);
+
+        let pct = NumSpec::percent(0.05, 1.0, 0.05);
+        assert_eq!(pct.format(0.5), "50%");
+        assert_eq!(pct.edit_text(0.5), "50");
+        assert_eq!(pct.parse("50%"), NumParse::Value(0.5));
+        assert_eq!(pct.parse("50"), NumParse::Value(0.5));
+        assert_eq!(pct.format(0.0), "0%");
+    }
+
+    #[test]
+    fn num_spec_slider_mapping_and_scrub() {
+        let spec = NumSpec::percent(0.05, 1.0, 0.05);
+        assert_eq!(spec.frac_of(0.05), 0.0);
+        assert_eq!(spec.frac_of(1.0), 1.0);
+        assert!((spec.frac_of(0.525) - 0.5).abs() < 1e-6);
+        assert!((spec.value_at_frac(0.5) - 0.525).abs() < 1e-6);
+        assert_eq!(spec.value_at_frac(-1.0), 0.05);
+        assert_eq!(spec.value_at_frac(2.0), 1.0);
+        // An empty range has no fraction.
+        assert_eq!(NumSpec::new(5.0, 5.0, 1.0).frac_of(5.0), 0.0);
+
+        // Scrub: 2 pt per 4-unit step — travel converts
+        // at the spec's rate and clamps at the range.
+        let len = NumSpec::new(4.0, 220.0, 4.0);
+        assert_eq!(len.scrubbed(100.0, 0.0), 100.0);
+        assert_eq!(len.scrubbed(100.0, 20.0), 140.0);
+        assert_eq!(len.scrubbed(100.0, -20.0), 60.0);
+        assert_eq!(len.scrubbed(100.0, 10_000.0), 220.0);
+        assert_eq!(len.scrubbed(100.0, f32::NAN), 100.0);
+    }
+
+    #[test]
+    fn number_edit_session_machine() {
+        let spec = NumSpec::new(4.0, 220.0, 4.0);
+        let mut edit = NumberEdit::new();
+        assert!(!edit.is_open());
+        edit.begin(spec.edit_text(120.0));
+        assert!(edit.is_open());
+        assert!(edit.edit.focused, "a fresh session claims focus");
+        assert_eq!(edit.text(), "120");
+        assert_eq!(edit.validity(&spec), NumValidity::Valid);
+        // Live validity follows the buffer.
+        edit.edit.replace_text("abc".to_string());
+        assert_eq!(edit.validity(&spec), NumValidity::Invalid);
+        edit.edit.replace_text("".to_string());
+        assert_eq!(edit.validity(&spec), NumValidity::Empty);
+        // A session still holding focus is untouched by
+        // the poll reconciliation.
+        assert!(!edit.reconcile());
+        assert!(edit.is_open());
+        // Escape blurs the field (framework); the sync
+        // reconciliation reverts to the seed.
+        edit.edit.focused = false;
+        assert!(edit.reconcile());
+        assert!(!edit.is_open());
+        assert_eq!(edit.text(), "120");
+        // The commit path: close leaves the buffer as
+        // typed (the display re-derives from the value).
+        edit.begin("120".to_string());
+        edit.edit.replace_text("150".to_string());
+        edit.close();
+        assert!(!edit.is_open());
+        assert_eq!(edit.text(), "150");
     }
 
     #[test]
@@ -1043,6 +2061,8 @@ mod tests {
             let _ = kbd_on_accent("Ctrl+K", &t);
             let _ = empty_state("play", "Nothing here", &t);
             let _ = empty_state("no-such-icon", "Nothing here", &t);
+            let _ = empty_state_action("play", "Nothing here", "empty-act", "Add one", &t, |_| {});
+            let _ = empty_state_action("no-such-icon", "Nothing here", "empty-act", "Add one", &t, |_| {});
             let _ = list_row("row", true, &t);
             let _ = list_row("row", false, &t);
             let _ = row_shell(true, &t);
@@ -1055,6 +2075,46 @@ mod tests {
             let _ = step_btn("step", "-", StepForm::MutedLive, &t, |_| {});
             let _ = text_field(&TextEdit::new("x"), type_::BODY, true, &t);
             let _ = text_field(&TextEdit::new(""), type_::BODY, false, &t);
+            let _ = text_field_flagged(&TextEdit::new("x"), type_::BODY, true, true, &t);
+            let _ = text_field_flagged(&TextEdit::new(""), type_::BODY, false, false, &t);
+            // The numeric primitive (Roadmap Wave 1,
+            // F-3): the field in both forms (closed and
+            // open sessions, invalid hint shown and not)
+            // and the bounded composite.
+            let spec = NumSpec::new(4.0, 220.0, 4.0);
+            let closed = NumberEdit::new();
+            let _ = number_field(
+                "nf", &closed, &spec, 120.0, "120", "Length", None, &t, test_wiring(),
+            );
+            let mut open = NumberEdit::new();
+            open.begin("120".to_string());
+            let _ = number_field(
+                "nf",
+                &open,
+                &spec,
+                120.0,
+                "120",
+                "Length",
+                Some("Not a number"),
+                &t,
+                test_wiring(),
+            );
+            let _ = bounded_value_row(
+                "b-slider",
+                "b-field",
+                "b-dn",
+                "b-up",
+                "Length",
+                &closed,
+                &spec,
+                120.0,
+                "120",
+                None,
+                &t,
+                test_wiring(),
+                |_, _| {},
+                |_, _, _| {},
+            );
             let _ = slider_track(0.0, &t);
             let _ = slider_track(0.5, &t);
             let _ = slider_track(1.0, &t);

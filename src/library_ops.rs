@@ -49,14 +49,12 @@ pub fn is_builtin(name: &str) -> bool {
     name.starts_with(LIBRARY_BUILTIN_PREFIX)
 }
 
-/// The directory saved library entries live in:
-/// `./library` under the process current directory —
-/// the folder `load_library` reads and
-/// `save_figure_to_library` writes.
+/// The directory saved library entries live in: the one
+/// resolver's library dir ([`crate::shell::library_dir`],
+/// Roadmap Wave 1, RM9 / F-8) — the folder `load_library`
+/// reads and `save_figure_to_library` writes.
 fn library_dir() -> PathBuf {
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("library")
+    crate::shell::library_dir()
 }
 
 /// The backing file of the library entry whose STEM is

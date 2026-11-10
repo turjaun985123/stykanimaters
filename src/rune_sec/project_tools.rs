@@ -357,6 +357,26 @@ pub fn autosave_line(edits_since_autosave: u64) -> String {
     }
 }
 
+/// The named-save counterpart of [`autosave_line`]
+/// (Roadmap Wave 1, RM24, P-14 — A15 R4): what the
+/// project's own FILE knows, as opposed to the recovery
+/// snapshot. Pure over the core's save-state accessors,
+/// like `autosave_line` is over its counter. The three
+/// states are stated plainly — never saved, saved, or
+/// carrying edits the file does not have — because the
+/// autosave line's "up to date" was routinely misread as
+/// this line's claim (it is only ever the recovery
+/// snapshot's). Unkeyed plain text, like the autosave
+/// line: it renders beside it in the Projects card.
+pub fn save_state_line(core: &EditorCore) -> String {
+    match core.edits_since_save() {
+        None => "Never saved to a file yet.".to_string(),
+        Some(0) => "Saved.".to_string(),
+        Some(1) => "1 edit since the last save.".to_string(),
+        Some(n) => format!("{n} edits since the last save."),
+    }
+}
+
 /// The "Current file: …" line's decision, factored out of
 /// [`current_file_line`] so it is testable without touching
 /// the disk: `last_opened` is the display name
@@ -1139,6 +1159,18 @@ pub fn project_section(s: &State, t: &Theme) -> El {
                 .wrap()
                 .w_full(),
         )
+        // RM24: the named-save line under the recovery
+        // line — the two claims side by side, so neither
+        // is misread for the other (the audit's R4
+        // finding was precisely that conflation). Same
+        // unkeyed prose treatment as the autosave line.
+        .child(
+            text(save_state_line(core))
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .wrap()
+                .w_full(),
+        )
         .child(design::divider(t))
         .child(
             row()
@@ -1362,6 +1394,10 @@ mod tests {
             show_right: true,
             key_clipboard: None,
             key_follow_graph: false,
+            key_sel: Default::default(),
+            help_panel: Default::default(),
+            camera_panel: Default::default(),
+            segment_numbers: Default::default(),
             export_recap: String::new(),
             export_job: None,
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
@@ -1423,6 +1459,21 @@ playback_speed: 1.0,
         assert_eq!(autosave_line(0), "Recovery snapshot up to date.");
         assert_eq!(autosave_line(1), "1 edit since the last recovery snapshot.");
         assert_eq!(autosave_line(7), "7 edits since the last recovery snapshot.");
+    }
+
+    #[test]
+    fn save_state_line_names_the_three_states() {
+        // RM24: never saved / saved / modified, in plain
+        // words, driven off a real core's state machine.
+        let mut core = EditorCore::new();
+        assert_eq!(save_state_line(&core), "Never saved to a file yet.");
+        core.save();
+        assert_eq!(save_state_line(&core), "Saved.");
+        core.add_frame();
+        assert_eq!(save_state_line(&core), "1 edit since the last save.");
+        core.add_frame();
+        assert_eq!(save_state_line(&core), "2 edits since the last save.");
+        let _ = std::fs::remove_file("./project.styk.json");
     }
 
     #[test]

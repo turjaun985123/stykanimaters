@@ -1507,19 +1507,30 @@ pub fn library_panel(s: &State, t: &Theme) -> El {
                 )),
         );
         if core.library.is_empty() {
-            card = card.child(design::empty_state(
+            // RM28 (PL-7): the state offers its filling
+            // action — this card's own Save button op.
+            card = card.child(design::empty_state_action(
                 "shapes",
                 "Library is empty — save a figure to add one.",
+                "library-empty-save",
+                "Save current figure to library",
                 t,
+                |s: &mut State| save_current_figure(s),
             ));
         } else {
             let builtins = sort_rows(builtin_rows_q(core, &query), sort_by_name);
             let saved = sort_rows(saved_rows_q(core, &query), sort_by_name);
             if builtins.is_empty() && saved.is_empty() {
-                card = card.child(design::empty_state(
+                // RM28 (PL-7): the state offers its
+                // remedy — clear the search that hid
+                // everything.
+                card = card.child(design::empty_state_action(
                     "magnifying-glass",
                     &format!("No library figures match \"{}\".", query.trim()),
+                    "library-empty-clear-search",
+                    "Clear search",
                     t,
+                    |s: &mut State| s.library_panel.search = TextEdit::default(),
                 ));
             }
             let list = col()

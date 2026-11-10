@@ -9,12 +9,14 @@
 //! implementation. The bookkeeping is the helpers', unchanged:
 //!
 //! * [`EditorCore::set_figure_color`] is a bounds-checked
-//!   field write plus a status line, with **no snapshot** —
-//!   the same shape as `set_node_color` (editor.rs) and the
-//!   MCP layer's figure-colour write. Wave 13: an actual
-//!   colour change calls `EditorCore::mark_dirty`, so the
-//!   non-undoable write still counts toward the dirty dot
-//!   and autosave cadence.
+//!   field write plus a status line — the same shape as
+//!   `set_node_color` (editor.rs) and the MCP layer's
+//!   figure-colour write. Wave 13: an actual colour change
+//!   called `EditorCore::mark_dirty`, so the non-undoable
+//!   write still counted toward the dirty dot and autosave
+//!   cadence. Roadmap Wave 1 (RM24, P-14): a real change
+//!   takes a coalesced undo step instead — the census of
+//!   non-undoable writes is closed.
 //! * [`EditorCore::duplicate_figure`] mirrors
 //!   `delete_figure`'s bookkeeping (editor.rs) run in
 //!   reverse, plus the index shifts an insertion requires.
@@ -242,30 +244,24 @@ fn mirror_pose_in_place(pose: &mut Pose) {
 impl EditorCore {
     /// Set figure `fi`'s colour directly (the colour picker
     /// panels). Writes the same `FigureInstance.color` the
-    /// add-figure ops assign from the `FIGURE_COLORS` cycle;
-    /// like `set_node_color` it does not snapshot, so a
-    /// colour change is not an undo step. Wave 13: when the
-    /// stored colour actually changes, the write calls
-    /// [`EditorCore::mark_dirty`] — dirty/autosave counting
-    /// without an undo step (the B-squad seam for
-    /// non-undoable project writes). Re-selecting the
-    /// colour already stored changes nothing and marks
-    /// nothing. An out-of-range `fi` only sets the status
-    /// line.
+    /// add-figure ops assign from the `FIGURE_COLORS` cycle.
+    /// Since Roadmap Wave 1 (RM24, P-14 — A15 H3) a write
+    /// that actually changes the colour takes a coalesced
+    /// undo step first, like `set_node_color` (Wave 13 only
+    /// marked it dirty). Re-selecting the colour already
+    /// stored changes nothing and spends nothing. An
+    /// out-of-range `fi` only sets the status line.
     pub fn set_figure_color(&mut self, fi: usize, color: u32) {
-        let changed = {
-            let Some(fig) = self.project.figures.get_mut(fi) else {
+        let changed = match self.project.figures.get(fi) {
+            Some(fig) => fig.color != color,
+            None => {
                 self.status = "No such figure.".into();
                 return;
-            };
-            let changed = fig.color != color;
-            if changed {
-                fig.color = color;
             }
-            changed
         };
         if changed {
-            self.mark_dirty();
+            self.snapshot_coalesced("Figure colour");
+            self.project.figures[fi].color = color;
         }
         self.status = format!("Figure {} colour changed.", fi + 1);
     }
@@ -606,15 +602,12 @@ pub fn tool_figure_recolor(core: &mut EditorCore, args: &Value) -> Result<Value,
 }
 
 /// MCP `figure_rename`: the figure inspector's Rename.
-/// Figure names are plain field writes everywhere (the
-/// panel's `rename_selected_figure` documents the same),
-/// so — like that op and `figure_set_color` — this takes
-/// no undo snapshot. Wave 13: an actual name change calls
-/// `EditorCore::mark_dirty`, so the write counts toward
-/// the dirty dot and autosave cadence without becoming
-/// an undo step; renaming to the name already stored
-/// changes nothing and marks nothing. The name is
-/// trimmed; blank is refused with the panel's wording.
+/// Since Roadmap Wave 1 (RM24, P-14 — A15 H3) an actual
+/// name change takes exactly one undo step, here and in
+/// the panel's `rename_selected_figure` alike (Wave 13
+/// only marked it dirty); renaming to the name already
+/// stored changes nothing and spends nothing. The name
+/// is trimmed; blank is refused with the panel's wording.
 pub fn tool_figure_rename(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let fi = fop_req_usize(args, "figure")?;
     fop_check_figure(core, fi)?;
@@ -624,8 +617,8 @@ pub fn tool_figure_rename(core: &mut EditorCore, args: &Value) -> Result<Value, 
         return Err("Figure name cannot be empty.".into());
     }
     if core.project.figures[fi].name != name {
+        core.snapshot_labeled("Rename figure");
         core.project.figures[fi].name = name.to_string();
-        core.mark_dirty();
     }
     core.status = format!("Figure {} renamed to \"{name}\".", fi + 1);
     Ok(json!({
@@ -642,7 +635,10 @@ pub fn tool_figure_rename(core: &mut EditorCore, args: &Value) -> Result<Value, 
 /// plan every parented node's post-scale length with
 /// `adjust_length`'s arithmetic (clamped to [4.0, 220.0]),
 /// refuse when nothing would move, otherwise one snapshot
-/// and the writes through `adjust_length` itself. The op
+/// and the writes through `adjust_length_raw` itself (the
+/// raw write: since Roadmap Wave 1 (RM24, P-14) the
+/// `adjust_length` door takes its own coalesced step, and
+/// a composed scale must stay exactly one step). The op
 /// acts on the SELECTED figure, so the target is selected
 /// first — the built-in delete/move figure tools'
 /// convention; the node selection is restored afterwards.
@@ -681,13 +677,13 @@ pub fn tool_figure_scale(core: &mut EditorCore, args: &Value) -> Result<Value, S
         ));
     }
     core.selected_figure = fi;
-    core.snapshot();
+    core.snapshot_labeled("Scale figure");
     let saved_node = core.selected_node;
     let count = core.project.figures[fi].def.nodes.len();
     for ni in 0..count {
         let len = core.project.figures[fi].def.nodes[ni].length;
         core.selected_node = Some(ni);
-        core.adjust_length(len * factor - len);
+        core.adjust_length_raw(len * factor - len);
     }
     core.selected_node = saved_node;
     // Report the achieved scale, as the panel does.
@@ -1011,7 +1007,9 @@ struct FopPoseLibraryEntry {
 }
 
 fn fop_pose_library_dir() -> PathBuf {
-    PathBuf::from("library").join("poses")
+    // The pose folder inside the one resolver's library
+    // dir (Roadmap Wave 1, RM9 / F-8).
+    crate::shell::library_dir().join("poses")
 }
 
 fn fop_save_pose_library_in(dir: &Path, pose: &Pose, name: &str) -> std::io::Result<PathBuf> {
@@ -1292,21 +1290,27 @@ pub fn tool_pose_library_rename(core: &mut EditorCore, args: &Value) -> Result<V
 
 /// MCP `layers_set_all_visible`: the figures/layers
 /// panels' All / None buttons — `layers::set_all_visible`.
-/// Returns how many figures changed state. Wave 13: the
-/// bulk write takes no snapshot (panel parity), so when
-/// at least one flag actually changed it calls
-/// `EditorCore::mark_dirty` exactly once — dirty/autosave
-/// counting without an undo step; a no-change call marks
-/// nothing.
+/// Returns how many figures changed state. Since Roadmap
+/// Wave 1 (RM24, P-14 — A15 H3) the bulk write takes
+/// exactly one undo step when at least one flag actually
+/// changes (the would-change count is computed before
+/// the write, so the step precedes it; a no-change call
+/// spends nothing). Wave 13 only marked it dirty.
 pub fn tool_layers_set_all_visible(
     core: &mut EditorCore,
     args: &Value,
 ) -> Result<Value, String> {
     let visible = fop_req_bool(args, "visible")?;
-    let changed = crate::layers::set_all_visible(&mut core.project, visible);
-    if changed > 0 {
-        core.mark_dirty();
+    let would_change = core
+        .project
+        .figures
+        .iter()
+        .filter(|f| f.hidden == visible)
+        .count();
+    if would_change > 0 {
+        core.snapshot_labeled("Figure visibility");
     }
+    let changed = crate::layers::set_all_visible(&mut core.project, visible);
     // Panel parity (figures_panel footer, reconciled at Wave 11
     // integration): the bulk write also clears any active solo
     // so the flags ARE the effective visibility, and reports
@@ -1328,18 +1332,19 @@ pub fn tool_layers_set_all_visible(
 
 /// MCP `layers_invert_visibility`: the figures panel's
 /// Invert button — `layers::invert_visibility`. Returns
-/// how many figures changed state. Wave 13: as in
-/// `layers_set_all_visible`, no snapshot is taken, so a
-/// call that flipped at least one flag calls
-/// `EditorCore::mark_dirty` exactly once.
+/// how many figures changed state. Since Roadmap Wave 1
+/// (RM24, P-14): as in `layers_set_all_visible`, exactly
+/// one undo step when at least one flag flips (with at
+/// least one figure present an invert always flips, so
+/// the step is taken whenever the project is non-empty).
 pub fn tool_layers_invert_visibility(
     core: &mut EditorCore,
     _args: &Value,
 ) -> Result<Value, String> {
-    let changed = crate::layers::invert_visibility(&mut core.project);
-    if changed > 0 {
-        core.mark_dirty();
+    if !core.project.figures.is_empty() {
+        core.snapshot_labeled("Figure visibility");
     }
+    let changed = crate::layers::invert_visibility(&mut core.project);
     // Panel parity, as in tool_layers_set_all_visible.
     core.solo = None;
     core.status = format!("Figure visibility inverted ({changed} flipped).");
@@ -1353,9 +1358,10 @@ pub fn tool_layers_invert_visibility(
 
 /// MCP handler: cycle one figure's opacity through the
 /// panel's steps (the figure inspector's Opacity cycler —
-/// `EditorCore::cycle_figure_opacity`). Like the panel, this
-/// is an appearance cycler: NO undo snapshot, by the core
-/// op's own discipline. Wave 11 (C1), integrator-authored.
+/// `EditorCore::cycle_figure_opacity`). The step is taken
+/// inside the core op (coalesced since Roadmap Wave 1,
+/// RM24, P-14; before, this cycler took no snapshot at
+/// all). Wave 11 (C1), integrator-authored.
 pub fn tool_figure_cycle_opacity(
     core: &mut EditorCore,
     args: &Value,
@@ -1852,11 +1858,13 @@ mod tests {
 
     #[test]
     fn mcp_wave14_step_opacity_and_toggles_follow_the_layers_family_contract() {
-        // Wave 14 (A2): the relative/toggle handlers spend
-        // NO undo step (the core ops are the layers family:
-        // no snapshot by design), a real project change
-        // counts exactly one dirty edit via mark_dirty, and
-        // solo — session state — counts nothing.
+        // Wave 14 (A2): the relative/toggle handlers'
+        // bookkeeping. Roadmap Wave 1 (RM24, P-14) closed
+        // the census this test originally pinned: the
+        // layers family now snapshots — a real change
+        // counts exactly one edit and one (coalesced) undo
+        // step — and solo, session state, still counts
+        // nothing.
         let mut core = EditorCore::new();
         let edits = core.edits_since_autosave();
         let depth = core.undo_depth();
@@ -1868,25 +1876,31 @@ mod tests {
         // 0.899999976… — compare within f32 tolerance.
         let opacity = out["opacity"].as_f64().unwrap();
         assert!((opacity - 0.9).abs() < 1e-6, "opacity steps to 0.9, got {opacity}");
-        assert_eq!(core.undo_depth(), depth, "step takes no snapshot");
+        assert_eq!(core.undo_depth(), depth + 1, "step takes one coalesced undo step");
         assert_eq!(
             core.edits_since_autosave(),
             edits + 1,
-            "the real change counts one dirty edit"
+            "the real change counts one edit"
         );
 
-        // A step at the clamp changes nothing and marks
+        // A step at the clamp changes nothing and spends
         // nothing (the op's own rule).
         let out = tool_figure_step_opacity(&mut core, &json!({ "figure": 0, "delta": 5.0 }))
             .expect("step to the ceiling succeeds");
         assert_eq!(out["opacity"], json!(1.0));
         let edits_at_ceiling = core.edits_since_autosave();
+        let depth_at_ceiling = core.undo_depth();
         let _ = tool_figure_step_opacity(&mut core, &json!({ "figure": 0, "delta": 0.1 }))
             .expect("step at the ceiling still answers");
         assert_eq!(
             core.edits_since_autosave(),
             edits_at_ceiling,
-            "a no-change step marks nothing"
+            "a no-change step counts nothing"
+        );
+        assert_eq!(
+            core.undo_depth(),
+            depth_at_ceiling,
+            "a no-change step spends no undo step"
         );
 
         let out = tool_figure_toggle_hidden(&mut core, &json!({ "figure": 0 }))
@@ -2042,13 +2056,14 @@ mod tests {
     fn mcp_figure_recolor_and_rename_dirty_and_undo_contract() {
         // Wave 13 (B3, the E8 census fix): the two MCP
         // paths' bookkeeping, pinned separately because
-        // their contracts differ. Recolour is an undoable
+        // their contracts differed. Recolour is an undoable
         // edit — `recolor_figure` takes exactly one
         // snapshot, so the autosave counter and the undo
-        // depth both advance by one. Rename is a plain
-        // field write that stays non-undoable, so it
-        // advances the counter through `mark_dirty` and
-        // leaves the undo depth exactly where it was.
+        // depth both advance by one. Rename was a plain
+        // field write that stayed non-undoable (counter via
+        // `mark_dirty`, depth unmoved) — Roadmap Wave 1
+        // (RM24, P-14) closed that: rename now takes
+        // exactly one undo step of its own.
         let mut core = EditorCore::new();
         let edits = core.edits_since_autosave();
         let depth = core.undo_depth();
@@ -2075,9 +2090,10 @@ mod tests {
         );
         assert_eq!(
             core.undo_depth(),
-            depth + 1,
-            "rename takes no snapshot — the depth is still the recolour's"
+            depth + 2,
+            "rename takes its own undo step since RM24"
         );
+        assert_eq!(core.undo_label(), Some("Rename figure"));
 
         // Refusals spend nothing under either contract.
         let edits = core.edits_since_autosave();
@@ -2314,11 +2330,13 @@ mod tests {
 
     #[test]
     fn mcp_layers_bulk_visibility_marks_dirty_only_for_actual_changes() {
-        // Wave 13 (B3): the bulk visibility writes take no
-        // snapshot (panel parity), so an actual change is
-        // counted through `mark_dirty` — exactly once per
-        // call, however many figures flipped — and a
-        // no-change call counts nothing.
+        // Wave 13 (B3): the bulk visibility writes counted
+        // an actual change through `mark_dirty` — exactly
+        // once per call, however many figures flipped —
+        // and a no-change call counted nothing. Roadmap
+        // Wave 1 (RM24, P-14) keeps that counting shape but
+        // the count is now an undo step: exactly one per
+        // changing call, none for a no-change call.
         let mut core = EditorCore::new();
         core.add_figure();
         let edits = core.edits_since_autosave();
@@ -2329,26 +2347,27 @@ mod tests {
         assert_eq!(
             core.edits_since_autosave(),
             edits + 1,
-            "one mark for the whole bulk write"
+            "one edit counted for the whole bulk write"
         );
-        assert_eq!(core.undo_depth(), depth, "no snapshot for a visibility write");
+        assert_eq!(core.undo_depth(), depth + 1, "one undo step for the bulk write");
 
         tool_layers_set_all_visible(&mut core, &json!({ "visible": false }))
             .expect("hiding again is a no-change success");
         assert_eq!(
             core.edits_since_autosave(),
             edits + 1,
-            "a no-change call marks nothing"
+            "a no-change call counts nothing"
         );
+        assert_eq!(core.undo_depth(), depth + 1, "a no-change call spends no step");
 
         tool_layers_invert_visibility(&mut core, &json!({}))
             .expect("invert succeeds");
         assert_eq!(
             core.edits_since_autosave(),
             edits + 2,
-            "the invert flipped flags, so it marks once"
+            "the invert flipped flags, so it counts once"
         );
-        assert_eq!(core.undo_depth(), depth, "the invert takes no snapshot either");
+        assert_eq!(core.undo_depth(), depth + 2, "the invert takes its own step");
     }
 
     #[test]
@@ -2463,10 +2482,13 @@ mod tests {
 
     #[test]
     fn set_figure_color_marks_dirty_without_an_undo_step() {
-        // Wave 13 (B3): the colour write stays
-        // non-undoable (the op's standing discipline), but
-        // an actual change now counts toward the dirty dot
-        // and autosave cadence through `mark_dirty`.
+        // Wave 13 (B3): the colour write counted toward
+        // the dirty dot and autosave cadence through
+        // `mark_dirty` while staying non-undoable. Roadmap
+        // Wave 1 (RM24, P-14) closed the census: a real
+        // change now takes a coalesced undo step — a run
+        // of colour picks is ONE step that counts one edit
+        // per pick.
         let mut core = EditorCore::new();
         let fi = core.selected_figure;
         let stored = core.project.figures[fi].color;
@@ -2475,15 +2497,21 @@ mod tests {
 
         core.set_figure_color(fi, 0x2686E8);
         assert_ne!(stored, 0x2686E8, "the test colour differs from the stored one");
-        assert_eq!(core.edits_since_autosave(), edits + 1, "one mark for the change");
-        assert_eq!(core.undo_depth(), depth, "no snapshot for a colour write");
+        assert_eq!(core.edits_since_autosave(), edits + 1, "one edit counted for the change");
+        assert_eq!(core.undo_depth(), depth + 1, "one coalesced step for the colour run");
+
+        // A second, different pick folds into the same
+        // step (the gesture is one undo).
+        core.set_figure_color(fi, 0x123456);
+        assert_eq!(core.edits_since_autosave(), edits + 2, "the fold still counts the edit");
+        assert_eq!(core.undo_depth(), depth + 1, "the run stays one step");
 
         // Re-selecting the stored colour changes nothing
-        // and marks nothing; a stale index marks nothing.
-        core.set_figure_color(fi, 0x2686E8);
+        // and spends nothing; a stale index spends nothing.
+        core.set_figure_color(fi, 0x123456);
         core.set_figure_color(999, 0x123456);
-        assert_eq!(core.edits_since_autosave(), edits + 1);
-        assert_eq!(core.undo_depth(), depth);
+        assert_eq!(core.edits_since_autosave(), edits + 2);
+        assert_eq!(core.undo_depth(), depth + 1);
     }
 
     #[test]

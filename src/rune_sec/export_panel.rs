@@ -331,6 +331,76 @@
 //! did; a member's failure never stops the bundle —
 //! every member is attempted, and the recap names the
 //! failures, exactly as before.
+//!
+//! Roadmap Wave 1 (RM23, P-13) adds export delivery.
+//! FIRST: named destinations + an overwrite guard.
+//! Every single-file destination the panel controls
+//! is now derived from the project name
+//! (`project_stem` / `ExportOp::dest_named`): the MP4
+//! master is `./export/<project>.mp4`, not a shared
+//! `animation.mp4` the next episode silently replaces.
+//! And before any export whose single-file targets
+//! already exist, the first press only arms the guard
+//! and says so (status + recap, one new sentence —
+//! no existing class-C sentence changes); the second
+//! press of the same export overwrites. The guard
+//! covers the jobbed MP4/WebM, the bundles' file
+//! members, the synchronous GIF/APNG/sheet/contact
+//! files, the .piv/.stknds files and the delivery /
+//! publish destinations; the sequence formats (PNG/
+//! JPEG/SVG directories of regenerable frames) stay
+//! unguarded, as do .stk/.nodes (their file names are
+//! the figure's, chosen inside the editor ops). The
+//! full `EditorCore` ops for GIF/sheet/APNG still
+//! write their hardcoded names — the panel now calls
+//! the lib entries directly at the named paths in
+//! both modes, in the ops' exact status wording, so
+//! the guard and the naming hold in "All frames" too.
+//! THEN: a Delivery section — preset chips (Project
+//! master / YouTube 1080p / YouTube 4K / Community
+//! GIF) composing format + the core scaled entries,
+//! one Export delivery button, and its honest output
+//! line naming preset, dimensions and destination.
+//! (A Shorts preset is NOT offered: the scaled entries
+//! preserve the staged aspect, and a 9:16 reframe
+//! needs a core crop the export funnel does not have
+//! — IA-RM23-4.) And a third bundle, "Publish
+//! package": the delivery MP4 (the selected MP4
+//! preset's leg) + the SRT and VTT sidecars from the
+//! subtitle writers + a 1280-wide thumbnail still of
+//! the playhead frame, run as one job on the bundle
+//! contract, its recap naming every member. Export
+//! cancel stays unbuilt (decision D-4).
+//!
+//! Roadmap Wave 1 (RM29, P-16) adds the post-export QA
+//! probe and the partial-artifact honesty. When an
+//! MP4/WebM job (single, delivery, video bundle or the
+//! publish package's MP4 leg) finishes successfully,
+//! the produced file is probed — ffprobe stream and
+//! duration data, a full audio decode metered for peak
+//! and RMS, a black-frame scan over sampled frames and,
+//! when the project has subtitle cues in the exported
+//! window, a burn-in spot-check counting text-colour
+//! ink in the anchored band — and the verdict renders
+//! as its own line under the recap (`xc-qa`), built by
+//! `qa_verdict` from the measurements alone. The probe
+//! is detectors only: it never writes or rewrites the
+//! status or the recap, and no class-C sentence changes
+//! — a failed probe is a second, separate record, so
+//! the P0-1 shape (a success sentence over a broken
+//! file) now has a loud neighbour. Its sharpest check
+//! is the silent-audio one: when the project has
+//! audible clips the export claims, a decoded peak at
+//! digital silence fails the verdict. The honesty half:
+//! a failed PNG/JPEG sequence job states its residue —
+//! the frame files the attempt left in the destination
+//! — on its own line (`xc-residue`), and Recent exports
+//! marks a sequence row incomplete when the directory
+//! holds fewer frames than the last sequence job for
+//! that row was expected to write. The QA and residue
+//! labels ride IA-RM29-1; until the integrator inserts
+//! them the wire falls back to the key text, the Q7
+//! pattern.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -608,6 +678,371 @@ fn export_dir() -> PathBuf {
         .join("export")
 }
 
+// ---- Overwrite guard (Roadmap Wave 1, RM23) -----------
+// P-13's first item: an export must never silently
+// replace a finished master. The guard is press-time
+// and two-press: when any of the export's single-file
+// targets already exists, the first press writes
+// nothing — it arms the guard (the target set's
+// signature, held in a thread-local like the history
+// cache: panel session state, no `State` field) and
+// reports through the status and the recap in one new
+// sentence. A second press of the SAME export (the
+// armed signature matches the targets that exist)
+// proceeds and disarms. A press of a different export
+// replaces the arm with its own guard. The sentence
+// is a `core.status` record, so it stays English like
+// every status record (the Wave T discipline); it is
+// a NEW sentence — no class-C wording changes — and
+// it is shaped so the detectors read it honestly: it
+// does not start with "Exported " (not a success) and
+// does not contain "failed" (not a failure).
+
+thread_local! {
+    /// The armed overwrite signature: the existing
+    /// target paths of the last guarded press, joined
+    /// by `overwrite_signature`.
+    static OVERWRITE_ARM: RefCell<Option<String>> = RefCell::new(None);
+}
+
+/// Which of an export's targets already exist as
+/// files — the guard's only filesystem read, one stat
+/// per target. Pure apart from those stats.
+pub fn existing_targets(targets: &[PathBuf]) -> Vec<PathBuf> {
+    targets.iter().filter(|p| p.is_file()).cloned().collect()
+}
+
+/// The signature an arm is stored and matched under:
+/// the existing targets' paths, in order.
+pub fn overwrite_signature(existing: &[PathBuf]) -> String {
+    existing
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+/// The guard's sentence: the first existing target is
+/// named, the rest are counted. (Status-record copy —
+/// English by the class-C discipline, like the ops'
+/// own sentences.)
+pub fn overwrite_guard_line(existing: &[PathBuf]) -> String {
+    let first = existing
+        .first()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let more = if existing.len() > 1 {
+        format!(" (and {} more)", existing.len() - 1)
+    } else {
+        String::new()
+    };
+    format!(
+        "Export target already exists: {first}{more} — press the same export again to overwrite it."
+    )
+}
+
+/// The press-time guard: returns true when the press
+/// must NOT run — some target exists and this press
+/// was not the confirming second press. On a block
+/// the guard sentence is written to the status and
+/// the recap (the panel's persistent record), so the
+/// user sees exactly which file stopped the export.
+fn guard_blocks(s: &mut State, targets: &[PathBuf]) -> bool {
+    let existing = existing_targets(targets);
+    if existing.is_empty() {
+        return false;
+    }
+    let sig = overwrite_signature(&existing);
+    let armed = OVERWRITE_ARM.with(|a| a.borrow().clone());
+    if armed.as_deref() == Some(sig.as_str()) {
+        OVERWRITE_ARM.with(|a| *a.borrow_mut() = None);
+        return false;
+    }
+    OVERWRITE_ARM.with(|a| *a.borrow_mut() = Some(sig));
+    let line = overwrite_guard_line(&existing);
+    s.core.status = line.clone();
+    s.export_recap = line;
+    true
+}
+
+/// The single-file targets a bundle press would
+/// write, under its destination root: the images
+/// bundle's only file member is the spritesheet (the
+/// sequences write directories); the video bundle's
+/// two members are both files.
+fn bundle_file_targets(kind: BundleKind, project: &stykanimate_rs::model::Project, root: &Path) -> Vec<PathBuf> {
+    let stem = project_stem(project);
+    match kind {
+        BundleKind::Images => vec![root.join(
+            file_name_for(ExportOp::Spritesheet, &stem).expect("spritesheet is a file format"),
+        )],
+        BundleKind::Video => [ExportOp::Mp4, ExportOp::Webm]
+            .iter()
+            .map(|op| root.join(file_name_for(*op, &stem).expect("video formats are files")))
+            .collect(),
+    }
+}
+
+// ---- Delivery presets (Roadmap Wave 1, RM23) ----------
+// P-13's presets: one selection, composed over the
+// machinery that already exists — the MP4/GIF scaled
+// entries in `export.rs` (a true re-render at the
+// scaled size, never an upscale) and the named
+// destinations above. The selection is panel session
+// state (the thread-local idiom of this file), so no
+// `State` field is added; it starts at Project master
+// on every launch. A Shorts preset is deliberately
+// absent: scaling preserves the staged aspect, and
+// nothing in the funnel reframes to 9:16 — offering
+// the chip would promise a crop that does not happen
+// (IA-RM23-4 files the core ask).
+
+/// One delivery preset: a format plus a scale rule.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DeliveryPreset {
+    /// The project as staged: MP4 at scale 1.0.
+    Master,
+    /// MP4 scaled so the picture is 1080 pt tall.
+    Youtube1080,
+    /// MP4 scaled so the picture is 2160 pt tall.
+    Youtube4k,
+    /// GIF at half scale — the community-post format.
+    Gif,
+}
+
+impl DeliveryPreset {
+    /// The catalogue key the preset's chip label
+    /// renders through (IA-RM23-2).
+    pub fn label_key(self) -> &'static str {
+        match self {
+            DeliveryPreset::Master => "export_preset_master",
+            DeliveryPreset::Youtube1080 => "export_preset_youtube_1080",
+            DeliveryPreset::Youtube4k => "export_preset_youtube_4k",
+            DeliveryPreset::Gif => "export_preset_gif",
+        }
+    }
+
+    /// Whether this preset's format is the GIF.
+    pub fn is_gif(self) -> bool {
+        matches!(self, DeliveryPreset::Gif)
+    }
+
+    /// The preset chip's element key.
+    pub fn key(self) -> &'static str {
+        match self {
+            DeliveryPreset::Master => "xc-preset-master",
+            DeliveryPreset::Youtube1080 => "xc-preset-yt1080",
+            DeliveryPreset::Youtube4k => "xc-preset-yt4k",
+            DeliveryPreset::Gif => "xc-preset-gif",
+        }
+    }
+}
+
+thread_local! {
+    /// The selected delivery preset (session state).
+    static DELIVERY_PRESET: RefCell<DeliveryPreset> =
+        RefCell::new(DeliveryPreset::Master);
+}
+
+/// The selected delivery preset.
+pub fn delivery_preset() -> DeliveryPreset {
+    DELIVERY_PRESET.with(|p| *p.borrow())
+}
+
+/// Select a delivery preset (the chips' handler).
+pub fn set_delivery_preset(preset: DeliveryPreset) {
+    DELIVERY_PRESET.with(|p| *p.borrow_mut() = preset);
+}
+
+/// The scale a preset renders at: the height presets
+/// divide their target height by the stage height
+/// (a stage already at the target renders at 1.0 and
+/// routes through the unscaled entries inside the
+/// core functions, byte-identical); the GIF preset
+/// is a fixed half. A stage with no usable height
+/// falls back to 1.0 rather than inventing a scale.
+pub fn delivery_scale(project: &stykanimate_rs::model::Project, preset: DeliveryPreset) -> f32 {
+    let for_height = |target: f32| {
+        let h = project.stage[1];
+        if h.is_finite() && h > 0.0 {
+            target / h
+        } else {
+            1.0
+        }
+    };
+    match preset {
+        DeliveryPreset::Master => 1.0,
+        DeliveryPreset::Youtube1080 => for_height(1080.0),
+        DeliveryPreset::Youtube4k => for_height(2160.0),
+        DeliveryPreset::Gif => 0.5,
+    }
+}
+
+/// The pixel dimensions a preset will produce: the
+/// stage dimensions times the preset's scale,
+/// rounded, at least 1 per axis — the output line's
+/// numbers, computed from the same scale the export
+/// will use, so the two can never disagree.
+pub fn delivery_dims(project: &stykanimate_rs::model::Project, preset: DeliveryPreset) -> (u32, u32) {
+    let scale = delivery_scale(project, preset);
+    let dim = |v: f32| -> u32 {
+        if v.is_finite() && v > 0.0 {
+            (v * scale).round().max(1.0) as u32
+        } else {
+            0
+        }
+    };
+    (dim(project.stage[0]), dim(project.stage[1]))
+}
+
+/// The file name a preset writes, from the project
+/// stem: the height presets carry their platform
+/// suffix (`<project>-1080p.mp4`, A12's R12.3 shape);
+/// the master is the plain named MP4.
+pub fn delivery_file_name(stem: &str, preset: DeliveryPreset) -> String {
+    match preset {
+        DeliveryPreset::Master => format!("{stem}.mp4"),
+        DeliveryPreset::Youtube1080 => format!("{stem}-1080p.mp4"),
+        DeliveryPreset::Youtube4k => format!("{stem}-4k.mp4"),
+        DeliveryPreset::Gif => format!("{stem}.gif"),
+    }
+}
+
+/// Where a preset export writes: the export root
+/// plus `delivery_file_name`.
+pub fn delivery_dest(core: &EditorCore, preset: DeliveryPreset) -> PathBuf {
+    export_dir().join(delivery_file_name(&project_stem(&core.project), preset))
+}
+
+/// The delivery line under the preset chips: what
+/// the Export delivery press will produce — preset,
+/// dimensions, destination — a catalogue template
+/// (`export_delivery_line`, IA-RM23-2) with the
+/// preset label, the dims and the destination as
+/// slots, the camera `follow_label` idiom.
+pub fn delivery_text(core: &EditorCore, preset: DeliveryPreset) -> String {
+    let (w, h) = delivery_dims(&core.project, preset);
+    i18n_wire::tr(core, "export_delivery_line")
+        .replace("{preset}", &i18n_wire::tr(core, preset.label_key()))
+        .replace("{width}", &w.to_string())
+        .replace("{height}", &h.to_string())
+        .replace(
+            "{dest}",
+            &format!("./{}", display_name(&delivery_dest(core, preset))),
+        )
+}
+
+/// One format row's guidance note with its real destination
+/// composed in (Roadmap Wave 1, RM23, IA-RM23-3): the six
+/// converted `export_note_*` values carry a `{dest}` slot in
+/// place of the legacy fixed path, and the row composes the
+/// op's project-stem destination — the same string the op
+/// itself writes to (`ExportOp::dest_named`).
+fn note_with_dest(core: &EditorCore, key: &str, op: ExportOp) -> String {
+    i18n_wire::tr(core, key)
+        .replace("{dest}", &op.dest_named(&project_stem(&core.project)))
+}
+
+// ---- Publish package (Roadmap Wave 1, RM23) -----------
+// P-13's bundle: the delivery MP4 (the selected MP4
+// preset's leg — the GIF preset falls back to the
+// master leg, a package carries an MP4 by
+// definition) + the SRT and VTT sidecars from the
+// subtitle writers + a thumbnail still of the
+// playhead frame at 1280 wide. Members run in this
+// order under the core bundle-progress contract,
+// each allocated before the first runs (the MP4 its
+// sampled frame total, each file member 1), and the
+// recap names every member with its destination —
+// the bundle recap's shapes, so the classifier reads
+// a publish recap exactly like a bundle recap.
+
+/// The publish package's member names, in run order —
+/// the failure names the recap and the result carry.
+pub const PUBLISH_MEMBERS: [&str; 4] = ["MP4", "SRT", "VTT", "thumbnail"];
+
+/// The MP4 preset a publish package uses: the
+/// selected preset when it is an MP4 preset, the
+/// master when the GIF preset is selected.
+pub fn publish_mp4_preset(preset: DeliveryPreset) -> DeliveryPreset {
+    if preset.is_gif() {
+        DeliveryPreset::Master
+    } else {
+        preset
+    }
+}
+
+/// The publish package's four destination files,
+/// under the export root, named from the project
+/// stem and the package's MP4 preset.
+pub fn publish_targets(core: &EditorCore, preset: DeliveryPreset) -> Vec<PathBuf> {
+    let stem = project_stem(&core.project);
+    let dir = export_dir();
+    vec![
+        dir.join(delivery_file_name(&stem, publish_mp4_preset(preset))),
+        dir.join(format!("{stem}.srt")),
+        dir.join(format!("{stem}.vtt")),
+        dir.join(format!("{stem}-thumbnail.png")),
+    ]
+}
+
+/// The recap line for a finished publish package,
+/// built from the members that failed: every member
+/// that ran and did not fail, with its destination,
+/// in run order; the failures named after the
+/// "; failed:" marker — `bundle_recap`'s exact
+/// shapes, one member list over.
+pub fn publish_recap(failed: &[&str], stem: &str, mp4_name: &str) -> String {
+    let dests: [(&str, String); 4] = [
+        ("MP4", format!("./export/{mp4_name}")),
+        ("SRT", format!("./export/{stem}.srt")),
+        ("VTT", format!("./export/{stem}.vtt")),
+        ("thumbnail", format!("./export/{stem}-thumbnail.png")),
+    ];
+    let mut done: Vec<String> = Vec::new();
+    for (name, dest) in &dests {
+        if !failed.contains(name) {
+            done.push(format!("{name} → {dest}"));
+        }
+    }
+    let mut recap = if done.is_empty() {
+        "Exported nothing".to_string()
+    } else {
+        format!("Exported {}", done.join(", "))
+    };
+    if !failed.is_empty() {
+        recap += &format!("; failed: {}", failed.join(", "));
+    }
+    recap
+}
+
+/// Write the publish package's thumbnail member: the
+/// playhead frame rendered at 1280 pt wide (the core
+/// scaled still entry — a true re-render, not an
+/// upscale) and saved as PNG. No frames is an error,
+/// never an empty success.
+fn write_thumbnail(
+    project: &stykanimate_rs::model::Project,
+    frame: usize,
+    path: &Path,
+) -> std::io::Result<()> {
+    if project.frames.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the project has no frames to thumbnail",
+        ));
+    }
+    let frame = frame.min(project.frames.len() - 1);
+    let w = project.stage[0];
+    let scale = if w.is_finite() && w > 0.0 {
+        1280.0 / w
+    } else {
+        1.0
+    };
+    let img = stykanimate_rs::export::render_frame_scaled(project, frame, scale)?;
+    img.save(path).map_err(std::io::Error::other)
+}
+
 // ---- Bundle plans and recaps -----------------------------
 // `plan_bundle` is the single source of truth for what a
 // bundle runs: the bundle handler executes exactly this
@@ -665,6 +1100,80 @@ impl ExportOp {
             ExportOp::Mp4 => "./export/animation.mp4",
             ExportOp::Webm => "./export/animation.webm",
         }
+    }
+
+    /// Where the format's full export writes when the
+    /// destination is named from the project (Roadmap
+    /// Wave 1, RM23 — P-13's named destinations): the
+    /// single-file formats carry the project stem
+    /// (`project_stem`) instead of the shared `animation`
+    /// stem every episode used to overwrite; the
+    /// sequence formats write into the same directories
+    /// as ever (their frames are regenerable and named
+    /// by frame number, not by episode). With the stem
+    /// `"animation"` this is `dest()` byte for byte.
+    pub fn dest_named(self, stem: &str) -> String {
+        match self {
+            ExportOp::Png => "./export/".to_string(),
+            ExportOp::Jpeg => "out/jpeg/".to_string(),
+            ExportOp::Svg => "./export/svg/".to_string(),
+            ExportOp::Spritesheet => format!("./export/{stem}-spritesheet.png"),
+            ExportOp::ContactSheet => format!("./export/{stem}-contact-sheet.png"),
+            ExportOp::Gif => format!("./export/{stem}.gif"),
+            ExportOp::Apng => format!("out/{stem}.apng"),
+            ExportOp::Mp4 => format!("./export/{stem}.mp4"),
+            ExportOp::Webm => format!("./export/{stem}.webm"),
+        }
+    }
+}
+
+/// The bare file name a single-file format writes under
+/// its output root, named from the project stem
+/// (RM23) — the join half of `ExportOp::dest_named`:
+/// the panel builds real paths from the root plus
+/// this name, and the recap strings from
+/// `dest_named`, and the two can never disagree.
+/// `None` for the sequence formats, which write a
+/// directory of frame files, not one named file.
+pub fn file_name_for(op: ExportOp, stem: &str) -> Option<String> {
+    match op {
+        ExportOp::Spritesheet => Some(format!("{stem}-spritesheet.png")),
+        ExportOp::ContactSheet => Some(format!("{stem}-contact-sheet.png")),
+        ExportOp::Gif => Some(format!("{stem}.gif")),
+        ExportOp::Apng => Some(format!("{stem}.apng")),
+        ExportOp::Mp4 => Some(format!("{stem}.mp4")),
+        ExportOp::Webm => Some(format!("{stem}.webm")),
+        ExportOp::Png | ExportOp::Jpeg | ExportOp::Svg => None,
+    }
+}
+
+/// The file stem every named destination is built
+/// from (RM23): the project name, lowercased, with
+/// every run of non-alphanumeric characters collapsed
+/// to one `-` and no leading/trailing dash
+/// ("The Last Promise" → `the-last-promise`).
+/// Underscores are kept. A name with no alphanumeric
+/// characters at all falls back to the historical
+/// stem, `animation` — the name the destinations
+/// carried before they were named.
+pub fn project_stem(project: &stykanimate_rs::model::Project) -> String {
+    let mut stem = String::new();
+    let mut pending_dash = false;
+    for ch in project.name.chars() {
+        if ch.is_alphanumeric() || ch == '_' {
+            if pending_dash && !stem.is_empty() {
+                stem.push('-');
+            }
+            pending_dash = false;
+            stem.extend(ch.to_lowercase());
+        } else {
+            pending_dash = true;
+        }
+    }
+    if stem.is_empty() {
+        "animation".to_string()
+    } else {
+        stem
     }
 }
 
@@ -816,17 +1325,25 @@ pub fn recap_severity(recap: &str) -> Severity {
 /// full destination, and a failure keeps the op's reason
 /// via `failure_recap`.
 fn note_single(s: &mut State, op: ExportOp, range: Option<(usize, usize)>) {
+    let dest = op.dest_named(&project_stem(&s.core.project));
+    note_single_dest(s, op, range, &dest);
+}
+
+/// `note_single` with the destination given: the
+/// jobbed file formats recap the destination the job
+/// actually wrote (its baked `job.dest`, named at
+/// press time), not a recomputed one — the finish
+/// path passes it, so the recap names the real file
+/// even if the project was renamed mid-job.
+fn note_single_dest(s: &mut State, op: ExportOp, range: Option<(usize, usize)>, dest: &str) {
     s.export_recap = if export_failed(&s.core) {
         failure_recap(&s.core.status, op.name())
     } else {
         match range {
-            Some(range) => single_recap_range(
-                op.name(),
-                op.dest(),
-                range,
-                matches!(op, ExportOp::Webm),
-            ),
-            None => single_recap(op.name(), op.dest()),
+            Some(range) => {
+                single_recap_range(op.name(), dest, range, matches!(op, ExportOp::Webm))
+            }
+            None => single_recap(op.name(), dest),
         }
     };
 }
@@ -835,12 +1352,14 @@ fn note_single(s: &mut State, op: ExportOp, range: Option<(usize, usize)>) {
 /// plan: every op that ran and did not fail, with its
 /// destination, in plan order; the failed ops (if any) are
 /// named after a "; failed:" marker instead of being
-/// claimed as exported.
-pub fn bundle_recap(kind: BundleKind, failed: &[ExportOp]) -> String {
+/// claimed as exported. Destinations are the named ones
+/// (RM23): built from the project stem the bundle ran
+/// under.
+pub fn bundle_recap(kind: BundleKind, failed: &[ExportOp], stem: &str) -> String {
     let mut done: Vec<String> = Vec::new();
     for op in plan_bundle(kind) {
         if !failed.contains(&op) {
-            done.push(format!("{} → {}", op.name(), op.dest()));
+            done.push(format!("{} → {}", op.name(), op.dest_named(stem)));
         }
     }
     let mut recap = if done.is_empty() {
@@ -993,6 +1512,16 @@ enum JobKind {
     /// runs the whole plan, not one format.
     BundleImages,
     BundleVideo,
+    /// A delivery-preset MP4 (RM23): the full MP4 at
+    /// the preset's scale (computed in the worker
+    /// from the cloned project, like every other
+    /// baked input), through the scaled entry (at
+    /// 1.0 the entry itself routes to the unscaled
+    /// funnel).
+    Mp4Preset(DeliveryPreset),
+    /// The publish package (RM23): a job whose worker
+    /// runs the four package members, not one format.
+    BundlePublish,
 }
 
 impl JobKind {
@@ -1005,10 +1534,11 @@ impl JobKind {
         match self {
             JobKind::PngFull | JobKind::PngRange(..) => ExportOp::Png,
             JobKind::JpegFull | JobKind::JpegRange(..) => ExportOp::Jpeg,
-            JobKind::Mp4Full | JobKind::Mp4Range(..) => ExportOp::Mp4,
+            JobKind::Mp4Full | JobKind::Mp4Range(..) | JobKind::Mp4Preset(_) => ExportOp::Mp4,
             JobKind::WebmFull | JobKind::WebmRange(..) => ExportOp::Webm,
             JobKind::BundleImages => ExportOp::Png,
             JobKind::BundleVideo => ExportOp::Mp4,
+            JobKind::BundlePublish => ExportOp::Mp4,
         }
     }
 
@@ -1020,6 +1550,14 @@ impl JobKind {
             JobKind::BundleVideo => Some(BundleKind::Video),
             _ => None,
         }
+    }
+
+    /// Whether this job runs the publish package
+    /// (RM23) — its own branch in the finish and the
+    /// readout, like a bundle's, but with its own
+    /// member list and recap builder.
+    fn publish(self) -> bool {
+        matches!(self, JobKind::BundlePublish)
     }
 
     fn range(self) -> Option<(usize, usize)> {
@@ -1052,6 +1590,11 @@ enum ExportJobResult {
     /// `Err`); the job-level `Err` is reserved for a
     /// worker that produced nothing at all.
     Bundle(Vec<ExportOp>),
+    /// A finished publish package (RM23): the members
+    /// that failed, by name (`PUBLISH_MEMBERS`), in
+    /// run order — the same data-not-error discipline
+    /// as `Bundle`.
+    Publish(Vec<&'static str>),
 }
 
 /// What the worker sends back: the entry's result, with
@@ -1114,6 +1657,10 @@ pub fn export_job_active(s: &State) -> bool {
 /// no filesystem.
 fn job_spec(s: &State, op: ExportOp) -> Option<(JobKind, PathBuf)> {
     let range = range_target(&s.core, s.export_use_range);
+    // RM23: the video destinations are named from the
+    // project stem at press time and baked into the
+    // job, like the range.
+    let stem = project_stem(&s.core.project);
     Some(match (op, range) {
         (ExportOp::Png, Some((a, b))) => (JobKind::PngRange(a, b), export_dir()),
         (ExportOp::Png, None) => (JobKind::PngFull, export_dir()),
@@ -1124,16 +1671,20 @@ fn job_spec(s: &State, op: ExportOp) -> Option<(JobKind, PathBuf)> {
         (ExportOp::Jpeg, None) => (JobKind::JpegFull, PathBuf::from("out").join("jpeg")),
         (ExportOp::Mp4, Some((a, b))) => (
             JobKind::Mp4Range(a, b),
-            export_dir().join("animation.mp4"),
+            export_dir().join(file_name_for(ExportOp::Mp4, &stem).expect("MP4 is a file format")),
         ),
-        (ExportOp::Mp4, None) => (JobKind::Mp4Full, export_dir().join("animation.mp4")),
+        (ExportOp::Mp4, None) => (
+            JobKind::Mp4Full,
+            export_dir().join(file_name_for(ExportOp::Mp4, &stem).expect("MP4 is a file format")),
+        ),
         (ExportOp::Webm, Some((a, b))) => (
             JobKind::WebmRange(a, b),
-            export_dir().join("animation.webm"),
+            export_dir().join(file_name_for(ExportOp::Webm, &stem).expect("WebM is a file format")),
         ),
-        (ExportOp::Webm, None) => {
-            (JobKind::WebmFull, export_dir().join("animation.webm"))
-        }
+        (ExportOp::Webm, None) => (
+            JobKind::WebmFull,
+            export_dir().join(file_name_for(ExportOp::Webm, &stem).expect("WebM is a file format")),
+        ),
         _ => return None,
     })
 }
@@ -1205,6 +1756,16 @@ fn run_job(
             Some(&render_cb),
         )
         .map(ExportJobResult::Mp4),
+        JobKind::Mp4Preset(preset) => {
+            stykanimate_rs::export::export_mp4_scaled_with_progress(
+                project,
+                dest,
+                delivery_scale(project, preset),
+                Some(&encode_cb),
+                Some(&render_cb),
+            )
+            .map(ExportJobResult::Mp4)
+        }
         JobKind::WebmFull => stykanimate_rs::export::export_webm_with_progress(
             project,
             dest,
@@ -1225,13 +1786,16 @@ fn run_job(
         }
         // Bundle kinds never run here: `begin_job`'s work
         // closure for a bundle calls `run_bundle_job`
-        // (the plan-driven worker). Reaching this arm is
+        // (the plan-driven worker), and a publish job's
+        // calls `run_publish_job`. Reaching this arm is
         // a dispatch bug, surfaced as a failed job rather
         // than a panic.
-        JobKind::BundleImages | JobKind::BundleVideo => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "bundle jobs run through run_bundle_job",
-        )),
+        JobKind::BundleImages | JobKind::BundleVideo | JobKind::BundlePublish => {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "bundle jobs run through run_bundle_job",
+            ))
+        }
     };
     result.map_err(|e| e.to_string())
 }
@@ -1284,11 +1848,35 @@ fn start_export_job(s: &mut State, op: ExportOp) -> bool {
     let Some((kind, dest)) = job_spec(s, op) else {
         return false;
     };
+    // The overwrite guard (RM23): the jobbed file
+    // formats (MP4/WebM) name a finished master —
+    // an existing one stops the press until it is
+    // confirmed. The sequence formats write into a
+    // directory and stay unguarded.
+    if matches!(op, ExportOp::Mp4 | ExportOp::Webm) && guard_blocks(s, std::slice::from_ref(&dest)) {
+        return false;
+    }
     // The directory creation the MP4/WebM range actions
     // performed before calling (the sequence entries and
     // the encode funnels create their own parents).
     if matches!(kind, JobKind::Mp4Range(..) | JobKind::WebmRange(..)) {
         let _ = std::fs::create_dir_all(export_dir());
+    }
+    // RM29: a sequence job records what it is expected
+    // to write, under the name Recent exports will give
+    // its row, before the worker starts — a job that
+    // dies mid-write is exactly the case the incomplete
+    // mark exists for (`mark_incomplete`).
+    match op {
+        ExportOp::Png => note_expected_sequence(
+            &display_name(&export_dir().join("frame-*.png")),
+            expected_sequence_frames(&s.core.project, kind.range()),
+        ),
+        ExportOp::Jpeg => note_expected_sequence(
+            &display_name(&PathBuf::from("out").join("jpeg")),
+            expected_sequence_frames(&s.core.project, kind.range()),
+        ),
+        _ => {}
     }
     let work_dest = dest.clone();
     let project = s.core.project.clone();
@@ -1382,17 +1970,28 @@ fn run_bundle_job(
             if result.is_err() {
                 failed.push(ExportOp::Svg);
             }
-            let result = export::export_spritesheet(project, &dest.join("spritesheet.png"));
+            let result = export::export_spritesheet(
+                project,
+                &dest.join(
+                    file_name_for(ExportOp::Spritesheet, &project_stem(project))
+                        .expect("spritesheet is a file format"),
+                ),
+            );
             tracker.complete_member(result.is_ok());
             if result.is_err() {
                 failed.push(ExportOp::Spritesheet);
             }
         }
         BundleKind::Video => {
+            // RM23: the members write the named
+            // destinations, like the single-format jobs.
+            let stem = project_stem(project);
             let member_cb = tracker.encode_callback(0);
             let result = export::export_mp4_with_encode_progress(
                 project,
-                &dest.join("animation.mp4"),
+                &dest.join(
+                    file_name_for(ExportOp::Mp4, &stem).expect("MP4 is a file format"),
+                ),
                 Some(&member_cb),
             );
             tracker.complete_member(result.is_ok());
@@ -1402,7 +2001,9 @@ fn run_bundle_job(
             let member_cb = tracker.encode_callback(1);
             let result = export::export_webm_with_encode_progress(
                 project,
-                &dest.join("animation.webm"),
+                &dest.join(
+                    file_name_for(ExportOp::Webm, &stem).expect("WebM is a file format"),
+                ),
                 Some(&member_cb),
             );
             tracker.complete_member(result.is_ok());
@@ -1426,6 +2027,27 @@ fn start_bundle_job(s: &mut State, kind: BundleKind) -> bool {
         return false;
     }
     let (job_kind, dest) = bundle_job_spec(kind);
+    // The overwrite guard (RM23): a bundle whose file
+    // members already exist stops at the first press,
+    // like a single-format press.
+    let targets = bundle_file_targets(kind, &s.core.project, &dest);
+    if guard_blocks(s, &targets) {
+        return false;
+    }
+    // RM29: the images bundle's two sequence members
+    // record their expected counts like single sequence
+    // jobs do (full exports — bundles ignore the range
+    // toggle).
+    if matches!(kind, BundleKind::Images) {
+        note_expected_sequence(
+            &display_name(&export_dir().join("frame-*.png")),
+            expected_sequence_frames(&s.core.project, None),
+        );
+        note_expected_sequence(
+            &display_name(&PathBuf::from("out").join("jpeg")),
+            expected_sequence_frames(&s.core.project, None),
+        );
+    }
     let work_dest = dest.clone();
     let project = s.core.project.clone();
     begin_job(
@@ -1435,6 +2057,141 @@ fn start_bundle_job(s: &mut State, kind: BundleKind) -> bool {
         project,
         Box::new(move |project, _render, _encode, bundle| {
             run_bundle_job(kind, project, &work_dest, bundle)
+        }),
+    );
+    true
+}
+
+/// The publish package's worker body (RM23): run the
+/// four members in order over the cloned project under
+/// a core `BundleProgress` tracker allocated before
+/// the first member runs — the MP4 member its sampled
+/// frame total, each file member 1 — exactly the
+/// bundle discipline. The MP4 member runs through the
+/// (scaled) encode entry the delivery preset names,
+/// with the tracker's encode translator as its
+/// callback; the sidecars are written from the
+/// subtitle writers' documents; the thumbnail is the
+/// playhead frame at 1280 wide. Every member is
+/// attempted — a failure is recorded by name and the
+/// package continues, as a bundle does — and the
+/// tracker is finished after the last member. Runs
+/// entirely off the UI thread; touches no shell state.
+fn run_publish_job(
+    project: &stykanimate_rs::model::Project,
+    dest: &Path,
+    stem: &str,
+    mp4_name: &str,
+    scale: f32,
+    frame: usize,
+    bundle: &PhaseProgress,
+) -> ExportJobOutcome {
+    use stykanimate_rs::export;
+    // The sidecar writes do not create their parent
+    // (the MP4 funnel does, but it may have failed
+    // before reaching its own creation) — the package
+    // root is created up front, like the actions do.
+    let _ = std::fs::create_dir_all(dest);
+    let bundle_cb = |ev: export::BundleProgressEvent| bundle.store_bundle(ev);
+    let totals = [export::sampled_frame_total(project), 1, 1, 1];
+    let tracker = export::BundleProgress::new(&totals, Some(&bundle_cb));
+    let mut failed: Vec<&'static str> = Vec::new();
+    let member_cb = tracker.encode_callback(0);
+    let result = if scale == 1.0 {
+        export::export_mp4_with_encode_progress(project, &dest.join(mp4_name), Some(&member_cb))
+    } else {
+        export::export_mp4_scaled_with_encode_progress(
+            project,
+            &dest.join(mp4_name),
+            scale,
+            Some(&member_cb),
+        )
+    };
+    tracker.complete_member(result.is_ok());
+    if result.is_err() {
+        failed.push("MP4");
+    }
+    let srt = stykanimate_rs::subtitles::subtitles_to_srt(project);
+    let ok = std::fs::write(dest.join(format!("{stem}.srt")), srt).is_ok();
+    tracker.complete_member(ok);
+    if !ok {
+        failed.push("SRT");
+    }
+    let vtt = stykanimate_rs::subtitles::subtitles_to_vtt(project);
+    let ok = std::fs::write(dest.join(format!("{stem}.vtt")), vtt).is_ok();
+    tracker.complete_member(ok);
+    if !ok {
+        failed.push("VTT");
+    }
+    let ok = write_thumbnail(project, frame, &dest.join(format!("{stem}-thumbnail.png"))).is_ok();
+    tracker.complete_member(ok);
+    if !ok {
+        failed.push("thumbnail");
+    }
+    tracker.finish();
+    Ok(ExportJobResult::Publish(failed))
+}
+
+/// Begin the background job for the publish package —
+/// the body of the Publish package row's press.
+/// Returns false, changing nothing but the guard's
+/// record, when a job is already active (one export
+/// at a time) or when the overwrite guard stops the
+/// press (any of the four destination files exists
+/// and this is not the confirming second press).
+fn start_publish_job(s: &mut State) -> bool {
+    if s.export_job.is_some() {
+        return false;
+    }
+    let preset = delivery_preset();
+    let targets = publish_targets(&s.core, preset);
+    if guard_blocks(s, &targets) {
+        return false;
+    }
+    let mp4_preset = publish_mp4_preset(preset);
+    let stem = project_stem(&s.core.project);
+    let mp4_name = delivery_file_name(&stem, mp4_preset);
+    let scale = delivery_scale(&s.core.project, mp4_preset);
+    let frame = s.core.current;
+    let dest = export_dir();
+    let work_dest = dest.clone();
+    let project = s.core.project.clone();
+    begin_job(
+        s,
+        JobKind::BundlePublish,
+        dest,
+        project,
+        Box::new(move |project, _render, _encode, bundle| {
+            run_publish_job(project, &work_dest, &stem, &mp4_name, scale, frame, bundle)
+        }),
+    );
+    true
+}
+
+/// Begin the background job for an MP4 delivery
+/// preset (the Export delivery press on an MP4
+/// preset): the full MP4 through the scaled entry at
+/// the preset's scale, to the preset's named
+/// destination, under the same one-at-a-time and
+/// overwrite-guard discipline as a single-format job.
+fn start_delivery_job(s: &mut State, preset: DeliveryPreset) -> bool {
+    if s.export_job.is_some() {
+        return false;
+    }
+    let dest = delivery_dest(&s.core, preset);
+    if guard_blocks(s, std::slice::from_ref(&dest)) {
+        return false;
+    }
+    let kind = JobKind::Mp4Preset(preset);
+    let work_dest = dest.clone();
+    let project = s.core.project.clone();
+    begin_job(
+        s,
+        kind,
+        dest,
+        project,
+        Box::new(move |project, render, encode, _bundle| {
+            run_job(kind, project, &work_dest, render, encode)
         }),
     );
     true
@@ -1510,6 +2267,35 @@ fn job_failure_status(op: ExportOp, reason: &str) -> String {
 /// does not change) —
 /// then `note_single`, as the actions called it.
 fn finish_export_job(s: &mut State, job: &ExportJob, result: ExportJobOutcome) {
+    // A publish package job (RM23) finishes the way a
+    // bundle job does — its recap, built from the
+    // members that failed, is the status and the panel
+    // recap together. The stem and the MP4 member's
+    // name are recomputed from the same state the
+    // press read (the preset chips are inert while a
+    // job runs, so the selection cannot have moved).
+    // A job-level `Err` means no member outcome was
+    // reported, so every member counts as failed.
+    if job.kind.publish() {
+        let failed: Vec<&'static str> = match result {
+            Ok(ExportJobResult::Publish(failed)) => failed,
+            _ => PUBLISH_MEMBERS.to_vec(),
+        };
+        let stem = project_stem(&s.core.project);
+        let mp4_name = delivery_file_name(&stem, publish_mp4_preset(delivery_preset()));
+        let recap = publish_recap(&failed, &stem, &mp4_name);
+        s.core.status = recap.clone();
+        s.export_recap = recap;
+        // RM29: probe the package's MP4 leg like any
+        // finished video export — its own QA record
+        // beside the recap, which is not rewritten.
+        clear_residue();
+        if !failed.iter().any(|f| *f == "MP4") {
+            let dest = job.dest.join(&mp4_name);
+            probe_and_store(&s.core.project, &dest, None, true);
+        }
+        return;
+    }
     // A bundle job (Wave Z, Z8) finishes the way the
     // synchronous bundle handler did: the recap — built
     // from the members that failed — is written to the
@@ -1526,12 +2312,39 @@ fn finish_export_job(s: &mut State, job: &ExportJob, result: ExportJobOutcome) {
             Ok(ExportJobResult::Bundle(failed)) => failed,
             _ => plan_bundle(kind),
         };
-        let recap = bundle_recap(kind, &failed);
+        let stem = project_stem(&s.core.project);
+        let recap = bundle_recap(kind, &failed, &stem);
         s.core.status = recap.clone();
         s.export_recap = recap;
+        // RM29: the video bundle's members are finished
+        // video exports — probe each one that did not
+        // fail, the WebM under its video-only audio rule.
+        clear_residue();
+        if matches!(kind, BundleKind::Video) {
+            for (member, audio_possible) in [(ExportOp::Mp4, true), (ExportOp::Webm, false)] {
+                if !failed.contains(&member) {
+                    let dest = job
+                        .dest
+                        .join(file_name_for(member, &stem).expect("video member is a file format"));
+                    probe_and_store(&s.core.project, &dest, None, audio_possible);
+                }
+            }
+        }
         return;
     }
     let op = job.kind.op();
+    // RM29: a failed sequence job states its residue —
+    // the frame files the attempt left in the
+    // destination directory — on the residue line. The
+    // status below keeps the op's own failure sentence
+    // byte for byte; the residue is a second record.
+    let job_failed = result.is_err();
+    if job_failed && matches!(op, ExportOp::Png | ExportOp::Jpeg) {
+        let left = sequence_residue(&job.dest);
+        if left > 0 {
+            store_residue(left, &job.dest);
+        }
+    }
     s.core.status = match result {
         Err(e) => job_failure_status(op, &e),
         Ok(res) => match (job.kind, res) {
@@ -1552,7 +2365,7 @@ fn finish_export_job(s: &mut State, job: &ExportJob, result: ExportJobOutcome) {
                 a + 1,
                 b + 1
             ),
-            (JobKind::Mp4Full, ExportJobResult::Mp4(outcome)) => {
+            (JobKind::Mp4Full | JobKind::Mp4Preset(_), ExportJobResult::Mp4(outcome)) => {
                 match outcome.missing_audio_note() {
                     Some(note) => format!(
                         "Exported {}-frame MP4 to {}. {note}",
@@ -1603,7 +2416,32 @@ fn finish_export_job(s: &mut State, job: &ExportJob, result: ExportJobOutcome) {
             _ => job_failure_status(op, "internal result mismatch"),
         },
     };
-    note_single(s, op, job.kind.range());
+    // RM23: the jobbed file formats recap the
+    // destination the job actually wrote (named at
+    // press time and baked into the job), in the
+    // `./export/…` display shape the recaps have
+    // always used; the sequence formats recap their
+    // directory through `note_single` as before.
+    match op {
+        ExportOp::Mp4 | ExportOp::Webm => {
+            let dest = format!("./{}", display_name(&job.dest));
+            note_single_dest(s, op, job.kind.range(), &dest);
+        }
+        _ => note_single(s, op, job.kind.range()),
+    }
+    // RM29: on success the residue of any earlier failed
+    // sequence is stale — clear it — and a finished
+    // MP4/WebM is probed: the QA report is stored as its
+    // own record beside the recap (never a rewrite of
+    // the status or the recap above). The full WebM is
+    // the one path whose audio is not expected.
+    if !job_failed {
+        clear_residue();
+        if matches!(op, ExportOp::Mp4 | ExportOp::Webm) {
+            let audio_possible = !matches!(job.kind, JobKind::WebmFull);
+            probe_and_store(&s.core.project, &job.dest, job.kind.range(), audio_possible);
+        }
+    }
 }
 
 /// The readout's render-phase line: the stored event's
@@ -1677,6 +2515,21 @@ pub fn job_lines(core: &EditorCore, job: &ExportJob) -> Vec<(&'static str, Strin
             i18n_wire::tr(core, "export_progress_working").replace("{name}", kind.name()),
         )];
     }
+    if job.kind.publish() {
+        // A publish package (RM23) reads its bundle
+        // slot exactly like a bundle job — its members
+        // report through the one bundle contract — with
+        // the package's own name on the working line
+        // (slot data, like `BundleKind::name()`).
+        let bundle = job.bundle.snapshot();
+        if bundle.seen {
+            return vec![("xc-progress-bundle", bundle_progress_line(core, bundle))];
+        }
+        return vec![(
+            "xc-progress-working",
+            i18n_wire::tr(core, "export_progress_working").replace("{name}", "publish package"),
+        )];
+    }
     let mut lines = Vec::new();
     let render = job.render.snapshot();
     if render.seen {
@@ -1694,6 +2547,681 @@ pub fn job_lines(core: &EditorCore, job: &ExportJob) -> Vec<(&'static str, Strin
         ));
     }
     lines
+}
+
+// ---- Post-export QA probe (Roadmap Wave 1, RM29 / P-16) ----
+// Detectors only. Everything in this section READS a
+// produced file and reports; nothing here writes an
+// export, touches `core.status` or the recap, or alters
+// a class-C sentence. The verdict is computed by the
+// pure `qa_verdict` from plain measurements, so the
+// whole decision matrix is pinnable without a file; the
+// shell-outs (`ffprobe`, two bounded `ffmpeg` decodes)
+// only gather measurements. Probe machinery is shared
+// in spirit with RM1's F-1 family in `export.rs` — the
+// same system ffmpeg/ffprobe the exporters themselves
+// shell out to; the lib's own probe helpers are private
+// to that module, so the panel carries its own thin
+// readers here rather than widening the lib surface.
+
+/// A decoded peak at or below this amplitude counts as
+/// digital silence (≈ −60 dBFS): encoder padding and
+/// dither sit above it, a dropped or zeroed mix sits at
+/// exactly 0.
+pub const QA_SILENCE_PEAK: f32 = 0.001;
+
+/// Mean luma at or below this (0..=1) counts as a black
+/// sampled frame. A real fade can produce one; the
+/// verdict fails only when EVERY sampled frame is
+/// black.
+pub const QA_BLACK_LUMA: f32 = 0.02;
+
+/// Text-colour pixels the burn-in spot-check must find
+/// in the anchored band of the cue-midpoint frame. The
+/// frame is decoded at 480 pt wide, where one short cue
+/// line stamps hundreds of ink pixels; 12 is far above
+/// compression noise and far below any real line.
+pub const QA_INK_MIN: usize = 12;
+
+/// How many frames the black-frame scan samples across
+/// the file's duration.
+pub const QA_BLACK_SAMPLES: usize = 8;
+
+/// What a finished export was supposed to be, read off
+/// the project the job ran on: the duration and sampled
+/// frame count of the exported window, whether its
+/// audio was expected to carry the project's audible
+/// clips, and — when a subtitle cue overlaps the window
+/// — where the burn-in spot-check looks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QaExpectations {
+    pub duration_secs: f32,
+    pub frames: Option<usize>,
+    pub audio_expected: bool,
+    pub burn_in: Option<QaBurnIn>,
+}
+
+/// The burn-in spot-check's target: the frame time
+/// (seconds into the exported file) of the middle of
+/// the longest-overlapping cue, and the style's text
+/// colour and anchor the ink count reads.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QaBurnIn {
+    pub at_secs: f32,
+    pub text_rgb: [u8; 3],
+    pub position: stykanimate_rs::subtitles::SubtitlePosition,
+}
+
+/// Build the expectations for one finished video
+/// export. `window` is the job's frame range (`None` =
+/// the full timeline); `audio_possible` is false only
+/// for the one path that never muxes (the full WebM),
+/// so an absent audio stream there is the documented
+/// shape, not a loss. Pure apart from the clip-file
+/// stats (the `range_audio_note_shown` audibility rule:
+/// unmuted and the file present).
+pub fn qa_expectations(
+    project: &stykanimate_rs::model::Project,
+    window: Option<(usize, usize)>,
+    audio_possible: bool,
+) -> QaExpectations {
+    let (start_frame, end_frame) = match window {
+        Some((a, b)) => (a, b + 1),
+        None => (0, project.frames.len()),
+    };
+    let start_secs = project.seconds_at_frame_time(start_frame as f32);
+    let duration_secs = match window {
+        Some(_) => project.seconds_at_frame_time(end_frame as f32) - start_secs,
+        None => project.total_seconds(),
+    };
+    let frames = match window {
+        Some(_) => Some(
+            (project.beats_at_frame_time(end_frame as f32)
+                - project.beats_at_frame_time(start_frame as f32))
+            .round()
+            .max(0.0) as usize,
+        ),
+        None => Some(stykanimate_rs::export::sampled_frame_total(project)),
+    };
+    // A clip sounds in the window when it is unmuted,
+    // its file exists, and it starts before the window
+    // ends (a clip's own length is the mux plan's
+    // business; a clip starting earlier may still be
+    // sounding inside the window).
+    let audio_expected = audio_possible
+        && project.audio.iter().any(|clip| {
+            !clip.muted && clip.start_frame < end_frame && Path::new(&clip.path).exists()
+        });
+    // The cue with the longest overlap of the window is
+    // the spot-check: its midpoint is the frame most
+    // certainly carrying its text.
+    let mut burn_in: Option<(usize, usize, usize)> = None; // (overlap, mid frame, cue idx)
+    for (i, cue) in project.subtitles.iter().enumerate() {
+        let lo = cue.start_frame.max(start_frame);
+        let hi = cue.end_frame.min(end_frame);
+        if hi > lo {
+            let overlap = hi - lo;
+            if burn_in.map_or(true, |(best, _, _)| overlap > best) {
+                burn_in = Some((overlap, (lo + hi) / 2, i));
+            }
+        }
+    }
+    let burn_in = burn_in.map(|(_, mid, _i)| {
+        let rgb = project.subtitle_style.text_color;
+        QaBurnIn {
+            at_secs: project.seconds_at_frame_time(mid as f32) - start_secs,
+            text_rgb: [
+                ((rgb >> 16) & 0xFF) as u8,
+                ((rgb >> 8) & 0xFF) as u8,
+                (rgb & 0xFF) as u8,
+            ],
+            position: project.subtitle_style.position,
+        }
+    });
+    QaExpectations {
+        duration_secs,
+        frames,
+        audio_expected,
+        burn_in,
+    }
+}
+
+/// What `ffprobe` says about a produced file: container
+/// duration, stream presence, the video stream's frame
+/// count when the container carries one (else derived
+/// from the average frame rate), and its dimensions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VideoProbe {
+    pub duration_secs: f32,
+    pub has_video: bool,
+    pub has_audio: bool,
+    pub frames: Option<u64>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Parse `ffprobe -show_format -show_streams -of json`
+/// output. Pure, so the parser is pinnable without the
+/// binary. `None` on unparseable output or a missing
+/// duration — a probe that cannot read the file says
+/// so by absence, and the verdict treats absence as
+/// failure.
+pub fn parse_ffprobe_json(text: &str) -> Option<VideoProbe> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let duration_secs = value
+        .get("format")?
+        .get("duration")?
+        .as_str()?
+        .parse::<f32>()
+        .ok()?;
+    let mut probe = VideoProbe {
+        duration_secs,
+        has_video: false,
+        has_audio: false,
+        frames: None,
+        width: 0,
+        height: 0,
+    };
+    if let Some(streams) = value.get("streams").and_then(|s| s.as_array()) {
+        for stream in streams {
+            match stream.get("codec_type").and_then(|t| t.as_str()) {
+                Some("video") => {
+                    probe.has_video = true;
+                    probe.width =
+                        stream.get("width").and_then(|w| w.as_u64()).unwrap_or(0) as u32;
+                    probe.height =
+                        stream.get("height").and_then(|h| h.as_u64()).unwrap_or(0) as u32;
+                    probe.frames = stream
+                        .get("nb_frames")
+                        .and_then(|n| n.as_str())
+                        .and_then(|n| n.parse::<u64>().ok())
+                        .or_else(|| {
+                            let rate = stream.get("avg_frame_rate")?.as_str()?;
+                            let (num, den) = rate.split_once('/')?;
+                            let fps = num.parse::<f32>().ok()? / den.parse::<f32>().ok()?;
+                            if fps > 0.0 {
+                                Some((fps * duration_secs).round() as u64)
+                            } else {
+                                None
+                            }
+                        });
+                }
+                Some("audio") => probe.has_audio = true,
+                _ => {}
+            }
+        }
+    }
+    Some(probe)
+}
+
+/// Probe a produced file with the system `ffprobe` —
+/// the same external tool the exporters' own duration
+/// probe uses. `None` when ffprobe is missing, fails,
+/// or its output does not parse.
+pub fn probe_video_file(path: &Path) -> Option<VideoProbe> {
+    let output = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_ffprobe_json(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Peak and RMS amplitude of interleaved samples — the
+/// metering half of RM1's family, over the decoded
+/// export rather than the mix. `(0.0, 0.0)` for no
+/// samples.
+pub fn audio_stats(samples: &[f32]) -> (f32, f32) {
+    if samples.is_empty() {
+        return (0.0, 0.0);
+    }
+    let mut peak = 0.0f32;
+    let mut squares = 0.0f64;
+    for s in samples {
+        peak = peak.max(s.abs());
+        squares += (*s as f64) * (*s as f64);
+    }
+    (peak, (squares / samples.len() as f64).sqrt() as f32)
+}
+
+/// An amplitude as a dBFS reading with one decimal;
+/// silence (and below) reads "-inf dB".
+pub fn fmt_db(v: f32) -> String {
+    if v <= 0.0 {
+        "-inf dB".to_string()
+    } else {
+        format!("{:.1} dB", 20.0 * v.log10())
+    }
+}
+
+/// A unique scratch path for one probe decode.
+fn qa_temp_path(tag: &str, ext: &str) -> PathBuf {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "stykanimate-qa-{}-{n}-{tag}.{ext}",
+        std::process::id()
+    ))
+}
+
+/// Decode a produced file's audio with the system
+/// `ffmpeg` (mono WAV at the mix rate) and meter it —
+/// the measurement behind the silent-audio check. `None`
+/// when there is nothing decodable (no audio stream,
+/// ffmpeg missing): the verdict reads `None` beside an
+/// expected-audio export as its own failure, and beside
+/// a video-only export as no measurement.
+pub fn decode_audio_stats(path: &Path) -> Option<(f32, f32)> {
+    let tmp = qa_temp_path("audio", "wav");
+    let status = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-i"])
+        .arg(path)
+        .args(["-vn", "-ac", "1", "-ar", "44100"])
+        .arg(&tmp)
+        .status()
+        .ok()?;
+    let stats = if status.success() {
+        stykanimate_rs::audio_edit::read_wav(&tmp.to_string_lossy())
+            .ok()
+            .map(|wav| audio_stats(&wav.samples))
+    } else {
+        None
+    };
+    let _ = std::fs::remove_file(&tmp);
+    stats
+}
+
+/// Mean luma (0..=1) of one frame of a produced file,
+/// decoded small and gray — one black-scan sample.
+fn frame_luma_at(path: &Path, at_secs: f32) -> Option<f32> {
+    let tmp = qa_temp_path("luma", "gray");
+    let status = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-ss"])
+        .arg(format!("{at_secs:.3}"))
+        .arg("-i")
+        .arg(path)
+        .args(["-frames:v", "1", "-vf", "scale=64:36", "-f", "rawvideo", "-pix_fmt", "gray"])
+        .arg(&tmp)
+        .status()
+        .ok()?;
+    let bytes = if status.success() {
+        std::fs::read(&tmp).ok()
+    } else {
+        None
+    };
+    let _ = std::fs::remove_file(&tmp);
+    let bytes = bytes?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let sum: u64 = bytes.iter().map(|b| *b as u64).sum();
+    Some(sum as f32 / bytes.len() as f32 / 255.0)
+}
+
+/// Sample `QA_BLACK_SAMPLES` frames across the file
+/// for the black-frame scan. Undecodable samples are
+/// skipped, not counted black — an empty result means
+/// the scan itself found nothing to read, which the
+/// verdict treats as no evidence (the stream checks
+/// already passed or failed on their own).
+pub fn black_frame_lumas(path: &Path, duration_secs: f32) -> Vec<f32> {
+    let mut out = Vec::new();
+    for i in 0..QA_BLACK_SAMPLES {
+        let t = duration_secs * (i as f32 + 0.5) / QA_BLACK_SAMPLES as f32;
+        if let Some(luma) = frame_luma_at(path, t) {
+            out.push(luma);
+        }
+    }
+    out
+}
+
+/// Count pixels within tolerance of `colour` in the
+/// anchored band (top or bottom quarter) of an RGB
+/// frame — the burn-in spot-check's ink counter. Pure.
+pub fn band_ink_count(rgb: &[u8], width: usize, height: usize, top: bool, colour: [u8; 3]) -> usize {
+    if width == 0 || height == 0 || rgb.len() < width * height * 3 {
+        return 0;
+    }
+    let band = (height / 4).max(1);
+    let rows = if top { 0..band } else { height - band..height };
+    let mut count = 0;
+    for y in rows {
+        for x in 0..width {
+            let i = (y * width + x) * 3;
+            let d = (rgb[i] as i32 - colour[0] as i32).abs()
+                + (rgb[i + 1] as i32 - colour[1] as i32).abs()
+                + (rgb[i + 2] as i32 - colour[2] as i32).abs();
+            if d <= 72 {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// The burn-in spot-check measurement: decode the
+/// cue-midpoint frame at 480 pt wide and count
+/// text-colour ink in the anchored band. `None` when
+/// the frame does not decode.
+pub fn burn_in_ink(path: &Path, burn: &QaBurnIn, aspect: (u32, u32)) -> Option<usize> {
+    if aspect.0 == 0 || aspect.1 == 0 {
+        return None;
+    }
+    let width = 480usize;
+    let height = ((width as f32 * aspect.1 as f32 / aspect.0 as f32) / 2.0).round() as usize * 2;
+    if height == 0 {
+        return None;
+    }
+    let tmp = qa_temp_path("burnin", "rgb");
+    let status = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-ss"])
+        .arg(format!("{:.3}", burn.at_secs))
+        .arg("-i")
+        .arg(path)
+        .args(["-frames:v", "1", "-vf"])
+        .arg(format!("scale={width}:{height}"))
+        .args(["-f", "rawvideo", "-pix_fmt", "rgb24"])
+        .arg(&tmp)
+        .status()
+        .ok()?;
+    let bytes = if status.success() {
+        std::fs::read(&tmp).ok()
+    } else {
+        None
+    };
+    let _ = std::fs::remove_file(&tmp);
+    let bytes = bytes?;
+    Some(band_ink_count(
+        &bytes,
+        width,
+        height,
+        matches!(burn.position, stykanimate_rs::subtitles::SubtitlePosition::Top),
+        burn.text_rgb,
+    ))
+}
+
+/// Everything the probe measured about one file,
+/// before the verdict: the verdict is a pure function
+/// of this plus the expectations, so the decision
+/// matrix needs no files at all.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QaMeasurements {
+    pub probe: Option<VideoProbe>,
+    pub audio: Option<(f32, f32)>,
+    pub lumas: Vec<f32>,
+    pub ink: Option<usize>,
+}
+
+/// One probed export's verdict: where it was probed,
+/// whether it passed, the named failures (empty when
+/// passed), and the measured-facts string the panel
+/// line carries as its details slot.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QaReport {
+    pub dest: String,
+    pub passed: bool,
+    pub failures: Vec<String>,
+    pub details: String,
+}
+
+/// The QA verdict — pure. Every check names its own
+/// failure; a file that cannot even be probed fails
+/// with that single fact rather than a cascade.
+pub fn qa_verdict(dest: &str, expect: &QaExpectations, m: &QaMeasurements) -> QaReport {
+    let Some(probe) = &m.probe else {
+        return QaReport {
+            dest: dest.to_string(),
+            passed: false,
+            failures: vec!["the produced file could not be probed".to_string()],
+            details: "unreadable".to_string(),
+        };
+    };
+    let mut failures: Vec<String> = Vec::new();
+    if !probe.has_video {
+        failures.push("no video stream".to_string());
+    }
+    let duration_tol = (expect.duration_secs * 0.15).max(0.75);
+    if (probe.duration_secs - expect.duration_secs).abs() > duration_tol {
+        failures.push(format!(
+            "duration {:.1}s, expected {:.1}s",
+            probe.duration_secs, expect.duration_secs
+        ));
+    }
+    if let (Some(got), Some(want)) = (probe.frames, expect.frames) {
+        let tol = ((want as f32 * 0.05).ceil() as u64).max(2);
+        if got.abs_diff(want as u64) > tol {
+            failures.push(format!("{got} frames, expected {want}"));
+        }
+    }
+    if expect.audio_expected {
+        if !probe.has_audio {
+            failures.push("audio stream missing".to_string());
+        } else {
+            match m.audio {
+                None => failures.push("audio could not be decoded".to_string()),
+                Some((peak, _)) if peak <= QA_SILENCE_PEAK => {
+                    failures.push(format!("audio is silent (peak {})", fmt_db(peak)))
+                }
+                _ => {}
+            }
+        }
+    }
+    if !m.lumas.is_empty() && m.lumas.iter().all(|l| *l <= QA_BLACK_LUMA) {
+        failures.push(format!("all {} sampled frames are black", m.lumas.len()));
+    }
+    if expect.burn_in.is_some() {
+        match m.ink {
+            Some(ink) if ink >= QA_INK_MIN => {}
+            Some(_) => failures.push("subtitle burn-in missing at the cue".to_string()),
+            None => failures.push("subtitle burn-in could not be checked".to_string()),
+        }
+    }
+    let frames_fact = probe
+        .frames
+        .map(|f| f.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let audio_fact = match m.audio {
+        Some((peak, rms)) => format!("peak {} · RMS {}", fmt_db(peak), fmt_db(rms)),
+        None => "no audio measured".to_string(),
+    };
+    let black = m.lumas.iter().filter(|l| **l <= QA_BLACK_LUMA).count();
+    let burn_fact = match (&expect.burn_in, m.ink) {
+        (None, _) => "no subtitles",
+        (Some(_), Some(ink)) => {
+            if ink >= QA_INK_MIN {
+                "burn-in present"
+            } else {
+                "burn-in missing"
+            }
+        }
+        (Some(_), None) => "burn-in unchecked",
+    };
+    let details = format!(
+        "{:.1}s · {} frames · {} · black {}/{} · {}",
+        probe.duration_secs,
+        frames_fact,
+        audio_fact,
+        black,
+        m.lumas.len(),
+        burn_fact
+    );
+    QaReport {
+        dest: dest.to_string(),
+        passed: failures.is_empty(),
+        failures,
+        details,
+    }
+}
+
+/// Probe one produced file end to end: ffprobe, the
+/// audio decode (only when a stream is present), the
+/// black-frame scan, and the burn-in spot-check when a
+/// cue is expected. Gathering is best-effort per
+/// measurement; the verdict decides what absence means.
+pub fn probe_export(path: &Path, expect: &QaExpectations) -> QaReport {
+    let probe = probe_video_file(path);
+    let mut m = QaMeasurements {
+        probe: probe.clone(),
+        ..Default::default()
+    };
+    if let Some(p) = &probe {
+        if p.has_audio {
+            m.audio = decode_audio_stats(path);
+        }
+        if p.has_video {
+            m.lumas = black_frame_lumas(path, p.duration_secs);
+            if let Some(burn) = &expect.burn_in {
+                m.ink = burn_in_ink(path, burn, (p.width, p.height));
+            }
+        }
+    }
+    qa_verdict(&format!("./{}", display_name(path)), expect, &m)
+}
+
+/// The panel line for one report: the pass/fail
+/// template (IA-RM29-1) with the measured facts — and,
+/// on failure, the named failures — as its details
+/// slot. The templates are the only words; everything
+/// else in the line is detector data.
+pub fn qa_line(core: &EditorCore, report: &QaReport) -> String {
+    if report.passed {
+        i18n_wire::tr(core, "export_qa_pass").replace("{details}", &report.details)
+    } else {
+        let details = format!("{} — {}", report.failures.join("; "), report.details);
+        i18n_wire::tr(core, "export_qa_fail").replace("{details}", &details)
+    }
+}
+
+thread_local! {
+    /// The latest QA reports, newest last, keyed by
+    /// destination (a re-export of the same file
+    /// replaces its earlier report). Session state in
+    /// the panel's thread-local idiom (the overwrite
+    /// guard's precedent): no `State` field, so no
+    /// census moves.
+    static QA_REPORTS: RefCell<Vec<QaReport>> = RefCell::new(Vec::new());
+    /// The residue of the last failed sequence job:
+    /// how many frame files it left, and where.
+    static RESIDUE: RefCell<Option<(usize, String)>> = RefCell::new(None);
+    /// Expected frame counts for sequence rows, by row
+    /// name, recorded when a sequence job starts (see
+    /// `note_expected_sequence`).
+    static EXPECTED_SEQUENCES: RefCell<Vec<(String, usize)>> = RefCell::new(Vec::new());
+}
+
+/// The stored QA reports, oldest first.
+pub fn qa_reports() -> Vec<QaReport> {
+    QA_REPORTS.with(|slot| slot.borrow().clone())
+}
+
+/// Probe a just-finished export and store its report,
+/// replacing any earlier report for the same
+/// destination. Runs only when the destination file is
+/// actually there: a job whose worker claimed success
+/// for a file that does not exist is the worker-death
+/// case, which the finish path already reports as a
+/// failure — the probe's silence there is not a pass,
+/// it is absence, and no report is stored.
+fn probe_and_store(
+    project: &stykanimate_rs::model::Project,
+    dest: &Path,
+    window: Option<(usize, usize)>,
+    audio_possible: bool,
+) {
+    if !dest.is_file() {
+        return;
+    }
+    let expect = qa_expectations(project, window, audio_possible);
+    let report = probe_export(dest, &expect);
+    QA_REPORTS.with(|slot| {
+        let mut reports = slot.borrow_mut();
+        reports.retain(|r| r.dest != report.dest);
+        reports.push(report);
+    });
+}
+
+/// The stored sequence residue: `(frames left, dest)`.
+pub fn residue_note() -> Option<(usize, String)> {
+    RESIDUE.with(|slot| slot.borrow().clone())
+}
+
+fn store_residue(count: usize, dest: &Path) {
+    let shown = format!("./{}", display_name(dest));
+    RESIDUE.with(|slot| *slot.borrow_mut() = Some((count, shown)));
+}
+
+fn clear_residue() {
+    RESIDUE.with(|slot| *slot.borrow_mut() = None);
+}
+
+/// How many sequence frame files a directory holds —
+/// the residue a failed sequence export left behind.
+pub fn sequence_residue(dest: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dest) else {
+        return 0;
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.metadata().map(|m| m.is_file()).unwrap_or(false))
+        .filter(|e| is_sequence_frame(&e.path()))
+        .count()
+}
+
+/// The sampled frame count a sequence job over
+/// `window` will write: the full timeline's sampled
+/// total, or the window's duration-weighted beat span
+/// (the same span `qa_expectations` derives).
+pub fn expected_sequence_frames(
+    project: &stykanimate_rs::model::Project,
+    window: Option<(usize, usize)>,
+) -> usize {
+    match window {
+        Some((a, b)) => (project.beats_at_frame_time((b + 1) as f32)
+            - project.beats_at_frame_time(a as f32))
+        .round()
+        .max(0.0) as usize,
+        None => stykanimate_rs::export::sampled_frame_total(project),
+    }
+}
+
+/// Record the frame count the next sequence export to
+/// `row_name`'s directory is expected to write, so
+/// Recent exports can mark the row incomplete when the
+/// directory holds fewer (`mark_incomplete`). Called
+/// when the job starts: a job that dies mid-write is
+/// exactly the case the mark exists for.
+pub fn note_expected_sequence(row_name: &str, expected: usize) {
+    EXPECTED_SEQUENCES.with(|slot| {
+        let mut rows = slot.borrow_mut();
+        rows.retain(|(name, _)| name != row_name);
+        rows.push((row_name.to_string(), expected));
+    });
+}
+
+/// Mark rows incomplete from the registry: a sequence
+/// row whose directory holds fewer files than the last
+/// sequence job for it was expected to write. Rows the
+/// registry does not name keep their state — the panel
+/// only claims incompleteness it has a count for.
+pub fn mark_incomplete(rows: &mut [ExportRow]) {
+    EXPECTED_SEQUENCES.with(|slot| {
+        let registry = slot.borrow();
+        for row in rows.iter_mut() {
+            if let Some((_, expected)) = registry.iter().find(|(name, _)| *name == row.name) {
+                row.incomplete = row.count < *expected;
+            }
+        }
+    });
 }
 
 // ---- Range-capable actions --------------------------------
@@ -1759,12 +3287,25 @@ fn export_gif_action(s: &mut State) {
     if export_job_active(s) {
         return;
     }
+    // RM23: the GIF writes the named destination in
+    // both modes, under the overwrite guard. The full
+    // mode calls the lib entry directly — it is the
+    // very function `EditorCore::export_gif` calls
+    // (its `render_gif` alias) — in the op's exact
+    // status wording, so naming + guard hold in "All
+    // frames" too without touching `editor.rs`.
     let range = range_target(&s.core, s.export_use_range);
+    let dir = export_dir();
+    let path = dir.join(
+        file_name_for(ExportOp::Gif, &project_stem(&s.core.project))
+            .expect("GIF is a file format"),
+    );
+    if guard_blocks(s, std::slice::from_ref(&path)) {
+        return;
+    }
     match range {
         Some((a, b)) => {
-            let dir = export_dir();
             let _ = std::fs::create_dir_all(&dir);
-            let path = dir.join("animation.gif");
             match stykanimate_rs::export::export_gif_range(&s.core.project, a, b, &path) {
                 Ok(n) => {
                     s.core.status = format!(
@@ -1777,14 +3318,19 @@ fn export_gif_action(s: &mut State) {
                 Err(e) => s.core.status = format!("GIF export failed: {e}"),
             }
         }
-        None => s.core.export_gif(),
+        None => match stykanimate_rs::export::export_gif(&s.core.project, &path) {
+            Ok(n) => {
+                s.core.status = format!("Exported {n}-frame GIF to {}", path.display())
+            }
+            Err(e) => s.core.status = format!("GIF export failed: {e}"),
+        },
     }
     note_single(s, ExportOp::Gif, range);
 }
 
 /// Spritesheet with the range toggle (Phase J): the range
-/// variant writes the one sheet to the full op's
-/// destination (`./export/spritesheet.png`) and reports in
+/// variant writes the one sheet to the named
+/// destination (`./export/<project>-spritesheet.png`) and reports in
 /// the contact-sheet action's voice — frame count, the
 /// range, the path.
 fn export_sheet_action(s: &mut State) {
@@ -1793,12 +3339,23 @@ fn export_sheet_action(s: &mut State) {
     if export_job_active(s) {
         return;
     }
+    // RM23: named destination + overwrite guard, both
+    // modes — the full mode calls the lib entry
+    // directly (the `EditorCore::export_sheet` op's
+    // own `render_sheet` alias target) in the op's
+    // exact status wording, as `export_gif_action`.
     let range = range_target(&s.core, s.export_use_range);
+    let dir = export_dir();
+    let path = dir.join(
+        file_name_for(ExportOp::Spritesheet, &project_stem(&s.core.project))
+            .expect("spritesheet is a file format"),
+    );
+    if guard_blocks(s, std::slice::from_ref(&path)) {
+        return;
+    }
     match range {
         Some((a, b)) => {
-            let dir = export_dir();
             let _ = std::fs::create_dir_all(&dir);
-            let path = dir.join("spritesheet.png");
             match stykanimate_rs::export::export_sheet_range(&s.core.project, a, b, &path) {
                 Ok(n) => {
                     s.core.status = format!(
@@ -1811,7 +3368,12 @@ fn export_sheet_action(s: &mut State) {
                 Err(e) => s.core.status = format!("Spritesheet export failed: {e}"),
             }
         }
-        None => s.core.export_sheet(),
+        None => match stykanimate_rs::export::export_spritesheet(&s.core.project, &path) {
+            Ok(n) => {
+                s.core.status = format!("Exported {n}-frame spritesheet.")
+            }
+            Err(e) => s.core.status = format!("Spritesheet failed: {e}"),
+        },
     }
     note_single(s, ExportOp::Spritesheet, range);
 }
@@ -1825,7 +3387,10 @@ fn export_sheet_action(s: &mut State) {
 fn run_contact_full(core: &mut EditorCore) {
     let dir = export_dir();
     let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("contact-sheet.png");
+    let path = dir.join(
+        file_name_for(ExportOp::ContactSheet, &project_stem(&core.project))
+            .expect("contact sheet is a file format"),
+    );
     match stykanimate_rs::export::export_contact_sheet(&core.project, &path) {
         Ok(_) => {
             core.status = format!("Exported contact sheet to {}", path.display())
@@ -1840,12 +3405,21 @@ fn export_contact_action(s: &mut State) {
     if export_job_active(s) {
         return;
     }
+    // RM23: named destination + overwrite guard, both
+    // modes (the full helper above builds the same
+    // named path).
     let range = range_target(&s.core, s.export_use_range);
+    let dir = export_dir();
+    let path = dir.join(
+        file_name_for(ExportOp::ContactSheet, &project_stem(&s.core.project))
+            .expect("contact sheet is a file format"),
+    );
+    if guard_blocks(s, std::slice::from_ref(&path)) {
+        return;
+    }
     match range {
         Some((a, b)) => {
-            let dir = export_dir();
             let _ = std::fs::create_dir_all(&dir);
-            let path = dir.join("contact-sheet.png");
             match stykanimate_rs::export::export_contact_sheet_range(&s.core.project, a, b, &path) {
                 Ok(n) => {
                     s.core.status = format!(
@@ -1869,16 +3443,28 @@ fn export_apng_action(s: &mut State) {
     if export_job_active(s) {
         return;
     }
+    // RM23: named destination + overwrite guard, both
+    // modes — the full mode calls the lib entry
+    // directly (the very function
+    // `EditorCore::export_apng_file` calls) in the
+    // op's exact status wording: its success sentence
+    // names the `out/` path, so the named stem rides
+    // inside that same shape.
     let range = range_target(&s.core, s.export_use_range);
+    let dir = PathBuf::from("out");
+    let name = file_name_for(ExportOp::Apng, &project_stem(&s.core.project))
+        .expect("APNG is a file format");
+    let path = dir.join(&name);
+    if guard_blocks(s, std::slice::from_ref(&path)) {
+        return;
+    }
     match range {
         Some((a, b)) => {
-            let dir = PathBuf::from("out");
             let _ = std::fs::create_dir_all(&dir);
-            let path = dir.join("animation.apng");
             match stykanimate_rs::export::export_apng_range(&s.core.project, a, b, &path) {
                 Ok(n) => {
                     s.core.status = format!(
-                        "Exported {n}-frame APNG (frames {}–{}) to out/animation.apng.",
+                        "Exported {n}-frame APNG (frames {}–{}) to out/{name}.",
                         a + 1,
                         b + 1
                     )
@@ -1886,7 +3472,15 @@ fn export_apng_action(s: &mut State) {
                 Err(e) => s.core.status = format!("APNG export failed: {e}"),
             }
         }
-        None => s.core.export_apng_file(),
+        None => {
+            let _ = std::fs::create_dir_all(&dir);
+            match stykanimate_rs::export::export_apng(&s.core.project, &path) {
+                Ok(_) => {
+                    s.core.status = format!("Exported out/{name}.")
+                }
+                Err(e) => s.core.status = format!("APNG export failed: {e}"),
+            }
+        }
     }
     note_single(s, ExportOp::Apng, range);
 }
@@ -1918,6 +3512,57 @@ fn export_webm_action(s: &mut State) {
     // around the exclusion; the correction is a
     // catalogue-side decision, not this slice's).
     start_export_job(s, ExportOp::Webm);
+}
+
+/// The Export delivery press (RM23): run the selected
+/// preset. The MP4 presets start the delivery job
+/// (the scaled entry at the preset's scale, to the
+/// preset's named destination; the finish is the MP4
+/// job finish, wording included). The GIF preset has
+/// no progress contract — the GIF entries carry none
+/// — so it runs synchronously through the scaled GIF
+/// entry, under the overwrite guard, in the GIF
+/// action's exact status wording. Delivery exports
+/// are always full exports: a preset names a finished
+/// episode file, so the loop-range toggle does not
+/// apply to it (the delivery line says what it makes).
+fn export_delivery_action(s: &mut State) {
+    // One export at a time (Wave W, W1), as
+    // `export_svg_action`.
+    if export_job_active(s) {
+        return;
+    }
+    let preset = delivery_preset();
+    if preset.is_gif() {
+        let dest = delivery_dest(&s.core, preset);
+        if guard_blocks(s, std::slice::from_ref(&dest)) {
+            return;
+        }
+        let _ = std::fs::create_dir_all(export_dir());
+        match stykanimate_rs::export::export_gif_scaled(
+            &s.core.project,
+            &dest,
+            delivery_scale(&s.core.project, preset),
+        ) {
+            Ok(n) => {
+                s.core.status = format!("Exported {n}-frame GIF to {}", dest.display())
+            }
+            Err(e) => s.core.status = format!("GIF export failed: {e}"),
+        }
+        // The recap names the file the preset actually
+        // wrote (its suffix differs from the plain GIF
+        // row's destination).
+        s.export_recap = if export_failed(&s.core) {
+            failure_recap(&s.core.status, ExportOp::Gif.name())
+        } else {
+            single_recap(
+                ExportOp::Gif.name(),
+                &format!("./{}", display_name(&dest)),
+            )
+        };
+        return;
+    }
+    start_delivery_job(s, preset);
 }
 
 // ---- Recent exports history -------------------------------
@@ -1959,6 +3604,13 @@ pub struct ExportRow {
     pub size: u64,
     pub mtime: SystemTime,
     pub count: usize,
+    /// The row stands for a sequence whose directory
+    /// holds fewer frames than the last sequence job
+    /// for it was expected to write (RM29 — see
+    /// `mark_incomplete`). Set after the scan builds
+    /// the rows, never by the scan itself: the scan
+    /// knows what is on disk, not what should be.
+    pub incomplete: bool,
 }
 
 /// One raw scan result — (path, size in bytes, mtime,
@@ -2037,6 +3689,7 @@ pub fn rows_from_triples(triples: &[FileTriple]) -> Vec<ExportRow> {
                 size: *size,
                 mtime: *mtime,
                 count: *count,
+                incomplete: false,
             });
         }
     }
@@ -2047,6 +3700,7 @@ pub fn rows_from_triples(triples: &[FileTriple]) -> Vec<ExportRow> {
                 size: total,
                 mtime: newest,
                 count: n,
+                incomplete: false,
             });
         } else {
             rows.push(ExportRow {
@@ -2054,6 +3708,7 @@ pub fn rows_from_triples(triples: &[FileTriple]) -> Vec<ExportRow> {
                 size: total,
                 mtime: newest,
                 count: 1,
+                incomplete: false,
             });
         }
     }
@@ -2115,7 +3770,7 @@ pub fn age_label(core: &EditorCore, now: SystemTime, mtime: SystemTime) -> Strin
 /// count, the `age_label` line), the frame words are
 /// the template's; English output is byte-identical.
 pub fn row_line(core: &EditorCore, row: &ExportRow, now: SystemTime) -> String {
-    if row.count > 1 {
+    let line = if row.count > 1 {
         i18n_wire::tr(core, "export_history_row_files")
             .replace("{name}", &row.name)
             .replace("{count}", &row.count.to_string())
@@ -2126,6 +3781,16 @@ pub fn row_line(core: &EditorCore, row: &ExportRow, now: SystemTime) -> String {
             .replace("{name}", &row.name)
             .replace("{size}", &format_size(row.size))
             .replace("{age}", &age_label(core, now, row.mtime))
+    };
+    // An incomplete sequence (RM29) says so on its own
+    // row: the marker word rides IA-RM29-1
+    // (`export_history_incomplete`) and is appended to
+    // the row's template line, so a complete row's line
+    // stays byte-identical to what it has always been.
+    if row.incomplete {
+        format!("{} · {}", line, i18n_wire::tr(core, "export_history_incomplete"))
+    } else {
+        line
     }
 }
 
@@ -2285,13 +3950,22 @@ pub fn recent_exports_cached() -> Vec<ExportRow> {
             v
         })
         .collect();
-    if keys.iter().all(|k| k.is_none()) {
-        return rows_from_triples(&scan_triples(&roots));
-    }
-    HISTORY_CACHE.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        cached_history(&mut slot, keys, || rows_from_triples(&scan_triples(&roots)))
-    })
+    let mut rows = if keys.iter().all(|k| k.is_none()) {
+        rows_from_triples(&scan_triples(&roots))
+    } else {
+        HISTORY_CACHE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            cached_history(&mut slot, keys, || rows_from_triples(&scan_triples(&roots)))
+        })
+    };
+    // Incompleteness (RM29) is marked on the way out,
+    // not in the cache: the registry of expected counts
+    // can change between two builds of the same cached
+    // scan (a sequence job starts, or a partial export
+    // lands), and the mark must follow the registry,
+    // not the scan's moment.
+    mark_incomplete(&mut rows);
+    rows
 }
 
 // ---- Rows and groups -----------------------------------
@@ -2323,12 +3997,24 @@ fn plain_row(
     op: fn(&mut EditorCore),
     recap_name: &'static str,
     recap_dest: &'static str,
+    guard: Option<PathBuf>,
 ) -> El {
     let handler = move |s: &mut State| {
         // One export at a time (Wave W, W1): while a
         // background job runs, a press here is a no-op.
         if export_job_active(s) {
             return;
+        }
+        // The overwrite guard (RM23) for the rows whose
+        // destination this panel knows exactly (the
+        // .piv files and .stknds): an existing master
+        // stops the first press. `.stk`/`.nodes` pass
+        // `None` — their file names are the selected
+        // figure's, built inside the editor ops.
+        if let Some(target) = &guard {
+            if guard_blocks(s, std::slice::from_ref(target)) {
+                return;
+            }
         }
         op(&mut s.core);
         s.export_recap = if export_failed(&s.core) {
@@ -2539,7 +4225,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "xc-sheet",
             "table-cells-large",
             &i18n_wire::tr(core, "spritesheet"),
-            &i18n_wire::tr(core, "export_note_sheet"),
+            &note_with_dest(core, "export_note_sheet", ExportOp::Spritesheet),
             t,
             export_sheet_action,
         ))
@@ -2547,7 +4233,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "xc-contact",
             "table-cells-large",
             &i18n_wire::tr(core, "export_contact_sheet"),
-            &i18n_wire::tr(core, "export_note_contact"),
+            &note_with_dest(core, "export_note_contact", ExportOp::ContactSheet),
             t,
             export_contact_action,
         ));
@@ -2566,7 +4252,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "xc-gif",
             "film",
             "GIF",
-            &i18n_wire::tr(core, "export_note_gif"),
+            &note_with_dest(core, "export_note_gif", ExportOp::Gif),
             t,
             export_gif_action,
         ))
@@ -2574,7 +4260,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "xc-apng",
             "film",
             &i18n_wire::tr(core, "export_apng"),
-            &i18n_wire::tr(core, "export_note_apng"),
+            &note_with_dest(core, "export_note_apng", ExportOp::Apng),
             t,
             export_apng_action,
         ));
@@ -2593,7 +4279,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "xc-mp4",
             "video",
             "MP4",
-            &i18n_wire::tr(core, "export_note_mp4"),
+            &note_with_dest(core, "export_note_mp4", ExportOp::Mp4),
             t,
             export_mp4_action,
         ))
@@ -2601,7 +4287,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "xc-webm",
             "video",
             &i18n_wire::tr(core, "export_webm"),
-            &i18n_wire::tr(core, "export_note_webm"),
+            &note_with_dest(core, "export_note_webm", ExportOp::Webm),
             t,
             export_webm_action,
         ));
@@ -2619,6 +4305,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             EditorCore::export_piv2,
             ".piv v2",
             "./export/animation-v2.piv",
+            Some(export_dir().join("animation-v2.piv")),
         ))
         .child(plain_row(
             "xc-v3",
@@ -2629,6 +4316,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             EditorCore::export_piv,
             ".piv v3",
             "./export/animation.piv",
+            Some(export_dir().join("animation.piv")),
         ))
         .child(plain_row(
             "xc-v4",
@@ -2639,6 +4327,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             EditorCore::export_piv4,
             ".piv v4",
             "./export/animation-v4.piv",
+            Some(export_dir().join("animation-v4.piv")),
         ))
         .child(plain_row(
             "xc-v5",
@@ -2649,6 +4338,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             EditorCore::export_v5_file,
             ".piv v5",
             "out/animation-v5.piv",
+            Some(PathBuf::from("out").join("animation-v5.piv")),
         ));
     // The .piv media note sits directly under the four
     // .piv rows it describes (and above the figure-file
@@ -2675,6 +4365,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             EditorCore::export_stk,
             ".stk",
             "./export/<figure>.stk",
+            None,
         ))
         .child(plain_row(
             "xc-nodes",
@@ -2685,6 +4376,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             EditorCore::export_nodes,
             ".nodes",
             "./export/<figure>.nodes",
+            None,
         ))
         .child(plain_row(
             "xc-stknds",
@@ -2695,6 +4387,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             EditorCore::export_stknds,
             ".stknds",
             "./export/animation.stknds",
+            Some(export_dir().join("animation.stknds")),
         ));
     // The sprite note sits directly under the three
     // figure-file rows it describes: a wrapped line
@@ -2731,8 +4424,105 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             &i18n_wire::tr(core, "export_note_bundle_video"),
             t,
             BundleKind::Video,
-        ));
+        ))
+        // The publish package (RM23): a third bundle
+        // row in the same shape — its press starts the
+        // package job (`start_publish_job`), and its
+        // note names the four members it produces.
+        .child(
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(icon_btn(
+                    "xc-bundle-publish",
+                    "video",
+                    &i18n_wire::tr(core, "export_bundle_publish"),
+                    false,
+                    t,
+                    |s: &mut State| {
+                        start_publish_job(s);
+                    },
+                ))
+                .child(
+                    text(i18n_wire::tr(core, "export_note_bundle_publish"))
+                        .font(type_::LABEL)
+                        .color(t.text_secondary)
+                        .wrap()
+                        .grow(1.0),
+                ),
+        );
     panel = panel.child(bundles);
+
+    // The Delivery section (RM23): the preset chips
+    // (the range toggle's button idiom — the active
+    // chip is the selected preset; a chip press is
+    // inert while a job runs, so a running delivery
+    // or publish job keeps the selection it started
+    // under), the Export delivery press, and the
+    // delivery line naming what the press will make.
+    // When the delivery destination already exists,
+    // the overwrite note says so BEFORE the press —
+    // the guard itself still stops the first press.
+    let preset = delivery_preset();
+    let mut preset_row = row().key("xc-preset-row").gap(8.0).center_y();
+    for p in [
+        DeliveryPreset::Master,
+        DeliveryPreset::Youtube1080,
+        DeliveryPreset::Youtube4k,
+        DeliveryPreset::Gif,
+    ] {
+        preset_row = preset_row.child(btn(
+            p.key(),
+            &i18n_wire::tr(core, p.label_key()),
+            preset == p,
+            t,
+            move |s: &mut State| {
+                if !export_job_active(s) {
+                    set_delivery_preset(p);
+                }
+            },
+        ));
+    }
+    let mut delivery = col()
+        .gap(6.0)
+        .child(design::section_label(&i18n_wire::tr(core, "export_sec_delivery"), t))
+        .child(preset_row)
+        .child(
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(icon_btn(
+                    "xc-delivery",
+                    "video",
+                    &i18n_wire::tr(core, "export_delivery"),
+                    false,
+                    t,
+                    export_delivery_action,
+                ))
+                .child(
+                    text(delivery_text(core, preset))
+                        .font(type_::LABEL)
+                        .color(t.text_secondary)
+                        .wrap()
+                        .grow(1.0),
+                ),
+        );
+    if delivery_dest(core, preset).is_file() {
+        delivery = delivery.child(
+            text(
+                i18n_wire::tr(core, "export_overwrite_note").replace(
+                    "{dest}",
+                    &format!("./{}", display_name(&delivery_dest(core, preset))),
+                ),
+            )
+            .key("xc-overwrite-note")
+            .font(type_::LABEL)
+            .color(t.text_secondary)
+            .wrap()
+            .w_full(),
+        );
+    }
+    panel = panel.child(delivery);
 
     if !s.export_recap.is_empty() {
         // The recap is the panel's persistent record of the
@@ -2756,6 +4546,51 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
                         .wrap()
                         .grow(1.0),
                 ),
+        );
+    }
+
+    // The post-export QA records (RM29): one line per
+    // probed export, under the recap they sit beside —
+    // the probe's verdict, never a rewrite of the recap.
+    // A passing line reads secondary; a failing one
+    // takes the error colour, because a success recap
+    // over a broken file is exactly the P0-1 shape this
+    // line exists to contradict out loud.
+    let reports = qa_reports();
+    if !reports.is_empty() {
+        let mut qa = col().key("xc-qa").gap(2.0);
+        for report in &reports {
+            qa = qa.child(
+                text(qa_line(core, report))
+                    .font(type_::LABEL)
+                    .color(if report.passed {
+                        t.text_secondary
+                    } else {
+                        Severity::Error.color(t)
+                    })
+                    .wrap()
+                    .w_full(),
+            );
+        }
+        panel = panel.child(qa);
+    }
+
+    // The failed sequence's residue (RM29): how many
+    // frames the attempt left behind, and where — the
+    // failure's own sentence lives on the status and
+    // the recap; this line only states what is on disk.
+    if let Some((count, dest)) = residue_note() {
+        panel = panel.child(
+            text(
+                i18n_wire::tr(core, "export_residue_line")
+                    .replace("{count}", &count.to_string())
+                    .replace("{dest}", &dest),
+            )
+            .key("xc-residue")
+            .font(type_::LABEL)
+            .color(Severity::Error.color(t))
+            .wrap()
+            .w_full(),
         );
     }
 
@@ -2872,12 +4707,12 @@ mod tests {
             ("export_note_png", "PNG image sequence — one file per frame in ./export/"),
             ("export_note_jpeg", "JPEG image sequence in out/jpeg/ (out/, not export/)"),
             ("export_note_svg", "One SVG per frame in ./export/svg/"),
-            ("export_note_sheet", "Frames on one sheet — ./export/spritesheet.png"),
-            ("export_note_contact", "Frames as one tile sheet — ./export/contact-sheet.png"),
-            ("export_note_gif", "Animated GIF — ./export/animation.gif"),
-            ("export_note_apng", "Animated PNG — out/animation.apng (out/, not export/)"),
-            ("export_note_mp4", "MP4 video via ffmpeg — ./export/animation.mp4 (full export includes audio; range export includes audio from clips inside the range — WAV or any other ffmpeg-readable format; a clip file that cannot be probed or decoded fails the range export)"),
-            ("export_note_webm", "WebM video (VP9) — ./export/animation.webm (full export is video-only; range export includes audio from clips inside the range)"),
+            ("export_note_sheet", "Frames on one sheet — {dest}"),
+            ("export_note_contact", "Frames as one tile sheet — {dest}"),
+            ("export_note_gif", "Animated GIF — {dest}"),
+            ("export_note_apng", "Animated PNG — {dest} (out/, not export/)"),
+            ("export_note_mp4", "MP4 video via ffmpeg — {dest} (full export includes audio; range export includes audio from clips inside the range — WAV or any other ffmpeg-readable format; a clip file that cannot be probed or decoded fails the range export)"),
+            ("export_note_webm", "WebM video (VP9) — {dest} (full export is video-only; range export includes audio from clips inside the range)"),
             ("export_note_piv2", "Pivot v2 project — ./export/animation-v2.piv"),
             ("export_note_piv3", "Pivot v3 project — ./export/animation.piv"),
             ("export_note_piv4", "Pivot v4 project — ./export/animation-v4.piv"),
@@ -2962,6 +4797,7 @@ mod tests {
             size: 600,
             mtime: at(300),
             count: 3,
+            incomplete: false,
         };
         assert_eq!(
             row_line(&core, &row, at(300)),
@@ -3133,11 +4969,11 @@ mod tests {
     #[test]
     fn bundle_recap_lists_every_planned_op_with_its_destination() {
         assert_eq!(
-            bundle_recap(BundleKind::Images, &[]),
+            bundle_recap(BundleKind::Images, &[], "animation"),
             "Exported PNG → ./export/, JPEG → out/jpeg/, SVG → ./export/svg/, sheet → ./export/spritesheet.png"
         );
         assert_eq!(
-            bundle_recap(BundleKind::Video, &[]),
+            bundle_recap(BundleKind::Video, &[], "animation"),
             "Exported MP4 → ./export/animation.mp4, WebM → ./export/animation.webm"
         );
     }
@@ -3145,11 +4981,11 @@ mod tests {
     #[test]
     fn bundle_recap_names_failures_instead_of_claiming_them() {
         assert_eq!(
-            bundle_recap(BundleKind::Video, &[ExportOp::Mp4]),
+            bundle_recap(BundleKind::Video, &[ExportOp::Mp4], "animation"),
             "Exported WebM → ./export/animation.webm; failed: MP4"
         );
         assert_eq!(
-            bundle_recap(BundleKind::Video, &[ExportOp::Mp4, ExportOp::Webm]),
+            bundle_recap(BundleKind::Video, &[ExportOp::Mp4, ExportOp::Webm], "animation"),
             "Exported nothing; failed: MP4, WebM"
         );
     }
@@ -3454,6 +5290,7 @@ mod tests {
             size: 1536,
             mtime: at(1000),
             count: 1,
+            incomplete: false,
         };
         assert_eq!(
             row_line(&EditorCore::new(), &row, at(1000 + 2 * 60 * 60)),
@@ -4119,7 +5956,7 @@ mod tests {
         s.core.loop_range = Some((0, 2));
         let (kind, dest) = job_spec(&s, ExportOp::Mp4).expect("MP4 is contracted");
         assert_eq!(kind, JobKind::Mp4Range(0, 2));
-        assert_eq!(dest, export_dir().join("animation.mp4"));
+        assert_eq!(dest, export_dir().join("untitled.mp4"));
         // Uncontracted formats are never jobbed.
         assert!(job_spec(&s, ExportOp::Svg).is_none());
         assert!(job_spec(&s, ExportOp::Gif).is_none());
@@ -4192,10 +6029,10 @@ mod tests {
         // the recap IS the status, and the same line is
         // the stored recap — the failed member named,
         // the rest claimed with their destinations.
-        let recap = bundle_recap(BundleKind::Images, &[ExportOp::Svg]);
+        let recap = bundle_recap(BundleKind::Images, &[ExportOp::Svg], "untitled");
         assert_eq!(
             recap,
-            "Exported PNG → ./export/, JPEG → out/jpeg/, sheet → ./export/spritesheet.png; failed: SVG"
+            "Exported PNG → ./export/, JPEG → out/jpeg/, sheet → ./export/untitled-spritesheet.png; failed: SVG"
         );
         assert_eq!(s.core.status, recap);
         assert_eq!(s.export_recap, recap);
@@ -4211,8 +6048,8 @@ mod tests {
         );
         release.send(()).expect("worker listening");
         poll_until_finished(&mut s);
-        let recap = bundle_recap(BundleKind::Video, &[]);
-        assert_eq!(recap, "Exported MP4 → ./export/animation.mp4, WebM → ./export/animation.webm");
+        let recap = bundle_recap(BundleKind::Video, &[], "untitled");
+        assert_eq!(recap, "Exported MP4 → ./export/untitled.mp4, WebM → ./export/untitled.webm");
         assert_eq!(s.core.status, recap);
         assert_eq!(s.export_recap, recap);
     }
@@ -4239,7 +6076,7 @@ mod tests {
         // claims nothing: every member named as failed,
         // in the bundle's own voice — never a success
         // and never a single-format failure sentence.
-        let recap = bundle_recap(BundleKind::Images, &plan_bundle(BundleKind::Images));
+        let recap = bundle_recap(BundleKind::Images, &plan_bundle(BundleKind::Images), "untitled");
         assert_eq!(recap, "Exported nothing; failed: PNG, JPEG, SVG, sheet");
         assert_eq!(s.core.status, recap);
         assert_eq!(s.export_recap, recap);
@@ -4431,7 +6268,777 @@ mod tests {
         // The original bundle job wrote the finish.
         assert_eq!(
             s.core.status,
-            bundle_recap(BundleKind::Images, &[])
+            bundle_recap(BundleKind::Images, &[], "untitled")
+        );
+    }
+
+    // ---- Named destinations, guard, delivery, publish ----
+    // (Roadmap Wave 1, RM23 — P-13)
+    // The naming, scale and recap builders are pure;
+    // the guard's state machine is driven through
+    // `guard_blocks` with real temp files (existence
+    // is its one filesystem input); the publish finish
+    // is driven through the job seam like the bundles'.
+
+    /// A project with the given name (the demo project
+    /// otherwise).
+    fn named_project(name: &str) -> stykanimate_rs::model::Project {
+        let mut core = EditorCore::new();
+        core.project.name = name.to_string();
+        core.project
+    }
+
+    #[test]
+    fn project_stem_sanitises_names_and_falls_back() {
+        assert_eq!(project_stem(&named_project("Untitled")), "untitled");
+        assert_eq!(project_stem(&named_project("The Last Promise")), "the-last-promise");
+        assert_eq!(project_stem(&named_project("Ep. 12 — Finale!")), "ep-12-finale");
+        assert_eq!(project_stem(&named_project("my_ep  2")), "my_ep-2");
+        assert_eq!(project_stem(&named_project("  --A--  ")), "a");
+        // No alphanumeric characters at all: the
+        // historical stem, so the destinations are the
+        // ones the panel has always written.
+        assert_eq!(project_stem(&named_project("!!!")), "animation");
+        assert_eq!(project_stem(&named_project("")), "animation");
+    }
+
+    #[test]
+    fn named_destinations_carry_the_stem_and_match_legacy_at_animation() {
+        // With the fallback stem the named destinations
+        // are the legacy ones byte for byte — the
+        // naming changes nothing for an unnamed-feeling
+        // project, and everything for a named one.
+        for op in [
+            ExportOp::Png,
+            ExportOp::Jpeg,
+            ExportOp::Svg,
+            ExportOp::Spritesheet,
+            ExportOp::ContactSheet,
+            ExportOp::Gif,
+            ExportOp::Apng,
+            ExportOp::Mp4,
+            ExportOp::Webm,
+        ] {
+            assert_eq!(op.dest_named("animation"), op.dest(), "{op:?}");
+            let named = op.dest_named("my-episode");
+            match file_name_for(op, "my-episode") {
+                Some(file) => assert!(named.ends_with(&file), "{op:?}: {named}"),
+                None => assert_eq!(named, op.dest(), "{op:?} writes a directory"),
+            }
+        }
+        assert_eq!(ExportOp::Mp4.dest_named("my-episode"), "./export/my-episode.mp4");
+        assert_eq!(ExportOp::Apng.dest_named("my-episode"), "out/my-episode.apng");
+        assert_eq!(
+            ExportOp::Spritesheet.dest_named("my-episode"),
+            "./export/my-episode-spritesheet.png"
+        );
+    }
+
+    #[test]
+    fn delivery_scale_dims_and_names_follow_the_preset() {
+        // The demo stage is 960×720.
+        let project = named_project("Demo");
+        assert_eq!(delivery_scale(&project, DeliveryPreset::Master), 1.0);
+        assert_eq!(delivery_scale(&project, DeliveryPreset::Youtube1080), 1.5);
+        assert_eq!(delivery_scale(&project, DeliveryPreset::Youtube4k), 3.0);
+        assert_eq!(delivery_scale(&project, DeliveryPreset::Gif), 0.5);
+        assert_eq!(delivery_dims(&project, DeliveryPreset::Master), (960, 720));
+        assert_eq!(delivery_dims(&project, DeliveryPreset::Youtube1080), (1440, 1080));
+        assert_eq!(delivery_dims(&project, DeliveryPreset::Youtube4k), (2880, 2160));
+        assert_eq!(delivery_dims(&project, DeliveryPreset::Gif), (480, 360));
+        assert_eq!(delivery_file_name("demo", DeliveryPreset::Master), "demo.mp4");
+        assert_eq!(
+            delivery_file_name("demo", DeliveryPreset::Youtube1080),
+            "demo-1080p.mp4"
+        );
+        assert_eq!(delivery_file_name("demo", DeliveryPreset::Youtube4k), "demo-4k.mp4");
+        assert_eq!(delivery_file_name("demo", DeliveryPreset::Gif), "demo.gif");
+        // A stage with no usable height falls back to
+        // the unscaled render rather than a NaN scale.
+        let mut flat = named_project("Demo");
+        flat.stage = [960.0, 0.0];
+        assert_eq!(delivery_scale(&flat, DeliveryPreset::Youtube1080), 1.0);
+    }
+
+    #[test]
+    fn delivery_and_publish_labels_exist_in_the_catalogue() {
+        // RM23 (IA-RM23-2): the Delivery section's
+        // catalogue keys — the section heading, the
+        // four preset labels, the export button, the
+        // publish row's label + note, and the two
+        // composed templates in stored form. Like the
+        // other IA pins in this module, this passes
+        // only once the integrator inserts the keys
+        // (the Q7 pattern).
+        let core = EditorCore::new();
+        for (key, literal) in [
+            ("export_sec_delivery", "Delivery"),
+            ("export_preset_master", "Project master"),
+            ("export_preset_youtube_1080", "YouTube 1080p"),
+            ("export_preset_youtube_4k", "YouTube 4K"),
+            ("export_preset_gif", "Community GIF"),
+            ("export_delivery", "Export delivery"),
+            ("export_bundle_publish", "Publish package"),
+            (
+                "export_note_bundle_publish",
+                "MP4 + SRT/VTT captions + thumbnail still in one press. Always exports in full — the range toggle above applies only to the single-format buttons.",
+            ),
+            (
+                "export_delivery_line",
+                "Delivery: {preset} — {width}×{height} → {dest}",
+            ),
+            (
+                "export_overwrite_note",
+                "Heads up: {dest} already exists — the export will ask for a second press before overwriting it.",
+            ),
+        ] {
+            assert!(
+                crate::rune_sec::i18n_wire::key_in_table(key),
+                "{key} must exist in the i18n table"
+            );
+            assert_eq!(
+                crate::rune_sec::i18n_wire::tr(&core, key),
+                literal,
+                "{key} must render byte-identically in English"
+            );
+        }
+        // The composed delivery line through the public
+        // helper: the demo project at the master preset.
+        assert_eq!(
+            delivery_text(&core, DeliveryPreset::Master),
+            "Delivery: Project master — 960×720 → ./export/untitled.mp4"
+        );
+    }
+
+    /// Create a real file in the temp dir (the guard's
+    /// existence fixture) and return its path; the
+    /// caller removes it.
+    fn existing_target(tag: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "stykanimate-rs-rm23-guard-{tag}-{}.mp4",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"master").expect("create the guard fixture");
+        path
+    }
+
+    #[test]
+    fn overwrite_guard_line_names_the_first_and_counts_the_rest() {
+        let a = PathBuf::from("/x/export/ep.mp4");
+        let b = PathBuf::from("/x/export/ep.webm");
+        assert_eq!(
+            overwrite_guard_line(&[a.clone()]),
+            "Export target already exists: /x/export/ep.mp4 — press the same export again to overwrite it."
+        );
+        assert_eq!(
+            overwrite_guard_line(&[a, b]),
+            "Export target already exists: /x/export/ep.mp4 (and 1 more) — press the same export again to overwrite it."
+        );
+        // The detectors read the guard honestly: not a
+        // success shape, not a failure shape.
+        let line = overwrite_guard_line(&[PathBuf::from("/x/export/ep.mp4")]);
+        assert!(!line.starts_with("Exported "), "{line}");
+        assert!(!line.to_lowercase().contains("failed"), "{line}");
+    }
+
+    #[test]
+    fn overwrite_guard_blocks_the_first_press_and_arms_the_second() {
+        let mut s = crate::init();
+        let target = existing_target("arm");
+        let targets = vec![target.clone()];
+        // First press: blocked, nothing exported, the
+        // guard sentence is the status AND the recap.
+        assert!(guard_blocks(&mut s, &targets));
+        let line = overwrite_guard_line(&existing_targets(&targets));
+        assert_eq!(s.core.status, line);
+        assert_eq!(s.export_recap, line);
+        // Second press of the same export: proceeds,
+        // and the arm is spent — a third press blocks
+        // again (the file still exists).
+        assert!(!guard_blocks(&mut s, &targets));
+        assert!(guard_blocks(&mut s, &targets));
+        // A different target set replaces the arm: it
+        // blocks on its own first press even right
+        // after the other set was armed.
+        let other = existing_target("other");
+        let other_targets = vec![other.clone()];
+        assert!(guard_blocks(&mut s, &other_targets));
+        assert!(!guard_blocks(&mut s, &other_targets));
+        // No existing targets: never blocks.
+        let missing = PathBuf::from("/nonexistent-dir-rm23/nope.mp4");
+        assert!(!guard_blocks(&mut s, &[missing]));
+        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_file(&other);
+    }
+
+    #[test]
+    fn publish_targets_and_recap_name_every_member() {
+        let core = EditorCore::new();
+        let targets = publish_targets(&core, DeliveryPreset::Master);
+        let names: Vec<String> = targets
+            .iter()
+            .map(|p| p.file_name().expect("file target").to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "untitled.mp4",
+                "untitled.srt",
+                "untitled.vtt",
+                "untitled-thumbnail.png"
+            ]
+        );
+        // The GIF preset cannot name the package's MP4
+        // leg: it falls back to the master name.
+        let gif_targets = publish_targets(&core, DeliveryPreset::Gif);
+        assert_eq!(gif_targets[0], targets[0]);
+        // A height preset names the MP4 member with
+        // its suffix.
+        let hd_targets = publish_targets(&core, DeliveryPreset::Youtube1080);
+        assert!(hd_targets[0].ends_with("untitled-1080p.mp4"));
+        assert_eq!(
+            publish_recap(&[], "untitled", "untitled.mp4"),
+            "Exported MP4 → ./export/untitled.mp4, SRT → ./export/untitled.srt, VTT → ./export/untitled.vtt, thumbnail → ./export/untitled-thumbnail.png"
+        );
+        assert_eq!(
+            publish_recap(&["SRT"], "untitled", "untitled.mp4"),
+            "Exported MP4 → ./export/untitled.mp4, VTT → ./export/untitled.vtt, thumbnail → ./export/untitled-thumbnail.png; failed: SRT"
+        );
+        assert_eq!(
+            publish_recap(&PUBLISH_MEMBERS, "untitled", "untitled.mp4"),
+            "Exported nothing; failed: MP4, SRT, VTT, thumbnail"
+        );
+        // The classifier reads a partial publish recap
+        // as an error, exactly like a bundle's.
+        assert_eq!(
+            recap_severity(&publish_recap(&["SRT"], "untitled", "untitled.mp4")),
+            Severity::Error
+        );
+        assert_eq!(
+            recap_severity(&publish_recap(&[], "untitled", "untitled.mp4")),
+            Severity::Success
+        );
+    }
+
+    #[test]
+    fn publish_job_finish_writes_the_recap_to_status_and_recap() {
+        let mut s = crate::init();
+        let release = blocked_job(
+            &mut s,
+            JobKind::BundlePublish,
+            Ok(ExportJobResult::Publish(vec!["VTT"])),
+        );
+        release.send(()).expect("worker listening");
+        poll_until_finished(&mut s);
+        // The bundle finish discipline: the recap IS
+        // the status and the stored recap — the failed
+        // member named, the rest claimed with their
+        // (named) destinations.
+        let recap = publish_recap(&["VTT"], "untitled", "untitled.mp4");
+        assert_eq!(s.core.status, recap);
+        assert_eq!(s.export_recap, recap);
+    }
+
+    #[test]
+    fn publish_worker_that_never_reports_fails_every_member() {
+        let mut s = crate::init();
+        let (tx, rx) = mpsc::channel::<ExportJobOutcome>();
+        drop(tx);
+        s.export_job = Some(ExportJob {
+            kind: JobKind::BundlePublish,
+            dest: PathBuf::from("out-test"),
+            render: Arc::new(PhaseProgress::default()),
+            encode: Arc::new(PhaseProgress::default()),
+            bundle: Arc::new(PhaseProgress::default()),
+            outcome: rx,
+            shown_render: PhaseSnapshot::default(),
+            shown_encode: PhaseSnapshot::default(),
+            shown_bundle: PhaseSnapshot::default(),
+        });
+        assert_eq!(poll_export_job(&mut s), (true, false));
+        assert!(s.export_job.is_none());
+        let recap = publish_recap(&PUBLISH_MEMBERS, "untitled", "untitled.mp4");
+        assert_eq!(recap, "Exported nothing; failed: MP4, SRT, VTT, thumbnail");
+        assert_eq!(s.core.status, recap);
+        assert_eq!(s.export_recap, recap);
+    }
+
+    #[test]
+    fn publish_job_reads_its_bundle_slot_like_a_bundle() {
+        let mut s = crate::init();
+        let release = blocked_job(
+            &mut s,
+            JobKind::BundlePublish,
+            Ok(ExportJobResult::Publish(Vec::new())),
+        );
+        let job = s.export_job.as_ref().expect("job running");
+        // Before any member reports: the working line
+        // names the package (slot data, not a label).
+        let lines = job_lines(&s.core, job);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].0, "xc-progress-working");
+        assert_eq!(
+            lines[0].1,
+            crate::rune_sec::i18n_wire::tr(&s.core, "export_progress_working")
+                .replace("{name}", "publish package")
+        );
+        release.send(()).expect("worker listening");
+        poll_until_finished(&mut s);
+    }
+
+    #[test]
+    fn delivery_preset_job_kind_maps_to_the_mp4_finish() {
+        // The preset kind is an MP4 job in every
+        // dispatch table the finish and the readout
+        // consult — never a bundle, never ranged.
+        let kind = JobKind::Mp4Preset(DeliveryPreset::Youtube1080);
+        assert_eq!(kind.op(), ExportOp::Mp4);
+        assert_eq!(kind.bundle_kind(), None);
+        assert!(!kind.publish());
+        assert_eq!(kind.range(), None);
+        assert!(JobKind::BundlePublish.publish());
+        assert_eq!(JobKind::BundlePublish.bundle_kind(), None);
+    }
+
+    // ---- Post-export QA probe (RM29, P-16) ----
+
+    fn healthy_measurements() -> QaMeasurements {
+        QaMeasurements {
+            probe: Some(VideoProbe {
+                duration_secs: 2.0,
+                has_video: true,
+                has_audio: true,
+                frames: Some(48),
+                width: 960,
+                height: 720,
+            }),
+            audio: Some((0.5, 0.2)),
+            lumas: vec![0.4, 0.5, 0.3, 0.45],
+            ink: None,
+        }
+    }
+
+    fn expect_with_audio() -> QaExpectations {
+        QaExpectations {
+            duration_secs: 2.0,
+            frames: Some(48),
+            audio_expected: true,
+            burn_in: None,
+        }
+    }
+
+    #[test]
+    fn ffprobe_json_parses_streams_frames_and_dimensions() {
+        let json = r#"{"streams":[
+            {"codec_type":"video","width":960,"height":720,"nb_frames":"48","avg_frame_rate":"24/1"},
+            {"codec_type":"audio","nb_frames":"84"}
+        ],"format":{"duration":"2.000000"}}"#;
+        let probe = parse_ffprobe_json(json).expect("valid ffprobe output parses");
+        assert!(probe.has_video && probe.has_audio);
+        assert_eq!(probe.frames, Some(48));
+        assert_eq!((probe.width, probe.height), (960, 720));
+        assert_eq!(probe.duration_secs, 2.0);
+    }
+
+    #[test]
+    fn ffprobe_json_derives_frames_when_the_container_omits_them() {
+        // WebM carries no nb_frames: the count derives
+        // from the average frame rate and the duration.
+        let json = r#"{"streams":[
+            {"codec_type":"video","width":320,"height":240,"avg_frame_rate":"10/1"}
+        ],"format":{"duration":"1.500000"}}"#;
+        let probe = parse_ffprobe_json(json).expect("valid ffprobe output parses");
+        assert!(probe.has_video && !probe.has_audio);
+        assert_eq!(probe.frames, Some(15));
+        // Garbage and duration-less output do not parse.
+        assert!(parse_ffprobe_json("not json").is_none());
+        assert!(parse_ffprobe_json(r#"{"streams":[]}"#).is_none());
+    }
+
+    #[test]
+    fn audio_stats_measures_peak_rms_and_silence() {
+        let (peak, rms) = audio_stats(&[0.5, -0.5, 0.5, -0.5]);
+        assert_eq!(peak, 0.5);
+        assert!((rms - 0.5).abs() < 1e-6);
+        assert_eq!(audio_stats(&[0.0; 8]), (0.0, 0.0));
+        assert_eq!(audio_stats(&[]), (0.0, 0.0));
+        assert_eq!(fmt_db(1.0), "0.0 dB");
+        assert_eq!(fmt_db(0.5), "-6.0 dB");
+        assert_eq!(fmt_db(0.0), "-inf dB");
+    }
+
+    #[test]
+    fn band_ink_counts_text_colour_in_the_anchored_band_only() {
+        // 8×8 frame, black except a white block in the
+        // bottom band and one white pixel at the top.
+        let (w, h) = (8usize, 8usize);
+        let mut rgb = vec![0u8; w * h * 3];
+        for y in 6..8 {
+            for x in 2..6 {
+                let i = (y * w + x) * 3;
+                rgb[i] = 255;
+                rgb[i + 1] = 255;
+                rgb[i + 2] = 255;
+            }
+        }
+        let i = (0 * w + 0) * 3;
+        rgb[i] = 255;
+        rgb[i + 1] = 255;
+        rgb[i + 2] = 255;
+        assert_eq!(band_ink_count(&rgb, w, h, false, [255, 255, 255]), 8);
+        assert_eq!(band_ink_count(&rgb, w, h, true, [255, 255, 255]), 1);
+        assert_eq!(band_ink_count(&rgb, w, h, false, [255, 0, 0]), 0);
+        assert_eq!(band_ink_count(&[], w, h, false, [255, 255, 255]), 0);
+    }
+
+    #[test]
+    fn qa_verdict_passes_a_healthy_measurement_set() {
+        let report = qa_verdict("./export/x.mp4", &expect_with_audio(), &healthy_measurements());
+        assert!(report.passed, "failures: {:?}", report.failures);
+        assert!(report.failures.is_empty());
+        assert!(report.details.contains("48 frames"), "{}", report.details);
+        assert!(report.details.contains("no subtitles"), "{}", report.details);
+    }
+
+    #[test]
+    fn qa_verdict_fails_loudly_on_silent_audio() {
+        // The P0-1 regression shape at the detector
+        // level: the export claims the project's audio,
+        // the file has a stream, and the stream is
+        // digital silence.
+        let mut m = healthy_measurements();
+        m.audio = Some((0.0, 0.0));
+        let report = qa_verdict("./export/x.mp4", &expect_with_audio(), &m);
+        assert!(!report.passed);
+        assert_eq!(report.failures.len(), 1);
+        assert!(report.failures[0].contains("silent"), "{}", report.failures[0]);
+        // A missing stream is its own named failure.
+        let mut m = healthy_measurements();
+        m.probe.as_mut().expect("probe").has_audio = false;
+        m.audio = None;
+        let report = qa_verdict("./export/x.mp4", &expect_with_audio(), &m);
+        assert!(!report.passed);
+        assert!(report.failures[0].contains("missing"), "{}", report.failures[0]);
+    }
+
+    #[test]
+    fn qa_verdict_accepts_absent_audio_when_none_is_expected() {
+        // The full WebM's documented shape: no audio
+        // stream, none expected — not a failure.
+        let mut m = healthy_measurements();
+        m.probe.as_mut().expect("probe").has_audio = false;
+        m.audio = None;
+        let mut expect = expect_with_audio();
+        expect.audio_expected = false;
+        let report = qa_verdict("./export/x.webm", &expect, &m);
+        assert!(report.passed, "failures: {:?}", report.failures);
+    }
+
+    #[test]
+    fn qa_verdict_catches_duration_frame_and_black_mismatches() {
+        let mut m = healthy_measurements();
+        m.probe.as_mut().expect("probe").duration_secs = 5.0;
+        m.probe.as_mut().expect("probe").frames = Some(20);
+        let report = qa_verdict("./export/x.mp4", &expect_with_audio(), &m);
+        assert!(!report.passed);
+        assert_eq!(report.failures.len(), 2, "{:?}", report.failures);
+        // A partly black video passes the black scan —
+        // fades are legal; only ALL sampled frames black
+        // fails.
+        let mut m = healthy_measurements();
+        m.lumas = vec![0.0, 0.0, 0.4, 0.0];
+        assert!(qa_verdict("./export/x.mp4", &expect_with_audio(), &m).passed);
+        m.lumas = vec![0.0, 0.01, 0.0, 0.02];
+        let report = qa_verdict("./export/x.mp4", &expect_with_audio(), &m);
+        assert!(!report.passed);
+        assert!(report.failures[0].contains("black"), "{}", report.failures[0]);
+        // An unprobeable file fails with that one fact.
+        let report = qa_verdict("./export/x.mp4", &expect_with_audio(), &QaMeasurements::default());
+        assert!(!report.passed);
+        assert_eq!(report.failures.len(), 1);
+    }
+
+    #[test]
+    fn qa_verdict_catches_a_missing_burn_in() {
+        let mut expect = expect_with_audio();
+        expect.audio_expected = false;
+        expect.burn_in = Some(QaBurnIn {
+            at_secs: 1.0,
+            text_rgb: [255, 255, 255],
+            position: stykanimate_rs::subtitles::SubtitlePosition::Bottom,
+        });
+        let mut m = healthy_measurements();
+        m.ink = Some(0);
+        let report = qa_verdict("./export/x.mp4", &expect, &m);
+        assert!(!report.passed);
+        assert!(report.failures[0].contains("burn-in"), "{}", report.failures[0]);
+        m.ink = Some(QA_INK_MIN);
+        assert!(qa_verdict("./export/x.mp4", &expect, &m).passed);
+        // The check itself failing to run is reported,
+        // not silently passed.
+        m.ink = None;
+        let report = qa_verdict("./export/x.mp4", &expect, &m);
+        assert!(!report.passed);
+    }
+
+    #[test]
+    fn qa_expectations_read_the_project() {
+        let mut core = EditorCore::new();
+        // The demo project: no clips, no cues.
+        let expect = qa_expectations(&core.project, None, true);
+        assert!(!expect.audio_expected);
+        assert!(expect.burn_in.is_none());
+        assert_eq!(
+            expect.frames,
+            Some(stykanimate_rs::export::sampled_frame_total(&core.project))
+        );
+        assert!(expect.duration_secs > 0.0);
+        // A cue plants the spot-check at its midpoint,
+        // in the style's colour, at the style's anchor.
+        core.project.subtitles.push(stykanimate_rs::subtitles::SubtitleCue {
+            start_frame: 0,
+            end_frame: 2,
+            text: "Hello".to_string(),
+            speaker: None,
+        });
+        let expect = qa_expectations(&core.project, None, true);
+        let burn = expect.burn_in.expect("cue expected");
+        assert_eq!(burn.text_rgb, [255, 255, 255]);
+        assert_eq!(
+            burn.at_secs,
+            core.project.seconds_at_frame_time(1.0),
+        );
+        // An unmuted clip whose file exists expects
+        // audio; muting it withdraws the expectation,
+        // and the video-only door never expects any.
+        let clip_path = qa_temp_path("clip", "wav");
+        std::fs::write(&clip_path, b"placeholder").expect("temp clip");
+        core.project.audio.push(stykanimate_rs::model::AudioClip {
+            path: clip_path.to_string_lossy().into_owned(),
+            start_frame: 0,
+            gain: 1.0,
+            muted: false,
+        });
+        assert!(qa_expectations(&core.project, None, true).audio_expected);
+        assert!(!qa_expectations(&core.project, None, false).audio_expected);
+        core.project.audio[0].muted = true;
+        assert!(!qa_expectations(&core.project, None, true).audio_expected);
+        let _ = std::fs::remove_file(&clip_path);
+    }
+
+    fn qa_fixture_dir(tag: &str) -> PathBuf {
+        let dir = qa_temp_path(tag, "dir");
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        dir
+    }
+
+    /// A one-second lavfi MP4 with the given audio
+    /// source — the probe family's real-file fixture
+    /// (RM1's precedent: CI installs ffmpeg).
+    fn lavfi_mp4(tag: &str, audio_source: &str) -> PathBuf {
+        let out = qa_fixture_dir(tag).join("probe.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("testsrc2=duration=1:size=320x240:rate=10")
+            .args(["-f", "lavfi", "-i"])
+            .arg(audio_source)
+            .args(["-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+            .arg(&out)
+            .status()
+            .expect("ffmpeg is installed in CI");
+        assert!(status.success(), "fixture encode failed");
+        out
+    }
+
+    #[test]
+    fn probe_export_passes_a_real_healthy_mp4() {
+        let path = lavfi_mp4("healthy", "sine=frequency=440:duration=1");
+        let expect = QaExpectations {
+            duration_secs: 1.0,
+            frames: Some(10),
+            audio_expected: true,
+            burn_in: None,
+        };
+        let report = probe_export(&path, &expect);
+        assert!(report.passed, "failures: {:?}", report.failures);
+    }
+
+    #[test]
+    fn probe_export_fails_the_planted_silent_audio_fixture() {
+        // Phase 2 acceptance: the QA recap fails loudly
+        // on a planted silent-audio file — an audio
+        // stream is present, the project audio is
+        // expected, and the stream meters at silence.
+        let path = lavfi_mp4("silent", "anullsrc=channel_layout=stereo:sample_rate=44100");
+        let expect = QaExpectations {
+            duration_secs: 1.0,
+            frames: Some(10),
+            audio_expected: true,
+            burn_in: None,
+        };
+        let report = probe_export(&path, &expect);
+        assert!(!report.passed);
+        assert!(
+            report.failures.iter().any(|f| f.contains("silent")),
+            "failures: {:?}",
+            report.failures
+        );
+        // The same file passes when no audio is
+        // expected of it (the video-only shape).
+        let mut relaxed = expect.clone();
+        relaxed.audio_expected = false;
+        assert!(probe_export(&path, &relaxed).passed);
+    }
+
+    #[test]
+    fn probe_export_spots_burned_in_text_and_its_absence() {
+        // A white bar in the bottom band stands in for
+        // burned-in text: the ink counter must find it,
+        // and must find nothing on the plain black file.
+        let burn = QaBurnIn {
+            at_secs: 0.5,
+            text_rgb: [255, 255, 255],
+            position: stykanimate_rs::subtitles::SubtitlePosition::Bottom,
+        };
+        let expect = QaExpectations {
+            duration_secs: 1.0,
+            frames: Some(10),
+            audio_expected: false,
+            burn_in: Some(burn),
+        };
+        let with_text = qa_fixture_dir("burnin").join("with.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("color=c=black:s=320x240:d=1:r=10")
+            .args(["-vf", "drawbox=x=40:y=196:w=240:h=20:color=white:t=fill"])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(&with_text)
+            .status()
+            .expect("ffmpeg is installed in CI");
+        assert!(status.success());
+        let report = probe_export(&with_text, &expect);
+        assert!(
+            !report.failures.iter().any(|f| f.contains("burn-in")),
+            "failures: {:?}",
+            report.failures
+        );
+        let plain = qa_fixture_dir("noburn").join("plain.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("color=c=black:s=320x240:d=1:r=10")
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(&plain)
+            .status()
+            .expect("ffmpeg is installed in CI");
+        assert!(status.success());
+        let report = probe_export(&plain, &expect);
+        assert!(
+            report.failures.iter().any(|f| f.contains("burn-in missing")),
+            "failures: {:?}",
+            report.failures
+        );
+    }
+
+    #[test]
+    fn sequence_residue_counts_only_frame_files() {
+        let dir = qa_fixture_dir("residue");
+        for name in ["frame-0001.png", "frame-0002.png", "frame-0010.png"] {
+            std::fs::write(dir.join(name), b"x").expect("frame file");
+        }
+        // A hand-named file and another format's master
+        // are not residue.
+        std::fs::write(dir.join("frame-draft.png"), b"x").expect("draft");
+        std::fs::write(dir.join("untitled.mp4"), b"x").expect("master");
+        assert_eq!(sequence_residue(&dir), 3);
+        assert_eq!(sequence_residue(&dir.join("missing")), 0);
+    }
+
+    #[test]
+    fn incomplete_rows_are_marked_from_the_registry() {
+        // The registry names the row the PNG jobs write
+        // ("export/frame-*.png"); a directory holding
+        // fewer frames than expected marks the row, a
+        // full one does not, and the mark shows on the
+        // row's line only when set.
+        note_expected_sequence("export/frame-*.png", 5);
+        let triples: Vec<FileTriple> = (1..=3)
+            .map(|i| {
+                (
+                    PathBuf::from(format!("export/frame-{i:04}.png")),
+                    100,
+                    at(500),
+                    1,
+                )
+            })
+            .collect();
+        let mut rows = rows_from_triples(&triples);
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].incomplete, "unmarked before the registry is read");
+        mark_incomplete(&mut rows);
+        assert!(rows[0].incomplete);
+        let core = EditorCore::new();
+        let marked = row_line(&core, &rows[0], at(500));
+        assert!(
+            marked.ends_with(&i18n_wire::tr(&core, "export_history_incomplete")),
+            "{marked}"
+        );
+        let mut full = rows.clone();
+        full[0].count = 5;
+        mark_incomplete(&mut full);
+        assert!(!full[0].incomplete);
+        assert_eq!(
+            row_line(&core, &full[0], at(500)),
+            "export/frame-*.png · 5 files · 300 B · just now"
+        );
+    }
+
+    #[test]
+    fn qa_labels_exist_in_the_catalogue() {
+        // RM29 (IA-RM29-1): the QA verdict templates,
+        // the residue line and the incomplete marker —
+        // the composed panel copy of this seat. Like
+        // the other IA pins in this module, this passes
+        // only once the integrator inserts the keys
+        // (the Q7 pattern).
+        let core = EditorCore::new();
+        for (key, literal) in [
+            ("export_qa_pass", "QA passed — {details}"),
+            ("export_qa_fail", "QA failed — {details}"),
+            (
+                "export_residue_line",
+                "Partial export: {count} frames were written to {dest} before it failed.",
+            ),
+            ("export_history_incomplete", "incomplete"),
+        ] {
+            assert!(
+                crate::rune_sec::i18n_wire::key_in_table(key),
+                "{key} must exist in the i18n table"
+            );
+            assert_eq!(
+                crate::rune_sec::i18n_wire::tr(&core, key),
+                literal,
+                "{key} must render byte-identically in English"
+            );
+        }
+        // The composed lines through the public helpers:
+        // a passing report renders its measured facts; a
+        // failing one names its failures first.
+        let pass = QaReport {
+            dest: "./export/x.mp4".to_string(),
+            passed: true,
+            failures: Vec::new(),
+            details: "2.0s · 48 frames".to_string(),
+        };
+        assert_eq!(qa_line(&core, &pass), "QA passed — 2.0s · 48 frames");
+        let fail = QaReport {
+            dest: "./export/x.mp4".to_string(),
+            passed: false,
+            failures: vec!["audio is silent (peak -inf dB)".to_string()],
+            details: "2.0s · 48 frames".to_string(),
+        };
+        assert_eq!(
+            qa_line(&core, &fail),
+            "QA failed — audio is silent (peak -inf dB) — 2.0s · 48 frames"
         );
     }
 }

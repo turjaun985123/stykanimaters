@@ -668,12 +668,13 @@ struct PoseLibraryEntry {
     pose: Pose,
 }
 
-/// The directory the 2D pose library lives in:
-/// `./library/poses`, inside the 2D figure library's own
-/// directory — where the 3D mirror keeps `./library3d/poses`
-/// beside its figure library.
+/// The directory the 2D pose library lives in: the
+/// `poses` folder inside the one resolver's library dir
+/// (`stykanimate_rs::shell::library_dir`, Roadmap Wave 1,
+/// RM9 / F-8) — where the 3D mirror keeps its `poses`
+/// folder inside the library3d dir.
 fn pose_library_dir() -> PathBuf {
-    PathBuf::from("library").join("poses")
+    stykanimate_rs::shell::library_dir().join("poses")
 }
 
 /// Save `pose` into pose library directory `dir` (created

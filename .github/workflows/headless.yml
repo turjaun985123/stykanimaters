@@ -54,6 +54,25 @@ name: Headless Rune probe (snap / tree)
 #   main workflow is already red for the same reason and a probe
 #   result would be meaningless.
 #
+# THE BINDING LAYER (Roadmap F-7, A26 R1 — read before touching
+# either half)
+#   Fail-soft steps + strict transcripts had a failure mode of
+#   their own, paid for on record: green conclusions hiding red
+#   transcripts, and an overflow scan that was never run over an
+#   artifact reported CLEAN. So the probe steps stay soft (data
+#   collection), but they are now FOLLOWED by strict readers:
+#     * an overflow-scan step runs scripts/overflow_scan.py over
+#       the dumps THIS run just produced (same job, same files);
+#     * an aggregate step folds every transcript into ONE
+#       machine-readable verdict (headless-out/verdict.json,
+#       scripts/verdict_aggregate.py);
+#     * a separate `verdict` JOB at the bottom of this file
+#       downloads the artifact and re-runs the aggregator with
+#       NO fail-soft wrapper — its conclusion IS the verdict,
+#       and it is the check to mark required in branch
+#       protection. Do not soften the verdict job, and do not
+#       harden the probe steps: each half is the other's reason.
+#
 # WHY workflow_dispatch ONLY (no push trigger)
 #   A push trigger would pay for a second full release build on every
 #   push — roughly doubling CI minutes — to re-answer questions that
@@ -97,6 +116,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # Roadmap Wave 1 (RM9, IA-RM9-3): since the AppDirs
+  # move, the editor's store lives in the OS config dir
+  # unless STYKANIMATE_PORTABLE is set — the probes seed
+  # and reset the checkout's ./projects store, so the
+  # probe runs portable, as it did before the move.
+  STYKANIMATE_PORTABLE: "1"
   CARGO_TERM_COLOR: always
   # Same as the main workflow: incremental artifacts bloat the cache.
   CARGO_INCREMENTAL: "0"
@@ -670,23 +695,37 @@ jobs:
             kill "$XVFB_PID" 2>/dev/null
           }
           trap cleanup EXIT
+          # Roadmap F-10 (RM11): the tools/list floor DERIVES
+          # from the gate's MCP_SURFACE_FLOOR constant in
+          # scripts/phase_j_checks.py, read by
+          # scripts/mcp_tool_floor.py — the single ledgered
+          # source. It replaces the stale hard-coded 370 that
+          # stood here while the surface grew to 392: a copied
+          # floor silently stops binding the day it is copied.
+          # The derivation fails the step loudly (set +e is in
+          # force, so check explicitly) rather than probing
+          # against a guessed number.
+          MCP_TOOL_FLOOR="$(python3 scripts/mcp_tool_floor.py)" || { echo "TOOL FLOOR DERIVATION FAILED — see scripts/mcp_tool_floor.py"; exit 1; }
+          export MCP_TOOL_FLOOR
+          echo "Live MCP probe: tool floor $MCP_TOOL_FLOOR (derived from MCP_SURFACE_FLOOR in scripts/phase_j_checks.py)"
           python3 - <<'PYEOF'
           import json, os, sys, time, urllib.error, urllib.request
 
           BASE = "http://127.0.0.1:32117"
-          # The tools/list floor, derived from source at Wave 11:
-          # mcp.rs all_tools() = 41 built-ins (3 original + 29
-          # Wave-9 parity + 9 Wave-10 round-2, the literal vec in
-          # all_tools) + mcp_tools::tools() 91 registry tools +
-          # mcp_io::tools() 8 IO tools = 140, and tools/list
-          # returns all_tools() unfiltered (tools_list_result in
-          # mcp.rs). The floor is a minimum, not an equality:
-          # later waves ADD tools. The binding invariant is the
-          # cross-check below — the health document's count and
-          # the tools/list length are read from the same registry
+          # The tools/list floor arrives via MCP_TOOL_FLOOR,
+          # derived by the step above from the gate's
+          # MCP_SURFACE_FLOOR constant (scripts/mcp_tool_floor.py;
+          # Roadmap F-10). tools/list returns all_tools()
+          # unfiltered (tools_list_result in mcp.rs), so the
+          # floor is a minimum, not an equality: later waves ADD
+          # tools, and the gate's ratchet ledger is where the
+          # floor moves. The binding invariant is the cross-check
+          # below — the health document's count and the
+          # tools/list length are read from the same registry
           # by two different code paths (listener thread vs UI
-          # thread dispatch) and must agree.
-          TOOL_FLOOR = 370
+          # thread dispatch) and must agree. A missing env var is
+          # a loud failure, never a silent default.
+          TOOL_FLOOR = int(os.environ["MCP_TOOL_FLOOR"])
 
           lines = []
           failures = []
@@ -892,6 +931,42 @@ jobs:
           fi
           exit $rc
 
+      # Roadmap F-7 (A26 R1): the overflow scan runs HERE, over
+      # the dumps this same run just produced — not in a later
+      # human debrief. (Wave X was reported CLEAN while its
+      # artifact held 40 hits, because the scan simply never
+      # ran.) Fail-soft at step level like every probe step, so
+      # the upload below always happens; the strict reading of
+      # this output belongs to the verdict job, via the
+      # aggregator step next. The scan's own transcript and
+      # exit code ride the artifact.
+      - name: Overflow scan — over the just-produced dumps
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set +e
+          python3 scripts/overflow_scan.py --dir headless-out \
+            > headless-out/overflow-scan.txt 2>&1
+          echo $? > headless-out/overflow-scan.exit
+          cat headless-out/overflow-scan.txt
+
+      # Roadmap F-7 (A26 R1): fold every fail-soft transcript
+      # (subtitle census, Home thumbnail probe, both Home
+      # markers, live MCP probe) plus the overflow scan into
+      # ONE machine-readable verdict: headless-out/verdict.json.
+      # Fail-soft like its inputs so the artifact — verdict.json
+      # included — always uploads. The `verdict` job below
+      # re-runs this same aggregator over the downloaded
+      # artifact WITHOUT the fail-soft wrapper; its conclusion
+      # is the verdict.
+      - name: Verdict aggregate — one machine-readable verdict
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set +e
+          python3 scripts/verdict_aggregate.py headless-out
+          echo $? > headless-out/verdict.exit
+
       # Whatever exists is the result — including "nothing exists".
       # if-no-files-found: ignore is load-bearing: an absent output
       # is probe data, not a workflow failure.
@@ -924,3 +999,35 @@ jobs:
             echo "Interpretation guide: see the header comment in .github/workflows/headless.yml."
           } >> "$GITHUB_STEP_SUMMARY"
           ls -la headless-out || true
+
+  # Roadmap F-7 (A26 R1): THE BINDING CHECK. Everything above is
+  # fail-soft data collection by design; this job is not. It
+  # downloads the probe artifact and re-runs the verdict
+  # aggregator over it with no continue-on-error and no `|| true`:
+  # the job's conclusion IS the machine-readable verdict. A
+  # missing artifact (the probe build died), a FAIL or UNPROVEN
+  # transcript, a missing transcript, or a non-CLEAN overflow
+  # scan each turn this job — and therefore the run — red.
+  # `if: always()` is load-bearing: the job must still render
+  # its verdict when the probe job failed, because "no evidence"
+  # is a FAIL here, never a skip. To bind the branch, mark the
+  # "Binding verdict" check required in branch protection —
+  # repository settings are the one part of F-7 a workflow file
+  # cannot do itself.
+  verdict:
+    name: Binding verdict
+    needs: headless-probe
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Download the probe artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: headless-probe-output
+          path: headless-out
+
+      - name: Aggregate the verdict (non-fail-soft)
+        run: python3 scripts/verdict_aggregate.py headless-out

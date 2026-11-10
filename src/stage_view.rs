@@ -36,7 +36,13 @@
 //! gizmo (topmost), per-side onion depths in place of the
 //! core's single `onion_frames` count, and independent
 //! frustum / safe-frame guide toggles under the master
-//! `guides` flag.
+//! `guides` flag. Roadmap Wave 1 (RM18, P-6c) makes the
+//! frustum family frustum-true under those same toggles:
+//! the frustum toggle also draws the rule-of-thirds grid
+//! INSIDE the framed view, and the safe toggle also draws
+//! the framed view's own action/title-safe rects with
+//! their labels — the stage-space grid and safe frames
+//! remain, honestly describing the stage itself.
 //! UI mission Wave 5 adds two things to the stack: a permanent
 //! stage frame (the stage rect filled with the project
 //! background and outlined in the theme's border token, drawn
@@ -44,8 +50,15 @@
 //! (a zoom/pan composed over the camera transform, folded in
 //! by [`display_transform`] / [`drag_transform`] — audit
 //! S10 D4; see the "View navigation" section below).
+//! Roadmap Wave 1 (RM16, roadmap P-4) adds the motion-path
+//! overlay in the stack's tail: while `core.show_paths`
+//! is on, the selected figure's evaluated root trajectory
+//! (with a draggable point per frame, wired to
+//! `EditorCore::nudge_path_point`) and the selected joint's
+//! trajectory are drawn over the frame content — see the
+//! "Motion-path overlay" section at [`motion_path_points`].
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use rune::{Color, LineCap, Shape};
 use stykanimate_rs::editor::EditorCore;
@@ -258,6 +271,882 @@ pub fn with_view_nav(
         size: base.vt.size,
     };
     crate::rune_sec::stage_camera::RotTransform::new(vt, theta)
+}
+
+// ----------------------------------------------------------------
+// Stage feedback & precision (Roadmap Wave 1, RM15 — roadmap
+// P-3; audit A2's R-A2-1…R-A2-7 cluster)
+// ----------------------------------------------------------------
+//
+// The stage's transform core was already exact; what it lacked
+// was FEEDBACK: picking that feels the same at every zoom,
+// something under the pointer before the grab, numbers while
+// dragging instead of only a recap after release, and any
+// precision channel at all (snapping, nudge, coordinates).
+// This section is that layer, built as pure functions and
+// session state in this module:
+//
+// * screen-space picking — the pick radius and snap tolerance
+//   are ELEMENT-POINT constants converted through the live
+//   view scale ([`pick_radius`], [`snap_tolerance`]), so a
+//   target is the same size on screen at 0.1× and at 8×
+//   (R-A2-1);
+// * segment picking — [`segment_hit`] over the same evaluated
+//   positions the figure pass draws, so a long segment's
+//   middle is grabbable, not dead stage (R-A2-4);
+// * the hover model — [`hover_at`] classifies the point under
+//   the pointer (joint > segment > sprite > stroke, the press
+//   priority with segment slotted in), [`stage_cursor`] turns
+//   hover + mode + drag state into the canvas's cursor shape,
+//   and the drawing pass at the end of [`stage_shape`] paints
+//   the hover highlight (R-A2-2);
+// * the snap engine — angle steps for aim/IK drags, centre /
+//   edge / ground / grid snapping for root drags, with the
+//   marks a HUD needs to SAY a snap engaged (R-A2-5);
+// * the drag HUD + pointer readout — [`drag_hud_lines`] reads
+//   the live drag straight off the core (the solvers have
+//   already written the pose the pointer asked for, so the
+//   numbers are the pose's own), drawn beside the pointer by
+//   the same final pass; with no drag in flight the pointer's
+//   stage coordinates stand in the stage's bottom-left corner
+//   (R-A2-3 + the coordinate half of R-A2-6);
+// * keyboard nudge — [`nudge_selected`], one snapshot per
+//   key-repeat burst, on the drag path's own write patterns
+//   (R-A2-7).
+//
+// The pointer's element-local position reaches this module
+// through the [`StagePointer`] probe — a `thread_local` in
+// the `VIEW_NAV` pattern, fed by the shell (IA-RM15-1). Until
+// the shell feeds it, the probe is empty, the final pass
+// draws nothing, and the stage is byte-for-byte the stage
+// this section found. The drag-path adoptions that live in
+// frozen files (the core hit test's radius, `drag_to`'s snap,
+// the key bindings) are filed as IA-RM15-2…IA-RM15-5 in the
+// seat findings; everything here is written so those are
+// one-line call-site swaps.
+
+/// The stage picking radius in ELEMENT POINTS (R-A2-1): the
+/// on-screen size of a joint target, converted to stage units
+/// at the pointer path by [`pick_radius`]. 13 pt is the size
+/// the old stage-unit constant produced at the fit view (one
+/// stage unit ≈ one point there), so the fit view's feel is
+/// unchanged — what changes is that zooming no longer shrinks
+/// or inflates the target.
+pub const PICK_RADIUS_PX: f32 = 13.0;
+
+/// The snap engagement tolerance in ELEMENT POINTS (R-A2-5):
+/// how close, ON SCREEN, a dragged point must come to a snap
+/// target before the snap takes it.
+pub const SNAP_TOLERANCE_PX: f32 = 8.0;
+
+/// Stage units for a point-denominated `px` at view `scale`:
+/// the one conversion every screen-space constant goes
+/// through. A degenerate scale (no stage drawn yet) reads as
+/// 1:1 rather than dividing by zero.
+fn stage_units(px: f32, scale: f32) -> f32 {
+    if scale > 0.0 {
+        px / scale
+    } else {
+        px
+    }
+}
+
+/// The joint/segment pick radius in stage units at view
+/// `scale` — [`PICK_RADIUS_PX`] on screen, whatever the zoom.
+pub fn pick_radius(scale: f32) -> f32 {
+    stage_units(PICK_RADIUS_PX, scale)
+}
+
+/// The snap tolerance in stage units at view `scale`.
+pub fn snap_tolerance(scale: f32) -> f32 {
+    stage_units(SNAP_TOLERANCE_PX, scale)
+}
+
+/// The pointer's last known place over the stage canvas, in
+/// the canvas element's own layout points, with the element
+/// size it was measured against. Fed by the shell on pointer
+/// move and through the drag phases (IA-RM15-1); read by
+/// [`stage_shape`]'s feedback pass and by [`stage_cursor_now`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StagePointer {
+    /// Element-local pointer position, layout points.
+    pub local: [f32; 2],
+    /// Canvas element size when the position was taken.
+    pub size: [f32; 2],
+}
+
+thread_local! {
+    /// The display scale [`stage_shape`] last drew at
+    /// (element points per stage unit). Session consumers
+    /// that only ever see stage points — the sprite drag's
+    /// jitter gate is the first — read it to convert their
+    /// screen-space constants, the `LAST_STAGE_SIZE`
+    /// precedent ("the size the stage was last drawn at")
+    /// applied to scale. 0 = never drawn.
+    static LAST_DISPLAY_SCALE: Cell<f32> = const { Cell::new(0.0) };
+    /// The pointer probe (see [`StagePointer`]).
+    static STAGE_POINTER: Cell<Option<StagePointer>> = const { Cell::new(None) };
+    /// The session snap configuration (see [`SnapConfig`]).
+    static SNAP_CONFIG: Cell<SnapConfig> = const { Cell::new(SnapConfig::DEFAULT) };
+    /// The last nudge's burst stamp (see [`nudge_selected`]).
+    static NUDGE_STAMP: Cell<Option<NudgeStamp>> = const { Cell::new(None) };
+}
+
+/// The scale the stage last drew at; 1.0 before the first
+/// draw, so a screen-space conversion made early is the
+/// fit-view conversion rather than a divide by zero.
+pub fn last_display_scale() -> f32 {
+    let s = LAST_DISPLAY_SCALE.with(|c| c.get());
+    if s > 0.0 {
+        s
+    } else {
+        1.0
+    }
+}
+
+/// Feed the pointer probe: the shell calls this on pointer
+/// move and on every drag phase with the event's
+/// element-local point and the element's size, and with
+/// `None` when the pointer leaves the canvas.
+pub fn set_stage_pointer(p: Option<StagePointer>) {
+    STAGE_POINTER.with(|c| c.set(p));
+}
+
+/// The pointer probe as last fed (see [`set_stage_pointer`]).
+pub fn stage_pointer() -> Option<StagePointer> {
+    STAGE_POINTER.with(|c| c.get())
+}
+
+/// The evaluated joint positions the feedback layer reads:
+/// the display frame's, setup-aware — the very positions the
+/// figure pass of [`stage_shape`] draws, so a highlight sits
+/// on the joint as drawn, not on a neighbouring frame's.
+fn feedback_positions(core: &EditorCore, fi: usize) -> Vec<V2> {
+    if core.setup_mode {
+        core.setup_positions_f(core.display_frame(), fi)
+    } else {
+        core.positions_f(core.display_frame(), fi)
+    }
+}
+
+/// Distance from `p` to the segment `a`–`b`, with the
+/// projection parameter `t` (0 at `a`, 1 at `b`, clamped):
+/// the segment-picking primitive. A degenerate segment
+/// (`a == b`) measures to the point itself with `t = 0`.
+pub fn dist_to_segment(p: V2, a: V2, b: V2) -> (f32, f32) {
+    let ab = [b[0] - a[0], b[1] - a[1]];
+    let len2 = ab[0] * ab[0] + ab[1] * ab[1];
+    if len2 <= 0.0 {
+        return (model::dist(p, a), 0.0);
+    }
+    let t = (((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / len2).clamp(0.0, 1.0);
+    (model::dist(p, [a[0] + ab[0] * t, a[1] + ab[1] * t]), t)
+}
+
+/// The nearest joint to stage point `p` within `radius`
+/// stage units, over every figure's drawn positions: the
+/// core hit test's shape with the radius as a parameter, so
+/// the caller converts it from screen points first
+/// ([`pick_radius`]). Nearest wins; ties keep the earlier
+/// figure/node, the hit test's own convention.
+pub fn joint_hit(core: &EditorCore, p: V2, radius: f32) -> Option<(usize, usize)> {
+    let mut best: Option<(usize, usize, f32)> = None;
+    for fi in 0..core.project.figures.len() {
+        for (ni, joint) in feedback_positions(core, fi).iter().enumerate() {
+            let d = model::dist(p, *joint);
+            if d <= radius && best.map(|(_, _, bd)| d < bd).unwrap_or(true) {
+                best = Some((fi, ni, d));
+            }
+        }
+    }
+    best.map(|(fi, ni, _)| (fi, ni))
+}
+
+/// The nearest segment to stage point `p` within `radius`
+/// stage units: `(figure, node, distance)` where `node` is
+/// the segment's CHILD joint (the segment runs parent →
+/// node, the indexing the bend channel uses). A stickman is
+/// mostly segment; until now only its joints were pickable
+/// (R-A2-4).
+pub fn segment_hit(core: &EditorCore, p: V2, radius: f32) -> Option<(usize, usize, f32)> {
+    let mut best: Option<(usize, usize, f32)> = None;
+    for fi in 0..core.project.figures.len() {
+        let pos = feedback_positions(core, fi);
+        for (ni, node) in core.project.figures[fi].def.nodes.iter().enumerate() {
+            let Some(par) = node.parent else { continue };
+            let (Some(&a), Some(&b)) = (pos.get(par), pos.get(ni)) else {
+                continue;
+            };
+            let (d, _) = dist_to_segment(p, a, b);
+            if d <= radius && best.map(|(_, _, bd)| d < bd).unwrap_or(true) {
+                best = Some((fi, ni, d));
+            }
+        }
+    }
+    best
+}
+
+/// What the stage pointer is over, in press priority order
+/// (R-A2-2/R-A2-4): a joint beats the segment under it, a
+/// segment beats the sprite/stroke layers beneath the
+/// figures — the left press's own order (joint → sprite →
+/// stroke) with segment slotted where a pose grab belongs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageHover {
+    None,
+    Joint(usize, usize),
+    Segment(usize, usize),
+    Sprite(usize),
+    Stroke(usize),
+}
+
+/// Classify stage point `p` at view `scale` (see
+/// [`StageHover`]): the pick radius is screen-space, so the
+/// classification is the same at any zoom.
+pub fn hover_at(core: &EditorCore, p: V2, scale: f32) -> StageHover {
+    let radius = pick_radius(scale);
+    if let Some((fi, ni)) = joint_hit(core, p, radius) {
+        return StageHover::Joint(fi, ni);
+    }
+    if let Some((fi, ni, _)) = segment_hit(core, p, radius) {
+        return StageHover::Segment(fi, ni);
+    }
+    if let Some(si) = crate::stage_sprites::sprite_pick_at(core, p) {
+        return StageHover::Sprite(si);
+    }
+    if let Some(si) = crate::rune_sec::stage_layers::stroke_at_point(core, p, radius) {
+        return StageHover::Stroke(si);
+    }
+    StageHover::None
+}
+
+/// The cursor shape the stage canvas wears for this core
+/// state and hover (R-A2-2): the drag in flight decides
+/// first (grabbing, or move for a camera pan), then the
+/// modal tools (camera pans, draw crosses), then the hover
+/// target (a pose grab over joints/segments, a move over
+/// sprites, a pointer over strokes), else the arrow. Pure:
+/// the shell asks per commit and sets the element's cursor
+/// (IA-RM15-1).
+pub fn stage_cursor(core: &EditorCore, hover: StageHover) -> rune::Cursor {
+    use stykanimate_rs::editor::DragKind;
+    match core.dragging {
+        Some(DragKind::Camera) => return rune::Cursor::Move,
+        Some(_) => return rune::Cursor::Grabbing,
+        None => {}
+    }
+    if core.camera_mode {
+        return rune::Cursor::Move;
+    }
+    if core.draw_mode {
+        return rune::Cursor::Crosshair;
+    }
+    match hover {
+        StageHover::Joint(..) | StageHover::Segment(..) => rune::Cursor::Grab,
+        StageHover::Sprite(_) => rune::Cursor::Move,
+        StageHover::Stroke(_) => rune::Cursor::Pointer,
+        StageHover::None => rune::Cursor::Default,
+    }
+}
+
+/// [`stage_cursor`] with the hover classified from the
+/// pointer probe: the one call the canvas mount needs
+/// (IA-RM15-1). No probe (pointer never seen / already left)
+/// classifies as [`StageHover::None`].
+pub fn stage_cursor_now(core: &EditorCore, el_size: [f32; 2]) -> rune::Cursor {
+    let hover = match stage_pointer() {
+        Some(ptr) => {
+            let rt = drag_transform(core, el_size);
+            hover_at(core, rt.to_stage(ptr.local), rt.vt.scale)
+        }
+        None => StageHover::None,
+    };
+    stage_cursor(core, hover)
+}
+
+/// The session's snap configuration (R-A2-5): session-only,
+/// like the view navigation — a posing aid, not project
+/// data, so it takes no undo step and saves nowhere. The
+/// panel/settings surface that will one day own these
+/// switches writes through [`set_snap_config`]; until then
+/// the defaults below are the behaviour.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SnapConfig {
+    /// Master switch for every snap in [`snap_drag_point`].
+    pub enabled: bool,
+    /// Angle snap step in degrees for aim/IK drags (15° —
+    /// the Pivot/Stick Nodes convention).
+    pub angle_step: f32,
+    /// Grid spacing in stage units for root drags, when a
+    /// grid is configured; `None` = no grid snap.
+    pub grid: Option<f32>,
+}
+
+impl SnapConfig {
+    pub const DEFAULT: SnapConfig = SnapConfig {
+        enabled: true,
+        angle_step: 15.0,
+        grid: None,
+    };
+}
+
+/// The session snap configuration (see [`SnapConfig`]).
+pub fn snap_config() -> SnapConfig {
+    SNAP_CONFIG.with(|c| c.get())
+}
+
+/// Replace the session snap configuration.
+pub fn set_snap_config(cfg: SnapConfig) {
+    SNAP_CONFIG.with(|c| c.set(cfg));
+}
+
+/// `angle` rounded to the nearest multiple of `step`
+/// degrees; a non-positive step is no snap at all.
+pub fn snap_angle_deg(angle: f32, step: f32) -> f32 {
+    if step <= 0.0 {
+        angle
+    } else {
+        (angle / step).round() * step
+    }
+}
+
+/// The aim snap: `p` rotated about `pivot` onto the nearest
+/// `step`-degree ray, at `p`'s own distance — the dragged
+/// joint keeps its reach and takes the snapped direction,
+/// which is exactly what the aim solver will then pose. A
+/// point on the pivot has no direction and passes through.
+pub fn snap_aim_point(pivot: V2, p: V2, step: f32) -> V2 {
+    let d = [p[0] - pivot[0], p[1] - pivot[1]];
+    let r = (d[0] * d[0] + d[1] * d[1]).sqrt();
+    if r <= 0.0 {
+        return p;
+    }
+    let snapped = snap_angle_deg(d[1].atan2(d[0]).to_degrees(), step).to_radians();
+    [pivot[0] + r * snapped.cos(), pivot[1] + r * snapped.sin()]
+}
+
+/// Which root-snap targets took a coordinate (R-A2-5): the
+/// HUD's vocabulary for saying a snap engaged, and the snap
+/// pins' assertion surface.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RootSnap {
+    pub centre_x: bool,
+    pub centre_y: bool,
+    pub edge: bool,
+    pub ground: bool,
+    pub grid: bool,
+}
+
+/// Snap a root-drag point to the stage's own landmarks:
+/// per coordinate, the nearest of {edge, centre, opposite
+/// edge} within `tol` stage units wins over the grid (a
+/// landmark is a stronger statement than a grid line); the
+/// bottom edge is the ground line a pose stands on. With no
+/// grid configured and nothing in tolerance, the point
+/// passes through untouched.
+pub fn snap_root_point(p: V2, stage: [f32; 2], tol: f32, grid: Option<f32>) -> (V2, RootSnap) {
+    let mut out = p;
+    let mut marks = RootSnap::default();
+    let (mut grid_x, mut grid_y) = (false, false);
+    if let Some(sp) = grid {
+        if sp > 0.0 {
+            let gx = (p[0] / sp).round() * sp;
+            grid_x = gx != out[0];
+            out[0] = gx;
+            let gy = (p[1] / sp).round() * sp;
+            grid_y = gy != out[1];
+            out[1] = gy;
+        }
+    }
+    if stage[0] > 0.0 {
+        for (target, is_centre) in [(0.0, false), (stage[0] / 2.0, true), (stage[0], false)] {
+            if (out[0] - target).abs() <= tol {
+                out[0] = target;
+                if is_centre {
+                    marks.centre_x = true;
+                } else {
+                    marks.edge = true;
+                }
+                grid_x = false;
+                break;
+            }
+        }
+    }
+    if stage[1] > 0.0 {
+        for (target, kind) in [(0.0, 0u8), (stage[1] / 2.0, 1u8), (stage[1], 2u8)] {
+            if (out[1] - target).abs() <= tol {
+                out[1] = target;
+                match kind {
+                    1 => marks.centre_y = true,
+                    2 => marks.ground = true,
+                    _ => marks.edge = true,
+                }
+                grid_y = false;
+                break;
+            }
+        }
+    }
+    marks.grid = grid_x || grid_y;
+    (out, marks)
+}
+
+/// What a snapped drag point engaged (see [`snap_drag_point`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SnapMarks {
+    /// An aim/IK point was rotated onto a step ray.
+    pub angle: bool,
+    /// A root point's landmark/grid engagements.
+    pub root: RootSnap,
+}
+
+/// Snap the stage point a drag is about to write, per the
+/// drag in flight on `core` and the session [`SnapConfig`]:
+/// roots take the landmark snap, aim drags snap about the
+/// parent joint, IK drags about the chain root (the
+/// grandparent joint — the ray the chain reaches along).
+/// Camera drags and no-drag pass through. This is the whole
+/// drag-path adoption surface: the shell snaps the converted
+/// pointer point through here before handing it to the core
+/// (IA-RM15-3), so the core's solvers stay snap-free and the
+/// undo discipline is untouched.
+pub fn snap_drag_point(core: &EditorCore, p: V2, scale: f32) -> (V2, SnapMarks) {
+    use stykanimate_rs::editor::DragKind;
+    let marks = SnapMarks::default();
+    let cfg = snap_config();
+    if !cfg.enabled {
+        return (p, marks);
+    }
+    let fi = core.selected_figure;
+    let Some(fig) = core.project.figures.get(fi) else {
+        return (p, marks);
+    };
+    match core.dragging {
+        Some(DragKind::Root) => {
+            let (q, m) = snap_root_point(p, core.project.stage, snap_tolerance(scale), cfg.grid);
+            (q, SnapMarks { angle: false, root: m })
+        }
+        Some(DragKind::Aim(ni)) | Some(DragKind::SetupAim(ni)) => {
+            let pos = feedback_positions(core, fi);
+            let pivot = fig
+                .def
+                .nodes
+                .get(ni)
+                .and_then(|n| n.parent)
+                .and_then(|par| pos.get(par).copied())
+                .unwrap_or(p);
+            let q = snap_aim_point(pivot, p, cfg.angle_step);
+            (q, SnapMarks { angle: q != p, root: RootSnap::default() })
+        }
+        Some(DragKind::Ik(ni)) | Some(DragKind::SetupIk(ni)) => {
+            let pos = feedback_positions(core, fi);
+            let pivot = fig
+                .def
+                .nodes
+                .get(ni)
+                .and_then(|n| n.parent)
+                .and_then(|par| fig.def.nodes.get(par))
+                .and_then(|par| par.parent)
+                .and_then(|gp| pos.get(gp).copied())
+                .unwrap_or(p);
+            let q = snap_aim_point(pivot, p, cfg.angle_step);
+            (q, SnapMarks { angle: q != p, root: RootSnap::default() })
+        }
+        _ => (p, marks),
+    }
+}
+
+/// A segment's direction in degrees, stage convention
+/// (y down, `atan2` range −180..=180): the HUD's angle.
+fn seg_angle_deg(a: V2, b: V2) -> f32 {
+    (b[1] - a[1]).atan2(b[0] - a[0]).to_degrees()
+}
+
+/// The angle of node `ni`'s segment on figure `fi`, read off
+/// the drawn positions — the number the aim/IK solvers are
+/// posing, not a re-derivation from stored angles.
+fn aim_angle_deg(core: &EditorCore, fi: usize, ni: usize) -> Option<f32> {
+    let fig = core.project.figures.get(fi)?;
+    let par = fig.def.nodes.get(ni)?.parent?;
+    let pos = feedback_positions(core, fi);
+    Some(seg_angle_deg(*pos.get(par)?, *pos.get(ni)?))
+}
+
+/// An IK chain's reach as a percentage of its fully
+/// extended length (the two segment lengths summed): the
+/// HUD's "how straight is this limb" number. `None` when
+/// the chain or its lengths are degenerate.
+fn ik_reach_pct(core: &EditorCore, fi: usize, ni: usize) -> Option<f32> {
+    let fig = core.project.figures.get(fi)?;
+    let mid = fig.def.nodes.get(ni)?.parent?;
+    let root_i = fig.def.nodes.get(mid)?.parent?;
+    let pos = feedback_positions(core, fi);
+    let d = model::dist(*pos.get(root_i)?, *pos.get(ni)?);
+    let max = fig.def.nodes[mid].length + fig.def.nodes[ni].length;
+    if max <= 0.0 {
+        return None;
+    }
+    Some((d / max * 100.0).clamp(0.0, 100.0))
+}
+
+/// The live drag HUD's lines (R-A2-3), read off the core
+/// while a pose/camera drag is in flight: the drag has
+/// already written the pose the pointer asked for, so these
+/// are the pose's own live numbers — root coordinates for a
+/// root drag, the grabbed segment's angle for an aim, reach
+/// for an IK grab, the camera key for a camera pan, the
+/// `REST` twins in setup mode. Empty when no core drag is
+/// in flight (the sprite drag's line is
+/// `stage_sprites::sprite_drag_hud`'s, and the drawing pass
+/// concatenates the two). Formatting follows the numeric
+/// idiom RM3's kit set for readouts: fixed decimals per
+/// quantity (stage coordinates and degrees whole, zoom two
+/// places), and every string is plain ASCII capitals,
+/// digits and `.,-%` — the canvas text stamp's charset.
+pub fn drag_hud_lines(core: &EditorCore) -> Vec<String> {
+    use stykanimate_rs::editor::DragKind;
+    let Some(kind) = core.dragging else {
+        return Vec::new();
+    };
+    let fi = core.selected_figure;
+    if core.project.figures.get(fi).is_none() {
+        return Vec::new();
+    }
+    match kind {
+        DragKind::Root => {
+            let root = core
+                .project
+                .frames
+                .get(core.current)
+                .and_then(|f| f.poses.get(fi))
+                .map(|pose| pose.root)
+                .unwrap_or([0.0, 0.0]);
+            vec![format!("ROOT {:.0}, {:.0}", root[0], root[1])]
+        }
+        DragKind::Aim(ni) => match aim_angle_deg(core, fi, ni) {
+            Some(deg) => vec![format!("ANGLE {:.0} DEG", deg)],
+            None => Vec::new(),
+        },
+        DragKind::Ik(ni) => match ik_reach_pct(core, fi, ni) {
+            Some(pct) => vec![format!("IK REACH {:.0}%", pct)],
+            None => Vec::new(),
+        },
+        DragKind::Camera => {
+            let (x, y, z) = core.camera_here();
+            vec![format!("CAM {:.0}, {:.0}", x, y), format!("ZOOM {:.2}", z)]
+        }
+        DragKind::SetupAim(ni) => match aim_angle_deg(core, fi, ni) {
+            Some(deg) => vec![format!("REST ANGLE {:.0} DEG", deg)],
+            None => Vec::new(),
+        },
+        DragKind::SetupIk(ni) => match ik_reach_pct(core, fi, ni) {
+            Some(pct) => vec![format!("REST IK REACH {:.0}%", pct)],
+            None => Vec::new(),
+        },
+    }
+}
+
+/// The pointer's stage coordinates as the corner readout
+/// shows them: whole stage units, `x, y`.
+pub fn pointer_readout(p: V2) -> String {
+    format!("{:.0}, {:.0}", p[0], p[1])
+}
+
+/// The keyboard nudge steps in stage units (R-A2-7): plain
+/// arrow = 1, Shift = 10, Alt = 0.1 — [`nudge_step`] picks.
+pub const NUDGE_STEP: f32 = 1.0;
+pub const NUDGE_STEP_LARGE: f32 = 10.0;
+pub const NUDGE_STEP_FINE: f32 = 0.1;
+
+/// The nudge step for a key press's modifiers (Alt beats
+/// Shift: the finer override wins when both are held).
+pub fn nudge_step(shift: bool, alt: bool) -> f32 {
+    if alt {
+        NUDGE_STEP_FINE
+    } else if shift {
+        NUDGE_STEP_LARGE
+    } else {
+        NUDGE_STEP
+    }
+}
+
+/// One nudge burst's stamp: nudges against the same
+/// selection, frame and mode within
+/// [`NUDGE_BURST_WINDOW_MS`] of the last one share its
+/// snapshot, so a held arrow key (OS key-repeat) is ONE
+/// undo step, not thirty — the gesture-coalescing rule the
+/// drag path gets from its grab snapshot, restated for keys.
+#[derive(Clone, Copy)]
+struct NudgeStamp {
+    at: std::time::Instant,
+    fi: usize,
+    ni: Option<usize>,
+    frame: usize,
+    setup: bool,
+}
+
+/// The burst window for [`nudge_selected`]'s snapshot
+/// coalescing, in milliseconds.
+pub const NUDGE_BURST_WINDOW_MS: u128 = 750;
+
+/// Forget the nudge burst stamp: the next nudge snapshots
+/// afresh. The shell calls this when the selection or frame
+/// changes under it (the stamp also keys on both, so this
+/// is belt-and-braces); tests use it to separate bursts.
+pub fn reset_nudge_burst() {
+    NUDGE_STAMP.with(|c| c.set(None));
+}
+
+/// Snapshot for a nudge, coalesced per burst (see
+/// [`NudgeStamp`]): the first press of a burst takes the
+/// gesture's one snapshot; repeats inside the window ride
+/// it.
+fn nudge_snapshot(core: &mut EditorCore, fi: usize, ni: Option<usize>, setup: bool) {
+    let now = std::time::Instant::now();
+    let reuse = NUDGE_STAMP.with(|c| c.get()).map_or(false, |st| {
+        st.fi == fi
+            && st.ni == ni
+            && st.frame == core.current
+            && st.setup == setup
+            && now.duration_since(st.at).as_millis() <= NUDGE_BURST_WINDOW_MS
+    });
+    if !reuse {
+        core.snapshot();
+    }
+    NUDGE_STAMP.with(|c| {
+        c.set(Some(NudgeStamp {
+            at: now,
+            fi,
+            ni,
+            frame: core.current,
+            setup,
+        }))
+    });
+}
+
+/// Nudge the selected joint by `(dx, dy)` stage units
+/// (R-A2-7): the keyboard twin of a stage drag, on the drag
+/// path's own write patterns — a root joint's pose root
+/// moves verbatim; any other joint is aimed at its current
+/// position plus the delta through `model::aim_node` (so
+/// joint limits clamp exactly as a drag's would); in setup
+/// mode the same aim writes clamped REST angles through a
+/// scratch pose, and a root there refuses with
+/// `begin_setup_drag`'s own sentence, because a rest pose
+/// has no root to move. One snapshot per key-repeat burst
+/// (see [`NudgeStamp`]). Refuses — silently, as a press
+/// during playback does — while playing, with no joint
+/// selected, or on a stale selection; a locked figure
+/// refuses with the drag path's own status sentence.
+/// Returns whether a nudge was written. The key binding
+/// itself is the shell's (IA-RM15-4).
+pub fn nudge_selected(core: &mut EditorCore, dx: f32, dy: f32) -> bool {
+    if core.playing || (dx == 0.0 && dy == 0.0) {
+        return false;
+    }
+    let fi = core.selected_figure;
+    let Some(ni) = core.selected_node else {
+        return false;
+    };
+    let Some(fig) = core.project.figures.get(fi) else {
+        return false;
+    };
+    if fig.locked {
+        core.status = "Figure is locked — unlock it in the figures list.".into();
+        return false;
+    }
+    if core.setup_mode {
+        if fig.def.nodes[ni].parent.is_none() {
+            core.status = "The rest pose has no root position — roots live in frame poses.".into();
+            return false;
+        }
+        let pos = core.setup_positions(fi);
+        let Some(&joint) = pos.get(ni) else {
+            return false;
+        };
+        let target = [joint[0] + dx, joint[1] + dy];
+        nudge_snapshot(core, fi, Some(ni), true);
+        let root = core.project.frames[core.current].poses[fi].root;
+        let mut scratch = core.project.figures[fi].def.rest_pose(root);
+        model::aim_node(&core.project.figures[fi].def, &mut scratch, ni, target);
+        let fig = &mut core.project.figures[fi];
+        for (node, angle) in fig.def.nodes.iter_mut().zip(scratch.angles.iter()) {
+            node.rest_angle = node.clamp_angle(*angle);
+        }
+        core.status = format!("Nudged rest joint {ni} by ({dx:.1}, {dy:.1}).");
+        return true;
+    }
+    let frame = core.current;
+    if fig.def.nodes[ni].parent.is_none() {
+        nudge_snapshot(core, fi, Some(ni), false);
+        let pose = &mut core.project.frames[frame].poses[fi];
+        pose.root = [pose.root[0] + dx, pose.root[1] + dy];
+        core.status = format!(
+            "Nudged figure {} root to ({:.0}, {:.0}).",
+            fi + 1,
+            pose.root[0],
+            pose.root[1]
+        );
+        return true;
+    }
+    let pos = core.positions(frame, fi);
+    let Some(&joint) = pos.get(ni) else {
+        return false;
+    };
+    let target = [joint[0] + dx, joint[1] + dy];
+    nudge_snapshot(core, fi, Some(ni), false);
+    let def = &core.project.figures[fi].def;
+    let pose = &mut core.project.frames[frame].poses[fi];
+    model::aim_node(def, pose, ni, target);
+    core.status = format!("Nudged figure {} joint {} by ({dx:.1}, {dy:.1}).", fi + 1, ni);
+    true
+}
+
+/// The stage's feedback pass (RM15), drawn LAST in
+/// [`stage_shape`] — over figures, FX, text and weather,
+/// with the selection gizmos: these are editor markers, and
+/// a marker the frame content could cover would fail at its
+/// job. Reads only the pointer probe and the core, so with
+/// the probe empty (the shell has not fed it yet, or the
+/// pointer has left) it draws nothing at all.
+///
+/// * Hover (no drag in flight): the hovered joint gets an
+///   enlarged accent octagon, the hovered segment a
+///   translucent accent wash, the hovered sprite a
+///   full-strength outline, the hovered stroke a white glow
+///   along its points — the target announces itself BEFORE
+///   the grab (R-A2-2).
+/// * A drag in flight: the HUD — a theme-card plate beside
+///   the pointer carrying [`drag_hud_lines`] (plus the
+///   sprite drag's line) in the canvas text stamp (R-A2-3).
+/// * Otherwise: the pointer's stage coordinates in the
+///   stage's bottom-left corner (the readout half of
+///   R-A2-6's measurement furniture).
+fn draw_stage_feedback(
+    mut shape: Shape,
+    core: &EditorCore,
+    rt: &crate::rune_sec::stage_camera::RotTransform,
+    el_size: [f32; 2],
+    s: f32,
+) -> Shape {
+    let Some(ptr) = stage_pointer() else {
+        return shape;
+    };
+    if el_size[0] <= 0.0 || el_size[1] <= 0.0 {
+        return shape;
+    }
+    let stage_p = rt.to_stage(ptr.local);
+    let accent = hex_color(SELECTION_ACCENT).unwrap_or(Color::WHITE);
+    let dragging = core.dragging.is_some() || crate::stage_sprites::sprite_drag_active();
+    if !dragging {
+        match hover_at(core, stage_p, s) {
+            StageHover::Joint(fi, ni) => {
+                if let Some(&joint) = feedback_positions(core, fi).get(ni) {
+                    shape = shape.fill(
+                        ngon(rt.to_screen(joint), 11.0 * s.max(0.6), 8),
+                        accent.alpha(0.40),
+                    );
+                }
+            }
+            StageHover::Segment(fi, ni) => {
+                let pos = feedback_positions(core, fi);
+                if let (Some(&a), Some(&b)) = (
+                    core.project.figures[fi]
+                        .def
+                        .nodes
+                        .get(ni)
+                        .and_then(|n| n.parent)
+                        .and_then(|par| pos.get(par)),
+                    pos.get(ni),
+                ) {
+                    shape = shape.line(rt.to_screen(a), rt.to_screen(b), 5.0, LineCap::Round, accent.alpha(0.30));
+                }
+            }
+            StageHover::Sprite(si) => {
+                let quads = crate::stage_sprites::sprite_quads(&core.project, core.display_frame());
+                if let Some(q) = quads.iter().find(|q| q.sprite == si) {
+                    let pts: Vec<[f32; 2]> = q.corners.iter().map(|p| rt.to_screen(*p)).collect();
+                    shape = shape.stroke_with(pts, true, 1.5, LineCap::Round, accent.alpha(0.95));
+                }
+            }
+            StageHover::Stroke(si) => {
+                if let Some(stroke) = core.project.strokes.get(si) {
+                    for w in stroke.points.windows(2) {
+                        shape = shape.line(
+                            rt.to_screen(w[0]),
+                            rt.to_screen(w[1]),
+                            3.0,
+                            LineCap::Round,
+                            Color::WHITE.alpha(0.45),
+                        );
+                    }
+                }
+            }
+            StageHover::None => {}
+        }
+    }
+    // HUD text geometry: glyph height ≈ 11 element points,
+    // expressed in stage units through the live scale; the
+    // stamp's cell is a fifth of the glyph height and each
+    // character advances four cells (stage_text's own
+    // layout constants, restated for the width estimate).
+    let glyph = 11.0 / s.max(0.05);
+    let cell = glyph / 5.0;
+    let text_w = |line: &str| (line.chars().count() as f32 * 4.0 - 1.0).max(0.0) * cell;
+    let ink: u32 = if core.light_theme { 0x14161A } else { 0xF2F4F8 };
+    let mut lines = drag_hud_lines(core);
+    if let Some(line) = crate::stage_sprites::sprite_drag_hud(core) {
+        lines.push(line);
+    }
+    if !lines.is_empty() {
+        let theme = crate::rune_sec::app_theme::app_theme(!core.light_theme);
+        let line_h = glyph * 1.5;
+        let max_w = lines.iter().map(|l| text_w(l)).fold(0.0f32, f32::max);
+        let pad = glyph * 0.55;
+        // The plate's top-left in stage coordinates: the
+        // stage point under a screen offset from the
+        // pointer, so the plate rides beside the cursor at
+        // any zoom or camera rotation.
+        let anchor = rt.to_stage([ptr.local[0] + 16.0, ptr.local[1] + 18.0]);
+        let total_h = line_h * lines.len() as f32 - (line_h - glyph);
+        let corners = [
+            [anchor[0] - pad, anchor[1] - pad],
+            [anchor[0] + max_w + pad, anchor[1] - pad],
+            [anchor[0] + max_w + pad, anchor[1] + total_h + pad],
+            [anchor[0] - pad, anchor[1] + total_h + pad],
+        ];
+        let screen: Vec<[f32; 2]> = corners.iter().map(|p| rt.to_screen(*p)).collect();
+        shape = shape.fill(screen.clone(), theme.card.alpha(0.88));
+        shape = shape.stroke_with(screen, true, 1.0, LineCap::Round, theme.card_border.alpha(0.9));
+        for (i, line) in lines.iter().enumerate() {
+            let centre = [
+                anchor[0] + text_w(line) / 2.0,
+                anchor[1] + glyph / 2.0 + line_h * i as f32,
+            ];
+            for tp in crate::rune_sec::stage_text::label_boxes_alpha(centre, 0.0, line, glyph, ink, 0.95) {
+                let crate::rune_sec::stage_text::TextPrim::GlyphBox { corners, color, alpha } = tp;
+                let screen: Vec<[f32; 2]> = corners.iter().map(|p| rt.to_screen(*p)).collect();
+                shape = shape.fill(screen, hex_color(color).unwrap_or(Color::WHITE).alpha(alpha));
+            }
+        }
+        return shape;
+    }
+    if !dragging {
+        // The coordinate readout, bottom-left of the
+        // ELEMENT (screen-anchored through the inverse
+        // transform, like the HUD plate).
+        let size = 10.0 / s.max(0.05);
+        let cell = size / 5.0;
+        let line = pointer_readout(stage_p);
+        let w = (line.chars().count() as f32 * 4.0 - 1.0).max(0.0) * cell;
+        let base = rt.to_stage([10.0, el_size[1] - 10.0]);
+        let centre = [base[0] + w / 2.0, base[1] - size / 2.0];
+        for tp in crate::rune_sec::stage_text::label_boxes_alpha(centre, 0.0, &line, size, ink, 0.80) {
+            let crate::rune_sec::stage_text::TextPrim::GlyphBox { corners, color, alpha } = tp;
+            let screen: Vec<[f32; 2]> = corners.iter().map(|p| rt.to_screen(*p)).collect();
+            shape = shape.fill(screen, hex_color(color).unwrap_or(Color::WHITE).alpha(alpha));
+        }
+    }
+    shape
 }
 
 /// The transform the stage DRAWS with: the camera at the
@@ -634,9 +1523,12 @@ pub struct StageOverlays {
     /// for both sub-toggles below (frustum/safe frames never
     /// draw while this is off, whatever they say).
     pub guides: bool,
-    /// Camera-frustum outline under `guides`.
+    /// Camera-frustum outline under `guides` — and, since
+    /// RM18 (P-6c), the frustum-true thirds grid inside it.
     pub guides_frustum: bool,
-    /// Action/title-safe frames under `guides`.
+    /// Action/title-safe frames under `guides`: the
+    /// stage's own rects, and since RM18 (P-6c) the framed
+    /// view's rects with their "Action"/"Title" labels.
     pub guides_safe: bool,
     /// Selected stroke, project-wide index into
     /// `core.project.strokes` (the `delete_stroke_at` /
@@ -839,6 +1731,10 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
     // = the camera's own transform, bit for bit).
     let rt = display_transform(core, el_size);
     let s = rt.vt.scale;
+    // The feedback layer's scale record (RM15): session
+    // consumers that only see stage points convert their
+    // screen-space constants through `last_display_scale`.
+    LAST_DISPLAY_SCALE.with(|c| c.set(s));
     let mut shape = Shape::new();
 
     // The stage frame (UI mission Wave 5, audit S10 D1),
@@ -894,11 +1790,64 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
                 let crate::rune_sec::stage_camera::GuidePrim::Line { a, b } = prim;
                 shape = shape.line(rt.to_screen(a), rt.to_screen(b), 1.0, LineCap::Round, guide_color);
             }
+            // Frustum-true thirds (Roadmap Wave 1, RM18 /
+            // P-6c): the rule-of-thirds grid of the FRAMED
+            // VIEW, inside the outline above — under any
+            // pan/zoom/rotation the stage grid at the top of
+            // this pass stops describing the shot, and these
+            // lines take over that job. Same ink, same gate.
+            for prim in crate::rune_sec::stage_camera::frustum_thirds_geometry(core) {
+                let crate::rune_sec::stage_camera::GuidePrim::Line { a, b } = prim;
+                shape = shape.line(rt.to_screen(a), rt.to_screen(b), 1.0, LineCap::Round, guide_color);
+            }
         }
         if overlays.guides_safe {
             for prim in crate::rune_sec::stage_camera::safe_frame_geometry(project.stage) {
                 let crate::rune_sec::stage_camera::GuidePrim::Line { a, b } = prim;
                 shape = shape.line(rt.to_screen(a), rt.to_screen(b), 1.0, LineCap::Round, guide_color);
+            }
+            // Frustum-true safe areas (RM18 / P-6c): the
+            // action/title-safe rects of the framed view,
+            // beside the stage's own above, with their
+            // labels laid out by stage_text's label layout
+            // (the sprite labels' machinery) at a glyph
+            // height relative to the framed view's height,
+            // so the tags scale with the shot they annotate.
+            for prim in crate::rune_sec::stage_camera::frustum_safe_geometry(core) {
+                let crate::rune_sec::stage_camera::GuidePrim::Line { a, b } = prim;
+                shape = shape.line(rt.to_screen(a), rt.to_screen(b), 1.0, LineCap::Round, guide_color);
+            }
+            if let Some(c) = crate::rune_sec::stage_camera::frustum_corners(core) {
+                let frame_h = ((c[3][0] - c[0][0]).powi(2)
+                    + (c[3][1] - c[0][1]).powi(2))
+                .sqrt();
+                let size = frame_h * 0.035;
+                if size >= 4.0 {
+                    for label in
+                        crate::rune_sec::stage_camera::frustum_safe_labels(core, size)
+                    {
+                        for tp in crate::rune_sec::stage_text::label_boxes_alpha(
+                            label.centre,
+                            label.angle_deg,
+                            label.kind.label(),
+                            size,
+                            0xFFFFFF,
+                            0.85,
+                        ) {
+                            let crate::rune_sec::stage_text::TextPrim::GlyphBox {
+                                corners,
+                                color,
+                                alpha,
+                            } = tp;
+                            let screen: Vec<[f32; 2]> =
+                                corners.iter().map(|p| rt.to_screen(*p)).collect();
+                            shape = shape.fill(
+                                screen,
+                                hex_color(color).unwrap_or(Color::WHITE).alpha(alpha),
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -1005,14 +1954,19 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
         // `bends_at` and overridden by any Bend channel, so a
         // bend channel shows on the stage; the no-channels
         // path is `bends_at` verbatim, as before.
+        // Roadmap Wave 1 (RM6, F-5): that evaluation is now
+        // the core's one shared `evaluated_frame` — computed
+        // once per (revision, frame) for the whole redraw
+        // instead of a second full `apply_channels` per
+        // figure here; its bend rows are the same values in
+        // both branches (seeded from `bends_at`, channel
+        // overrides applied).
         // Bends are per-frame pose data: a rest pose
         // draws straight in setup mode (Wave Y, Y8).
         let bends = if core.setup_mode {
             Vec::new()
-        } else if project.channels.is_empty() {
-            project.bends_at(display, fi)
         } else {
-            stykanimate_rs::graph::apply_channels(project, &project.channels, display)
+            core.evaluated_frame(display)
                 .bends
                 .get(fi)
                 .cloned()
@@ -1311,7 +2265,422 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
             shape = particle_prim(shape, &rt, s, prim, None);
         }
     }
+    // Motion-path overlay (Roadmap Wave 1, RM16 — P-4),
+    // the last content pass: the selected figure's evaluated
+    // root trajectory with one draggable point per frame,
+    // and the selected joint's trajectory beside it (see
+    // the motion-path section below). It reads the CORE's
+    // own `show_paths` flag — the Wave 7 field whose only
+    // consumers until now were the path ops themselves —
+    // so it needs no `StageOverlays` field and no shell
+    // wiring to appear. Setup mode hides it: the stage
+    // there draws rest poses, and the path is not what a
+    // setup drag edits.
+    if core.show_paths && !core.setup_mode {
+        shape = motion_path_prims(shape, core, &rt, s);
+    }
+    // Stage feedback (Roadmap Wave 1, RM15 — P-3): hover
+    // highlight, the live drag HUD and the pointer
+    // coordinate readout — after even the motion-path
+    // markers, since the HUD must never be covered by the
+    // content it annotates. Draws nothing while the
+    // pointer probe is empty.
+    let shape = draw_stage_feedback(shape, core, &rt, el_size, s);
     shape
+}
+
+/// The stage pass for the motion-path overlay: the
+/// selected figure's root path — samples stroked in the
+/// figure's own colour at half strength, one octagon
+/// marker per frame, the current frame's marker amber and
+/// larger (the selected-joint ink) — plus the selected
+/// joint's samples in translucent white. An in-flight drag
+/// substitutes its live displacement into the grabbed
+/// point and its two half-frame neighbours (see
+/// [`path_drag_preview`]). A layers-hidden figure and an
+/// empty path draw nothing. Called by [`stage_shape`] in
+/// its tail (RM15's feedback pass follows it), gated
+/// there on `core.show_paths && !core.setup_mode`.
+fn motion_path_prims(
+    mut shape: Shape,
+    core: &EditorCore,
+    rt: &crate::rune_sec::stage_camera::RotTransform,
+    s: f32,
+) -> Shape {
+    let fi = core.selected_figure;
+    let visible = stykanimate_rs::layers::visible_figures(&core.project, core.solo);
+    if !visible.get(fi).copied().unwrap_or(false) {
+        return shape;
+    }
+    let Some(fig) = core.project.figures.get(fi) else {
+        return shape;
+    };
+    let (mut points, mut samples, joint) = path_geometry(core);
+    if points.is_empty() {
+        return shape;
+    }
+    // Live drag preview: the grabbed point — and the two
+    // half-frame samples beside it, which are interpolations
+    // dominated by it — ride the pointer's displacement.
+    // The joint line does not follow: it is evaluation, and
+    // settles to the dragged truth on release.
+    if let Some((frame, delta)) = path_drag_preview(fi) {
+        if delta != [0.0, 0.0] {
+            if let Some(p) = points.get_mut(frame) {
+                p[0] += delta[0];
+                p[1] += delta[1];
+            }
+            if !samples.is_empty() {
+                let lo = (2 * frame).saturating_sub(1);
+                let hi = (2 * frame + 1).min(samples.len() - 1);
+                for p in &mut samples[lo..=hi] {
+                    p[0] += delta[0];
+                    p[1] += delta[1];
+                }
+            }
+        }
+    }
+    let base = hex_color(fig.color).unwrap_or(Color::WHITE);
+    if samples.len() > 1 {
+        let screen: Vec<[f32; 2]> = samples.iter().map(|p| rt.to_screen(*p)).collect();
+        shape = shape.stroke_with(screen, false, 1.5, LineCap::Round, base.alpha(0.55));
+    }
+    if joint.len() > 1 {
+        let screen: Vec<[f32; 2]> = joint.iter().map(|p| rt.to_screen(*p)).collect();
+        shape = shape.stroke_with(screen, false, 1.0, LineCap::Round, Color::WHITE.alpha(0.35));
+    }
+    let amber = hex_color(0xFFC65D).unwrap_or(Color::WHITE);
+    for (f, p) in points.iter().enumerate() {
+        let current = f == core.current;
+        let r = if current { 6.0 } else { 3.5 } * s.max(0.6);
+        let color = if current { amber } else { base };
+        shape = shape.fill(ngon(rt.to_screen(*p), r, 8), color);
+    }
+    shape
+}
+
+// ---- Motion-path overlay (Roadmap Wave 1, RM16 — P-4) --------
+//
+// `EditorCore::show_paths` has existed since Wave 7 beside
+// the two ops that edit what it names — `nudge_path_point`
+// (move one frame's root) and `smooth_path_roots` (one
+// averaging pass) — but nothing ever read the flag: the
+// ops' only consumers were the MCP doors and the frame-ops
+// panel's Smooth button, and the path they edit was
+// invisible. This section is the stage consumer roadmap
+// P-4 asked for (its geometry and drag session above and
+// below; the pass itself is `motion_path_prims`, called
+// from `stage_shape`'s tail):
+//
+// * the evaluated trajectory of the SELECTED figure's root
+//   across every frame — a polyline through half-frame
+//   samples, so channel-curved motion reads as a curve and
+//   not a chord — with one point marker per frame: the
+//   points are the authored data, the samples between them
+//   are evaluation only;
+// * the selected joint's trajectory alongside it (a plain
+//   polyline, no markers): read-only by design — no op
+//   moves a joint's path directly; it moves when its root
+//   or its channels move;
+// * a drag session over the root points: the press seeks
+//   the playhead to the point's frame, the drag previews
+//   live without writing, and the release lands exactly
+//   one `nudge_path_point` — one undo step carrying the
+//   op's own status line. The current frame's point is
+//   never grabbable here: the pose drag owns the current
+//   root, which sits at the same spot, so the pick skips
+//   it.
+//
+// Evaluation goes through the core's public paths only —
+// `evaluated_frame` for roots, `positions_f` for joints —
+// the same values the figure pass draws. The geometry is
+// memoised in a thread local keyed by (project revision,
+// figure, node, frame count): RM6's revision is the honest
+// key for anything derived from the project, and without
+// the memo the stage would re-evaluate every frame on
+// every redraw (the core's own evaluation cache holds
+// only a handful of frames at a time).
+
+/// How close (stage units) a press must land to a frame's
+/// root point to grab it — the stage layers' pick
+/// tolerance, in the same units for the same reason
+/// (presses arrive in stage coordinates through
+/// `drag_transform`).
+pub const PATH_PICK_TOLERANCE: f32 = 13.0;
+
+/// The selected figure's root at every integer frame, in
+/// stage coordinates: [`EditorCore::evaluated_frame`]'s
+/// pose roots, so RootX/RootY graph channels bend this
+/// path exactly as they bend the drawn figure (the
+/// authored frame roots underneath differ wherever a
+/// channel speaks). Empty when the figure index is out of
+/// range or the project has no frames.
+pub fn motion_path_points(core: &EditorCore, fi: usize) -> Vec<V2> {
+    let n = core.frame_count();
+    if fi >= core.project.figures.len() || n == 0 {
+        return Vec::new();
+    }
+    (0..n)
+        .map(|f| core.evaluated_frame(f as f32).poses[fi].root)
+        .collect()
+}
+
+/// The root path as the overlay strokes it: every integer
+/// frame's root with the evaluated midpoint between
+/// neighbours interleaved — layout `[f0, f0.5, f1, f1.5,
+/// …]`, so frame `f`'s point sits at index `2f` and its
+/// half-frame neighbours at `2f−1` / `2f+1` (the drag
+/// preview's substitution indices). Channels curve the
+/// root between frames (Hermite tangents on RootX/RootY),
+/// so the halves keep the drawn path honest on long moves;
+/// they are display only — never pickable, never edited.
+pub fn motion_path_samples(core: &EditorCore, fi: usize) -> Vec<V2> {
+    let n = core.frame_count();
+    if fi >= core.project.figures.len() || n == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(2 * n - 1);
+    for f in 0..n {
+        out.push(core.evaluated_frame(f as f32).poses[fi].root);
+        if f + 1 < n {
+            out.push(core.evaluated_frame(f as f32 + 0.5).poses[fi].root);
+        }
+    }
+    out
+}
+
+/// The selected joint's trajectory as the overlay strokes
+/// it, in the same interleaved layout as
+/// [`motion_path_samples`]: [`EditorCore::positions_f`]'s
+/// values — the figure pass's own joint positions, channel
+/// evaluation included. Empty for an out-of-range figure
+/// or node, or an empty project.
+pub fn joint_path_samples(core: &EditorCore, fi: usize, ni: usize) -> Vec<V2> {
+    let n = core.frame_count();
+    let Some(fig) = core.project.figures.get(fi) else {
+        return Vec::new();
+    };
+    if ni >= fig.def.nodes.len() || n == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(2 * n - 1);
+    for f in 0..n {
+        out.push(core.positions_f(f as f32, fi)[ni]);
+        if f + 1 < n {
+            out.push(core.positions_f(f as f32 + 0.5, fi)[ni]);
+        }
+    }
+    out
+}
+
+/// The overlay's memoised geometry for one (revision,
+/// figure, node, frame count) key: the integer root
+/// points, the interleaved root samples, and the
+/// interleaved joint samples (empty unless a non-root
+/// node is selected — the root's own "joint path" would
+/// duplicate the root path). Stored in a thread local
+/// beside the view navigation (see the section docs for
+/// why the memo exists and why the revision keys it).
+struct PathGeometry {
+    revision: u64,
+    fi: usize,
+    node: Option<usize>,
+    frames: usize,
+    points: Vec<V2>,
+    samples: Vec<V2>,
+    joint: Vec<V2>,
+}
+
+/// One in-flight path-point drag: the frame and figure the
+/// press grabbed, where the press landed, and the live
+/// pointer position the overlay previews. Nothing is
+/// written to the project while it lives — the release
+/// converts the total displacement into one
+/// `nudge_path_point` — so the record needs no restore
+/// half (the sprite drag's record keeps original keys
+/// because its moves write early; this session never
+/// writes early, and a cancelled gesture therefore has
+/// nothing to put back).
+#[derive(Clone, Copy)]
+struct PathDrag {
+    frame: usize,
+    fi: usize,
+    press: V2,
+    at: V2,
+}
+
+thread_local! {
+    static PATH_GEOMETRY: RefCell<Option<PathGeometry>> = const { RefCell::new(None) };
+    static PATH_DRAG: RefCell<Option<PathDrag>> = const { RefCell::new(None) };
+}
+
+/// The overlay geometry for the core's current selection,
+/// memoised per the section docs: `(integer root points,
+/// interleaved root samples, interleaved joint samples)`.
+fn path_geometry(core: &EditorCore) -> (Vec<V2>, Vec<V2>, Vec<V2>) {
+    let fi = core.selected_figure;
+    let node = core.selected_node;
+    let frames = core.frame_count();
+    let revision = core.revision();
+    let hit = PATH_GEOMETRY.with(|c| {
+        let cell = c.borrow();
+        match cell.as_ref() {
+            Some(g)
+                if g.revision == revision
+                    && g.fi == fi
+                    && g.node == node
+                    && g.frames == frames =>
+            {
+                Some((g.points.clone(), g.samples.clone(), g.joint.clone()))
+            }
+            _ => None,
+        }
+    });
+    if let Some(hit) = hit {
+        return hit;
+    }
+    let points = motion_path_points(core, fi);
+    let samples = motion_path_samples(core, fi);
+    let joint = match node {
+        Some(ni) if ni > 0 => joint_path_samples(core, fi, ni),
+        _ => Vec::new(),
+    };
+    PATH_GEOMETRY.with(|c| {
+        *c.borrow_mut() = Some(PathGeometry {
+            revision,
+            fi,
+            node,
+            frames,
+            points: points.clone(),
+            samples: samples.clone(),
+            joint: joint.clone(),
+        });
+    });
+    (points, samples, joint)
+}
+
+/// The frame whose root point a press at stage point `p`
+/// would grab, or `None`: the nearest of the selected
+/// figure's frame points within [`PATH_PICK_TOLERANCE`],
+/// ties to the earlier frame (the graph panel's
+/// nearest-key rule). Pure geometry over the drawn path,
+/// behind the drawing's own gates: nothing is pickable
+/// while the overlay is off or in setup mode (the pass
+/// draws nothing then), nor on a figure the layers hide,
+/// and the CURRENT frame's point is excluded — the pose
+/// drag owns the current root, which sits at the same
+/// spot.
+pub fn path_point_at(core: &EditorCore, p: V2) -> Option<usize> {
+    if !core.show_paths || core.setup_mode {
+        return None;
+    }
+    let fi = core.selected_figure;
+    let visible = stykanimate_rs::layers::visible_figures(&core.project, core.solo);
+    if !visible.get(fi).copied().unwrap_or(false) {
+        return None;
+    }
+    let pts = motion_path_points(core, fi);
+    let mut best: Option<(usize, f32)> = None;
+    for (f, pt) in pts.iter().enumerate() {
+        if f == core.current {
+            continue;
+        }
+        let d = (p[0] - pt[0]).hypot(p[1] - pt[1]);
+        if d <= PATH_PICK_TOLERANCE && best.map_or(true, |(_, b)| d < b) {
+            best = Some((f, d));
+        }
+    }
+    best.map(|(f, _)| f)
+}
+
+/// Stage drag, Down phase for the path overlay: grab the
+/// root point at stage point `p` (see [`path_point_at`])
+/// and seek the playhead to its frame, so the pose on
+/// stage is the one being moved. Returns true when the
+/// press was consumed. Refused while playing (the pose
+/// drag's own rule), and a stale record from an
+/// interrupted gesture is dropped first — it holds no
+/// writes, so dropping is all the cleanup it needs. No
+/// snapshot: the gesture's single undo step is the
+/// release's `nudge_path_point`.
+pub fn path_drag_down(core: &mut EditorCore, p: V2) -> bool {
+    PATH_DRAG.with(|c| *c.borrow_mut() = None);
+    if core.playing {
+        return false;
+    }
+    let Some(frame) = path_point_at(core, p) else {
+        return false;
+    };
+    let fi = core.selected_figure;
+    PATH_DRAG.with(|c| {
+        *c.borrow_mut() = Some(PathDrag {
+            frame,
+            fi,
+            press: p,
+            at: p,
+        });
+    });
+    core.goto(frame);
+    true
+}
+
+/// Stage drag, Move phase: track the pointer for the
+/// overlay's live preview. Writes nothing to the project.
+/// Returns true while a path drag owns the gesture; a
+/// record gone stale mid-gesture (its figure or frame
+/// deleted under it) ends the drag instead of writing
+/// anywhere.
+pub fn path_drag_move(core: &mut EditorCore, p: V2) -> bool {
+    let alive = PATH_DRAG.with(|c| {
+        let mut cell = c.borrow_mut();
+        match cell.as_mut() {
+            Some(d) if d.fi < core.project.figures.len() && d.frame < core.frame_count() => {
+                d.at = p;
+                true
+            }
+            _ => false,
+        }
+    });
+    if !alive {
+        PATH_DRAG.with(|c| *c.borrow_mut() = None);
+    }
+    alive
+}
+
+/// Stage drag, Up phase: settle the gesture. A cancelled
+/// gesture just drops the record (nothing was written, so
+/// there is nothing to restore and no undo step to
+/// spend). Otherwise the press-to-release displacement
+/// lands as ONE `nudge_path_point` on the grabbed frame's
+/// root — one undo step, the op's own status line. A
+/// press that never moved spends nothing: it was a seek,
+/// and the seek already happened at Down.
+pub fn path_drag_up(core: &mut EditorCore, p: V2, cancelled: bool) {
+    let Some(d) = PATH_DRAG.with(|c| c.borrow_mut().take()) else {
+        return;
+    };
+    if cancelled {
+        return;
+    }
+    let delta = [p[0] - d.press[0], p[1] - d.press[1]];
+    if delta != [0.0, 0.0] {
+        core.nudge_path_point(d.frame, d.fi, delta);
+    }
+}
+
+/// The live drag displacement the draw pass previews —
+/// `(frame, delta)` — while a path drag is in flight on
+/// figure `fi`; `None` otherwise.
+fn path_drag_preview(fi: usize) -> Option<(usize, V2)> {
+    PATH_DRAG.with(|c| {
+        c.borrow().as_ref().and_then(|d| {
+            if d.fi == fi {
+                Some((d.frame, [d.at[0] - d.press[0], d.at[1] - d.press[1]]))
+            } else {
+                None
+            }
+        })
+    })
 }
 
 /// Right-press selection on the stage (Phase K): select the
@@ -1341,10 +2710,18 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
 /// point through `RotTransform::for_drag` exactly as
 /// `stage_drag` converts a drag's point.
 pub fn secondary_select(core: &mut EditorCore, p: V2) -> bool {
+    secondary_select_with_radius(core, p, 13.0)
+}
+
+/// [`secondary_select`] with the pick radius as a
+/// parameter (Roadmap Wave 1, IA-RM15-2): the shell
+/// passes its screen-space radius so the right-press
+/// target matches the left press's at any view zoom.
+pub fn secondary_select_with_radius(core: &mut EditorCore, p: V2, radius: f32) -> bool {
     if core.playing {
         return false;
     }
-    let Some((fi, ni)) = core.hit_test(p) else {
+    let Some((fi, ni)) = core.hit_test_with_radius(p, radius) else {
         return false;
     };
     if core.project.figures[fi].locked {
@@ -2234,6 +3611,185 @@ mod tests {
     /// subtitle pass. The geometry itself (bands, colours,
     /// stacking) is pinned in `stage_text`'s tests; this
     /// pin proves the prims reach the stage.
+    // ---- Motion-path overlay (Roadmap Wave 1, RM16 — P-4) ----
+
+    /// A demo core whose figure-0 roots march along y=100 in
+    /// 40-unit steps (the wave7_smooth fixture style: roots
+    /// written directly, no channels, so the evaluated path
+    /// is the authored path).
+    fn path_core() -> EditorCore {
+        let mut core = EditorCore::new();
+        for (i, frame) in core.project.frames.iter_mut().enumerate() {
+            frame.poses[0].root = [40.0 * i as f32, 100.0];
+        }
+        core
+    }
+
+    fn approx2(a: V2, b: V2) -> bool {
+        (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3
+    }
+
+    #[test]
+    fn motion_path_points_follow_the_authored_roots() {
+        let core = path_core();
+        let pts = motion_path_points(&core, 0);
+        assert_eq!(pts.len(), core.frame_count());
+        for (f, p) in pts.iter().enumerate() {
+            assert!(approx2(*p, [40.0 * f as f32, 100.0]), "frame {f}: {p:?}");
+        }
+        // Out-of-range figure: an empty path, never a panic.
+        assert!(motion_path_points(&core, 99).is_empty());
+        assert!(motion_path_samples(&core, 99).is_empty());
+    }
+
+    #[test]
+    fn motion_path_samples_interleave_half_frame_evaluations() {
+        let core = path_core();
+        let samples = motion_path_samples(&core, 0);
+        let n = core.frame_count();
+        assert_eq!(samples.len(), 2 * n - 1);
+        // Integer slots are the authored points themselves.
+        let pts = motion_path_points(&core, 0);
+        for f in 0..n {
+            assert!(approx2(samples[2 * f], pts[f]), "frame {f} slot");
+        }
+        // The half-frame slot between frames 0 and 1 is the
+        // evaluated midpoint of the (channel-free, linearly
+        // interpolated) move: x = 20, between 0 and 40.
+        assert!(approx2(samples[1], [20.0, 100.0]), "midpoint: {:?}", samples[1]);
+    }
+
+    #[test]
+    fn joint_path_samples_track_the_selected_joint() {
+        let core = path_core();
+        let samples = joint_path_samples(&core, 0, 1);
+        assert_eq!(samples.len(), 2 * core.frame_count() - 1);
+        // The first sample is the joint's own frame-0
+        // position, through the same evaluation the figure
+        // pass draws.
+        assert!(approx2(samples[0], core.positions(0, 0)[1]));
+        // Out-of-range node / figure: empty, never a panic.
+        assert!(joint_path_samples(&core, 0, 999).is_empty());
+        assert!(joint_path_samples(&core, 99, 1).is_empty());
+    }
+
+    #[test]
+    fn path_point_at_picks_the_nearest_non_current_point() {
+        let mut core = path_core();
+        core.show_paths = true;
+        core.goto(2);
+        // Exactly on frame 3's point: frame 3.
+        assert_eq!(path_point_at(&core, [120.0, 100.0]), Some(3));
+        // Exactly on the CURRENT frame's point: excluded —
+        // the pose drag owns the current root — and every
+        // other point is 40 units away, outside tolerance.
+        assert_eq!(path_point_at(&core, [80.0, 100.0]), None);
+        // Between two points, the nearer one wins.
+        assert_eq!(path_point_at(&core, [112.0, 100.0]), Some(3));
+        assert_eq!(path_point_at(&core, [45.0, 100.0]), Some(1));
+        // Far from every point: nothing.
+        assert_eq!(path_point_at(&core, [500.0, 400.0]), None);
+        // Overlay off: nothing is pickable, however close.
+        core.show_paths = false;
+        assert_eq!(path_point_at(&core, [120.0, 100.0]), None);
+        // Setup mode draws no path and picks none either.
+        core.show_paths = true;
+        core.setup_mode = true;
+        assert_eq!(path_point_at(&core, [120.0, 100.0]), None);
+    }
+
+    #[test]
+    fn path_drag_writes_one_nudge_on_release() {
+        let mut core = path_core();
+        core.show_paths = true;
+        let depth = core.undo_depth();
+        // Press on frame 1's point: consumed, and the
+        // playhead seeks to the grabbed frame.
+        assert!(path_drag_down(&mut core, [40.0, 100.0]));
+        assert_eq!(core.current, 1);
+        // Moves write nothing yet.
+        assert!(path_drag_move(&mut core, [55.0, 95.0]));
+        assert!(approx2(core.project.frames[1].poses[0].root, [40.0, 100.0]));
+        assert_eq!(core.undo_depth(), depth);
+        // The release lands the total displacement as one
+        // nudge: exactly one undo step, only frame 1 moved.
+        path_drag_up(&mut core, [55.0, 95.0], false);
+        assert!(approx2(core.project.frames[1].poses[0].root, [55.0, 95.0]));
+        assert!(approx2(core.project.frames[0].poses[0].root, [0.0, 100.0]));
+        assert!(approx2(core.project.frames[2].poses[0].root, [80.0, 100.0]));
+        assert_eq!(core.undo_depth(), depth + 1, "one gesture, one undo step");
+        assert!(core.status.contains("Nudged path point"), "{}", core.status);
+        // The gesture is over: a stray move owns nothing.
+        assert!(!path_drag_move(&mut core, [0.0, 0.0]));
+    }
+
+    #[test]
+    fn path_drag_cancel_and_plain_click_write_nothing() {
+        let mut core = path_core();
+        core.show_paths = true;
+        let depth = core.undo_depth();
+        // Cancelled mid-drag: the root never moved (moves
+        // don't write) and no undo step was spent.
+        assert!(path_drag_down(&mut core, [40.0, 100.0]));
+        assert!(path_drag_move(&mut core, [90.0, 130.0]));
+        path_drag_up(&mut core, [90.0, 130.0], true);
+        assert!(approx2(core.project.frames[1].poses[0].root, [40.0, 100.0]));
+        assert_eq!(core.undo_depth(), depth);
+        // A press released where it landed is a seek, not
+        // an edit: it moved the playhead at Down and spends
+        // no undo step at Up.
+        assert!(path_drag_down(&mut core, [120.0, 100.0]));
+        assert_eq!(core.current, 3);
+        path_drag_up(&mut core, [120.0, 100.0], false);
+        assert!(approx2(core.project.frames[3].poses[0].root, [120.0, 100.0]));
+        assert_eq!(core.undo_depth(), depth);
+    }
+
+    #[test]
+    fn path_drag_refused_while_playing() {
+        let mut core = path_core();
+        core.show_paths = true;
+        core.playing = true;
+        assert!(!path_drag_down(&mut core, [40.0, 100.0]));
+        assert!(!path_drag_move(&mut core, [50.0, 100.0]));
+    }
+
+    #[test]
+    fn stage_shape_draws_one_point_marker_per_frame_only_when_on() {
+        reset_view_nav();
+        let fill_count = |core: &EditorCore| {
+            format!("{:?}", stage_shape(core, [800.0, 600.0], StageOverlays::default()))
+                .matches("Fill { points:")
+                .count()
+        };
+        let mut core = path_core();
+        let off = fill_count(&core);
+        core.show_paths = true;
+        let on_shape = format!(
+            "{:?}",
+            stage_shape(&core, [800.0, 600.0], StageOverlays::default())
+        );
+        let on = on_shape.matches("Fill { points:").count();
+        assert_eq!(
+            on,
+            off + core.frame_count(),
+            "one marker fill per frame, nothing else filled"
+        );
+        // The polylines are in the same shape (the debug
+        // string differs beyond the added fills).
+        assert_ne!(
+            on_shape,
+            format!(
+                "{:?}",
+                stage_shape(&path_core(), [800.0, 600.0], StageOverlays::default())
+            )
+        );
+        // Setup mode hides the pass entirely.
+        core.setup_mode = true;
+        assert_eq!(fill_count(&core), off);
+        reset_view_nav();
+    }
+
     #[test]
     fn stage_shape_paints_live_subtitle_prims_and_nothing_otherwise() {
         reset_view_nav();
@@ -2250,6 +3806,7 @@ mod tests {
                 font_scale: 1.0,
                 text_color: 0xFFEE00,
                 box_color: 0x112233,
+                font: Default::default(),
             };
             if let Some(c) = cue {
                 core.project.subtitles.push(c);
@@ -2280,5 +3837,293 @@ mod tests {
             "every subtitle prim reaches the stage as one fill"
         );
         reset_view_nav();
+    }
+
+    // --------------------------------------------------------
+    // Stage feedback & precision (RM15 — P-3)
+    // --------------------------------------------------------
+
+    /// The first node of figure 0 that HAS a parent, and
+    /// that parent: the demo figure's first real segment.
+    fn first_segment(core: &EditorCore) -> (usize, usize) {
+        core.project.figures[0]
+            .def
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(ni, n)| n.parent.map(|par| (ni, par)))
+            .expect("the demo figure has a segment")
+    }
+
+    #[test]
+    fn pick_radius_is_a_screen_constant_at_every_zoom() {
+        // 13 pt on screen at 1×, 0.1× and 8× alike: the
+        // stage-unit radius divides by the scale, so the
+        // product (what the user sees) never changes.
+        for scale in [0.1f32, 0.5, 1.0, 2.0, 8.0] {
+            assert!((pick_radius(scale) * scale - PICK_RADIUS_PX).abs() < 1e-4, "scale {scale}");
+        }
+        assert_eq!(pick_radius(1.0), 13.0, "the fit view keeps the old constant");
+        assert_eq!(pick_radius(0.0), PICK_RADIUS_PX, "degenerate scale reads 1:1");
+        assert_eq!(snap_tolerance(2.0), SNAP_TOLERANCE_PX / 2.0);
+    }
+
+    #[test]
+    fn dist_to_segment_measures_and_clamps() {
+        let (d, t) = dist_to_segment([5.0, 5.0], [0.0, 0.0], [10.0, 0.0]);
+        assert!((d - 5.0).abs() < 1e-4 && (t - 0.5).abs() < 1e-4);
+        let (d, t) = dist_to_segment([-3.0, 0.0], [0.0, 0.0], [10.0, 0.0]);
+        assert!((d - 3.0).abs() < 1e-4 && t == 0.0, "past the end clamps to a");
+        let (d, t) = dist_to_segment([2.0, 5.0], [2.0, 2.0], [2.0, 2.0]);
+        assert!((d - 3.0).abs() < 1e-4 && t == 0.0, "degenerate segment measures to the point");
+    }
+
+    #[test]
+    fn segment_and_joint_hits_read_the_drawn_positions() {
+        let core = EditorCore::new();
+        let pos = core.positions_f(0.0, 0);
+        assert_eq!(joint_hit(&core, pos[0], pick_radius(1.0)), Some((0, 0)));
+        // The longest segment's midpoint: distance ~0 from
+        // its own segment, and a segment hit names the
+        // segment's CHILD node.
+        let (ni, par) = core.project.figures[0]
+            .def
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(ni, n)| n.parent.map(|par| (ni, par)))
+            .max_by(|a, b| {
+                stykanimate_rs::model::dist(pos[a.1], pos[a.0])
+                    .partial_cmp(&stykanimate_rs::model::dist(pos[b.1], pos[b.0]))
+                    .unwrap()
+            })
+            .expect("the demo figure has segments");
+        let mid = [
+            (pos[par][0] + pos[ni][0]) / 2.0,
+            (pos[par][1] + pos[ni][1]) / 2.0,
+        ];
+        let (fi, hit_ni, d) = segment_hit(&core, mid, pick_radius(1.0)).expect("the midpoint hits");
+        assert_eq!((fi, hit_ni), (0, ni));
+        assert!(d < 1.0, "the midpoint lies on its segment (d = {d})");
+        // Beyond the radius from everything: no hit.
+        assert!(segment_hit(&core, [-5000.0, -5000.0], pick_radius(1.0)).is_none());
+        assert_eq!(joint_hit(&core, [-5000.0, -5000.0], pick_radius(1.0)), None);
+    }
+
+    #[test]
+    fn hover_priority_is_joint_then_segment_then_nothing() {
+        let core = EditorCore::new();
+        let pos = core.positions_f(0.0, 0);
+        assert_eq!(hover_at(&core, pos[0], 1.0), StageHover::Joint(0, 0));
+        assert_eq!(hover_at(&core, [-5000.0, -5000.0], 1.0), StageHover::None);
+        // Zooming out must not shrink the target away: at
+        // 0.1× the same joint is still the hover at its own
+        // position (the radius grew in stage units).
+        assert_eq!(hover_at(&core, pos[0], 0.1), StageHover::Joint(0, 0));
+    }
+
+    #[test]
+    fn cursor_follows_drag_mode_and_hover() {
+        use stykanimate_rs::editor::DragKind;
+        let mut core = EditorCore::new();
+        assert_eq!(stage_cursor(&core, StageHover::None), rune::Cursor::Default);
+        assert_eq!(stage_cursor(&core, StageHover::Joint(0, 0)), rune::Cursor::Grab);
+        assert_eq!(stage_cursor(&core, StageHover::Segment(0, 1)), rune::Cursor::Grab);
+        assert_eq!(stage_cursor(&core, StageHover::Sprite(0)), rune::Cursor::Move);
+        assert_eq!(stage_cursor(&core, StageHover::Stroke(0)), rune::Cursor::Pointer);
+        core.camera_mode = true;
+        assert_eq!(stage_cursor(&core, StageHover::Joint(0, 0)), rune::Cursor::Move);
+        core.camera_mode = false;
+        core.draw_mode = true;
+        assert_eq!(stage_cursor(&core, StageHover::None), rune::Cursor::Crosshair);
+        core.draw_mode = false;
+        core.dragging = Some(DragKind::Aim(1));
+        assert_eq!(stage_cursor(&core, StageHover::None), rune::Cursor::Grabbing);
+        core.dragging = Some(DragKind::Camera);
+        assert_eq!(stage_cursor(&core, StageHover::None), rune::Cursor::Move);
+        // No probe fed: the mount-level helper sees modes only.
+        set_stage_pointer(None);
+        core.dragging = None;
+        assert_eq!(stage_cursor_now(&core, [800.0, 600.0]), rune::Cursor::Default);
+    }
+
+    #[test]
+    fn snap_angle_rounds_to_the_step() {
+        assert_eq!(snap_angle_deg(7.0, 15.0), 0.0);
+        assert_eq!(snap_angle_deg(8.0, 15.0), 15.0);
+        assert_eq!(snap_angle_deg(-22.0, 15.0), -15.0);
+        assert_eq!(snap_angle_deg(44.0, 15.0), 45.0);
+        assert_eq!(snap_angle_deg(33.0, 0.0), 33.0, "a zero step is no snap");
+    }
+
+    #[test]
+    fn snap_aim_point_rotates_onto_the_step_ray_at_the_same_reach() {
+        let pivot = [100.0, 100.0];
+        let a10 = 10.0f32.to_radians();
+        let p = [pivot[0] + 10.0 * a10.cos(), pivot[1] + 10.0 * a10.sin()];
+        let q = snap_aim_point(pivot, p, 15.0);
+        let a15 = 15.0f32.to_radians();
+        assert!((q[0] - (pivot[0] + 10.0 * a15.cos())).abs() < 1e-3, "x: {q:?}");
+        assert!((q[1] - (pivot[1] + 10.0 * a15.sin())).abs() < 1e-3, "y: {q:?}");
+        assert_eq!(snap_aim_point(pivot, pivot, 15.0), pivot, "on the pivot: no direction");
+    }
+
+    #[test]
+    fn snap_root_point_takes_landmarks_over_grid() {
+        let stage = [960.0, 540.0];
+        let (q, m) = snap_root_point([478.0, 200.0], stage, 6.0, None);
+        assert_eq!(q[0], 480.0);
+        assert!(m.centre_x && !m.grid);
+        let (q, m) = snap_root_point([300.0, 536.0], stage, 6.0, None);
+        assert_eq!(q[1], 540.0);
+        assert!(m.ground, "the bottom edge is the ground line");
+        let (q, m) = snap_root_point([4.0, 200.0], stage, 6.0, None);
+        assert_eq!(q[0], 0.0);
+        assert!(m.edge);
+        let (q, m) = snap_root_point([300.0, 200.0], stage, 6.0, None);
+        assert_eq!(q, [300.0, 200.0]);
+        assert_eq!(m, RootSnap::default(), "nothing in tolerance: untouched, unmarked");
+        // Grid alone: rounds to the spacing, marked as grid.
+        let (q, m) = snap_root_point([312.0, 200.0], stage, 6.0, Some(50.0));
+        assert_eq!(q, [300.0, 200.0]);
+        assert!(m.grid);
+        // Landmark beats grid on its coordinate: 478 grids
+        // to 475 but centres to 480, and the grid mark for
+        // x is spent.
+        let (q, m) = snap_root_point([478.0, 200.0], stage, 6.0, Some(25.0));
+        assert_eq!(q[0], 480.0);
+        assert!(m.centre_x);
+    }
+
+    #[test]
+    fn snap_drag_point_snaps_aims_and_honours_the_master_switch() {
+        use stykanimate_rs::editor::DragKind;
+        let mut core = EditorCore::new();
+        let (ni, par) = first_segment(&core);
+        let pos = core.positions(0, 0);
+        let pivot = pos[par];
+        let a10 = 10.0f32.to_radians();
+        let p = [pivot[0] + 50.0 * a10.cos(), pivot[1] + 50.0 * a10.sin()];
+        core.dragging = Some(DragKind::Aim(ni));
+        set_snap_config(SnapConfig::DEFAULT);
+        let (q, marks) = snap_drag_point(&core, p, 1.0);
+        assert!(marks.angle, "the aim point rotated onto the 15-degree ray");
+        let a15 = 15.0f32.to_radians();
+        assert!((q[0] - (pivot[0] + 50.0 * a15.cos())).abs() < 1e-2, "x: {q:?}");
+        assert!((q[1] - (pivot[1] + 50.0 * a15.sin())).abs() < 1e-2, "y: {q:?}");
+        set_snap_config(SnapConfig { enabled: false, ..SnapConfig::DEFAULT });
+        let (q, marks) = snap_drag_point(&core, p, 1.0);
+        assert_eq!(q, p, "the master switch off passes the point through");
+        assert_eq!(marks, SnapMarks::default());
+        set_snap_config(SnapConfig::DEFAULT);
+        // No drag in flight: nothing to snap.
+        core.dragging = None;
+        let (q, _) = snap_drag_point(&core, p, 1.0);
+        assert_eq!(q, p);
+    }
+
+    #[test]
+    fn drag_hud_lines_read_the_live_drag() {
+        use stykanimate_rs::editor::DragKind;
+        let mut core = EditorCore::new();
+        assert!(drag_hud_lines(&core).is_empty(), "no drag, no HUD");
+        let root = core.project.frames[0].poses[0].root;
+        core.dragging = Some(DragKind::Root);
+        assert_eq!(
+            drag_hud_lines(&core),
+            vec![format!("ROOT {:.0}, {:.0}", root[0], root[1])]
+        );
+        let (ni, _) = first_segment(&core);
+        core.dragging = Some(DragKind::Aim(ni));
+        let lines = drag_hud_lines(&core);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("ANGLE ") && lines[0].ends_with(" DEG"), "{lines:?}");
+        core.dragging = Some(DragKind::Camera);
+        let lines = drag_hud_lines(&core);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("CAM ") && lines[1].starts_with("ZOOM "), "{lines:?}");
+        assert_eq!(pointer_readout([480.4, 519.6]), "480, 520");
+    }
+
+    #[test]
+    fn nudge_root_moves_the_pose_root_with_one_snapshot_per_burst() {
+        let mut core = EditorCore::new();
+        core.selected_node = Some(0);
+        reset_nudge_burst();
+        let before = core.project.frames[0].poses[0].root;
+        let depth = core.undo_depth();
+        assert!(nudge_selected(&mut core, 5.0, -3.0));
+        assert_eq!(
+            core.project.frames[0].poses[0].root,
+            [before[0] + 5.0, before[1] - 3.0]
+        );
+        assert_eq!(core.undo_depth(), depth + 1, "the burst's one snapshot");
+        // Key-repeat inside the window rides the same snapshot.
+        assert!(nudge_selected(&mut core, 1.0, 0.0));
+        assert!(nudge_selected(&mut core, 1.0, 0.0));
+        assert_eq!(core.undo_depth(), depth + 1, "repeats coalesce");
+        // A fresh burst (the shell resets on selection/frame
+        // change; tests do it by hand) snapshots again.
+        reset_nudge_burst();
+        assert!(nudge_selected(&mut core, 1.0, 0.0));
+        assert_eq!(core.undo_depth(), depth + 2);
+    }
+
+    #[test]
+    fn nudge_aim_keeps_the_segment_length_and_refuses_cleanly() {
+        let mut core = EditorCore::new();
+        let (ni, par) = first_segment(&core);
+        core.selected_node = Some(ni);
+        reset_nudge_burst();
+        let pos = core.positions(0, 0);
+        let len_before = stykanimate_rs::model::dist(pos[par], pos[ni]);
+        assert!(nudge_selected(&mut core, 30.0, 0.0));
+        let after = core.positions(0, 0);
+        assert!(
+            (stykanimate_rs::model::dist(after[par], after[ni]) - len_before).abs() < 1e-3,
+            "aiming rotates the segment; it never stretches it"
+        );
+        assert!(after[ni] != pos[ni], "the joint actually moved");
+        // No selection: nothing.
+        core.selected_node = None;
+        assert!(!nudge_selected(&mut core, 1.0, 0.0));
+        // Playing: nothing (a press during playback refuses
+        // the same way).
+        core.selected_node = Some(ni);
+        core.playing = true;
+        let frozen = core.positions(0, 0);
+        assert!(!nudge_selected(&mut core, 1.0, 0.0));
+        assert_eq!(core.positions(0, 0), frozen);
+        // The step idiom: Alt fine, Shift large, plain 1.
+        assert_eq!(nudge_step(false, false), NUDGE_STEP);
+        assert_eq!(nudge_step(true, false), NUDGE_STEP_LARGE);
+        assert_eq!(nudge_step(true, true), NUDGE_STEP_FINE);
+    }
+
+    #[test]
+    fn feedback_pass_draws_nothing_without_a_probe_and_paints_with_one() {
+        reset_view_nav();
+        let mut core = EditorCore::new();
+        core.project.stage = [640.0, 360.0];
+        let fills = |core: &EditorCore| {
+            format!("{:?}", stage_shape(core, [640.0, 360.0], StageOverlays::default()))
+                .matches("Fill { points:")
+                .count()
+        };
+        set_stage_pointer(None);
+        let base = fills(&core);
+        // Probe over joint 0: the hover octagon plus the
+        // coordinate readout's glyph fills appear.
+        let joint = core.positions_f(0.0, 0)[0];
+        let rt = display_transform(&core, [640.0, 360.0]);
+        set_stage_pointer(Some(StagePointer {
+            local: rt.to_screen(joint),
+            size: [640.0, 360.0],
+        }));
+        assert!(fills(&core) > base, "hover + readout paint over the bare stage");
+        // Dragging: the HUD plate and its glyph lines paint.
+        core.dragging = Some(stykanimate_rs::editor::DragKind::Root);
+        assert!(fills(&core) > base, "the HUD paints over the bare stage");
+        set_stage_pointer(None);
     }
 }

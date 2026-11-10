@@ -23,12 +23,15 @@
 //! has NO name gutter, for the clips lane's reason: a span
 //! lane that shifts its spans off their frames is lying.
 //!
-//! One pitch is all there is: the timeline has no zoom
-//! levels (its chip geometry is the fixed
-//! `CHIP_W`/[`CHIP_GAP`] pair; zoom in this shell is a
-//! stage-view concept). What varies is the frame count,
-//! which moves the clamp at the timeline's right edge —
-//! the pins below cover both.
+//! One pitch is all there is *at a time*: the lane
+//! lays out at the timeline's live pitch
+//! (`FrameOpsState::chip_w()` through
+//! `timeline_marks::pitch`) — the zoom is the
+//! timeline's, shared with the ruler, the chips and
+//! the clips lane, and this lane threads it like every
+//! other consumer. What varies besides the zoom is the
+//! frame count, which moves the clamp at the
+//! timeline's right edge — the pins below cover both.
 //!
 //! ## Rows
 //!
@@ -119,14 +122,24 @@
 //!
 //! ## Mounting and labels
 //!
-//! The lane exists only when the project HAS cues (the
-//! clips lane's `Option` discipline): a project without
-//! subtitles spends no timeline height on an empty strip.
-//! The header label is the dopesheet's idiom —
+//! The lane renders in every state (Roadmap Wave 1,
+//! RM21 — A9 R9-5): with cues it draws its blocks; with
+//! none it draws an empty state — the header over a
+//! "No subtitles yet" line and an Add-cue button
+//! (the panel's own `add_cue`, so the first cue is
+//! creatable from the timeline and lands selected with
+//! its editor open, exactly as the panel's Add leaves
+//! it). Before RM21 the builder returned `None` on a
+//! cue-less project (the clips lane's `Option`
+//! discipline), which made the lane invisible until
+//! the first cue existed somewhere else; the `Option`
+//! return stays because the mount site is shared, but
+//! it is now `Some` on every branch. The header label
+//! is the dopesheet's idiom —
 //! `design::section_label` over the lane, the frame
-//! readout (the dopesheet's own [`frame_readout`]) at the
-//! right. Since Wave R the word itself goes through the
-//! catalogue like the dopesheet's header:
+//! readout (the dopesheet's own [`frame_readout`]) at
+//! the right. Since Wave R the word itself goes through
+//! the catalogue like the dopesheet's header:
 //! `i18n_wire::tr(core, "subtitles")` (the `subtitles`
 //! key is R4's, landed in the same wave). A block's label
 //! is [`block_label`]: the cue's text, with the speaker
@@ -150,7 +163,9 @@
 //!
 //! `subtitle-lane` on the lane root, [`block_key`]
 //! (`subtitle-cue-{i}`, the cue's stored index) on each
-//! block.
+//! block. Roadmap Wave 1 (RM21) adds
+//! `subtitle-lane-empty` (the empty state's row) and
+//! `subtitle-lane-add` (its Add-cue button).
 
 use std::cell::RefCell;
 
@@ -161,7 +176,7 @@ use stykanimate_rs::subtitles::SubtitleCue;
 use crate::rune_sec::design;
 use crate::rune_sec::dopesheet::frame_readout;
 use crate::rune_sec::timeline_marks::{
-    span_rect, timeline_width, ClipSpan, SpanKind, CHIP_GAP, CHIP_PITCH, EDGE_PX,
+    pitch, span_rect, timeline_width, ClipSpan, SpanKind, CHIP_GAP, CHIP_PITCH, EDGE_PX,
 };
 use crate::State;
 
@@ -184,13 +199,18 @@ pub const SUB_ROW_H: f32 = 18.0;
 pub const SUB_ROW_GAP: f32 = 2.0;
 
 /// The narrowest block, in points, that carries its
-/// cue's text: two frames' extent — a one-frame block
-/// (30 pt) is a tick, and text truncated into a tick
-/// would show an ellipsis and nothing else, which says
-/// less than the block alone. At two frames the block
-/// fits a short word whole or a longer cue's readable
-/// start.
-pub const SUB_TEXT_MIN_W: f32 = 2.0 * CHIP_PITCH - CHIP_GAP;
+/// cue's text, at chip width `chip_w`: two frames'
+/// extent — a one-frame block is a tick, and text
+/// truncated into a tick would show an ellipsis and
+/// nothing else, which says less than the block alone.
+/// At two frames the block fits a short word whole or
+/// a longer cue's readable start. A function of the
+/// live width since the timeline zoom (Roadmap Wave
+/// 1, RM13 — P-1): what counts as two frames moves
+/// with the pitch.
+pub fn sub_text_min_w(chip_w: f32) -> f32 {
+    2.0 * pitch(chip_w) - CHIP_GAP
+}
 
 /// A cue block's key: `subtitle-cue-{i}`, `i` the cue's
 /// index in `project.subtitles` (stored order — the
@@ -206,20 +226,20 @@ pub fn block_key(i: usize) -> String {
 /// carrier note). Both edges clamp to the timeline's
 /// extent; a degenerate window, a window wholly past the
 /// last frame, or a zero-frame project gives width 0.
-pub fn cue_rect(cue: &SubtitleCue, frame_count: usize) -> [f32; 2] {
+pub fn cue_rect(cue: &SubtitleCue, frame_count: usize, chip_w: f32) -> [f32; 2] {
     let carrier = ClipSpan {
         kind: SpanKind::Audio,
         from_frame: cue.start_frame as f32,
         to_frame: cue.end_frame as f32,
         muted_or_hidden: false,
     };
-    span_rect(&carrier, frame_count)
+    span_rect(&carrier, frame_count, chip_w)
 }
 
 /// Whether a block of `width` points carries its cue's
-/// text (see [`SUB_TEXT_MIN_W`]).
-pub fn block_shows_text(width: f32) -> bool {
-    width >= SUB_TEXT_MIN_W
+/// text at chip width `chip_w` (see [`sub_text_min_w`]).
+pub fn block_shows_text(width: f32, chip_w: f32) -> bool {
+    width >= sub_text_min_w(chip_w)
 }
 
 /// A cue block's display label: the cue's text with its
@@ -251,11 +271,11 @@ pub fn block_label(cue: &SubtitleCue) -> String {
 /// cue starts, so edge-touching cues share a row).
 /// `None` for a cue that draws nothing (zero width): it
 /// takes no row.
-pub fn cue_rows(cues: &[SubtitleCue], frame_count: usize) -> Vec<Option<usize>> {
+pub fn cue_rows(cues: &[SubtitleCue], frame_count: usize, chip_w: f32) -> Vec<Option<usize>> {
     let mut rows: Vec<Option<usize>> = vec![None; cues.len()];
     let mut ends: Vec<f32> = Vec::new();
     for (i, cue) in cues.iter().enumerate() {
-        let [x, w] = cue_rect(cue, frame_count);
+        let [x, w] = cue_rect(cue, frame_count, chip_w);
         if w <= 0.0 {
             continue;
         }
@@ -390,8 +410,8 @@ thread_local! {
 /// `dx` window points since the press: the nearest frame
 /// boundary, at the timeline's one pitch. Negative
 /// travel gives negative frames.
-pub fn frame_delta(dx: f32) -> i32 {
-    (dx / CHIP_PITCH).round() as i32
+pub fn frame_delta(dx: f32, chip_w: f32) -> i32 {
+    (dx / pitch(chip_w)).round() as i32
 }
 
 /// The window a drag is asking for: the grabbed window
@@ -490,7 +510,7 @@ pub fn drag_apply(s: &mut State, drag: &mut Option<CueDrag>, dx: f32) {
         g.orig_end,
         g.snapshot_taken,
     );
-    let target = drag_target(mode, orig_start, orig_end, frame_delta(dx));
+    let target = drag_target(mode, orig_start, orig_end, frame_delta(dx, s.frame_ops.chip_w()));
     let cue = &s.core.project.subtitles[index];
     if (cue.start_frame, cue.end_frame) == target {
         return;
@@ -596,24 +616,24 @@ fn lane_rows(s: &State) -> Vec<Option<usize>> {
             let mut windows: Vec<SubtitleCue> = cues.clone();
             windows[index].start_frame = start;
             windows[index].end_frame = end;
-            cue_rows(&windows, frame_count)
+            cue_rows(&windows, frame_count, s.frame_ops.chip_w())
         }
-        None => cue_rows(cues, frame_count),
+        None => cue_rows(cues, frame_count, s.frame_ops.chip_w()),
     }
 }
 
 /// The subtitle lane: header, then one sub-row of blocks
-/// per [`cue_rows`] row. `None` when the project has no
-/// cues at all (the lane exists only when it has
-/// something to show — the clips lane's rule). Built to
-/// be appended to the timeline's scrolled content column
-/// — see the module docs for the wiring.
+/// per [`cue_rows`] row — or, on a cue-less project, the
+/// empty state (RM21: the header over the
+/// `subtitle_lane_empty` line and an Add-cue button, so
+/// the first cue is creatable from the timeline). The
+/// `Option` is `Some` on every branch since RM21 (see
+/// the module docs). Built to be appended to the
+/// timeline's scrolled content column — see the module
+/// docs for the wiring.
 pub fn subtitle_lane(s: &State, t: &Theme) -> Option<El> {
     let core = &s.core;
     let cues = &core.project.subtitles;
-    if cues.is_empty() {
-        return None;
-    }
     let frame_count = core.frame_count();
     let rows = lane_rows(s);
 
@@ -624,7 +644,7 @@ pub fn subtitle_lane(s: &State, t: &Theme) -> Option<El> {
     // last frame column.
     let mut header = row().gap(8.0).center_y();
     if frame_count > 0 {
-        header = header.size(timeline_width(frame_count), SUB_HEADER_H);
+        header = header.size(timeline_width(frame_count, s.frame_ops.chip_w()), SUB_HEADER_H);
     } else {
         header = header.h(SUB_HEADER_H);
     }
@@ -641,6 +661,35 @@ pub fn subtitle_lane(s: &State, t: &Theme) -> Option<El> {
         );
 
     let mut lane = col().key("subtitle-lane").gap(SUB_ROW_GAP).child(header);
+    if cues.is_empty() {
+        // The empty state (RM21): one row under the
+        // header — the invitation line and the
+        // Add button, which is the PANEL's add (the cue
+        // lands at the playhead, selected, its text
+        // editor open in the panel: timeline-first
+        // creation with no second add path to drift).
+        lane = lane.child(
+            row()
+                .key("subtitle-lane-empty")
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text(crate::rune_sec::i18n_wire::tr(core, "subtitle_lane_empty"))
+                        .font(type_::LABEL)
+                        .color(t.text_secondary)
+                        .grow(1.0)
+                        .truncate(),
+                )
+                .child(crate::chrome_view::btn(
+                    "subtitle-lane-add",
+                    &crate::rune_sec::i18n_wire::tr(core, "subtitle_add"),
+                    false,
+                    t,
+                    |s: &mut State| crate::rune_sec::subtitle_panel::add_cue(s),
+                )),
+        );
+        return Some(lane);
+    }
     for r in 0..cue_row_count(&rows) {
         lane = lane.child(block_row(s, t, &rows, r));
     }
@@ -662,7 +711,7 @@ fn block_row(s: &State, t: &Theme, rows: &[Option<usize>], r: usize) -> El {
         if rows[i] != Some(r) {
             continue;
         }
-        let [x, w] = cue_rect(cue, frame_count);
+        let [x, w] = cue_rect(cue, frame_count, s.frame_ops.chip_w());
         if x > cursor {
             row_el = row_el.child(el().size(x - cursor, SUB_ROW_H));
         }
@@ -682,7 +731,7 @@ fn block_row(s: &State, t: &Theme, rows: &[Option<usize>], r: usize) -> El {
             .hover(t.hover)
             .press(t.press)
             .on_drag(move |s: &mut State, d: &mut Drag, _tx: &mut Tx| block_drag(s, d, i));
-        if block_shows_text(w) && !cue.text.is_empty() {
+        if block_shows_text(w, s.frame_ops.chip_w()) && !cue.text.is_empty() {
             block = block.child(
                 text(block_label(cue))
                     .font(type_::LABEL)
@@ -737,16 +786,16 @@ mod tests {
     fn cue_rect_is_the_span_maths_at_the_timeline_pitch() {
         // Chip f starts at f * 34; a window's right edge
         // is the end of its last chip (end * 34 - 4).
-        assert_eq!(cue_rect(&cue(0, 1, ""), 5), [0.0, CHIP_W]);
-        assert_eq!(cue_rect(&cue(0, 3, ""), 5), [0.0, 3.0 * CHIP_PITCH - CHIP_GAP]);
-        assert_eq!(cue_rect(&cue(2, 5, ""), 5), [68.0, 98.0]);
+        assert_eq!(cue_rect(&cue(0, 1, ""), 5, CHIP_W), [0.0, CHIP_W]);
+        assert_eq!(cue_rect(&cue(0, 3, ""), 5, CHIP_W), [0.0, 3.0 * CHIP_PITCH - CHIP_GAP]);
+        assert_eq!(cue_rect(&cue(2, 5, ""), 5, CHIP_W), [68.0, 98.0]);
         assert_eq!(
-            cue_rect(&cue(4, 5, ""), 5),
+            cue_rect(&cue(4, 5, ""), 5, CHIP_W),
             [4.0 * CHIP_PITCH, CHIP_W],
             "the last frame's cue is one chip wide at the right edge"
         );
         // A long timeline: the same pitch, no drift.
-        assert_eq!(cue_rect(&cue(50, 60, ""), 100), [1700.0, 336.0]);
+        assert_eq!(cue_rect(&cue(50, 60, ""), 100, CHIP_W), [1700.0, 336.0]);
     }
 
     #[test]
@@ -761,8 +810,8 @@ mod tests {
                 muted_or_hidden: false,
             };
             assert_eq!(
-                cue_rect(&cue(from, to, ""), count),
-                span_rect(&span, count),
+                cue_rect(&cue(from, to, ""), count, CHIP_W),
+                span_rect(&span, count, CHIP_W),
                 "window {from}..{to} over {count} frames"
             );
         }
@@ -771,26 +820,32 @@ mod tests {
     #[test]
     fn cue_rect_clamps_at_the_timeline_end() {
         // Total width over 5 frames: 5 * 34 - 4 = 166.
-        assert_eq!(timeline_width(5), 166.0);
+        assert_eq!(timeline_width(5, CHIP_W), 166.0);
         // Running past the end stops at the last chip.
-        assert_eq!(cue_rect(&cue(3, 9, ""), 5), [102.0, 64.0]);
+        assert_eq!(cue_rect(&cue(3, 9, ""), 5, CHIP_W), [102.0, 64.0]);
         // Wholly past the end: zero width, at the end.
-        assert_eq!(cue_rect(&cue(7, 9, ""), 5), [166.0, 0.0]);
+        assert_eq!(cue_rect(&cue(7, 9, ""), 5, CHIP_W), [166.0, 0.0]);
         // No frames, no rect.
-        assert_eq!(cue_rect(&cue(0, 2, ""), 0), [0.0, 0.0]);
+        assert_eq!(cue_rect(&cue(0, 2, ""), 0, CHIP_W), [0.0, 0.0]);
         // A degenerate window draws nothing.
-        assert_eq!(cue_rect(&cue(3, 3, ""), 5), [102.0, 0.0]);
-        assert_eq!(cue_rect(&cue(4, 2, ""), 5), [136.0, 0.0]);
+        assert_eq!(cue_rect(&cue(3, 3, ""), 5, CHIP_W), [102.0, 0.0]);
+        assert_eq!(cue_rect(&cue(4, 2, ""), 5, CHIP_W), [136.0, 0.0]);
     }
 
     #[test]
     fn text_shows_only_on_blocks_wide_enough_to_carry_it() {
-        assert!(!block_shows_text(CHIP_W), "a one-frame tick carries no text");
-        assert!(!block_shows_text(SUB_TEXT_MIN_W - 1.0));
-        assert!(block_shows_text(SUB_TEXT_MIN_W));
-        assert!(block_shows_text(200.0));
+        assert!(
+            !block_shows_text(CHIP_W, CHIP_W),
+            "a one-frame tick carries no text"
+        );
+        assert!(!block_shows_text(sub_text_min_w(CHIP_W) - 1.0, CHIP_W));
+        assert!(block_shows_text(sub_text_min_w(CHIP_W), CHIP_W));
+        assert!(block_shows_text(200.0, CHIP_W));
         // The threshold is exactly two frames' extent.
-        assert_eq!(SUB_TEXT_MIN_W, cue_rect(&cue(0, 2, ""), 9)[1]);
+        assert_eq!(
+            sub_text_min_w(CHIP_W),
+            cue_rect(&cue(0, 2, ""), 9, CHIP_W)[1]
+        );
     }
 
     /// A cue carrying a speaker credit (Wave R's field,
@@ -817,7 +872,7 @@ mod tests {
         // the prefixed string is longer, the width is not.
         let plain = cue(2, 9, "The long road home.");
         let credited = credited_cue(2, 9, "The long road home.", "Adult Son");
-        assert_eq!(cue_rect(&credited, 12), cue_rect(&plain, 12));
+        assert_eq!(cue_rect(&credited, 12, CHIP_W), cue_rect(&plain, 12, CHIP_W));
     }
 
     #[test]
@@ -846,24 +901,24 @@ mod tests {
     #[test]
     fn cue_rows_share_when_separate_and_stack_when_overlapping() {
         let cues = vec![cue(0, 2, "a"), cue(2, 4, "b"), cue(5, 6, "c")];
-        assert_eq!(cue_rows(&cues, 10), vec![Some(0), Some(0), Some(0)]);
-        assert_eq!(cue_row_count(&cue_rows(&cues, 10)), 1);
+        assert_eq!(cue_rows(&cues, 10, CHIP_W), vec![Some(0), Some(0), Some(0)]);
+        assert_eq!(cue_row_count(&cue_rows(&cues, 10, CHIP_W)), 1);
 
         // The middle cue overlaps the first; the third
         // fits back onto the first row once it ends.
         let cues = vec![cue(0, 4, "a"), cue(2, 6, "b"), cue(4, 8, "c")];
-        assert_eq!(cue_rows(&cues, 10), vec![Some(0), Some(1), Some(0)]);
-        assert_eq!(cue_row_count(&cue_rows(&cues, 10)), 2);
+        assert_eq!(cue_rows(&cues, 10, CHIP_W), vec![Some(0), Some(1), Some(0)]);
+        assert_eq!(cue_row_count(&cue_rows(&cues, 10, CHIP_W)), 2);
 
         // Three mutually overlapping cues stack three deep.
         let cues = vec![cue(0, 6, "a"), cue(1, 5, "b"), cue(2, 3, "c")];
-        assert_eq!(cue_rows(&cues, 10), vec![Some(0), Some(1), Some(2)]);
+        assert_eq!(cue_rows(&cues, 10, CHIP_W), vec![Some(0), Some(1), Some(2)]);
     }
 
     #[test]
     fn cue_rows_give_no_row_to_cues_that_draw_nothing() {
         let cues = vec![cue(0, 2, "a"), cue(3, 3, "empty"), cue(9, 12, "past")];
-        let rows = cue_rows(&cues, 5);
+        let rows = cue_rows(&cues, 5, CHIP_W);
         assert_eq!(rows, vec![Some(0), None, None]);
         assert_eq!(cue_row_count(&rows), 1);
         assert_eq!(cue_row_count(&[]), 0);
@@ -919,9 +974,12 @@ mod tests {
         // timeline's existing snap coverage).
         for dark in [true, false] {
             let t = rune::tok::theme(dark);
-            // No cues: no lane.
+            // No cues: the empty-state lane (RM21 —
+            // before this seat the builder returned
+            // None here and the lane was invisible
+            // until the first cue).
             let s = cue_state(10, Vec::new());
-            assert!(subtitle_lane(&s, &t).is_none());
+            assert!(subtitle_lane(&s, &t).is_some());
             // One cue.
             let s = cue_state(10, vec![cue(1, 4, "Hello.")]);
             assert!(subtitle_lane(&s, &t).is_some());
@@ -964,13 +1022,13 @@ mod tests {
 
     #[test]
     fn frame_delta_rounds_travel_to_whole_frames() {
-        assert_eq!(frame_delta(0.0), 0);
-        assert_eq!(frame_delta(10.0), 0, "under half a pitch is no frame");
-        assert_eq!(frame_delta(CHIP_PITCH), 1);
-        assert_eq!(frame_delta(2.0 * CHIP_PITCH), 2);
-        assert_eq!(frame_delta(0.5 * CHIP_PITCH), 1, "half a pitch rounds over");
-        assert_eq!(frame_delta(-CHIP_PITCH), -1);
-        assert_eq!(frame_delta(-0.5 * CHIP_PITCH), -1);
+        assert_eq!(frame_delta(0.0, CHIP_W), 0);
+        assert_eq!(frame_delta(10.0, CHIP_W), 0, "under half a pitch is no frame");
+        assert_eq!(frame_delta(CHIP_PITCH, CHIP_W), 1);
+        assert_eq!(frame_delta(2.0 * CHIP_PITCH, CHIP_W), 2);
+        assert_eq!(frame_delta(0.5 * CHIP_PITCH, CHIP_W), 1, "half a pitch rounds over");
+        assert_eq!(frame_delta(-CHIP_PITCH, CHIP_W), -1);
+        assert_eq!(frame_delta(-0.5 * CHIP_PITCH, CHIP_W), -1);
     }
 
     #[test]
@@ -1198,7 +1256,7 @@ mod tests {
         });
         assert_eq!(windows(&s), vec![(2, 4), (3, 5)], "the cue really moved");
         assert_eq!(
-            cue_rows(&s.core.project.subtitles, 10),
+            cue_rows(&s.core.project.subtitles, 10, CHIP_W),
             vec![Some(0), Some(1)],
             "on live windows the rows WOULD change"
         );

@@ -10,6 +10,21 @@
 //! colours), and SRT/WebVTT import/export through the
 //! converters in `stykanimate_rs::subtitles`.
 //!
+//! Roadmap Wave 1 (RM21, P-11 — subtitles as citizens)
+//! deepened the panel in place: the style block gained
+//! the font cycler (Shaped/Pixel — IA-RM2-3, the panel
+//! door RM2's burn-in routing waited on); the detail
+//! block gained a time-domain readout (timecodes and
+//! duration at the project frame rate), CPS/line-length
+//! authoring feedback (measurement only — the stack
+//! cap/wrap question is a standing §8 decision this
+//! panel does not touch), a speaker line for a credited
+//! cue, and nudge-by-time buttons; and a Timing block
+//! (shift-all + explicit fps retiming) joined the
+//! section. Promotion to a section of the panel's own
+//! (out of the Audio foot) is the X9 gating move priced
+//! in IA-RM21-1 — not built here.
+//!
 //! ## The selection join (P32 IA-4)
 //!
 //! The panel and the timeline's subtitle lane share ONE
@@ -131,19 +146,23 @@
 //!   any `0xRRGGBB` value, including one set over MCP
 //!   that marks no swatch, is reachable and adjustable
 //!   here, through the same style op. The audit found
-//!   NO other gap: `SubtitleStyle` has exactly four
-//!   fields (position, font scale, text colour, box
-//!   colour) and all four now have full-reach controls.
-//!   There is no background or opacity field in the
-//!   model to control — `box_color` IS the backing
-//!   (drawn as outline / offset stamps; no surface
-//!   draws a filled box, see `subtitles.rs`) — so no
-//!   such control exists, and none is faked.
-//! * Drag-to-move for cues is the lane's named remainder
-//!   (P32): no per-block drag machinery exists in the
-//!   timeline to extend, and this panel does not fake
-//!   one — range steppers and the playhead buttons are
-//!   the move controls.
+//!   NO other gap at the time: `SubtitleStyle` then had
+//!   exactly four fields (position, font scale, text
+//!   colour, box colour), all with full-reach controls.
+//!   RM2 later added a fifth field, `font` (the burn-in
+//!   renderer choice), whose panel door is the font
+//!   cycler RM21 added beside the position cycler — all
+//!   five fields now have panel controls. There is no
+//!   background or opacity field in the model to
+//!   control — `box_color` IS the backing (drawn as
+//!   outline / offset stamps; no surface draws a filled
+//!   box, see `subtitles.rs`) — so no such control
+//!   exists, and none is faked.
+//! * Drag-to-move for cues lives in the LANE (Wave R,
+//!   R3 built P32's named remainder: block drags move
+//!   and edge-resize cues there). This panel's range
+//!   steppers, playhead buttons and nudge row are the
+//!   precise numeric route to the same moves.
 //!
 //! ## Keys (all additive, Wave Q)
 //!
@@ -168,15 +187,25 @@
 //! `subtitle-file` (file root), `subtitle-path` (path
 //! field), `subtitle-export-srt` / `subtitle-export-vtt`,
 //! `subtitle-import-srt` / `subtitle-import-vtt`.
+//! Roadmap Wave 1 (RM21) adds: `subtitle-nudge-m1s` /
+//! `subtitle-nudge-m100` / `subtitle-nudge-p100` /
+//! `subtitle-nudge-p1s` (the detail block's nudge row),
+//! `subtitle-font-prev` / `subtitle-font-next` (the
+//! style block's font cycler), `subtitle-timing`
+//! (timing root), `subtitle-shift-m1s` /
+//! `subtitle-shift-m100` / `subtitle-shift-p100` /
+//! `subtitle-shift-p1s` (shift-all), `subtitle-retime-dn`
+//! / `subtitle-retime-up` / `subtitle-retime-apply`.
 //! No existing key is renamed or removed.
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, El, TextEdit};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::subtitles::{
-    sort_subtitle_cues, subtitles_from_srt, subtitles_from_vtt, subtitles_to_srt,
-    subtitles_to_srt_counted, subtitles_to_vtt, SubtitleCue, SubtitlePosition, SubtitleStyle,
-    SUBTITLE_FONT_SCALE_MAX, SUBTITLE_FONT_SCALE_MIN,
+    nudge_delta_frames, retimed_window, shifted_window, sort_subtitle_cues,
+    subtitles_from_srt, subtitles_from_vtt, subtitles_to_srt,
+    subtitles_to_srt_counted, subtitles_to_vtt, SubtitleCue, SubtitleFont, SubtitlePosition,
+    SubtitleStyle, SUBTITLE_FONT_SCALE_MAX, SUBTITLE_FONT_SCALE_MIN,
 };
 
 use crate::chrome_view::btn;
@@ -252,6 +281,17 @@ pub struct SubtitlePanelState {
     /// no-change test compares BOTH buffers against
     /// their opened values.
     pub speaker_opened: String,
+    /// The Timing block's retime source rate (RM21):
+    /// the frame rate the cues were AUTHORED at, which
+    /// [`apply_retime`] rescales to the project's
+    /// current rate. `0.0` means "unset" — the steppers
+    /// and the readout then speak the project's own
+    /// rate, and a retime is a no-op report until the
+    /// value is stepped away from it. Panel-session
+    /// state only (never serialised, never an undo
+    /// step to change): it is a claim about the cues'
+    /// history, not project data.
+    pub retime_from: f32,
 }
 
 impl SubtitlePanelState {
@@ -263,6 +303,7 @@ impl SubtitlePanelState {
             text_opened: String::new(),
             speaker: TextEdit::new(""),
             speaker_opened: String::new(),
+            retime_from: 0.0,
         }
     }
 }
@@ -433,6 +474,145 @@ pub fn scale_readout(core: &EditorCore, style: SubtitleStyle) -> String {
 /// A stored colour as the readout's `#RRGGBB`.
 pub fn hex_label(rgb: u32) -> String {
     format!("#{rgb:06X}")
+}
+
+// ---------------------------------------------------------------------
+// Time domain (Roadmap Wave 1, RM21 — P-11 / A9 R9-3 + R9-2)
+//
+// Cue timing is frame counts at the project's frame
+// rate — the same domain the SRT/WebVTT converters
+// speak (`subtitles_from_srt(text, fps)`), so every
+// readout below is frames ÷ fps, nothing re-derived.
+// The feedback helpers MEASURE only: no cap, no wrap,
+// no auto-edit (the stack cap/wrap question is the
+// standing §8 decision D-9, untouched here).
+// ---------------------------------------------------------------------
+
+/// A frame's timecode at `fps`, in the SRT/WebVTT
+/// shape `HH:MM:SS.mmm` — the notation the cue's own
+/// sidecar files use, so the panel and the delivered
+/// document read identically. Millisecond rounding is
+/// to nearest. A non-positive or non-finite rate has
+/// no time domain: the zero timecode comes back
+/// rather than a NaN (the project rate is validated
+/// at its own controls; this is a display guard).
+pub fn timecode_of(frame: usize, fps: f32) -> String {
+    if !(fps > 0.0) || !fps.is_finite() {
+        return "00:00:00.000".to_string();
+    }
+    let total_ms = (frame as f64 / fps as f64 * 1000.0).round() as u64;
+    let ms = total_ms % 1000;
+    let total_s = total_ms / 1000;
+    let s = total_s % 60;
+    let total_m = total_s / 60;
+    let m = total_m % 60;
+    let h = total_m / 60;
+    format!("{h:02}:{m:02}:{s:02}.{ms:03}")
+}
+
+/// A cue's duration in seconds at `fps` — the
+/// half-open window's length over the rate. A
+/// non-positive/non-finite rate yields 0.0 (the
+/// display guard of [`timecode_of`]).
+pub fn cue_duration_seconds(cue: &SubtitleCue, fps: f32) -> f32 {
+    if !(fps > 0.0) || !fps.is_finite() {
+        return 0.0;
+    }
+    (cue.end_frame - cue.start_frame) as f32 / fps
+}
+
+/// The detail block's time line: the cue's start and
+/// end timecodes with its duration in seconds, at the
+/// project's frame rate. The line is the
+/// `subtitle_time_line` template key (IA-RM21-2);
+/// the timecodes and the seconds figure are notation
+/// substituted into its slots.
+pub fn cue_time_line(core: &EditorCore, cue: &SubtitleCue) -> String {
+    let fps = core.project.fps;
+    i18n_wire::tr(core, "subtitle_time_line")
+        .replace("{start}", &timecode_of(cue.start_frame, fps))
+        .replace("{end}", &timecode_of(cue.end_frame, fps))
+        .replace(
+            "{seconds}",
+            &format!("{:.1}", cue_duration_seconds(cue, fps)),
+        )
+}
+
+/// A cue's reading speed: characters per second at
+/// `fps`. The count is the text's characters with
+/// line breaks excluded (a break is layout, not
+/// reading); the duration is the half-open window's.
+/// A zero duration cannot occur (the model's
+/// one-frame minimum), and the rate guard of
+/// [`cue_duration_seconds`] yields 0.0 rather than a
+/// division by zero.
+pub fn cue_cps(cue: &SubtitleCue, fps: f32) -> f32 {
+    let seconds = cue_duration_seconds(cue, fps);
+    if seconds <= 0.0 {
+        return 0.0;
+    }
+    let chars = cue.text.chars().filter(|&c| c != '\n').count();
+    chars as f32 / seconds
+}
+
+/// Each line's character count, in order — the
+/// per-line half of the R9-2 feedback. Characters are
+/// Unicode scalars (what a reader reads), never
+/// bytes.
+pub fn cue_line_lengths(cue: &SubtitleCue) -> Vec<usize> {
+    cue.text.split('\n').map(|line| line.chars().count()).collect()
+}
+
+/// The detail block's feedback line: the cue's CPS
+/// and its per-line lengths. The line is the
+/// `subtitle_cps_line` template key (IA-RM21-2); the
+/// lengths join with " / " (notation). Measurement
+/// only — no threshold is judged here: A9 left the
+/// warning threshold's default as a user decision,
+/// so the panel reports the numbers and flags
+/// nothing.
+pub fn cue_cps_line(core: &EditorCore, cue: &SubtitleCue) -> String {
+    let lengths: Vec<String> = cue_line_lengths(cue)
+        .iter()
+        .map(|n| n.to_string())
+        .collect();
+    i18n_wire::tr(core, "subtitle_cps_line")
+        .replace("{cps}", &format!("{:.1}", cue_cps(cue, core.project.fps)))
+        .replace("{lines}", &lengths.join(" / "))
+}
+
+/// The retime source rate in force: the panel's
+/// stepped value when one is set, else the project's
+/// own rate (the unset state of
+/// `SubtitlePanelState::retime_from`).
+pub fn effective_retime_from(panel: &SubtitlePanelState, project_fps: f32) -> f32 {
+    if panel.retime_from > 0.0 {
+        panel.retime_from
+    } else {
+        project_fps
+    }
+}
+
+/// A font's display label (the style cycler's
+/// readout), resolved through the i18n tables
+/// (`subtitle_font_shaped` / `subtitle_font_pixel` —
+/// IA-RM21-2).
+pub fn font_label(core: &EditorCore, font: SubtitleFont) -> String {
+    match font {
+        SubtitleFont::Shaped => i18n_wire::tr(core, "subtitle_font_shaped"),
+        SubtitleFont::Pixel => i18n_wire::tr(core, "subtitle_font_pixel"),
+    }
+}
+
+/// The font a font-cycler press asks for: the other
+/// one. The style has exactly two fonts (RM2), so
+/// cycling in either direction lands on the same
+/// flip — the position cycler's shape.
+pub fn flipped_font(font: SubtitleFont) -> SubtitleFont {
+    match font {
+        SubtitleFont::Shaped => SubtitleFont::Pixel,
+        SubtitleFont::Pixel => SubtitleFont::Shaped,
+    }
 }
 
 /// Per-press channel step for the style block's RGB
@@ -711,6 +891,82 @@ pub fn end_at_playhead(s: &mut State) {
     }
 }
 
+/// Nudge the selected cue by `ms` milliseconds
+/// (RM21 — the time-domain half of the move controls;
+/// the frame steppers stay). The WHOLE window moves
+/// through `EditorCore::subtitle_update` (one undo
+/// step, duration preserved — see [`shifted_window`]),
+/// the selection following the cue. A nudge that
+/// cannot move (the cue is against frame 0, moving
+/// back) reports instead of spending a step.
+pub fn nudge_selected(s: &mut State, ms: i32) {
+    let Some((i, cue)) = selected_cue(&s.core, s.subtitle_selected) else {
+        return;
+    };
+    let delta = nudge_delta_frames(ms, s.core.project.fps);
+    match shifted_window(&cue, delta) {
+        Some((start, end)) => {
+            if let Some(new_i) =
+                s.core.subtitle_update(i, start, end, &cue.text, cue.speaker.as_deref())
+            {
+                s.subtitle_selected = Some(new_i);
+            }
+        }
+        None => {
+            s.core.status = format!("Subtitle {} already starts at the first frame.", i + 1);
+        }
+    }
+}
+
+/// Shift EVERY cue by `ms` milliseconds (RM21) — the
+/// bulk half of the time-domain controls. The bulk
+/// discipline itself (clone, shift, re-sort, one
+/// snapshot) is the core op's —
+/// `EditorCore::subtitle_shift_all` (IA-RM21-3), which
+/// the MCP `subtitle_shift_all` tool also calls, so
+/// the panel and the tool cannot drift. This shell
+/// wrapper adds the two things the core never sees:
+/// the selection and any open text session stand down
+/// after a shift that moved something (indices may
+/// name different cues after clamping collisions
+/// re-sort).
+pub fn shift_all(s: &mut State, ms: i32) {
+    if s.core.subtitle_shift_all(ms) > 0 {
+        s.subtitle_selected = None;
+        close_edit(s);
+    }
+}
+
+/// Step the Timing block's retime source rate by one
+/// frame-per-second in `dir`, held to 1..=120. Panel
+/// state only — no undo step, no status: the readout
+/// beside the stepper is the feedback. Stepping from
+/// the unset state starts from the project's rate
+/// ([`effective_retime_from`]).
+pub fn step_retime_from(s: &mut State, dir: i32) {
+    let base = effective_retime_from(&s.subtitle_panel, s.core.project.fps);
+    let next = (base + dir as f32).clamp(1.0, 120.0);
+    s.subtitle_panel.retime_from = next;
+}
+
+/// Retime every cue from the Timing block's source
+/// rate to the project's current rate (RM21 — fps
+/// retiming made explicit, never silent: the press is
+/// the offer A9 R9-3 asks for, and the status line
+/// names BOTH rates). One undo step on the import's
+/// bulk discipline ([`shift_all`]'s note; the core op is
+/// `EditorCore::subtitle_retime`, IA-RM21-3). A source rate equal
+/// to the project rate — or a rescale that lands every
+/// cue where it already sits — reports and spends
+/// nothing.
+pub fn apply_retime(s: &mut State) {
+    let from = effective_retime_from(&s.subtitle_panel, s.core.project.fps);
+    if s.core.subtitle_retime(from) > 0 {
+        s.subtitle_selected = None;
+        close_edit(s);
+    }
+}
+
 /// Delete the selected cue through
 /// `EditorCore::subtitle_delete` (one undo step) and
 /// clear the selection: the deleted cue's index would
@@ -732,6 +988,18 @@ pub fn delete_selected(s: &mut State) {
 pub fn cycle_position(s: &mut State) {
     let mut style = s.core.subtitle_style();
     style.position = flipped_position(style.position);
+    let _ = s.core.set_subtitle_style(style);
+}
+
+/// Flip the subtitle style's font (Shaped ↔ Pixel)
+/// through `EditorCore::set_subtitle_style` — one
+/// undo step, the op's own status either way. This is
+/// IA-RM2-3's panel door: RM2 routed the burn-in by
+/// `style.font` and gave the choice to MCP and the
+/// project file; the cycler gives it to the panel.
+pub fn cycle_font(s: &mut State) {
+    let mut style = s.core.subtitle_style();
+    style.font = flipped_font(style.font);
     let _ = s.core.set_subtitle_style(style);
 }
 
@@ -957,12 +1225,34 @@ pub fn import_file(s: &mut State, format: SubtitleFileFormat) {
         s.core.status = format!("{label} import matched the current subtitles; nothing changed.");
         return;
     }
+    // Speaker asymmetry (A9 G9c, closed by RM21): an
+    // SRT import replacing a speaker-carrying list
+    // drops credits the format cannot carry — the
+    // export side counts this loss (Wave S, S9), so
+    // the import side now names it too, in the same
+    // sentence shape. WebVTT keeps speakers, so its
+    // imports never grow the clause.
+    let credited_before = s
+        .core
+        .project
+        .subtitles
+        .iter()
+        .filter(|c| c.speaker.is_some())
+        .count();
+    let credited_after = cues.iter().filter(|c| c.speaker.is_some()).count();
+    let dropped = credited_before.saturating_sub(credited_after);
     let count = cues.len();
     s.core.snapshot();
     s.core.project.subtitles = cues;
     s.subtitle_selected = None;
     close_edit(s);
-    s.core.status = format!("Imported {count} subtitle(s) from {label}.");
+    s.core.status = if format == SubtitleFileFormat::Srt && dropped > 0 {
+        format!(
+            "Imported {count} subtitle(s) from {label} — {dropped} speaker credit(s) dropped (SRT has no speaker syntax)."
+        )
+    } else {
+        format!("Imported {count} subtitle(s) from {label}.")
+    };
 }
 
 // ---------------------------------------------------------------------
@@ -1022,10 +1312,80 @@ pub fn subtitle_section(s: &State, t: &Theme) -> El {
     );
     if !cues.is_empty() {
         section = section.child(detail_block(s, t));
+        section = section.child(timing_block(s, t));
     }
     section = section.child(style_block(s, t));
     section = section.child(file_block(s, t));
     section
+}
+
+/// The Timing block (RM21): the whole-list time
+/// controls — shift-all by time grains and the
+/// explicit fps retime. Mounted only when cues exist
+/// (both controls are meaningless over an empty list,
+/// and their handlers refuse silently there as a
+/// backstop). The bulk discipline is [`shift_all`]'s:
+/// one undo step per applied press, no-change reports
+/// instead of steps.
+fn timing_block(s: &State, t: &Theme) -> El {
+    let from = effective_retime_from(&s.subtitle_panel, s.core.project.fps);
+    let from_label = if from.fract() == 0.0 {
+        format!("{from:.0}")
+    } else {
+        format!("{from:.2}")
+    };
+    col()
+        .key("subtitle-timing")
+        .w_full()
+        .gap(8.0)
+        .child(design::section_label(
+            &i18n_wire::tr(&s.core, "subtitle_timing"),
+            t,
+        ))
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(
+                    design::section_label(&i18n_wire::tr(&s.core, "subtitle_shift_all"), t)
+                        .grow(1.0),
+                )
+                .child(btn("subtitle-shift-m1s", "-1s", false, t, |s| {
+                    shift_all(s, -1000)
+                }))
+                .child(btn("subtitle-shift-m100", "-0.1s", false, t, |s| {
+                    shift_all(s, -100)
+                }))
+                .child(btn("subtitle-shift-p100", "+0.1s", false, t, |s| {
+                    shift_all(s, 100)
+                }))
+                .child(btn("subtitle-shift-p1s", "+1s", false, t, |s| {
+                    shift_all(s, 1000)
+                })),
+        )
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(
+                    design::section_label(&i18n_wire::tr(&s.core, "subtitle_retime"), t)
+                        .grow(1.0),
+                )
+                .child(btn("subtitle-retime-dn", "−", false, t, |s| {
+                    step_retime_from(s, -1)
+                }))
+                .child(design::stepper_value(&from_label, t))
+                .child(btn("subtitle-retime-up", "+", false, t, |s| {
+                    step_retime_from(s, 1)
+                }))
+                .child(btn(
+                    "subtitle-retime-apply",
+                    &i18n_wire::tr(&s.core, "subtitle_retime_apply"),
+                    false,
+                    t,
+                    |s| apply_retime(s),
+                )),
+        )
 }
 
 /// The selected cue's editor: title and range readout,
@@ -1060,6 +1420,23 @@ fn detail_block(s: &State, t: &Theme) -> El {
         )
         .child(
             text(cue_range_line(&s.core, &cue))
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        // Time domain (RM21): the same window as
+        // timecodes + duration at the project rate —
+        // the sidecars' own notation, beside the frame
+        // numbers the steppers speak.
+        .child(
+            text(cue_time_line(&s.core, &cue))
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        // Reading feedback (RM21, A9 R9-2): CPS and
+        // per-line lengths — measurement only, no
+        // threshold judged (see cue_cps_line).
+        .child(
+            text(cue_cps_line(&s.core, &cue))
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         );
@@ -1121,6 +1498,23 @@ fn detail_block(s: &State, t: &Theme) -> El {
                     )),
             );
     } else {
+        // A credited cue names its speaker over its
+        // text (RM21 — the speaker/credit surface: the
+        // row label's prefix, spelled out here where
+        // the cue is read whole; the label is the
+        // existing `subtitle_speaker` key and the name
+        // is the cue's own data).
+        if let Some(name) = &cue.speaker {
+            block = block.child(
+                text(format!(
+                    "{}: {}",
+                    i18n_wire::tr(&s.core, "subtitle_speaker"),
+                    name
+                ))
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+            );
+        }
         // The cue's text whole (it wraps — a cue is
         // prose, and the card is its reading width),
         // over the row that opens the editor on it.
@@ -1196,6 +1590,31 @@ fn detail_block(s: &State, t: &Theme) -> El {
                     t,
                     |s| end_at_playhead(s),
                 )),
+        )
+        // Nudge by time (RM21): the whole window moves
+        // by a time grain — the frame steppers above
+        // stay for frame precision. The labels are
+        // notation, like the steppers' − / +.
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(
+                    design::section_label(&i18n_wire::tr(&s.core, "subtitle_nudge"), t)
+                        .grow(1.0),
+                )
+                .child(btn("subtitle-nudge-m1s", "-1s", false, t, |s| {
+                    nudge_selected(s, -1000)
+                }))
+                .child(btn("subtitle-nudge-m100", "-0.1s", false, t, |s| {
+                    nudge_selected(s, -100)
+                }))
+                .child(btn("subtitle-nudge-p100", "+0.1s", false, t, |s| {
+                    nudge_selected(s, 100)
+                }))
+                .child(btn("subtitle-nudge-p1s", "+1s", false, t, |s| {
+                    nudge_selected(s, 1000)
+                })),
         )
         .child(
             row()
@@ -1346,6 +1765,41 @@ fn style_block(s: &State, t: &Theme) -> El {
                     false,
                     t,
                     |s| cycle_position(s),
+                )),
+        )
+        // The font cycler (RM21 — IA-RM2-3's panel
+        // door): the position cycler's exact shape over
+        // the style's font field; the readout names the
+        // renderer the burn-in will use.
+        .child(
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    design::section_label(&i18n_wire::tr(&s.core, "subtitle_font"), t)
+                        .grow(1.0),
+                )
+                .child(icon_only_btn(
+                    "subtitle-font-prev",
+                    "chevron-left",
+                    &i18n_wire::tr(&s.core, "subtitle_font_prev"),
+                    26.0,
+                    false,
+                    t,
+                    |s| cycle_font(s),
+                ))
+                .child(design::stepper_value(
+                    &font_label(&s.core, style.font),
+                    t,
+                ))
+                .child(icon_only_btn(
+                    "subtitle-font-next",
+                    "chevron-right",
+                    &i18n_wire::tr(&s.core, "subtitle_font_next"),
+                    26.0,
+                    false,
+                    t,
+                    |s| cycle_font(s),
                 )),
         )
         .child(
@@ -1565,6 +2019,7 @@ mod tests {
         assert_eq!(st.text.text, "");
         assert_eq!(st.text_target, None);
         assert_eq!(st.text_opened, "");
+        assert_eq!(st.retime_from, 0.0, "the retime source starts unset");
         let st = SubtitlePanelState::default();
         assert_eq!(st.text_target, None);
     }
@@ -1660,7 +2115,7 @@ mod tests {
         // (English) core resolves it to the exact
         // literal it replaced — English rendering is
         // byte-identical to the pre-i18n panel.
-        const LABELS: [(&str, &str); 34] = [
+        const LABELS: [(&str, &str); 45] = [
             ("subtitles", "Subtitles"),
             ("subtitle_none", "No subtitles in this project."),
             ("subtitle_add", "Add cue"),
@@ -1702,6 +2157,25 @@ mod tests {
             ("subtitle_red", "Red"),
             ("subtitle_green", "Green"),
             ("subtitle_blue", "Blue"),
+            // Roadmap Wave 1 (RM21 — IA-RM21-2): the
+            // font cycler, the nudge row, the Timing
+            // block and the lane's empty line. Like the
+            // V6 keys above, these resolve only once the
+            // IA lands the keys in the catalogue.
+            ("subtitle_font", "Font"),
+            ("subtitle_font_prev", "Previous font"),
+            ("subtitle_font_next", "Next font"),
+            ("subtitle_font_shaped", "Shaped"),
+            ("subtitle_font_pixel", "Pixel"),
+            ("subtitle_nudge", "Nudge"),
+            ("subtitle_timing", "Timing"),
+            ("subtitle_shift_all", "Shift all cues"),
+            ("subtitle_retime", "Retime from (fps)"),
+            ("subtitle_retime_apply", "Retime cues"),
+            (
+                "subtitle_lane_empty",
+                "No subtitles yet — add the first cue from here.",
+            ),
         ];
         let s = cue_state(Vec::new());
         for (key, english) in LABELS {
@@ -1724,7 +2198,7 @@ mod tests {
         // value); the cue title and colour line
         // compose inline in their views and are
         // pinned by their stored templates here.
-        const TEMPLATES: [(&str, &str); 5] = [
+        const TEMPLATES: [(&str, &str); 7] = [
             ("subtitle_row_label", "{start}–{end} · {text}"),
             ("subtitle_cue_title", "{cue} {index}"),
             (
@@ -1735,6 +2209,16 @@ mod tests {
             (
                 "subtitle_color_readout",
                 "{text} {text_hex} · {box} {box_hex}",
+            ),
+            // Roadmap Wave 1 (RM21 — IA-RM21-2): the
+            // detail block's time and feedback lines.
+            (
+                "subtitle_time_line",
+                "{start} → {end} · {seconds} s",
+            ),
+            (
+                "subtitle_cps_line",
+                "{cps} chars/s · lines {lines}",
             ),
         ];
         for (key, template) in TEMPLATES {
@@ -2135,6 +2619,206 @@ mod tests {
         assert_eq!(s.core.subtitle_count(), 1);
         assert_eq!(s.core.project.subtitles[0].text, "Kept");
         assert_eq!(s.core.undo_depth(), depth);
+    }
+
+    #[test]
+    fn timecode_and_feedback_helpers_measure_the_cue() {
+        // RM21 (A9 R9-3/R9-2): the time domain is
+        // frames ÷ project fps, in the sidecars' own
+        // notation; the feedback is measurement only.
+        assert_eq!(timecode_of(0, 24.0), "00:00:00.000");
+        assert_eq!(timecode_of(24, 24.0), "00:00:01.000");
+        assert_eq!(timecode_of(36, 24.0), "00:00:01.500");
+        assert_eq!(timecode_of(87_864, 24.0), "01:01:01.000");
+        assert_eq!(timecode_of(24, 0.0), "00:00:00.000", "no rate, no NaN");
+        let c = cue(24, 72, "x");
+        assert_eq!(cue_duration_seconds(&c, 24.0), 2.0);
+        let s = cue_state(Vec::new());
+        assert_eq!(
+            cue_time_line(&s.core, &c),
+            "00:00:01.000 → 00:00:03.000 · 2.0 s"
+        );
+        // CPS counts characters without line breaks;
+        // line lengths count per line, in characters.
+        let two = cue(0, 48, "one\ntwo three");
+        assert_eq!(cue_cps(&two, 24.0), 6.0, "12 chars over 2 s");
+        assert_eq!(cue_line_lengths(&two), vec![3, 9]);
+        assert_eq!(cue_cps_line(&s.core, &two), "6.0 chars/s · lines 3 / 9");
+        assert_eq!(cue_cps(&cue(0, 24, "Hello world"), 24.0), 11.0);
+    }
+
+    #[test]
+    fn nudge_maths_rounds_and_never_vanishes() {
+        // RM21: a millisecond nudge becomes whole
+        // frames at the project rate — and a press
+        // always moves at least one frame.
+        assert_eq!(nudge_delta_frames(1000, 24.0), 24);
+        assert_eq!(nudge_delta_frames(-1000, 24.0), -24);
+        assert_eq!(nudge_delta_frames(100, 24.0), 2);
+        assert_eq!(nudge_delta_frames(-100, 24.0), -2);
+        assert_eq!(nudge_delta_frames(10, 24.0), 1, "sub-frame rounds up to a move");
+        assert_eq!(nudge_delta_frames(0, 24.0), 0);
+        assert_eq!(nudge_delta_frames(100, 0.0), 0, "no rate, no move");
+        // The whole-window shift preserves duration
+        // and clamps by APPLIED delta at frame 0.
+        let c = cue(10, 20, "x");
+        assert_eq!(shifted_window(&c, 5), Some((15, 25)));
+        assert_eq!(shifted_window(&c, -15), Some((0, 5)));
+        assert_eq!(shifted_window(&c, 0), None);
+        assert_eq!(shifted_window(&cue(0, 5, "x"), -1), None);
+    }
+
+    #[test]
+    fn nudge_moves_the_whole_cue_and_refuses_at_the_floor() {
+        let mut s = cue_state(vec![cue(24, 48, "a")]);
+        s.subtitle_selected = Some(0);
+        let depth = s.core.undo_depth();
+        nudge_selected(&mut s, 1000);
+        let c = &s.core.project.subtitles[0];
+        assert_eq!((c.start_frame, c.end_frame), (48, 72), "one second at 24 fps");
+        assert_eq!(s.core.undo_depth(), depth + 1, "one step per nudge");
+        // A partial clamp: 12 frames of travel remain.
+        let mut s = cue_state(vec![cue(12, 36, "a")]);
+        s.subtitle_selected = Some(0);
+        nudge_selected(&mut s, -1000);
+        let c = &s.core.project.subtitles[0];
+        assert_eq!((c.start_frame, c.end_frame), (0, 24), "duration preserved");
+        // At the floor the press reports, spending
+        // nothing.
+        let mut s = cue_state(vec![cue(0, 24, "a")]);
+        s.subtitle_selected = Some(0);
+        let depth = s.core.undo_depth();
+        nudge_selected(&mut s, -100);
+        assert_eq!(s.core.undo_depth(), depth);
+        assert!(s.core.status.contains("already starts at the first frame"));
+    }
+
+    #[test]
+    fn shift_all_spends_one_step_and_stands_the_selection_down() {
+        let mut s = cue_state(vec![cue(0, 24, "a"), cue(48, 72, "b")]);
+        s.subtitle_selected = Some(1);
+        let depth = s.core.undo_depth();
+        shift_all(&mut s, 1000);
+        assert_eq!(s.core.undo_depth(), depth + 1, "ONE step for the whole shift");
+        let wins: Vec<(usize, usize)> = s
+            .core
+            .project
+            .subtitles
+            .iter()
+            .map(|c| (c.start_frame, c.end_frame))
+            .collect();
+        assert_eq!(wins, vec![(24, 48), (72, 96)]);
+        assert_eq!(s.subtitle_selected, None, "indices stood down (import discipline)");
+        assert!(s.core.status.contains("Shifted 2 subtitle cue(s) by 1000 ms."));
+        // A shift no cue can take is free and says so.
+        let mut s = cue_state(vec![cue(0, 24, "a")]);
+        let depth = s.core.undo_depth();
+        shift_all(&mut s, -1000);
+        assert_eq!(s.core.undo_depth(), depth);
+        assert!(s.core.status.contains("no cue moved"));
+        // No cues: the handler is a silent no-op (the
+        // block never mounts — this is the backstop).
+        let mut s = cue_state(Vec::new());
+        shift_all(&mut s, 1000);
+        assert_eq!(s.core.subtitle_count(), 0);
+    }
+
+    #[test]
+    fn retime_scales_windows_and_names_both_rates() {
+        // RM21: retiming is explicit — the press, the
+        // rescale, and a status naming both rates.
+        assert_eq!(retimed_window(&cue(24, 48, "x"), 24.0, 30.0), (30, 60));
+        assert_eq!(retimed_window(&cue(0, 1, "x"), 24.0, 12.0), (0, 1));
+        assert_eq!(
+            retimed_window(&cue(24, 48, "x"), 24.0, 24.0),
+            (24, 48),
+            "equal rates are the identity"
+        );
+        let mut s = cue_state(vec![cue(24, 48, "a")]);
+        // Unset source = the project rate: a free
+        // no-op report.
+        let depth = s.core.undo_depth();
+        apply_retime(&mut s);
+        assert_eq!(s.core.undo_depth(), depth);
+        assert!(s.core.status.contains("already match the project frame rate"));
+        // Stepping the source is panel state only.
+        step_retime_from(&mut s, -1);
+        assert_eq!(s.subtitle_panel.retime_from, 23.0);
+        assert_eq!(s.core.undo_depth(), depth, "stepping spends no undo step");
+        // Apply: one step, windows scaled by 24/23,
+        // both rates named on the status line.
+        apply_retime(&mut s);
+        assert_eq!(s.core.undo_depth(), depth + 1);
+        let c = &s.core.project.subtitles[0];
+        assert_eq!((c.start_frame, c.end_frame), (25, 50));
+        assert_eq!(
+            s.core.status,
+            "Retimed 1 subtitle cue(s) from 23 fps to 24 fps."
+        );
+        // The steppers hold the 1..=120 rail.
+        let mut s = cue_state(Vec::new());
+        s.subtitle_panel.retime_from = 120.0;
+        step_retime_from(&mut s, 1);
+        assert_eq!(s.subtitle_panel.retime_from, 120.0);
+        s.subtitle_panel.retime_from = 1.0;
+        step_retime_from(&mut s, -1);
+        assert_eq!(s.subtitle_panel.retime_from, 1.0);
+    }
+
+    #[test]
+    fn font_cycler_flips_the_style_font_in_one_step() {
+        // RM21 (IA-RM2-3): the panel door for RM2's
+        // style field — the flip is one style op, the
+        // readout follows the stored value.
+        let mut s = cue_state(Vec::new());
+        assert_eq!(s.core.subtitle_style().font, SubtitleFont::Shaped);
+        assert_eq!(font_label(&s.core, SubtitleFont::Shaped), "Shaped");
+        assert_eq!(font_label(&s.core, SubtitleFont::Pixel), "Pixel");
+        assert_eq!(flipped_font(SubtitleFont::Shaped), SubtitleFont::Pixel);
+        assert_eq!(flipped_font(SubtitleFont::Pixel), SubtitleFont::Shaped);
+        let depth = s.core.undo_depth();
+        cycle_font(&mut s);
+        assert_eq!(s.core.subtitle_style().font, SubtitleFont::Pixel);
+        assert_eq!(s.core.undo_depth(), depth + 1);
+        cycle_font(&mut s);
+        assert_eq!(s.core.subtitle_style().font, SubtitleFont::Shaped);
+        assert_eq!(s.core.undo_depth(), depth + 2);
+    }
+
+    #[test]
+    fn srt_import_names_dropped_speaker_credits() {
+        // RM21 (A9 G9c): the import side of the Wave S
+        // export count — replacing a credited list from
+        // SRT names the credits the format dropped;
+        // WebVTT's import never grows the clause.
+        let dir = temp_dir("import-speakers");
+        let mut credited = cue(0, 24, "First line");
+        credited.speaker = Some("Mary Jane".to_string());
+        let mut s = cue_state(vec![credited]);
+        let srt = dir.join("plain.srt");
+        std::fs::write(&srt, "1\n00:00:02,000 --> 00:00:03,000\nOnly cue\n").unwrap();
+        s.subtitle_panel.path = TextEdit::new(srt.to_string_lossy().into_owned());
+        import_file(&mut s, SubtitleFileFormat::Srt);
+        assert_eq!(
+            s.core.status,
+            format!(
+                "Imported 1 subtitle(s) from SRT — 1 speaker credit(s) dropped (SRT has no speaker syntax)."
+            )
+        );
+        // WebVTT: the same replacement shape, the
+        // established plain sentence.
+        let mut credited = cue(0, 24, "First line");
+        credited.speaker = Some("Mary Jane".to_string());
+        let mut s = cue_state(vec![credited]);
+        let vtt = dir.join("plain.vtt");
+        std::fs::write(
+            &vtt,
+            "WEBVTT\n\n00:00:02.000 --> 00:00:03.000\nOnly cue\n",
+        )
+        .unwrap();
+        s.subtitle_panel.path = TextEdit::new(vtt.to_string_lossy().into_owned());
+        import_file(&mut s, SubtitleFileFormat::Vtt);
+        assert_eq!(s.core.status, "Imported 1 subtitle(s) from WebVTT.");
     }
 
     #[test]

@@ -45,7 +45,7 @@
 
 use rune::tok::{self, type_, Theme};
 use rune::{el, row, text, Color, El};
-use stykanimate_rs::editor::EditorCore;
+use stykanimate_rs::editor::{EditorCore, SaveState};
 
 use crate::rune_sec::app_theme;
 use crate::rune_sec::i18n_wire;
@@ -220,10 +220,14 @@ pub fn toggle_play(s: &mut State) {
 /// the project is dirty, absent while it is clean. The
 /// signal is the same one the status strip's project
 /// segment reads (see `status_strip::project_text`): the
-/// core's public edit counter — dirty exactly when
-/// `core.edits_since_autosave() > 0`, i.e. edits the
-/// autosave has not captured yet. Not the recovery file's
-/// mtime: that is the autosave segment's separate signal,
+/// core's named-save state — shown while the project has
+/// never been saved to a named file, and while it carries
+/// edits since the last named save; hidden only in the
+/// `Saved` state. (Pre-RM24 it read the autosave counter —
+/// edits the autosave had not captured — which cleared
+/// the dot for work no named file held.) Not the recovery
+/// file's mtime: that is the autosave segment's separate
+/// signal,
 /// and the two must not be conflated.
 ///
 /// UI mission Wave 9: the fill is the app palette's
@@ -234,7 +238,7 @@ pub fn toggle_play(s: &mut State) {
 /// shell wore the light one (the same defect class Wave 8
 /// fixed in the status strip).
 fn dirty_dot(core: &EditorCore, t: &Theme) -> Option<El> {
-    if core.edits_since_autosave() > 0 {
+    if core.save_state() != SaveState::Saved {
         Some(el().size(8.0, 8.0).radius(4.0).fill(dirty_dot_fill(t)))
     } else {
         None
@@ -304,6 +308,13 @@ pub fn load_pressed(s: &mut State) {
 /// unchanged in both forms — the layers panel's
 /// live/inert idiom.
 ///
+/// Roadmap Wave 1 (RM24, P-14): the live Undo/Redo
+/// labels name the edit they will revert/re-apply —
+/// "Undo Delete frame" — from the core's history
+/// labels (`undo_label` / `redo_label`); the inert
+/// twins keep the bare word (an empty stack has no
+/// label to name).
+///
 /// Phase N (charter §15): the name (TITLE, as before) now
 /// rides in a growing cluster with [`dirty_dot`] — the
 /// accent dot appears after the name while the project is
@@ -331,10 +342,23 @@ pub fn app_bar(s: &State, t: &Theme) -> El {
     // Undo/Redo, depth-gated (see this fn's docs): the
     // inert twin drops the handler, so an empty-stack
     // press cannot even reach the core's silent no-op.
+    // RM24: the live labels carry the history entry's
+    // name ("Undo Delete frame"); computed before the
+    // depth gate so both forms share the one string
+    // source (the inert form only renders at depth 0,
+    // where no label exists and the bare word stands).
+    let undo_text = match core.undo_label() {
+        Some(label) => format!("{} {label}", i18n_wire::tr(core, "undo")),
+        None => i18n_wire::tr(core, "undo"),
+    };
+    let redo_text = match core.redo_label() {
+        Some(label) => format!("{} {label}", i18n_wire::tr(core, "redo")),
+        None => i18n_wire::tr(core, "redo"),
+    };
     let undo_btn = if core.undo_depth() == 0 {
-        icon_btn_inert("undo", "arrow-rotate-left", &i18n_wire::tr(core, "undo"), t)
+        icon_btn_inert("undo", "arrow-rotate-left", &undo_text, t)
     } else {
-        icon_btn("undo", "arrow-rotate-left", &i18n_wire::tr(core, "undo"), false, t, |s| {
+        icon_btn("undo", "arrow-rotate-left", &undo_text, false, t, |s| {
             s.core.undo();
             // Wave 10 (C6): history navigation can change
             // the stroke list under the selection index —
@@ -343,9 +367,9 @@ pub fn app_bar(s: &State, t: &Theme) -> El {
         })
     };
     let redo_btn = if core.redo_depth() == 0 {
-        icon_btn_inert("redo", "arrow-rotate-right", &i18n_wire::tr(core, "redo"), t)
+        icon_btn_inert("redo", "arrow-rotate-right", &redo_text, t)
     } else {
-        icon_btn("redo", "arrow-rotate-right", &i18n_wire::tr(core, "redo"), false, t, |s| {
+        icon_btn("redo", "arrow-rotate-right", &redo_text, false, t, |s| {
             s.core.redo();
             s.stroke_selected = None;
         })
@@ -634,24 +658,36 @@ mod tests {
         assert_eq!(danger_color(DANGER_PRESS).hex(), "#9c2934ff");
     }
 
-    /// The app-bar dot is present exactly while the core
-    /// reports edits the autosave has not captured — the
-    /// status strip's dirty signal, not a side channel.
+    /// The app-bar dot is present exactly while the
+    /// core's named file is not current — the status
+    /// strip's save-state signal, not a side channel.
+    /// (Pre-RM24 this followed the autosave counter and
+    /// a fresh core read clean; a fresh core has never
+    /// been saved, so it reads lit now.)
     #[test]
-    fn dirty_dot_follows_the_autosave_edit_counter() {
+    fn dirty_dot_follows_the_named_save_state() {
         let mut core = EditorCore::new();
         for dark in [true, false] {
             let t = app_theme::app_theme(dark);
-            assert!(dirty_dot(&core, &t).is_none(), "a fresh core reads clean");
+            assert!(
+                dirty_dot(&core, &t).is_some(),
+                "a fresh, never-saved core lights the dot (dark={dark})"
+            );
+        }
+        core.save();
+        for dark in [true, false] {
+            let t = app_theme::app_theme(dark);
+            assert!(dirty_dot(&core, &t).is_none(), "a saved core reads clean");
         }
         core.snapshot();
         for dark in [true, false] {
             let t = app_theme::app_theme(dark);
             assert!(
                 dirty_dot(&core, &t).is_some(),
-                "one snapshot-counted edit lights the dot (dark={dark})"
+                "one edit after the save lights the dot again (dark={dark})"
             );
         }
+        let _ = std::fs::remove_file("./project.styk.json");
     }
 
     /// UI mission Wave 9: the dot paints the app palette's

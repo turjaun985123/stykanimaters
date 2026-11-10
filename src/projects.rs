@@ -388,9 +388,10 @@ pub fn list_project_files(dir: &Path) -> Vec<PathBuf> {
 /// and `save_copy_leaves_the_sessions_dirty_state_untouched`
 /// in this file's tests.
 pub fn refresh_project_files(core: &mut EditorCore) {
-    let dir = std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("projects");
+    // The one resolver (Roadmap Wave 1, RM9 / F-8): the
+    // selector scans the same projects dir the shell
+    // stores resolve to.
+    let dir = crate::shell::projects_dir();
     refresh_project_files_in(core, &dir);
 }
 
@@ -467,9 +468,9 @@ pub fn save(project: &Project, dir: &Path) -> std::io::Result<PathBuf> {
 /// overwritten — the call fails with an "already exists"
 /// error, mirroring [`rename_project`], and writes nothing.
 pub fn save_copy(core: &EditorCore, new_name: &str) -> Result<PathBuf, String> {
-    let dir = std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("projects");
+    // The one resolver (Roadmap Wave 1, RM9 / F-8), as in
+    // [`refresh_project_files`].
+    let dir = crate::shell::projects_dir();
     save_copy_to(core, new_name, &dir)
 }
 
@@ -732,7 +733,8 @@ pub fn tool_delete_project_file(core: &mut EditorCore, args: &Value) -> Result<V
     if arg.trim().is_empty() {
         return Err("argument 'path' must not be blank".to_string());
     }
-    let (display, path) = delete_project_file_in(Path::new("projects"), arg)?;
+    let (display, path) =
+        delete_project_file_in(&crate::shell::projects_dir(), arg)?;
     core.status = format!("Deleted project file {display}.");
     // The deleted file leaves the cached selector list
     // (selection preserved by identity; if the deleted

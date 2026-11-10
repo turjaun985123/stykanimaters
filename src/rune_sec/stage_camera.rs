@@ -33,6 +33,18 @@
 //! draws the broadcast action-safe / title-safe rectangles
 //! of the stage itself.
 //!
+//! Roadmap Wave 1 (RM18, P-6c) adds the frustum-true
+//! family on the same quad: [`frustum_thirds_geometry`]
+//! puts the rule-of-thirds grid INSIDE the framed view,
+//! [`frustum_safe_geometry`] moves the safe areas onto
+//! the framed view and [`frustum_safe_labels`] names
+//! them, and [`frustum_golden_geometry`] /
+//! [`frustum_diagonals_geometry`] are the golden-ratio and
+//! diagonal variants (built and pinned here; their own
+//! toggles are integrator wiring — see RM18's findings).
+//! The stage-space family above stays what it honestly
+//! is: guides of the stage, not of the shot.
+//!
 //! ## Sign convention — proven parity with export, not taste
 //!
 //! `export::camera_rotate_offset` (export.rs:178-195)
@@ -364,24 +376,257 @@ fn rect_lines(x0: f32, y0: f32, x1: f32, y1: f32) -> [GuidePrim; 4] {
 /// integrator draws the lines through `rt.to_screen` with
 /// the rest of the guides pass; see the module docs.
 pub fn frustum_geometry(core: &EditorCore) -> Vec<GuidePrim> {
-    let stage = core.project.stage;
-    let (w, h) = (stage[0], stage[1]);
-    if !(w > 0.0 && h > 0.0) {
+    let Some(corners) = frustum_corners(core) else {
         return Vec::new();
-    }
-    let rt = RotTransform::for_display(core, stage);
-    let corners = [
-        rt.to_stage([0.0, 0.0]),
-        rt.to_stage([w, 0.0]),
-        rt.to_stage([w, h]),
-        rt.to_stage([0.0, h]),
-    ];
+    };
     vec![
         GuidePrim::Line { a: corners[0], b: corners[1] },
         GuidePrim::Line { a: corners[1], b: corners[2] },
         GuidePrim::Line { a: corners[2], b: corners[3] },
         GuidePrim::Line { a: corners[3], b: corners[0] },
     ]
+}
+
+/// The four corners of the camera frustum as a stage-space
+/// quad, in the order [`frustum_geometry`] emits its sides
+/// (top-left, top-right, bottom-right, bottom-left — the
+/// element corners inverse-mapped, so a rotated camera
+/// yields a rotated quad, not a rectangle). `None` for a
+/// degenerate stage, the rule every geometry function in
+/// this file follows. The frustum-true guide family below
+/// (Roadmap Wave 1, RM18 / P-6c) is built on this quad:
+/// points inside the framed view are addressed in
+/// *(u, v)* frustum coordinates — u along the top edge,
+/// v down the left edge — and mapped through
+/// [`quad_point`], so every guide inside the frame stays
+/// true under pan, zoom and rotation alike, which is the
+/// whole point: the stage-space grid in
+/// [`guides_geometry`] describes the stage, these describe
+/// the shot.
+pub fn frustum_corners(core: &EditorCore) -> Option<[[f32; 2]; 4]> {
+    let stage = core.project.stage;
+    let (w, h) = (stage[0], stage[1]);
+    if !(w > 0.0 && h > 0.0) {
+        return None;
+    }
+    let rt = RotTransform::for_display(core, stage);
+    Some([
+        rt.to_stage([0.0, 0.0]),
+        rt.to_stage([w, 0.0]),
+        rt.to_stage([w, h]),
+        rt.to_stage([0.0, h]),
+    ])
+}
+
+/// Bilinear point of the frustum quad `c` (corner order as
+/// [`frustum_corners`]) at frustum coordinates *(u, v)*:
+/// u = 0 is the left edge, u = 1 the right, v = 0 the top,
+/// v = 1 the bottom. At the four corners it returns the
+/// corners themselves; on an axis-aligned quad it reduces
+/// to the obvious lerp.
+fn quad_point(c: &[[f32; 2]; 4], u: f32, v: f32) -> [f32; 2] {
+    let lerp = |a: [f32; 2], b: [f32; 2], t: f32| {
+        [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
+    };
+    let top = lerp(c[0], c[1], u);
+    let bottom = lerp(c[3], c[2], u);
+    lerp(top, bottom, v)
+}
+
+/// One guide line across the frustum quad at constant
+/// `u` (a "vertical" of the framed view, v from 0 to 1).
+fn quad_vertical(c: &[[f32; 2]; 4], u: f32) -> GuidePrim {
+    GuidePrim::Line { a: quad_point(c, u, 0.0), b: quad_point(c, u, 1.0) }
+}
+
+/// One guide line across the frustum quad at constant
+/// `v` (a "horizontal" of the framed view, u from 0 to 1).
+fn quad_horizontal(c: &[[f32; 2]; 4], v: f32) -> GuidePrim {
+    GuidePrim::Line { a: quad_point(c, 0.0, v), b: quad_point(c, 1.0, v) }
+}
+
+/// Rule-of-thirds lines INSIDE the camera frustum
+/// (Roadmap Wave 1, RM18 / P-6c): verticals at u = 1/3 and
+/// 2/3, horizontals at v = 1/3 and 2/3 of the framed view —
+/// the composition grid of the shot the audience will
+/// actually see, where [`guides_geometry`]'s thirds
+/// describe the stage whether the camera frames it or not.
+/// 4 primitives; none for a degenerate stage. Drawn by the
+/// stage's guides pass under the frustum toggle, with
+/// [`frustum_geometry`]'s outline.
+pub fn frustum_thirds_geometry(core: &EditorCore) -> Vec<GuidePrim> {
+    let Some(c) = frustum_corners(core) else {
+        return Vec::new();
+    };
+    vec![
+        quad_vertical(&c, 1.0 / 3.0),
+        quad_vertical(&c, 2.0 / 3.0),
+        quad_horizontal(&c, 1.0 / 3.0),
+        quad_horizontal(&c, 2.0 / 3.0),
+    ]
+}
+
+/// Golden-ratio lines inside the camera frustum: verticals
+/// and horizontals at 1 − 1/φ ≈ 0.382 and 1/φ ≈ 0.618 of
+/// the framed view (φ = (1 + √5) / 2). 4 primitives; none
+/// for a degenerate stage. A variant of
+/// [`frustum_thirds_geometry`] for directors who compose
+/// on the golden grid instead; the geometry is built and
+/// pinned here, and its own stage toggle is integrator
+/// wiring (it needs a shell flag this file cannot add).
+pub fn frustum_golden_geometry(core: &EditorCore) -> Vec<GuidePrim> {
+    let Some(c) = frustum_corners(core) else {
+        return Vec::new();
+    };
+    let inv_phi = ((5.0f32).sqrt() - 1.0) / 2.0; // 1/φ ≈ 0.618
+    let near = 1.0 - inv_phi; // ≈ 0.382
+    vec![
+        quad_vertical(&c, near),
+        quad_vertical(&c, inv_phi),
+        quad_horizontal(&c, near),
+        quad_horizontal(&c, inv_phi),
+    ]
+}
+
+/// The camera frustum's two diagonals (corner to corner of
+/// the framed view) — the diagonal-composition variant of
+/// the frustum guide family. 2 primitives; none for a
+/// degenerate stage. Built and pinned here; its own stage
+/// toggle is the same integrator wiring as
+/// [`frustum_golden_geometry`]'s.
+pub fn frustum_diagonals_geometry(core: &EditorCore) -> Vec<GuidePrim> {
+    let Some(c) = frustum_corners(core) else {
+        return Vec::new();
+    };
+    vec![
+        GuidePrim::Line { a: c[0], b: c[2] },
+        GuidePrim::Line { a: c[1], b: c[3] },
+    ]
+}
+
+/// The four sides of the frustum-quad rect inset by
+/// `(iu, iv)` in frustum coordinates — the safe-frame
+/// counterpart of [`rect_lines`], in the same winding.
+fn quad_rect_lines(c: &[[f32; 2]; 4], iu: f32, iv: f32) -> [GuidePrim; 4] {
+    let tl = quad_point(c, iu, iv);
+    let tr = quad_point(c, 1.0 - iu, iv);
+    let br = quad_point(c, 1.0 - iu, 1.0 - iv);
+    let bl = quad_point(c, iu, 1.0 - iv);
+    [
+        GuidePrim::Line { a: tl, b: tr },
+        GuidePrim::Line { a: tr, b: br },
+        GuidePrim::Line { a: br, b: bl },
+        GuidePrim::Line { a: bl, b: tl },
+    ]
+}
+
+/// The broadcast safe areas OF THE FRAMED VIEW (Roadmap
+/// Wave 1, RM18 / P-6c): the action-safe rect (5% inset in
+/// frustum coordinates) and the title-safe rect (10%
+/// inset), drawn inside the camera frustum instead of on
+/// the stage — [`safe_frame_geometry`]'s rects describe
+/// the stage, and under any pan or zoom they stop
+/// describing the picture an export contains. Same shape
+/// and order as `safe_frame_geometry`: 8 primitives,
+/// action-safe first, then title-safe; none for a
+/// degenerate stage. Their "Action" / "Title" labels are
+/// [`frustum_safe_labels`].
+pub fn frustum_safe_geometry(core: &EditorCore) -> Vec<GuidePrim> {
+    let Some(c) = frustum_corners(core) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(8);
+    out.extend(quad_rect_lines(&c, 0.05, 0.05));
+    out.extend(quad_rect_lines(&c, 0.10, 0.10));
+    out
+}
+
+/// Which of the frustum safe rects a [`SafeLabel`] names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SafeKind {
+    /// The 5%-inset rect: action survives cropping inside it.
+    Action,
+    /// The 10%-inset rect: titles belong inside it.
+    Title,
+}
+
+impl SafeKind {
+    /// The label text the stage draws for this rect (the
+    /// stage's bitmap label font folds case, so this reads
+    /// ACTION / TITLE on screen).
+    pub fn label(&self) -> &'static str {
+        match self {
+            SafeKind::Action => "Action",
+            SafeKind::Title => "Title",
+        }
+    }
+
+    /// The rect's inset in frustum coordinates.
+    fn inset(&self) -> f32 {
+        match self {
+            SafeKind::Action => 0.05,
+            SafeKind::Title => 0.10,
+        }
+    }
+}
+
+/// One frustum safe-area label, ready for the stage's
+/// label layout (`stage_text::label_boxes`): the text is
+/// centred at `centre`, in stage coordinates, and runs
+/// along `angle_deg` — the frustum top edge's direction,
+/// so the label turns with a rotated camera and stays
+/// parallel to the rect it names.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SafeLabel {
+    /// Which safe rect this label names.
+    pub kind: SafeKind,
+    /// Label centre, in stage coordinates.
+    pub centre: [f32; 2],
+    /// Text direction, stage-space degrees (y-down).
+    pub angle_deg: f32,
+}
+
+/// The "Action" and "Title" labels for
+/// [`frustum_safe_geometry`]'s rects: each sits just
+/// inside its rect's top-left corner, centred half a
+/// label-width along the top edge and half a glyph height
+/// below it, with a small margin — so the text reads
+/// inside the rect it names, never straddling the line.
+/// `size` is the glyph height in stage units the caller
+/// will lay the label out at (the label width derives
+/// from it through the label font's advance: 4 cells per
+/// character less the trailing gap, 5 rows per glyph —
+/// the `stage_text` layout constants). Action first,
+/// then Title; empty for a degenerate stage or a
+/// non-positive `size`.
+pub fn frustum_safe_labels(core: &EditorCore, size: f32) -> Vec<SafeLabel> {
+    let Some(c) = frustum_corners(core) else {
+        return Vec::new();
+    };
+    if !(size > 0.0) {
+        return Vec::new();
+    }
+    // Frustum size in stage units along each axis (edge
+    // lengths — exact for a rotated quad too).
+    let w = ((c[1][0] - c[0][0]).powi(2) + (c[1][1] - c[0][1]).powi(2)).sqrt();
+    let h = ((c[3][0] - c[0][0]).powi(2) + (c[3][1] - c[0][1]).powi(2)).sqrt();
+    if !(w > 0.0 && h > 0.0) {
+        return Vec::new();
+    }
+    let angle_deg = (c[1][1] - c[0][1]).atan2(c[1][0] - c[0][0]).to_degrees();
+    let margin = 0.35 * size;
+    [SafeKind::Action, SafeKind::Title]
+        .into_iter()
+        .map(|kind| {
+            let inset = kind.inset();
+            // Label width in stage units: (4·len − 1) cells
+            // at size/5 per cell — `stage_text`'s advance.
+            let width = size * (4.0 * kind.label().len() as f32 - 1.0) / 5.0;
+            let u = inset + (width / 2.0 + margin) / w;
+            let v = inset + (size / 2.0 + margin) / h;
+            SafeLabel { kind, centre: quad_point(&c, u, v), angle_deg }
+        })
+        .collect()
 }
 
 /// The broadcast safe areas of the stage itself, in stage
@@ -734,5 +979,151 @@ mod tests {
         assert!(safe_frame_geometry([0.0, 720.0]).is_empty());
         assert!(safe_frame_geometry([960.0, 0.0]).is_empty());
         assert!(safe_frame_geometry([-10.0, -10.0]).is_empty());
+    }
+
+    // ---- Roadmap Wave 1 (RM18, P-6c): frustum-true guides ----
+
+    /// `has_line` with the rotation tests' tolerance: the
+    /// frustum-true family derives its points by lerp, so
+    /// thirds and percentage insets land within 1e-3 of the
+    /// hand-computed values rather than on them exactly.
+    fn has_line_close(prims: &[GuidePrim], a: [f32; 2], b: [f32; 2]) -> bool {
+        prims.iter().any(|p| {
+            let GuidePrim::Line { a: ga, b: gb } = *p;
+            close(ga, a, 1e-3) && close(gb, b, 1e-3)
+        })
+    }
+
+    #[test]
+    fn frustum_thirds_at_rest_are_the_stage_thirds() {
+        // Default camera: frustum == stage, so the
+        // frustum-true thirds are the stage thirds (320/640
+        // verticals, 240/480 horizontals on 960×720) — the
+        // two families agree exactly when the camera frames
+        // the whole stage, and diverge only when it moves.
+        let core = EditorCore::new();
+        let prims = frustum_thirds_geometry(&core);
+        assert_eq!(prims.len(), 4);
+        assert!(has_line_close(&prims, [320.0, 0.0], [320.0, 720.0]));
+        assert!(has_line_close(&prims, [640.0, 0.0], [640.0, 720.0]));
+        assert!(has_line_close(&prims, [0.0, 240.0], [960.0, 240.0]));
+        assert!(has_line_close(&prims, [0.0, 480.0], [960.0, 480.0]));
+    }
+
+    #[test]
+    fn frustum_thirds_follow_the_zoom() {
+        // Zoom 2: the framed view is (240, 180)…(720, 540),
+        // so its thirds are x = 400 / 560 and y = 300 / 420
+        // — NOT the stage's 320/640, 240/480. This is the
+        // P-6c defect in one assertion set: under zoom the
+        // stage grid stops describing the shot.
+        let core = keyed_core(2.0, 0.0);
+        let prims = frustum_thirds_geometry(&core);
+        assert_eq!(prims.len(), 4);
+        assert!(has_line_close(&prims, [400.0, 180.0], [400.0, 540.0]));
+        assert!(has_line_close(&prims, [560.0, 180.0], [560.0, 540.0]));
+        assert!(has_line_close(&prims, [240.0, 300.0], [720.0, 300.0]));
+        assert!(has_line_close(&prims, [240.0, 420.0], [720.0, 420.0]));
+    }
+
+    #[test]
+    fn frustum_thirds_turn_with_a_rotated_camera() {
+        // Angle +90°: the frustum quad is (840, −120),
+        // (840, 840), (120, 840), (120, −120) (see
+        // frustum_rotates_with_the_camera). Its u = 1/3
+        // "vertical" runs along the top edge's direction —
+        // on the stage that is the horizontal line y = 200
+        // from x = 840 to x = 120.
+        let core = keyed_core(1.0, 90.0);
+        let prims = frustum_thirds_geometry(&core);
+        assert_eq!(prims.len(), 4);
+        assert!(has_line_close(&prims, [840.0, 200.0], [120.0, 200.0]));
+        assert!(has_line_close(&prims, [840.0, 520.0], [120.0, 520.0]));
+    }
+
+    #[test]
+    fn frustum_golden_and_diagonals_sit_inside_the_frame() {
+        // Zoom 2 (frame 240…720 × 180…540): golden
+        // verticals at 240 + 480·0.382 ≈ 423.34 and
+        // 240 + 480·0.618 ≈ 536.66; diagonals join the
+        // frame's own corners exactly.
+        let core = keyed_core(2.0, 0.0);
+        let golden = frustum_golden_geometry(&core);
+        assert_eq!(golden.len(), 4);
+        assert!(has_line_close(&golden, [423.344, 180.0], [423.344, 540.0]));
+        assert!(has_line_close(&golden, [536.656, 180.0], [536.656, 540.0]));
+        assert!(has_line_close(&golden, [240.0, 317.508], [720.0, 317.508]));
+        let diagonals = frustum_diagonals_geometry(&core);
+        assert_eq!(
+            diagonals,
+            vec![
+                GuidePrim::Line { a: [240.0, 180.0], b: [720.0, 540.0] },
+                GuidePrim::Line { a: [720.0, 180.0], b: [240.0, 540.0] },
+            ]
+        );
+    }
+
+    #[test]
+    fn frustum_safe_rects_inset_the_framed_view() {
+        // Zoom 2: action-safe = 5% of the 480×360 frame →
+        // (264, 198)…(696, 522); title-safe = 10% →
+        // (288, 216)…(672, 504). The stage's own safe rects
+        // (48, 36)… would be nowhere near the framed view.
+        let core = keyed_core(2.0, 0.0);
+        let prims = frustum_safe_geometry(&core);
+        assert_eq!(prims.len(), 8);
+        // Action-safe first, title-safe second — the
+        // stage family's order.
+        assert!(has_line_close(&prims[..4], [264.0, 198.0], [696.0, 198.0]));
+        assert!(has_line_close(&prims[..4], [696.0, 522.0], [264.0, 522.0]));
+        assert!(has_line_close(&prims[4..], [288.0, 216.0], [672.0, 216.0]));
+        assert!(has_line_close(&prims[4..], [672.0, 504.0], [288.0, 504.0]));
+        // At rest the frustum safe rects coincide with the
+        // stage safe rects (same insets of the same rect).
+        let rest = frustum_safe_geometry(&EditorCore::new());
+        assert!(has_line_close(&rest, [48.0, 36.0], [912.0, 36.0]));
+        assert!(has_line_close(&rest, [96.0, 72.0], [864.0, 72.0]));
+    }
+
+    #[test]
+    fn frustum_safe_labels_sit_inside_their_rects() {
+        // At rest with glyph height 20: "Action" is 6
+        // characters → width 20·23/5 = 92, half 46, plus
+        // the 7-unit margin: centre x = 48 + 53 = 101,
+        // y = 36 + (10 + 7) = 53. "Title": width 76, half
+        // 38 → x = 96 + 45 = 141, y = 72 + 17 = 89. Both
+        // run along the (unrotated) top edge: angle 0.
+        let labels = frustum_safe_labels(&EditorCore::new(), 20.0);
+        assert_eq!(labels.len(), 2);
+        assert_eq!(labels[0].kind, SafeKind::Action);
+        assert!(close(labels[0].centre, [101.0, 53.0], 1e-3), "{labels:?}");
+        assert_eq!(labels[1].kind, SafeKind::Title);
+        assert!(close(labels[1].centre, [141.0, 89.0], 1e-3), "{labels:?}");
+        assert!(labels.iter().all(|l| l.angle_deg.abs() < 1e-3));
+        assert_eq!(SafeKind::Action.label(), "Action");
+        assert_eq!(SafeKind::Title.label(), "Title");
+        // A rotated camera turns the labels with the
+        // frame: at +90° the top edge runs straight down
+        // the stage, so the text direction is +90°.
+        let turned = frustum_safe_labels(&keyed_core(1.0, 90.0), 20.0);
+        assert_eq!(turned.len(), 2);
+        assert!(
+            turned.iter().all(|l| (l.angle_deg - 90.0).abs() < 1e-3),
+            "{turned:?}"
+        );
+        // No size, no labels.
+        assert!(frustum_safe_labels(&EditorCore::new(), 0.0).is_empty());
+    }
+
+    #[test]
+    fn frustum_true_family_rejects_a_degenerate_stage() {
+        let mut core = EditorCore::new();
+        core.project.stage = [0.0, 720.0];
+        assert_eq!(frustum_corners(&core), None);
+        assert!(frustum_thirds_geometry(&core).is_empty());
+        assert!(frustum_golden_geometry(&core).is_empty());
+        assert!(frustum_diagonals_geometry(&core).is_empty());
+        assert!(frustum_safe_geometry(&core).is_empty());
+        assert!(frustum_safe_labels(&core, 20.0).is_empty());
     }
 }

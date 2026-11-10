@@ -77,8 +77,8 @@
 //! timeline-LENGTH edits — frames being inserted or
 //! deleted — and the answer, pinned by the tests
 //! `insert_frames_keep_instance_keys_and_all_pins_absolute`,
-//! `add_and_delete_frame_keep_instance_keys_absolute` and
-//! `delete_range_leaves_instance_keys_absolute_and_sample_still_resolves`,
+//! `add_keeps_all_pins_absolute_delete_frame_remaps_only_the_camera` and
+//! `delete_range_remaps_only_the_camera_and_leaves_instance_keys_absolute`,
 //! is **no — deliberately, and exactly as every other
 //! pinned collection behaves**:
 //!
@@ -87,6 +87,8 @@
 //!   `duplicate_frame`, `EditorCore::delete_frame`,
 //!   `EditorCore::insert_inbetween` and
 //!   `EditorCore::paste_frame` (editor.rs),
+//!   `insert_breakdowns` (this file, Roadmap Wave 1
+//!   RM17),
 //!   `EditorCore::delete_range` and
 //!   `EditorCore::paste_range` (whose own doc comments
 //!   state the rule outright), `shift_frames` /
@@ -135,6 +137,15 @@
 //!   against all the collections at once: a future flip
 //!   fails them together, in the open, instead of drifting
 //!   one collection at a time.
+//!
+//! One exception now exists, by the roadmap's explicit
+//! order (RM18, P-6b): CAMERA keys follow the delete /
+//! shift / reverse / paste mappings in `EditorCore`'s
+//! five ops, because a camera move detached from its
+//! action is invisible until export. The other six
+//! collections keep the timeline-absolute rule above,
+//! unchanged; flipping them is a separate decision, not
+//! a consequence of this one.
 //!
 //! ## Undo discipline
 //!
@@ -486,11 +497,209 @@ pub fn tool_insert_frames(core: &mut EditorCore, args: &Value) -> Result<Value, 
     }))
 }
 
+/// Smallest breakdown favour [`insert_breakdowns`] will
+/// use: a breakdown at (or beyond) either key is a copy of
+/// that key, not a breakdown. The 0.1 floor is audit A4
+/// R1's slider range.
+pub const BREAKDOWN_FAVOUR_MIN: f32 = 0.1;
+/// Largest breakdown favour — see [`BREAKDOWN_FAVOUR_MIN`].
+pub const BREAKDOWN_FAVOUR_MAX: f32 = 0.9;
+/// Most breakdowns one [`insert_breakdowns`] call authors.
+/// Between two keys, eight spacing samples is a generous
+/// single gesture; the insert is one undo step either way,
+/// so the cap is about intent, not recoverability.
+pub const BREAKDOWN_COUNT_MAX: usize = 8;
+
+/// The segment fractions at which [`insert_breakdowns`]
+/// samples, for `count` breakdowns biased by `favour`
+/// (already clamped to
+/// [`BREAKDOWN_FAVOUR_MIN`]..=[`BREAKDOWN_FAVOUR_MAX`]).
+/// Even fractions `u = k / (count + 1)` are warped by the
+/// power `gamma = ln(favour) / ln(0.5)`, chosen so the
+/// middle of the parameter range maps exactly onto
+/// `favour`: favour 0.5 is gamma 1 (even spacing — the
+/// single breakdown lands at the midpoint, the legacy
+/// `insert_inbetween` point), favour below 0.5 is
+/// gamma > 1 (samples crowd toward the current key),
+/// above is gamma < 1 (toward the next key). With
+/// `count == 1` the single fraction IS `favour`.
+/// Strictly increasing, always inside (0, 1).
+pub fn breakdown_fractions(favour: f32, count: usize) -> Vec<f32> {
+    let gamma = favour.ln() / 0.5f32.ln();
+    (1..=count)
+        .map(|k| (k as f32 / (count + 1) as f32).powf(gamma))
+        .collect()
+}
+
+/// One breakdown frame's bend rows: each figure's row
+/// lerps between the two frames' rows at the RAW
+/// fraction `u` (`Project::bends_at`'s rule — bends
+/// carry no easing), a missing row reading as zeros
+/// padded to the figure's node count. When neither
+/// frame carries bend data at all the result is empty,
+/// preserving `insert_inbetween`'s `bends: Vec::new()`
+/// representation exactly.
+fn breakdown_bends(a: &Frame, b: &Frame, node_counts: &[usize], u: f32) -> Vec<Vec<f32>> {
+    if a.bends.is_empty() && b.bends.is_empty() {
+        return Vec::new();
+    }
+    let rows = a.bends.len().max(b.bends.len());
+    (0..rows)
+        .map(|fi| {
+            let n = node_counts.get(fi).copied().unwrap_or(0);
+            let mut ra = a.bends.get(fi).cloned().unwrap_or_default();
+            let mut rb = b.bends.get(fi).cloned().unwrap_or_default();
+            ra.resize(n, 0.0);
+            rb.resize(n, 0.0);
+            ra.iter().zip(rb.iter()).map(|(x, y)| x + (y - x) * u).collect()
+        })
+        .collect()
+}
+
+/// Insert `count` breakdown frames between the current
+/// frame and the next (Roadmap Wave 1, RM17 — roadmap
+/// P-5a, audit A4 R1): the favour-biased generalisation
+/// of `EditorCore::insert_inbetween`, which stays as
+/// the fixed-midpoint special case the palette has
+/// always run.
+///
+/// Each breakdown SAMPLES the segment the way playback
+/// shows it: poses lerp at the segment's eased fraction
+/// (`frames[current].easing`, else the project easing —
+/// the resolution `Project::poses_at` uses), bends lerp
+/// at the raw fraction (the resolution
+/// `Project::bends_at` uses), so a breakdown frame holds
+/// exactly the pose and bends the tween preview showed
+/// at that point. Fractions come from
+/// [`breakdown_fractions`]; `favour` is clamped to
+/// [`BREAKDOWN_FAVOUR_MIN`]..=[`BREAKDOWN_FAVOUR_MAX`]
+/// and `count` to 1..=[`BREAKDOWN_COUNT_MAX`] (the
+/// `insert_frames_after_current` clamp discipline).
+///
+/// Inserted frames are authored frames: duration 1.0,
+/// easing None — `insert_inbetween`'s construction. The
+/// segment's easing override stays on the current frame
+/// and governs the first sub-segment from it; the
+/// breakdown poses themselves carry the shaped spacing.
+/// Frame pins are NOT remapped (the module docs'
+/// timeline-length verdict); only `current` moves, onto
+/// the first inserted breakdown.
+///
+/// Returns how many frames were inserted: 0 — status
+/// set, NO snapshot — when there is no following frame
+/// (the `insert_inbetween` refusal) or `favour` is not
+/// finite. On success exactly one snapshot covers the
+/// whole insert.
+pub fn insert_breakdowns(core: &mut EditorCore, favour: f32, count: usize) -> usize {
+    if !favour.is_finite() {
+        core.status = "Breakdown favour must be a finite fraction between 0 and 1.".into();
+        return 0;
+    }
+    let cur = core.current;
+    let (Some(a), Some(b)) = (
+        core.project.frames.get(cur),
+        core.project.frames.get(cur + 1),
+    ) else {
+        core.status = "Breakdown needs a following frame.".into();
+        return 0;
+    };
+    let a = a.clone();
+    let b = b.clone();
+    let favour = favour.clamp(BREAKDOWN_FAVOUR_MIN, BREAKDOWN_FAVOUR_MAX);
+    let count = count.clamp(1, BREAKDOWN_COUNT_MAX);
+    let easing = a.easing.unwrap_or(core.project.easing);
+    let node_counts: Vec<usize> = core
+        .project
+        .figures
+        .iter()
+        .map(|f| f.def.nodes.len())
+        .collect();
+    let frames: Vec<Frame> = breakdown_fractions(favour, count)
+        .into_iter()
+        .map(|u| {
+            let t = easing.apply(u);
+            let poses = a
+                .poses
+                .iter()
+                .zip(b.poses.iter())
+                .map(|(pa, pb)| pa.lerp(pb, t))
+                .collect();
+            let bends = breakdown_bends(&a, &b, &node_counts, u);
+            Frame { poses, duration: 1.0, easing: None, bends }
+        })
+        .collect();
+    core.snapshot();
+    let at = cur + 1;
+    let _removed: Vec<Frame> = core.project.frames.splice(at..at, frames).collect();
+    core.current = at;
+    core.status = if count == 1 {
+        format!("Breakdown inserted at frame {}.", core.current + 1)
+    } else {
+        format!("Inserted {count} breakdowns after frame {}.", cur + 1)
+    };
+    count
+}
+
+/// MCP handler for [`insert_breakdowns`] (Roadmap Wave 1,
+/// RM17): the Frames panel's breakdown insert.
+/// Registered by the integrator as `insert_breakdown`
+/// (see the TOOL ENTRY SPEC below).
+pub fn tool_insert_breakdown(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let favour = match args.get("favour").filter(|v| !v.is_null()) {
+        Some(_) => {
+            let f = fs_arg_f32(args, "favour")?;
+            if f <= 0.0 || f >= 1.0 {
+                return Err("argument 'favour' must be between 0 and 1 (exclusive)".into());
+            }
+            f
+        }
+        None => 0.5,
+    };
+    let count = match args.get("count").filter(|v| !v.is_null()) {
+        Some(_) => {
+            let c = fs_arg_usize(args, "count")?;
+            if c == 0 {
+                return Err("argument 'count' must be at least 1".into());
+            }
+            c
+        }
+        None => 1,
+    };
+    let inserted = insert_breakdowns(core, favour, count);
+    if inserted == 0 {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "inserted": inserted,
+        "frame_count": core.project.frames.len(),
+        "current_frame": core.current,
+        "status": core.status,
+    }))
+}
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 11 domain-file block beside insert_frames.
+//   Tool {
+//       name: "insert_breakdown",
+//       description: "Insert 'count' breakdown frames between the current frame and the next (the Frames panel's breakdown insert): the breakdowns sample the segment at favour-biased fractions — 'favour' 0.5 spaces them evenly (a single breakdown is the legacy midpoint inbetween), below 0.5 crowds them toward the current key, above 0.5 toward the next — with poses shaped by the segment's easing and bends interpolated linearly, exactly what tween playback shows at those points. 'favour' is clamped to 0.1–0.9 and 'count' to 8 by the op. One undo step; frame pins are not remapped (the timeline-length rule).",
+//       schema: obj_schema(
+//           json!({
+//               "favour": { "type": "number", "description": "Breakdown spacing bias between 0 and 1 (exclusive), default 0.5" },
+//               "count": { "type": "integer", "description": "Breakdowns to insert, at least 1 (default 1)" }
+//           }),
+//           &[],
+//       ),
+//       handler: crate::frame_swap::tool_insert_breakdown,
+//   }
+// MCP.md row:
+//   | `insert_breakdown` | Insert 'count' breakdown frames between the current frame and the next (the Frames panel's breakdown insert): the breakdowns sample the segment at favour-biased fractions — 'favour' 0.5 spaces them evenly (a single breakdown is the legacy midpoint inbetween), below 0.5 crowds them toward the current key, above 0.5 toward the next — with poses shaped by the segment's easing and bends interpolated linearly, exactly what tween playback shows at those points. 'favour' is clamped to 0.1–0.9 and 'count' to 8 by the op. One undo step; frame pins are not remapped (the timeline-length rule). | — | `count`, `favour` |
+
 // TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
 // in the Wave 11 domain-file block beside insert_frames.
 //   Tool {
 //       name: "adjust_frame_duration",
-//       description: "Adjust a frame's duration multiplier by 'factor' (the frame-ops panel's Dur −/+/×0.5/×2 buttons): the stored duration is multiplied and clamped to 0.25-8.0 by the op, and the reply reports the duration read back after clamping. The relative form of set_frame_duration. Applies to the current frame unless 'frame' names another (which moves the playhead there first, the set_frame_easing convention). Not an undo step (timing-tweak panel parity); a real change counts for dirty/autosave.",
+//       description: "Adjust a frame's duration multiplier by 'factor' (the frame-ops panel's Dur −/+/×0.5/×2 buttons): the stored duration is multiplied and clamped to 0.25-8.0 by the op, and the reply reports the duration read back after clamping. The relative form of set_frame_duration. Applies to the current frame unless 'frame' names another (which moves the playhead there first, the set_frame_easing convention). One undo step on a real change.",
 //       schema: obj_schema(
 //           json!({
 //               "factor": { "type": "number", "description": "Duration multiplier (positive, finite); 0.5 halves the hold, 2.0 doubles it" },
@@ -501,7 +710,7 @@ pub fn tool_insert_frames(core: &mut EditorCore, args: &Value) -> Result<Value, 
 //       handler: crate::frame_swap::tool_adjust_frame_duration,
 //   }
 // MCP.md row:
-//   | `adjust_frame_duration` | Adjust a frame's duration multiplier by 'factor' (the frame-ops panel's Dur −/+/×0.5/×2 buttons): the stored duration is multiplied and clamped to 0.25–8.0 by the op; the reply reports the duration read back, so a step past a bound truthfully reports the bound. The relative form of `set_frame_duration`. Applies to the current frame unless 'frame' names another (which moves the playhead there first). Not an undo step (timing-tweak panel parity); a real change counts for dirty/autosave. | `factor` | `frame` |
+//   | `adjust_frame_duration` | Adjust a frame's duration multiplier by 'factor' (the frame-ops panel's Dur −/+/×0.5/×2 buttons): the stored duration is multiplied and clamped to 0.25–8.0 by the op; the reply reports the duration read back, so a step past a bound truthfully reports the bound. The relative form of `set_frame_duration`. Applies to the current frame unless 'frame' names another (which moves the playhead there first). One undo step on a real change. | `factor` | `frame` |
 /// MCP handler for [`EditorCore::adjust_frame_duration`]
 /// (Wave 14, A2): the frame-ops panel's relative duration
 /// buttons. The op reads `frames[current]` directly, so
@@ -1493,7 +1702,7 @@ mod tests {
     }
 
     #[test]
-    fn add_and_delete_frame_keep_instance_keys_absolute() {
+    fn add_keeps_all_pins_absolute_delete_frame_remaps_only_the_camera() {
         let mut core = staged_core();
         let pins_before = all_pin_frames(&core);
 
@@ -1510,35 +1719,46 @@ mod tests {
 
         // EditorCore::delete_frame removes the frame just
         // added (the playhead sits on it), restoring the
-        // four-frame timeline — pins still exactly where
-        // they were authored.
+        // four-frame timeline. Every pin still sits exactly
+        // where it was authored — EXCEPT the camera key
+        // that sat on the deleted index (after the insert
+        // that is the staged B key, x = 30): since RM18
+        // (P-6b) the camera follows the delete mapping, so
+        // that key is removed with its frame and the
+        // camera leg is [0, A].
         core.delete_frame();
         assert_eq!(core.project.frames.len(), 4);
-        assert_eq!(
-            all_pin_frames(&core),
-            pins_before,
-            "delete_frame shifted no pin, instance keys included"
-        );
+        let (camera, particles, audio, sprite, text) = all_pin_frames(&core);
+        assert_eq!(camera, vec![0, A], "the camera key on the deleted frame went with it");
+        assert_eq!(particles, pins_before.1);
+        assert_eq!(audio, pins_before.2);
+        assert_eq!(sprite, pins_before.3);
+        assert_eq!(text, pins_before.4);
     }
 
     #[test]
-    fn delete_range_leaves_instance_keys_absolute_and_sample_still_resolves() {
+    fn delete_range_remaps_only_the_camera_and_leaves_instance_keys_absolute() {
         let mut core = staged_core();
         let pins_before = all_pin_frames(&core);
 
         // EditorCore::delete_range cuts frames 2 and 3:
-        // frame B (index 3) stops existing, so the sprite
-        // key at B and the camera key at B now sit beyond
-        // the end of a two-frame timeline. Nothing is
-        // deleted and nothing is renumbered — the pins
-        // survive at their absolute positions, uniformly.
+        // frame B (index 3) stops existing. The sprite key
+        // at B now sits beyond the end of a two-frame
+        // timeline — for the instance keys nothing is
+        // deleted and nothing is renumbered; the pins
+        // survive at their absolute positions. The camera
+        // key at B is the one exception (RM18, P-6b): it
+        // was removed with its frame, the camera leg is
+        // [0, A], and the sprite key at B is now the
+        // beyond-end example the sampling half below uses.
         assert!(core.delete_range(2, 2));
         assert_eq!(core.project.frames.len(), 2);
-        assert_eq!(
-            all_pin_frames(&core),
-            pins_before,
-            "delete_range shifted and deleted no pin, instance keys included"
-        );
+        let (camera, particles, audio, sprite, text) = all_pin_frames(&core);
+        assert_eq!(camera, vec![0, A], "the camera key inside the cut went with its frame");
+        assert_eq!(particles, pins_before.1);
+        assert_eq!(audio, pins_before.2);
+        assert_eq!(sprite, pins_before.3);
+        assert_eq!(text, pins_before.4);
 
         // The beyond-end sprite key still RESOLVES:
         // InstanceKey::sample clamps at the ends of the key
@@ -1555,5 +1775,275 @@ mod tests {
         assert_eq!(at_first.x, 5.0);
         let midway = InstanceKey::sample(keys, 2.0).expect("keys are non-empty");
         assert_eq!(midway.x, 6.0, "interpolation across the cut still works");
+    }
+
+    #[test]
+    fn frame_ops_remap_camera_keys_with_their_frames() {
+        // shift_frames(0, 2, +1): the block permutation —
+        // key 0 -> 1, key 1 -> 2, key 3 unmoved.
+        let mut core = staged_core();
+        let depth = core.undo_depth();
+        assert!(core.shift_frames(0, 2, 1));
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot incl. the remap");
+        let frames: Vec<usize> = core.project.camera.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, vec![1, 2, 3], "sorted after the move");
+        core.undo();
+        let frames: Vec<usize> = core.project.camera.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, vec![0, A, B], "one undo restores the camera too");
+
+        // reverse_range(0, 4): keys flip inside the block —
+        // x=30 lands on 0, x=10 on 2, x=1 on 3.
+        let mut core = staged_core();
+        core.reverse_range(0, 4);
+        let at = |core: &EditorCore, x: f32| {
+            core.project.camera.iter().find(|k| k.x == x).map(|k| k.frame)
+        };
+        assert_eq!(at(&core, 30.0), Some(0));
+        assert_eq!(at(&core, 10.0), Some(2));
+        assert_eq!(at(&core, 1.0), Some(3));
+
+        // delete_range(1, 2): key at 1 removed with its
+        // frame, key at 3 shifts to 1, key at 0 stays.
+        let mut core = staged_core();
+        assert!(core.delete_range(1, 2));
+        let frames: Vec<usize> = core.project.camera.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, vec![0, 1]);
+        assert_eq!(at(&core, 30.0), Some(1), "the survivor kept its identity");
+
+        // delete_frame at current = 1: key at 1 removed,
+        // key at 3 shifts to 2.
+        let mut core = staged_core();
+        core.current = 1;
+        core.delete_frame();
+        let frames: Vec<usize> = core.project.camera.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, vec![0, 2]);
+
+        // paste_range: keys at/after the paste point
+        // shift by the pasted count — [0, 3, 5]. This leg
+        // needs a pose-valid core (paste_range validates
+        // the copied frames against the live rigs, which
+        // staged_core's synthetic frames do not satisfy),
+        // so it stages the same three keys on a demo core
+        // whose frames are clones of its own first frame.
+        let mut core = EditorCore::new();
+        while core.project.frames.len() < 4 {
+            let f = core.project.frames[0].clone();
+            core.project.frames.push(f);
+        }
+        core.project.camera = vec![
+            CameraKey { frame: 0, x: 1.0, y: 0.0, zoom: 1.0, angle: 0.0 },
+            CameraKey { frame: A, x: 10.0, y: 0.0, zoom: 1.0, angle: 0.0 },
+            CameraKey { frame: B, x: 30.0, y: 0.0, zoom: 1.0, angle: 0.0 },
+        ];
+        assert!(core.copy_range(0, 2));
+        assert!(core.paste_range(1));
+        let frames: Vec<usize> = core.project.camera.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, vec![0, 3, 5]);
+    }
+
+    // ---- Roadmap Wave 1 (RM17): breakdown insert ----
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    fn bd_pose(root: [f32; 2], angles: &[f32]) -> Pose {
+        Pose { root, angles: angles.to_vec() }
+    }
+
+    /// Two frames with distinct poses and bends, the
+    /// playhead on the first: the breakdown testbed. The
+    /// project easing is the caller's; neither frame
+    /// carries an easing override unless a test adds one.
+    fn breakdown_core(easing: Easing) -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.easing = easing;
+        core.project.frames = vec![
+            Frame {
+                poses: vec![bd_pose([100.0, 200.0], &[0.0, 10.0])],
+                duration: 1.0,
+                easing: None,
+                bends: vec![vec![0.0, 0.0]],
+            },
+            Frame {
+                poses: vec![bd_pose([300.0, 200.0], &[40.0, 50.0])],
+                duration: 1.0,
+                easing: None,
+                bends: vec![vec![0.8, -0.4]],
+            },
+        ];
+        core.current = 0;
+        core
+    }
+
+    #[test]
+    fn breakdown_fractions_are_even_at_favour_half() {
+        assert_eq!(breakdown_fractions(0.5, 1), vec![0.5]);
+        let three = breakdown_fractions(0.5, 3);
+        assert_eq!(three.len(), 3);
+        assert!(approx(three[0], 0.25) && approx(three[1], 0.5) && approx(three[2], 0.75));
+    }
+
+    #[test]
+    fn breakdown_fractions_crowd_toward_the_favoured_key() {
+        // A single breakdown sits exactly at the favour.
+        assert!(approx(breakdown_fractions(0.25, 1)[0], 0.25));
+        assert!(approx(breakdown_fractions(0.75, 1)[0], 0.75));
+        // Favouring the current key pulls every sample
+        // below its even position; favouring the next key
+        // pushes every sample above it. Order and the
+        // open interval hold at the extremes.
+        let even = breakdown_fractions(0.5, 4);
+        let toward_a = breakdown_fractions(0.1, 4);
+        let toward_b = breakdown_fractions(0.9, 4);
+        for k in 0..4 {
+            assert!(toward_a[k] < even[k], "favour A crowds toward A: {toward_a:?}");
+            assert!(toward_b[k] > even[k], "favour B crowds toward B: {toward_b:?}");
+        }
+        for fr in [toward_a, toward_b] {
+            assert!(fr.windows(2).all(|w| w[0] < w[1]), "strictly increasing: {fr:?}");
+            assert!(fr.iter().all(|u| *u > 0.0 && *u < 1.0), "inside (0, 1): {fr:?}");
+        }
+    }
+
+    #[test]
+    fn breakdown_at_favour_half_linear_matches_legacy_inbetween_poses() {
+        let mut legacy = breakdown_core(Easing::Linear);
+        legacy.insert_inbetween();
+        let mut core = breakdown_core(Easing::Linear);
+        assert_eq!(insert_breakdowns(&mut core, 0.5, 1), 1);
+        assert_eq!(core.project.frames.len(), legacy.project.frames.len());
+        assert_eq!(core.current, legacy.current);
+        let got = &core.project.frames[1].poses[0];
+        let want = &legacy.project.frames[1].poses[0];
+        assert!(approx(got.root[0], want.root[0]) && approx(got.root[1], want.root[1]));
+        assert!(got.angles.iter().zip(want.angles.iter()).all(|(g, w)| approx(*g, *w)));
+        // The designed difference: the legacy insert
+        // stores NO bends (the breakdown frame rendered
+        // unbent between two bent frames); the breakdown
+        // interpolates them — 0.8 and -0.4 at u = 0.5.
+        assert!(legacy.project.frames[1].bends.is_empty());
+        let bends = &core.project.frames[1].bends[0];
+        assert!(approx(bends[0], 0.4) && approx(bends[1], -0.2), "bends: {bends:?}");
+    }
+
+    #[test]
+    fn breakdown_pose_is_shaped_by_the_segment_easing() {
+        // EaseIn at u = 0.5 shapes the pose fraction to
+        // 0.25: root x = 100 + 200 * 0.25 = 150 — the
+        // pose tween playback shows halfway in TIME is
+        // not the pose the breakdown authors.
+        let mut core = breakdown_core(Easing::EaseIn);
+        assert_eq!(insert_breakdowns(&mut core, 0.5, 1), 1);
+        let p = &core.project.frames[1].poses[0];
+        assert!(approx(p.root[0], 150.0), "root: {:?}", p.root);
+        assert!(approx(p.angles[0], 10.0) && approx(p.angles[1], 20.0), "angles: {:?}", p.angles);
+    }
+
+    #[test]
+    fn breakdown_pose_prefers_the_frame_easing_override() {
+        // The frame's own easing override beats the
+        // project easing (poses_at's resolution): EaseOut
+        // at u = 0.5 shapes to 0.75.
+        let mut core = breakdown_core(Easing::Linear);
+        core.project.frames[0].easing = Some(Easing::EaseOut);
+        assert_eq!(insert_breakdowns(&mut core, 0.5, 1), 1);
+        let p = &core.project.frames[1].poses[0];
+        assert!(approx(p.root[0], 250.0), "root: {:?}", p.root);
+    }
+
+    #[test]
+    fn breakdown_bends_lerp_at_the_raw_fraction_not_the_eased_one() {
+        // EaseIn at favour 0.25: the POSE fraction shapes
+        // to 0.0625 (root x = 112.5) while the BENDS take
+        // the raw 0.25 (0.8 * 0.25 = 0.2) — bends_at's
+        // asymmetry, pinned so the two samplers can never
+        // silently converge.
+        let mut core = breakdown_core(Easing::EaseIn);
+        assert_eq!(insert_breakdowns(&mut core, 0.25, 1), 1);
+        let f = &core.project.frames[1];
+        assert!(approx(f.poses[0].root[0], 112.5), "root: {:?}", f.poses[0].root);
+        assert!(approx(f.bends[0][0], 0.2) && approx(f.bends[0][1], -0.1), "bends: {:?}", f.bends);
+    }
+
+    #[test]
+    fn breakdown_without_bend_data_keeps_the_legacy_representation() {
+        let mut core = breakdown_core(Easing::Linear);
+        core.project.frames[0].bends = Vec::new();
+        core.project.frames[1].bends = Vec::new();
+        assert_eq!(insert_breakdowns(&mut core, 0.5, 1), 1);
+        assert!(core.project.frames[1].bends.is_empty());
+    }
+
+    #[test]
+    fn breakdown_refuses_on_the_last_frame_without_a_snapshot() {
+        let mut core = breakdown_core(Easing::Linear);
+        core.current = 1;
+        let depth = core.undo_depth();
+        assert_eq!(insert_breakdowns(&mut core, 0.5, 1), 0);
+        assert_eq!(core.status, "Breakdown needs a following frame.");
+        assert_eq!(core.project.frames.len(), 2);
+        assert_eq!(core.undo_depth(), depth, "the refusal spends no undo step");
+        // A non-finite favour refuses the same way.
+        core.current = 0;
+        assert_eq!(insert_breakdowns(&mut core, f32::NAN, 1), 0);
+        assert_eq!(core.undo_depth(), depth);
+        assert_eq!(core.project.frames.len(), 2);
+    }
+
+    #[test]
+    fn breakdown_is_one_undo_step_for_the_whole_insert() {
+        let mut core = breakdown_core(Easing::Linear);
+        let depth = core.undo_depth();
+        assert_eq!(insert_breakdowns(&mut core, 0.5, 4), 4);
+        assert_eq!(core.undo_depth(), depth + 1, "exactly one snapshot");
+        assert_eq!(core.project.frames.len(), 6);
+        assert_eq!(core.current, 1, "the playhead lands on the first breakdown");
+        assert!(
+            approx(core.project.frames[5].poses[0].root[0], 300.0),
+            "the old next frame shifted past all four breakdowns"
+        );
+        core.undo();
+        assert_eq!(core.project.frames.len(), 2, "one undo removes the whole insert");
+    }
+
+    #[test]
+    fn breakdown_clamps_count_and_favour() {
+        let mut core = breakdown_core(Easing::Linear);
+        assert_eq!(insert_breakdowns(&mut core, 0.5, 99), BREAKDOWN_COUNT_MAX);
+        // Favour below the floor clamps to 0.1 (Linear:
+        // root x = 100 + 200 * 0.1 = 120).
+        let mut core = breakdown_core(Easing::Linear);
+        assert_eq!(insert_breakdowns(&mut core, 0.0, 1), 1);
+        assert!(approx(core.project.frames[1].poses[0].root[0], 120.0));
+    }
+
+    #[test]
+    fn breakdown_leaves_frame_pins_absolute() {
+        // The module census rule, on the swap suite's own
+        // staged project: pins at frames 1 and 3 keep
+        // their stored numbers while two breakdowns are
+        // spliced in after the playhead (frame 2).
+        let mut core = staged_core();
+        let pins_before = all_pin_frames(&core);
+        assert_eq!(insert_breakdowns(&mut core, 0.5, 2), 2);
+        assert_eq!(core.project.frames.len(), 6);
+        assert_eq!(all_pin_frames(&core), pins_before, "no pin moved");
+    }
+
+    #[test]
+    fn breakdown_handler_validates_and_reports() {
+        let mut core = breakdown_core(Easing::Linear);
+        let out = tool_insert_breakdown(&mut core, &json!({})).unwrap();
+        assert_eq!(out["inserted"], 1);
+        assert_eq!(out["frame_count"], 3);
+        let err = tool_insert_breakdown(&mut core, &json!({ "favour": 1.5 })).unwrap_err();
+        assert!(err.contains("between 0 and 1"), "{err}");
+        let err = tool_insert_breakdown(&mut core, &json!({ "count": 0 })).unwrap_err();
+        assert!(err.contains("at least 1"), "{err}");
+        // On the last frame the op's refusal surfaces.
+        core.current = core.project.frames.len() - 1;
+        let err = tool_insert_breakdown(&mut core, &json!({})).unwrap_err();
+        assert_eq!(err, "Breakdown needs a following frame.");
     }
 }

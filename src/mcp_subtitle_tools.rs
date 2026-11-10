@@ -1,8 +1,9 @@
 //! MCP subtitle cue and style tools (Wave P, P29): the
-//! five editing tools over the subtitle core in
+//! seven editing tools over the subtitle core in
 //! [`crate::subtitles`] — `subtitle_list`, `subtitle_add`,
-//! `subtitle_update`, `subtitle_delete` and
-//! `subtitle_set_style`. (The SRT/WebVTT file exchange
+//! `subtitle_update`, `subtitle_delete`,
+//! `subtitle_set_style`, `subtitle_shift_all` and
+//! `subtitle_retime`. (The SRT/WebVTT file exchange
 //! lives in the sibling module, `mcp_subtitle_io`, P30.)
 //!
 //! The discipline is the core ops' own: they own
@@ -57,10 +58,23 @@
 //! replace. The no-change rule compares the speaker too:
 //! a speaker-only difference is a real change and spends
 //! its one step.
+//!
+//! Bulk timing (Roadmap Wave 1, RM21): `subtitle_shift_all`
+//! and `subtitle_retime` are the MCP parity of the panel's
+//! Timing block, over the core ops
+//! `EditorCore::subtitle_shift_all` /
+//! `EditorCore::subtitle_retime`, which own the bulk
+//! discipline (clone, transform, re-sort, exactly one
+//! snapshot on a real change). A call that moves nothing
+//! reports the op's status line with a zero count and
+//! spends no undo step — the handlers never snapshot
+//! themselves, like every handler in this module.
 
 use crate::editor::EditorCore;
 use crate::mcp::Tool;
-use crate::subtitles::{normalise_speaker, SubtitleCue, SubtitlePosition, SubtitleStyle};
+use crate::subtitles::{
+    normalise_speaker, SubtitleCue, SubtitleFont, SubtitlePosition, SubtitleStyle,
+};
 use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------
@@ -111,6 +125,24 @@ fn sub_as_usize(v: &Value, key: &str) -> Result<usize, String> {
 fn sub_req_usize(args: &Value, key: &str) -> Result<usize, String> {
     match sub_get(args, key) {
         Some(v) => sub_as_usize(v, key),
+        None => Err(format!("missing required argument '{key}'")),
+    }
+}
+
+fn sub_req_i32(args: &Value, key: &str) -> Result<i32, String> {
+    match sub_get(args, key) {
+        Some(v) => {
+            if let Some(i) = v.as_i64() {
+                return i32::try_from(i)
+                    .map_err(|_| format!("argument '{key}' is too large"));
+            }
+            if let Some(f) = v.as_f64() {
+                if f.fract() == 0.0 && f >= i32::MIN as f64 && f <= i32::MAX as f64 {
+                    return Ok(f as i32);
+                }
+            }
+            Err(format!("argument '{key}' must be an integer"))
+        }
         None => Err(format!("missing required argument '{key}'")),
     }
 }
@@ -201,6 +233,10 @@ fn subtitle_style_json(style: SubtitleStyle) -> Value {
         "font_scale": style.font_scale,
         "text_color": style.text_color,
         "box_color": style.box_color,
+        "font": match style.font {
+            SubtitleFont::Shaped => "shaped",
+            SubtitleFont::Pixel => "pixel",
+        },
     })
 }
 
@@ -213,6 +249,19 @@ fn parse_subtitle_position(name: &str) -> Result<SubtitlePosition, String> {
         "top" => Ok(SubtitlePosition::Top),
         other => Err(format!(
             "unknown subtitle position '{other}' (expected \"bottom\" or \"top\")"
+        )),
+    }
+}
+
+/// Parse a subtitle font name (Wave RM, RM2): the raster
+/// renderer choice — real shaped text or the legacy 3×5
+/// pixel stamp.
+fn parse_subtitle_font(name: &str) -> Result<SubtitleFont, String> {
+    match name {
+        "shaped" => Ok(SubtitleFont::Shaped),
+        "pixel" => Ok(SubtitleFont::Pixel),
+        other => Err(format!(
+            "unknown subtitle font '{other}' (expected \"shaped\" or \"pixel\")"
         )),
     }
 }
@@ -349,11 +398,20 @@ fn tool_subtitle_set_style(core: &mut EditorCore, args: &Value) -> Result<Value,
         .ok_or_else(|| "missing required argument 'text_color'".to_string())?;
     let box_color = sub_opt_color(args, "box_color")?
         .ok_or_else(|| "missing required argument 'box_color'".to_string())?;
+    // Wave RM (RM2): the font is the one OPTIONAL argument
+    // — absent means "keep the font in force", so a caller
+    // written against the four-argument form can never
+    // silently reset a user's deliberate pixel-style choice.
+    let font = match sub_opt_str(args, "font")? {
+        Some(name) => parse_subtitle_font(name)?,
+        None => core.subtitle_style().font,
+    };
     let style = SubtitleStyle {
         position,
         font_scale,
         text_color,
         box_color,
+        font,
     };
     // No-change parity (Wave R, R20): the op stores
     // `validated()`; for the finite scale the parse above
@@ -385,6 +443,36 @@ fn tool_subtitle_set_style(core: &mut EditorCore, args: &Value) -> Result<Value,
         "ok": true,
         "changed": true,
         "style": subtitle_style_json(core.project.subtitle_style),
+        "status": core.status,
+        "project": sub_project_summary(core),
+    }))
+}
+
+fn tool_subtitle_shift_all(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let ms = sub_req_i32(args, "ms")?;
+    // The op owns the whole discipline (conversion,
+    // clamping, re-sort, the one snapshot on a real
+    // shift, the status line in both outcomes).
+    let moved = core.subtitle_shift_all(ms);
+    Ok(json!({
+        "ok": true,
+        "moved": moved,
+        "count": core.subtitle_count(),
+        "status": core.status,
+        "project": sub_project_summary(core),
+    }))
+}
+
+fn tool_subtitle_retime(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let from_fps = sub_req_f32(args, "from_fps")?;
+    if from_fps <= 0.0 {
+        return Err("argument 'from_fps' must be greater than 0".to_string());
+    }
+    let retimed = core.subtitle_retime(from_fps);
+    Ok(json!({
+        "ok": true,
+        "retimed": retimed,
+        "count": core.subtitle_count(),
         "status": core.status,
         "project": sub_project_summary(core),
     }))
@@ -453,18 +541,43 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "subtitle_set_style",
-            description: "Replace the project's subtitle style in one call — a full replace, all four arguments required: 'position' (\"bottom\" or \"top\", the stage edge the cue block is anchored to), 'font_scale' (multiplier on the renderers' house subtitle size; a finite value is clamped to 0.5-3.0, a non-finite one is refused), 'text_color' and 'box_color' (packed 0xRRGGBB integers: the cue text colour and its backing/outline colour). The reply's 'style' is the style as stored, after clamping. Refused calls (unknown position, missing or mistyped arguments) change nothing. A call whose clamped result equals the style already in force is a no-op and spends no undo step; the reply's 'changed' says whether anything moved. One undo step. (Wave P, P29; no-op rule Wave R, R20)",
+            description: "Replace the project's subtitle style in one call — a full replace: 'position' (\"bottom\" or \"top\", the stage edge the cue block is anchored to), 'font_scale' (multiplier on the renderers' house subtitle size; a finite value is clamped to 0.5-3.0, a non-finite one is refused), 'text_color' and 'box_color' (packed 0xRRGGBB integers: the cue text colour and its backing/outline colour) are required; 'font' is optional (\"shaped\" = real font rasterisation, the default; \"pixel\" = the legacy 3x5 bitmap stamp) and defaults to the font already in force. The reply's 'style' is the style as stored, after clamping. Refused calls (unknown position or font, missing or mistyped arguments) change nothing. A call whose clamped result equals the style already in force is a no-op and spends no undo step; the reply's 'changed' says whether anything moved. One undo step. (Wave P, P29; no-op rule Wave R, R20; font argument Wave RM, RM2)",
             schema: json!({
                 "type": "object",
                 "properties": {
                     "position": { "type": "string", "enum": ["bottom", "top"], "description": "\"bottom\" or \"top\": the stage edge the subtitle block is anchored to" },
                     "font_scale": { "type": "number", "description": "Font size multiplier, clamped to 0.5-3.0" },
                     "text_color": { "type": "integer", "minimum": 0, "description": "Cue text colour, packed 0xRRGGBB" },
-                    "box_color": { "type": "integer", "minimum": 0, "description": "Backing (outline) colour, packed 0xRRGGBB" }
+                    "box_color": { "type": "integer", "minimum": 0, "description": "Backing (outline) colour, packed 0xRRGGBB" },
+                    "font": { "type": "string", "enum": ["shaped", "pixel"], "description": "Optional raster renderer: \"shaped\" (real font) or \"pixel\" (legacy 3x5 stamp); absent keeps the font in force" }
                 },
                 "required": ["position", "font_scale", "text_color", "box_color"]
             }),
             handler: tool_subtitle_set_style,
+        },
+        Tool {
+            name: "subtitle_shift_all",
+            description: "Shift EVERY subtitle cue by 'ms' milliseconds (the Subtitles panel's Shift-all): the delta converts to frames at the project rate (rounded, and never zero for a non-zero shift), each cue clamps at frame 0 individually with its duration preserved, and the list is re-sorted. The reply's 'moved' counts the cues that actually moved and 'count' the cue total. A shift in which no cue moves changes nothing and spends no undo step. One undo step. (Roadmap Wave 1, RM21)",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "ms": { "type": "integer", "description": "Shift in milliseconds; negative moves cues earlier" }
+                },
+                "required": ["ms"]
+            }),
+            handler: tool_subtitle_shift_all,
+        },
+        Tool {
+            name: "subtitle_retime",
+            description: "Retime EVERY subtitle cue from the 'from_fps' rate to the project's current frame rate (the Subtitles panel's Retime cues): each cue's window rescales by the rate ratio so its wall-clock timing is preserved, the half-open minimum is re-established, and the list is re-sorted. The reply's 'retimed' counts the cues in the retimed list and 'count' the cue total; the status names both rates. An equal-rate call, or a rescale that lands every cue where it already sits, changes nothing and spends no undo step. One undo step. (Roadmap Wave 1, RM21)",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "from_fps": { "type": "number", "description": "The rate the cues are currently timed at (frames per second, greater than 0)" }
+                },
+                "required": ["from_fps"]
+            }),
+            handler: tool_subtitle_retime,
         },
     ]
 }
@@ -507,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_are_the_contracted_five_in_order() {
+    fn tools_are_the_contracted_seven_in_order() {
         let names: Vec<&str> = tools().iter().map(|t| t.name).collect();
         assert_eq!(
             names,
@@ -517,6 +630,8 @@ mod tests {
                 "subtitle_update",
                 "subtitle_delete",
                 "subtitle_set_style",
+                "subtitle_shift_all",
+                "subtitle_retime",
             ]
         );
         for t in tools() {

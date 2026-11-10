@@ -644,31 +644,27 @@ pub fn clean_figure_name(raw: &str) -> Option<String> {
 /// true when the name was written. There is no rename op in
 /// the core: figure names are plain field writes everywhere
 /// (`project_tools::apply_project_name` is the same shape),
-/// so this writes `project.figures[fi].name` directly and —
-/// like `set_figure_color` — takes **no undo snapshot**.
-/// Bad input (empty name, stale selection) only sets the
-/// status line, mirroring the figure ops' refusal wording.
+/// so this writes `project.figures[fi].name` directly.
+/// Since Roadmap Wave 1 (RM24, P-14 — A15 H3) a real change
+/// takes exactly one undo step, exactly as the MCP rename
+/// does; an identical name spends nothing. Bad input
+/// (empty name, stale selection) only sets the status
+/// line, mirroring the figure ops' refusal wording.
 pub fn rename_selected_figure(core: &mut EditorCore, raw: &str) -> bool {
     let Some(name) = clean_figure_name(raw) else {
         core.status = "Figure name cannot be empty.".into();
         return false;
     };
     let fi = core.selected_figure;
-    let Some(fig) = core.project.figures.get_mut(fi) else {
+    let Some(fig) = core.project.figures.get(fi) else {
         core.status = "No such figure.".into();
         return false;
     };
-    // Wave 13 (census E1): the GUI half of the figure
-    // rename — no undo step (names are plain field writes
-    // by design), but a real change counts for
-    // dirty/autosave via the seam, exactly as the MCP
-    // rename does (B3). An identical name marks nothing.
-    let changed = fig.name != name;
-    if changed {
-        fig.name = name.clone();
-    }
-    if changed {
-        core.mark_dirty();
+    // Wave 13 (census E1) counted the change dirty only;
+    // RM24 spends the step, before the write.
+    if fig.name != name {
+        core.snapshot_labeled("Rename figure");
+        core.project.figures[fi].name = name.clone();
     }
     core.status = format!("Figure {} renamed to \"{name}\".", fi + 1);
     true
@@ -679,12 +675,15 @@ pub fn rename_selected_figure(core: &mut EditorCore, raw: &str) -> bool {
 /// returns true when the lengths were written.
 ///
 /// There is no whole-figure scale op in the core, so this
-/// composes the single-node editor's own op,
-/// `adjust_length` (editor.rs:489), once per node: select
-/// the node, pass the delta `len * factor − len`, and the
-/// op's own write — parented nodes only, clamped to
-/// [4.0, 220.0] — does the rest. The node selection is
-/// restored afterwards.
+/// composes the single-node editor's raw length write,
+/// `adjust_length_raw`, once per node under this fn's own
+/// single snapshot: select the node, pass the delta
+/// `len * factor − len`, and the write — parented nodes
+/// only, clamped to [4.0, 220.0] — does the rest. (The
+/// `adjust_length` DOOR takes its own coalesced step
+/// since RM24, so a composed scale must not call it: the
+/// raw write is the composer's half of that split.) The
+/// node selection is restored afterwards.
 ///
 /// Clamp honesty (Wave 10): the per-node clamp means the
 /// nominal factor is not always the achieved scale — a
@@ -755,13 +754,13 @@ pub fn scale_selected_figure(core: &mut EditorCore, factor: f32) -> bool {
         core.status = format!("Figure {} is already at the segment size limit.", fi + 1);
         return false;
     }
-    core.snapshot();
+    core.snapshot_labeled("Scale figure");
     let saved_node = core.selected_node;
     let count = core.project.figures[fi].def.nodes.len();
     for ni in 0..count {
         let len = core.project.figures[fi].def.nodes[ni].length;
         core.selected_node = Some(ni);
-        core.adjust_length(len * factor - len);
+        core.adjust_length_raw(len * factor - len);
     }
     core.selected_node = saved_node;
     // Report the achieved scale, not the requested
@@ -2031,6 +2030,10 @@ mod tests {
             show_right: true,
             key_clipboard: None,
             key_follow_graph: false,
+            key_sel: Default::default(),
+            help_panel: Default::default(),
+            camera_panel: Default::default(),
+            segment_numbers: Default::default(),
             export_recap: String::new(),
             export_job: None,
             clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
@@ -2094,6 +2097,10 @@ playback_speed: 1.0,
             show_right: true,
             key_clipboard: None,
             key_follow_graph: false,
+            key_sel: Default::default(),
+            help_panel: Default::default(),
+            camera_panel: Default::default(),
+            segment_numbers: Default::default(),
             export_recap: String::new(),
             export_job: None,
             clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),

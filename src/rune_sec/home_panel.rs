@@ -1047,17 +1047,20 @@ pub fn is_recovery_entry(info: &ProjectInfo) -> bool {
 
 /// True for a file the shell itself owns inside the
 /// projects dir — never a user project, so never a library
-/// row. The shell keeps three files beside the saved
-/// projects (shell.rs's `default_dir` is `./projects`):
-/// the layout prefs (`.layout.json`), the recovery
-/// snapshot (`.recovery.json`) and the recents list
-/// (`recents.json`). The snapshot parses as a `Project`
-/// and reaches the scan; the prefs and recents normally
-/// fail the parse — but the exclusion must not depend on
-/// that accident: any dotfile, and any file carrying one
-/// of the shell's names, is shell-owned. (A user project
-/// saved under the name "Layout" slugs to `layout.json` —
-/// no dot, not a shell name — and stays listed.)
+/// row. Since the F-8 split (Roadmap Wave 1, RM9) the
+/// shell's three files live in their own category dirs —
+/// the layout prefs (`.layout.json`) in config, the
+/// recovery snapshot (`.recovery.json`) and the recents
+/// list (`recents.json`) in state — and only portable
+/// mode still keeps them beside the saved projects; the
+/// exclusion stays regardless, because a snapshot copied
+/// or left beside the projects parses as a `Project` and
+/// would reach the scan, and the exclusion must not
+/// depend on which files happen to fail the parse: any
+/// dotfile, and any file carrying one of the shell's
+/// names, is shell-owned. (A user project saved under
+/// the name "Layout" slugs to `layout.json` — no dot,
+/// not a shell name — and stays listed.)
 pub fn is_shell_owned_entry(info: &ProjectInfo) -> bool {
     let Some(name) = info.path.file_name().and_then(|n| n.to_str()) else {
         return false;
@@ -2268,11 +2271,14 @@ pub fn discard_recovery_in(dir: &Path) -> bool {
     !dir.join(shell::RECOVERY_FILE).exists()
 }
 
-/// [`discard_recovery_in`] for the real `./projects`
-/// directory (the `_in` convention of
-/// [`startup_recovery`] / [`startup_recovery_in`]).
+/// [`discard_recovery_in`] for the real recovery home:
+/// the resolver's state dir ([`shell::state_dir`],
+/// Roadmap Wave 1, RM9 / F-8) — the snapshot moved out
+/// of the projects dir in the category split, and this
+/// wrapper is the discard's live path, so it names the
+/// state dir, not the scan root.
 pub fn discard_recovery() -> bool {
-    discard_recovery_in(&projects_dir())
+    discard_recovery_in(&shell::state_dir())
 }
 
 /// New project: install the starter project

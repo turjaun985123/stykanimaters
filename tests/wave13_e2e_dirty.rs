@@ -13,9 +13,10 @@
 //!
 //! The observable surface for "dirty" over MCP is
 //! `get_editor_status` (src/mcp.rs): it exposes
-//! `edits_since_autosave` — the exact counter the strip's
-//! dirty dot reads (`edits_since_autosave() > 0`, main.rs)
-//! — alongside `undo_depth` / `redo_depth`. So every pin in
+//! `edits_since_autosave` — the counter the strip's
+//! autosave segment reads (the dirty dot itself read it
+//! until RM24 moved the dot to the named-save state) —
+//! alongside `undo_depth` / `redo_depth`. So every pin in
 //! this suite is a pair of readings of that one status
 //! call, taken before and after one MCP edit:
 //!
@@ -45,6 +46,21 @@
 //!                    is the assumed part.
 //!   clip_set_angle   MARK_DIRTY — ASSUMED (see below).
 //!   clip_set_root    MARK_DIRTY — ASSUMED (see below).
+//!
+//! RM24 DISPOSITION (Roadmap Wave 1, P-14 — audit A15
+//! H3): the census this suite waited for eventually
+//! ruled the other way for every family above except
+//! one. The non-undoable-mutation census is CLOSED:
+//! figure_rename, figure_set_color and the clip pose
+//! tweaks are SNAPSHOT family now (the tweaks
+//! coalesced — a run of them is ONE step, which is
+//! what the flood concern actually needed), and their
+//! pins below flipped mechanically, exactly as the
+//! assumptions note promised they would.
+//! project_rename's session-name write is the ONE
+//! surviving MARK_DIRTY pin: undoing it would restore
+//! a name whose file no longer exists under it, so it
+//! stays on the seam by the census's own reasoning.
 //!
 //! ASSUMPTIONS, flagged honestly: B1's census
 //! (docs/wave13/DIRTY_CENSUS.md) did not exist when this
@@ -256,12 +272,13 @@ fn assert_counters(mcp: &mut Dispatch, want: Counters, what: &str) {
 }
 
 // ---------------------------------------------------------------------
-// Figure families: rename + base colour via the seam,
+// Figure families: rename + base colour via their own
+// snapshots (RM24; Wave 13 had them on the seam),
 // recolour via its one snapshot
 // ---------------------------------------------------------------------
 
 #[test]
-fn figure_rename_and_set_color_mark_dirty_without_an_undo_step() {
+fn figure_rename_and_set_color_take_one_undo_step_each() {
     let mut mcp = Dispatch::new();
     mcp.call_ok("new_project", json!({ "name": "Wave13 Dirty Figures" }));
 
@@ -272,9 +289,10 @@ fn figure_rename_and_set_color_mark_dirty_without_an_undo_step() {
 
     // (1) Rename: the write lands (the reply and the
     // figure list both read the trimmed name back) and
-    // the project is dirty afterwards — one counted edit,
-    // NO undo step (mark_dirty verdict; see the header's
-    // assumptions note).
+    // the project is dirty afterwards — one counted edit
+    // AND one undo step (SNAPSHOT family since RM24;
+    // the Wave 13 mark_dirty verdict is closed, see the
+    // header's disposition note).
     let renamed = mcp.call_ok(
         "figure_rename",
         json!({ "figure": 0, "name": "  Hero  " }),
@@ -284,13 +302,13 @@ fn figure_rename_and_set_color_mark_dirty_without_an_undo_step() {
     assert_eq!(figures["figures"][0]["name"], "Hero");
     assert_counters(
         &mut mcp,
-        Counters { edits: base.edits + 1, ..base },
-        "figure_rename counts one edit and takes no undo step",
+        Counters { edits: base.edits + 1, undo: base.undo + 1, ..base },
+        "figure_rename counts one edit and takes one undo step",
     );
 
     // (2) The base-colour write (`figure_set_color`, the
-    // colour-picker path): same contract — dirty, no
-    // undo step.
+    // colour-picker path): same contract — dirty, one
+    // (coalesced-class) undo step.
     let coloured = mcp.call_ok(
         "figure_set_color",
         json!({ "figure": 0, "color": 0x3366CC }),
@@ -300,8 +318,8 @@ fn figure_rename_and_set_color_mark_dirty_without_an_undo_step() {
     assert_eq!(figures["figures"][0]["color"], 0x3366CC);
     assert_counters(
         &mut mcp,
-        Counters { edits: base.edits + 2, ..base },
-        "figure_set_color counts one more edit and still no undo step",
+        Counters { edits: base.edits + 2, undo: base.undo + 2, ..base },
+        "figure_set_color counts one more edit and one more undo step",
     );
 
     // (3) Refusals spend nothing: a blank rename, and
@@ -441,11 +459,12 @@ fn project_rename_marks_dirty_without_an_undo_step() {
 }
 
 // ---------------------------------------------------------------------
-// Clip pose tweaks: dirty via the seam, no undo flood
+// Clip pose tweaks: dirty via one coalesced step per
+// gesture run (RM24; Wave 13 had them on the seam)
 // ---------------------------------------------------------------------
 
 #[test]
-fn clip_pose_tweaks_mark_dirty_without_an_undo_step() {
+fn clip_pose_tweaks_spend_one_coalesced_step_per_run() {
     let mut mcp = Dispatch::new();
     mcp.call_ok("new_project", json!({ "name": "Wave13 Dirty Clip" }));
 
@@ -465,12 +484,13 @@ fn clip_pose_tweaks_mark_dirty_without_an_undo_step() {
 
     // (1) Angle tweak: the write lands in the clip's own
     // frame (read back through `clip_get_pose`) and the
-    // project counts the edit — WITHOUT an undo step.
-    // Per-angle tweaks taking snapshots would flood the
-    // history (the entering tool description's stated
-    // reason for the pose-tweak rule); the wave's fix is
-    // the seam, not snapshots (see the header's
-    // assumptions note).
+    // project counts the edit — WITH one undo step.
+    // Per-angle tweaks taking a step EACH would flood
+    // the history (the entering tool description's
+    // stated reason for the pose-tweak rule); RM24's
+    // answer is coalescing, not the seam: a run of
+    // tweaks is one step (see the header's disposition
+    // note).
     let set = mcp.call_ok(
         "clip_set_angle",
         json!({ "node": 3, "degrees": 30 }),
@@ -484,12 +504,14 @@ fn clip_pose_tweaks_mark_dirty_without_an_undo_step() {
     );
     assert_counters(
         &mut mcp,
-        Counters { edits: base.edits + 1, ..base },
-        "clip_set_angle counts one edit and takes no undo step",
+        Counters { edits: base.edits + 1, undo: base.undo + 1, ..base },
+        "clip_set_angle counts one edit and takes one undo step",
     );
 
-    // (2) Root tweak: same contract, one more counted
-    // edit, still no undo step.
+    // (2) Root tweak: one more counted edit, and the
+    // step FOLDS into the angle tweak's — same gesture
+    // family ("Movieclip frame"), no history navigation
+    // between them — so the depth does not move again.
     let rooted = mcp.call_ok(
         "clip_set_root",
         json!({ "root": [123.0, 234.0] }),
@@ -503,8 +525,8 @@ fn clip_pose_tweaks_mark_dirty_without_an_undo_step() {
     );
     assert_counters(
         &mut mcp,
-        Counters { edits: base.edits + 2, ..base },
-        "clip_set_root counts one more edit and still no undo step",
+        Counters { edits: base.edits + 2, undo: base.undo + 1, ..base },
+        "clip_set_root counts one more edit folded into the same step",
     );
 
     // (3) A refused tweak spends nothing: a joint the

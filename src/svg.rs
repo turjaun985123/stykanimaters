@@ -2908,6 +2908,7 @@ mod tests {
             font_scale: 1.0,
             text_color: 0xFF_FF_FF,
             box_color: 0x00_00_00,
+            font: Default::default(),
         };
         project
     }

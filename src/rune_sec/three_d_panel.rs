@@ -1027,18 +1027,27 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
     panel = panel.child(design::section_label(&i18n_wire::tr(core, "threed_joints"), t));
     let rows = joint_rows(core);
     if rows.is_empty() {
-        panel = panel.child(design::empty_state(
-            "cube",
-            &i18n_wire::tr(
-                core,
-                if in_session {
-                    "threed_no_joints"
-                } else {
-                    "threed_enter_to_list_joints"
-                },
-            ),
-            t,
-        ));
+        // RM28 (PL-7): with no session, the state offers
+        // its filling action — the panel's own Enter 3D
+        // toggle op. In session (a hand-made figure with
+        // no joints) there is nothing to offer, and the
+        // plain state stands.
+        panel = panel.child(if in_session {
+            design::empty_state(
+                "cube",
+                &i18n_wire::tr(core, "threed_no_joints"),
+                t,
+            )
+        } else {
+            design::empty_state_action(
+                "cube",
+                &i18n_wire::tr(core, "threed_enter_to_list_joints"),
+                "threed-empty-enter",
+                &i18n_wire::tr(core, "threed_enter"),
+                t,
+                |s| s.core.enter_3d(),
+            )
+        });
     } else {
         let selected = core.fig3.as_ref().unwrap().selected;
         for (i, name) in rows {
@@ -1290,11 +1299,26 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
     );
     let figures = core.fig3_library_list();
     if figures.is_empty() {
-        panel = panel.child(design::empty_state(
-            "cube",
-            &i18n_wire::tr(core, "threed_no_figures"),
-            t,
-        ));
+        // RM28 (PL-7): in session, the state offers its
+        // filling action — the Save current op the row
+        // above runs. With no session Save is inert
+        // there too, so the plain state stands.
+        panel = panel.child(if dim {
+            design::empty_state(
+                "cube",
+                &i18n_wire::tr(core, "threed_no_figures"),
+                t,
+            )
+        } else {
+            design::empty_state_action(
+                "cube",
+                &i18n_wire::tr(core, "threed_no_figures"),
+                "threed-empty-save",
+                &i18n_wire::tr(core, "threed_save_current"),
+                t,
+                |s| s.core.fig3_save_to_library(),
+            )
+        });
     }
     for (i, name) in figures.iter().enumerate() {
         let load_name = name.clone();

@@ -732,8 +732,17 @@ fn clear_all_offered(live_count: usize) -> bool {
 /// Every live toast carries a dismiss button; when at least
 /// [`CLEAR_ALL_MIN`] toasts are live, a "Clear all" button
 /// closes the stack and removes them all at once.
+///
+/// The column builds on the caller's appearance through
+/// `app_theme` (Roadmap Wave 1, RM25 / PL-2): until now it
+/// was pinned to the upstream dark theme in both
+/// appearances — light-theme toasts rendered as dark cards
+/// and the light `*_on` severity variants never reached
+/// them. The theme resolves from the core's own appearance
+/// flag, the status strip's precedent, so the signature
+/// (whole `State`, no theme parameter) is unchanged.
 pub fn toasts_view(s: &State, now: f32) -> El {
-    let t = tok::theme(true);
+    let t = app_theme::app_theme(!s.core.light_theme);
     let mut column = col()
         .key("toasts")
         .pin(None, None, Some(32.0), Some(48.0))

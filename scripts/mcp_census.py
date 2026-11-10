@@ -164,7 +164,11 @@ WHAT IT CANNOT SEE (named blind spots):
   - Argument schemas are not censused (only the
     description is lifted); a tool whose schema drifts
     from its handler is a test-suite concern, not this
-    script's.
+    script's. (Roadmap F-10, RM11: the schema <->
+    docs/MCP.md catalogue comparison this leaves out is
+    mechanised in scripts/mcp_schema_audit.py — every
+    catalogue row's Required/Optional against the
+    schema extracted from source.)
   - The command palette is NOT an invocation point: its
     only MCP surface is the `toggle-live-mcp` command,
     which switches the live endpoint on/off. The map

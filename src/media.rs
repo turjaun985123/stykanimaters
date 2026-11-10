@@ -45,11 +45,17 @@
 //! rotated about the centre. A text instance draws with glyph
 //! height `size * key.scale` rotated by the key angle.
 //!
-//! Text is drawn with a built-in 3x5 bitmap font — no font files, no
-//! platform dependencies, fully deterministic. The charset is
-//! deliberately small: `A-Z` (lowercase is folded to uppercase),
-//! `0-9`, space, and `. , ! ? ' " - : ; ( ) + / & % * = < > _ # $ @`.
-//! Any other character renders as `?`.
+//! Text is drawn with shaped real fonts (Roadmap Wave 1,
+//! RM2 — roadmap F-2): the Rune font stack's engine (swash)
+//! shapes each script run against a system font whose
+//! charmap has proven coverage of the run, and the glyphs
+//! are rasterised anti-aliased. The pre-RM2 renderer — a
+//! built-in 3x5 bitmap font, ~68 glyphs, lowercase folded to
+//! uppercase, everything else a question mark — survives as
+//! the explicit pixel style (subtitles choose it via
+//! `SubtitleStyle.font`; it is also the .piv format's
+//! native look) and as the fallback when a system has no
+//! covering font at all.
 //!
 //! Conventions and limits:
 //! - Hidden figures contribute no media (same as the rasterizer).
@@ -62,8 +68,12 @@
 //!   belongs on real segments.)
 //! - An image whose asset index is out of range, or whose
 //!   stored bytes fail to decode, is skipped silently.
-//! - Assets are decoded on each call (no cache): fine for
-//!   export-time compositing, not a per-frame editor hot path.
+//! - Assets are decoded once per (index, content) behind
+//!   the decoded-asset cache (Roadmap Wave 1, RM6, F-5):
+//!   `media_items`' dimension lookups and `composite_media`'s
+//!   sampling share one decode instead of re-decoding on
+//!   every call — before the cache, every editor redraw and
+//!   every exported frame paid a full decode per asset.
 //!
 //! The asset table's MCP handlers also live in this module
 //! (`tool_assets_list`, `tool_asset_info`, `tool_asset_import`,
@@ -106,8 +116,11 @@ pub enum MediaItem {
     /// opacity — the same product the segment itself draws
     /// with — where before this field existed the compositor
     /// ignored both and drew every image at full strength;
-    /// free-standing sprite instances carry 1.0 (an instance
-    /// key has no opacity channel). Wave Z (Z5) adds the media
+    /// free-standing sprite instances carry their sampled
+    /// key's `opacity`, clamped to 0..=1 (the key field is
+    /// Wave 13's; an earlier wording of this doc claimed
+    /// instance keys had no opacity channel, which was
+    /// already false when written). Wave Z (Z5) adds the media
     /// payload's own `opacity` as a third factor for segment
     /// media (1.0 unless a layered import or an attach call
     /// stored a lesser value).
@@ -138,8 +151,12 @@ pub enum MediaItem {
     /// opacity is deliberately NOT a factor (the stage's
     /// figure fade is a colour blend, and export multiplies
     /// figure opacity into segment alpha only, never into
-    /// text); free-standing text instances carry 1.0 (an
-    /// instance key has no opacity channel).
+    /// text); free-standing text instances carry their
+    /// sampled key's `opacity`, clamped to 0..=1 — since
+    /// Roadmap Wave 1 (RM22, P-12): before that the text
+    /// pass hardcoded 1.0 here, so a faded text key
+    /// rendered fully opaque while its sprite twin faded
+    /// (the P0-watch defect this item closes).
     Text {
         pos: V2,
         angle_deg: f32,
@@ -162,18 +179,116 @@ fn scale(a: V2, s: f32) -> V2 {
     [a[0] * s, a[1] * s]
 }
 
+/// Roadmap Wave 1 (RM6, F-5): one decoded asset — the
+/// dimensions every placement pass needs plus the RGBA
+/// pixels the compositor samples, from a single
+/// `image::load_from_memory` decode converted exactly as
+/// the pre-cache consumers converted it (`to_rgba8`), so
+/// cached and uncached reads are byte-identical.
+struct DecodedAsset {
+    width: u32,
+    height: u32,
+    rgba: RgbaImage,
+}
+
+thread_local! {
+    /// Roadmap Wave 1 (RM6, F-5): the decoded-asset cache
+    /// behind [`png_dims`] and `composite_image` — the
+    /// shell's `thread_local` pattern for process state (as
+    /// in `projects` / `stage_view`). Entries are keyed by
+    /// (asset index, full-content hash of the stored
+    /// bytes): decode is a pure function of the bytes, so an
+    /// entry can only ever serve the image it was decoded
+    /// from; an in-place replace, an import that shifts
+    /// indices, or a different project entirely simply
+    /// produces a different key and misses. Session-only,
+    /// bounded: at most [`DECODED_ASSET_CACHE_MAX`] entries,
+    /// cleared wholesale when full (a miss costs one decode,
+    /// never correctness). Decode FAILURES are not cached —
+    /// a corrupt asset re-pays its failed decode per call,
+    /// exactly the pre-cache behaviour on that rare path.
+    static DECODED_ASSETS: std::cell::RefCell<
+        Vec<(usize, u64, std::rc::Rc<DecodedAsset>)>,
+    > = std::cell::RefCell::new(Vec::new());
+}
+
+/// Entry cap for the decoded-asset cache (see
+/// [`DECODED_ASSETS`]): comfortably above the referenced-
+/// asset count of a real episode project, far below any
+/// memory concern at episode asset sizes.
+const DECODED_ASSET_CACHE_MAX: usize = 32;
+
+/// Full-content hash of an asset's stored bytes, the
+/// content half of the decoded-cache key. `DefaultHasher`
+/// constructed directly (never `RandomState`) is a fixed-
+/// key SipHash, deterministic within the process — all the
+/// key needs, since the cache itself is per-thread and
+/// session-only. The length is folded in alongside.
+fn asset_bytes_hash(bytes: &[u8]) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    h.write(bytes);
+    h.write_usize(bytes.len());
+    h.finish()
+}
+
+/// The decoded form of asset `idx` — dimensions plus RGBA
+/// pixels — served from the decoded-asset cache after the
+/// first decode of that (index, content). None when the
+/// asset is missing or its bytes do not decode.
+fn decoded_asset(project: &Project, idx: usize) -> Option<std::rc::Rc<DecodedAsset>> {
+    let asset = project.assets.get(idx)?;
+    let hash = asset_bytes_hash(&asset.png);
+    let hit = DECODED_ASSETS.with(|c| {
+        c.borrow()
+            .iter()
+            .find(|(i, h, _)| *i == idx && *h == hash)
+            .map(|(_, _, d)| d.clone())
+    });
+    if let Some(d) = hit {
+        return Some(d);
+    }
+    let img = image::load_from_memory(&asset.png).ok()?;
+    let rgba = img.to_rgba8();
+    let (width, height) = (rgba.width(), rgba.height());
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let decoded = std::rc::Rc::new(DecodedAsset { width, height, rgba });
+    DECODED_ASSETS.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= DECODED_ASSET_CACHE_MAX {
+            c.clear();
+        }
+        c.retain(|(i, h, _)| !(*i == idx && *h == hash));
+        c.push((idx, hash, decoded.clone()));
+    });
+    Some(decoded)
+}
+
+/// The decoded pixels of asset `idx`, served by the
+/// decoded-asset cache — the public door RM22's Asset
+/// Manager thumbnails swap to (they decode from the
+/// stored bytes until this lands). Dimensions plus the
+/// shared RGBA; `None` when missing/undecodable.
+pub fn asset_pixels(
+    project: &Project,
+    idx: usize,
+) -> Option<(u32, u32, std::rc::Rc<image::RgbaImage>)> {
+    let d = decoded_asset(project, idx)?;
+    Some((d.width, d.height, std::rc::Rc::new(d.rgba.clone())))
+}
+
 /// Pixel dimensions of asset `idx`, or None when it is missing
 /// or its stored bytes do not decode. (The name is the
 /// original PNG-era one; the decode is by content and serves
-/// JPEG assets identically — Wave R, R9.)
+/// JPEG assets identically — Wave R, R9.) Roadmap Wave 1
+/// (RM6, F-5): served by the decoded-asset cache — the full
+/// decode this used to pay on every call now happens once
+/// per (asset index, content).
 pub fn png_dims(project: &Project, idx: usize) -> Option<(u32, u32)> {
-    let asset = project.assets.get(idx)?;
-    let img = image::load_from_memory(&asset.png).ok()?;
-    let (w, h) = (img.width(), img.height());
-    if w == 0 || h == 0 {
-        return None;
-    }
-    Some((w, h))
+    let d = decoded_asset(project, idx)?;
+    Some((d.width, d.height))
 }
 
 /// Width / height of asset `idx`, or None when it is missing or
@@ -552,7 +667,17 @@ pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
             content: text.content.clone(),
             size,
             color: text.color,
-            alpha: 1.0,
+            // Roadmap Wave 1 (RM22, P-12 — the P0-watch
+            // item): a text instance's keys DO carry an
+            // opacity channel (`InstanceKey::opacity`,
+            // sampled and interpolated like the sprite
+            // pass below reads for its items), and this
+            // pass hardcoded 1.0 — a faded text key
+            // rendered fully opaque in every export
+            // while its sprite twin faded. The sampled
+            // key's opacity, clamped exactly as the
+            // sprite pass clamps it.
+            alpha: key.opacity.clamp(0.0, 1.0),
         });
     }
     out
@@ -562,11 +687,33 @@ pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
 /// stage coordinates to image pixel coordinates (the same closure
 /// shape the export rasterizer builds). Images are sampled
 /// nearest-neighbour through the quad's affine map and alpha-blended
-/// over the destination; text is stamped as glyph blocks blended at the
-/// item's alpha.
+/// over the destination; text is shaped and rasterised with
+/// real fonts (the legacy 3×5 bitmap stamp remains the
+/// explicit pixel style and the no-covering-font fallback),
+/// blended at the item's alpha.
 pub fn composite_media(
     project: &Project,
     frame_f: f32,
+    img: &mut RgbaImage,
+    view: &dyn Fn(V2) -> [f32; 2],
+) {
+    composite_items(project, &media_items(project, frame_f), img, view);
+}
+
+/// Roadmap Wave 1 (RM6, F-5): composite an already-derived
+/// item list — the second half of [`composite_media`], for
+/// callers whose items do not come from `media_items` on a
+/// project. The export subtitle burn-in is the first: its
+/// stamp items are built directly by `subtitle_overlay`
+/// (export.rs) rather than derived from a cloned overlay
+/// project. Image items still resolve their asset bytes
+/// through `project` (the burn-in's list carries text only,
+/// so it never reads it). The per-item drawing — view-scale
+/// probe included — is [`composite_media`]'s own body, so
+/// both entries stamp identically.
+pub fn composite_items(
+    project: &Project,
+    items: &[MediaItem],
     img: &mut RgbaImage,
     view: &dyn Fn(V2) -> [f32; 2],
 ) {
@@ -584,7 +731,7 @@ pub fn composite_media(
         1.0
     };
 
-    for item in media_items(project, frame_f) {
+    for item in items {
         match item {
             MediaItem::Image {
                 corners,
@@ -592,7 +739,7 @@ pub fn composite_media(
                 alpha,
                 src_rect,
             } => {
-                composite_image(project, asset, corners, src_rect, alpha, img, view);
+                composite_image(project, *asset, *corners, *src_rect, *alpha, img, view);
             }
             MediaItem::Text {
                 pos,
@@ -601,7 +748,7 @@ pub fn composite_media(
                 size,
                 color,
                 alpha,
-            } => composite_text(pos, angle_deg, &content, size, color, alpha, img, view, view_scale),
+            } => composite_text(*pos, *angle_deg, content, *size, *color, *alpha, img, view, view_scale),
         }
     }
 }
@@ -895,6 +1042,189 @@ fn asset_json(project: &Project, index: usize, asset: &ImageAsset) -> Value {
     })
 }
 
+/// One row of the asset table for a browsing surface
+/// (Roadmap Wave 1, RM22 — P-12): everything the GUI Asset
+/// Manager (the Sprites panel's Assets section) shows per
+/// asset, computed from the same census the MCP list
+/// reports, so the two surfaces can never disagree about
+/// what an asset is or what uses it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AssetRow {
+    /// Index into `Project.assets`.
+    pub index: usize,
+    /// The asset's stored name.
+    pub name: String,
+    /// Stored byte length of the encoded image.
+    pub bytes: usize,
+    /// Decoded pixel dimensions, served by the F-5
+    /// decoded-asset cache ([`png_dims`] — RM6's cache,
+    /// the substrate P-12's manager is specified to sit
+    /// on); `None` when the stored bytes do not decode.
+    pub dims: Option<(u32, u32)>,
+    /// Figure segment images referencing this asset
+    /// ([`asset_references`]' first count).
+    pub segments: usize,
+    /// Clip-def segment images referencing this asset.
+    pub clip_segments: usize,
+    /// Sprite instances referencing this asset.
+    pub sprites: usize,
+}
+
+impl AssetRow {
+    /// Every live reference to this asset, all classes:
+    /// zero is what makes the asset removable
+    /// ([`remove_asset`]'s rule).
+    pub fn total_refs(&self) -> usize {
+        self.segments + self.clip_segments + self.sprites
+    }
+}
+
+/// Every asset in the table, in table order, as
+/// [`AssetRow`]s. Read-only; no undo step.
+pub fn asset_rows(project: &Project) -> Vec<AssetRow> {
+    project
+        .assets
+        .iter()
+        .enumerate()
+        .map(|(index, asset)| {
+            let (segments, clip_segments, sprites) = asset_references(project, index);
+            AssetRow {
+                index,
+                name: asset.name.clone(),
+                bytes: asset.png.len(),
+                dims: png_dims(project, index),
+                segments,
+                clip_segments,
+                sprites,
+            }
+        })
+        .collect()
+}
+
+/// What a successful [`import_asset_file`] appended.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImportedAsset {
+    /// Index of the new asset in `Project.assets`.
+    pub index: usize,
+    /// The name it was stored under.
+    pub name: String,
+    /// Stored byte length of the encoded image.
+    pub bytes: usize,
+    /// Decoded pixel dimensions.
+    pub width: u32,
+    pub height: u32,
+}
+
+/// GUI-facing asset import (Roadmap Wave 1, RM22 —
+/// P-12): the file half of [`tool_asset_import`], shared
+/// so the Asset Manager and the MCP handler can never
+/// drift on the gate, the naming default, the status
+/// sentence or the undo discipline. The file must start
+/// with the PNG magic bytes or the JPEG SOI marker,
+/// decode as an image, and be at most
+/// [`ASSET_IMPORT_MAX_BYTES`] — anything else is refused
+/// before any snapshot is taken. The asset name defaults
+/// to the file's name; a non-empty `name` overrides it.
+/// The new asset is appended in exactly one undo step,
+/// which also posts the import status.
+pub fn import_asset_file(
+    core: &mut EditorCore,
+    path: &str,
+    name: Option<&str>,
+) -> Result<ImportedAsset, String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("cannot read '{path}': {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("'{path}' is not a file"));
+    }
+    if meta.len() > ASSET_IMPORT_MAX_BYTES {
+        return Err(format!(
+            "'{path}' is {} bytes, over the {ASSET_IMPORT_MAX_BYTES}-byte import limit",
+            meta.len()
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read '{path}': {e}"))?;
+    let name = match name {
+        Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+        _ => std::path::Path::new(path)
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "image.png".into()),
+    };
+    let size = bytes.len();
+    // The content gate itself is the shared funnel
+    // (`asset_from_bytes`), so this op and the layered-set
+    // importer can never drift apart on what counts as an
+    // importable image.
+    let (asset, w, h) = asset_from_bytes(name.clone(), bytes)?;
+    core.snapshot();
+    let index = core.project.assets.len();
+    core.project.assets.push(asset);
+    core.status = format!("Asset imported ('{name}', asset {}).", index + 1);
+    Ok(ImportedAsset {
+        index,
+        name,
+        bytes: size,
+        width: w,
+        height: h,
+    })
+}
+
+/// GUI-facing asset rename (Roadmap Wave 1, RM22 —
+/// P-12): the mutation half of [`tool_asset_rename`].
+/// Trims `name`; an empty name is refused. Returns
+/// whether anything changed: renaming to the current
+/// name is a no-op that spends no undo step; a real
+/// rename is one undo step and posts the rename status.
+pub fn rename_asset(core: &mut EditorCore, index: usize, name: &str) -> Result<bool, String> {
+    ast_check_asset(core, index)?;
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("argument 'name' must not be empty".into());
+    }
+    if core.project.assets[index].name == name {
+        return Ok(false);
+    }
+    core.snapshot();
+    core.project.assets[index].name = name.clone();
+    core.status = format!("Asset {} renamed to '{name}'.", index + 1);
+    Ok(true)
+}
+
+/// GUI-facing asset removal (Roadmap Wave 1, RM22 —
+/// P-12): the mutation half of [`tool_asset_remove`],
+/// under its standing rule — if ANY reference to the
+/// asset exists (a figure segment image, a movieclip-def
+/// segment image, or a sprite instance) the removal is
+/// REFUSED with the counts, so a reference can never be
+/// silently orphaned. When the asset is unreferenced,
+/// removal shifts every later asset down one index and
+/// every still-valid reference to a higher index is
+/// remapped down by one in the SAME undo step. Returns
+/// the number of references remapped; posts the removal
+/// status.
+pub fn remove_asset(core: &mut EditorCore, index: usize) -> Result<usize, String> {
+    ast_check_asset(core, index)?;
+    let (segments, clip_segments, sprites) = asset_references(&core.project, index);
+    if segments + clip_segments + sprites > 0 {
+        return Err(format!(
+            "asset {index} ('{}') is still referenced by {segments} segment image(s), \
+             {clip_segments} clip segment(s) and {sprites} sprite instance(s); \
+             remove those references first — removal never orphans a reference",
+            core.project.assets[index].name
+        ));
+    }
+    let old_len = core.project.assets.len();
+    let name = core.project.assets[index].name.clone();
+    core.snapshot();
+    core.project.assets.remove(index);
+    let remapped = remap_asset_refs(&mut core.project, index, old_len);
+    core.status = format!(
+        "Asset {} ('{name}') removed; {remapped} reference(s) shifted.",
+        index + 1
+    );
+    Ok(remapped)
+}
+
 /// MCP handler: list the project's asset table — index, name,
 /// stored byte size, decoded pixel dimensions (null when the
 /// stored bytes do not decode) and live reference counts per
@@ -935,42 +1265,18 @@ pub fn tool_asset_info(core: &mut EditorCore, args: &Value) -> Result<Value, Str
 /// returned. One undo step.
 pub fn tool_asset_import(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let path = ast_req_str(args, "path")?;
-    let meta =
-        std::fs::metadata(path).map_err(|e| format!("cannot read '{path}': {e}"))?;
-    if !meta.is_file() {
-        return Err(format!("'{path}' is not a file"));
-    }
-    if meta.len() > ASSET_IMPORT_MAX_BYTES {
-        return Err(format!(
-            "'{path}' is {} bytes, over the {ASSET_IMPORT_MAX_BYTES}-byte import limit",
-            meta.len()
-        ));
-    }
-    let bytes = std::fs::read(path).map_err(|e| format!("cannot read '{path}': {e}"))?;
-    let name = match ast_opt_str(args, "name")? {
-        Some(n) if !n.trim().is_empty() => n.trim().to_string(),
-        _ => std::path::Path::new(path)
-            .file_name()
-            .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "image.png".into()),
-    };
-    let size = bytes.len();
-    // The content gate itself is the shared funnel
-    // (`asset_from_bytes`), so this handler and the
-    // layered-set importer can never drift apart on what
-    // counts as an importable image.
-    let (asset, w, h) = asset_from_bytes(name.clone(), bytes)?;
-    core.snapshot();
-    let index = core.project.assets.len();
-    core.project.assets.push(asset);
-    core.status = format!("Asset imported ('{name}', asset {}).", index + 1);
+    let name = ast_opt_str(args, "name")?;
+    // The mutation is the shared op ([`import_asset_file`],
+    // RM22) — this handler keeps only the argument reading
+    // and the reply shape.
+    let imported = import_asset_file(core, path, name)?;
     Ok(json!({
         "ok": true,
-        "index": index,
-        "name": name,
-        "bytes": size,
-        "width": w,
-        "height": h,
+        "index": imported.index,
+        "name": imported.name,
+        "bytes": imported.bytes,
+        "width": imported.width,
+        "height": imported.height,
         "status": core.status,
     }))
 }
@@ -982,27 +1288,17 @@ pub fn tool_asset_import(core: &mut EditorCore, args: &Value) -> Result<Value, S
 pub fn tool_asset_rename(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let index = ast_req_usize(args, "index")?;
     ast_check_asset(core, index)?;
-    let name = ast_req_str(args, "name")?.trim().to_string();
-    if name.is_empty() {
-        return Err("argument 'name' must not be empty".into());
-    }
-    if core.project.assets[index].name == name {
-        return Ok(json!({
-            "ok": true,
-            "index": index,
-            "name": name,
-            "changed": false,
-            "status": core.status,
-        }));
-    }
-    core.snapshot();
-    core.project.assets[index].name = name.clone();
-    core.status = format!("Asset {} renamed to '{name}'.", index + 1);
+    let raw_name = ast_req_str(args, "name")?;
+    // The mutation is the shared op ([`rename_asset`],
+    // RM22); `changed` in the reply is its return, and the
+    // reported name is the trimmed one it stored (or, on a
+    // no-op, would have stored).
+    let changed = rename_asset(core, index, raw_name)?;
     Ok(json!({
         "ok": true,
         "index": index,
-        "name": name,
-        "changed": true,
+        "name": raw_name.trim(),
+        "changed": changed,
         "status": core.status,
     }))
 }
@@ -1022,24 +1318,11 @@ pub fn tool_asset_rename(core: &mut EditorCore, args: &Value) -> Result<Value, S
 pub fn tool_asset_remove(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let index = ast_req_usize(args, "index")?;
     ast_check_asset(core, index)?;
-    let (segments, clip_segments, sprites) = asset_references(&core.project, index);
-    if segments + clip_segments + sprites > 0 {
-        return Err(format!(
-            "asset {index} ('{}') is still referenced by {segments} segment image(s), \
-             {clip_segments} clip segment(s) and {sprites} sprite instance(s); \
-             remove those references first — removal never orphans a reference",
-            core.project.assets[index].name
-        ));
-    }
-    let old_len = core.project.assets.len();
+    // The reply names the removed asset, so it is read
+    // before the shared op ([`remove_asset`], RM22) takes
+    // it out of the table.
     let name = core.project.assets[index].name.clone();
-    core.snapshot();
-    core.project.assets.remove(index);
-    let remapped = remap_asset_refs(&mut core.project, index, old_len);
-    core.status = format!(
-        "Asset {} ('{name}') removed; {remapped} reference(s) shifted.",
-        index + 1
-    );
+    let remapped = remove_asset(core, index)?;
     Ok(json!({
         "ok": true,
         "index": index,
@@ -1847,13 +2130,15 @@ fn composite_image(
     if alpha <= 0.0 {
         return;
     }
-    let Some(asset) = project.assets.get(asset) else {
+    // Roadmap Wave 1 (RM6, F-5): the decode comes from the
+    // decoded-asset cache — decoded once per (index,
+    // content) instead of once per composited frame. The
+    // sampled pixels are the same `to_rgba8` conversion of
+    // the same bytes, so the composite is byte-identical.
+    let Some(decoded) = decoded_asset(project, asset) else {
         return;
     };
-    let Ok(decoded) = image::load_from_memory(&asset.png) else {
-        return;
-    };
-    let src = decoded.to_rgba8();
+    let src = &decoded.rgba;
     let (sw, sh) = (src.width() as f32, src.height() as f32);
     if sw < 1.0 || sh < 1.0 {
         return;
@@ -1913,8 +2198,724 @@ fn composite_image(
     }
 }
 
+// ---------------------------------------------------------------------
+// Shaped text (Roadmap Wave 1, RM2 — roadmap F-2, the P0-2 fix)
+//
+// The renderer below shapes real text with swash — the
+// shaping + rasterisation engine the Rune font stack (the
+// shell's Parley/fontique/swash stack) is built on — against
+// system fonts resolved per script. Font files are
+// discovered in the platform font directories; candidates
+// whose file names name the run's script are tried first,
+// and a face is used for a run only after its charmap has
+// PROVEN coverage of the run's strong characters. A glyph
+// no resolved face covers is skipped — never replaced by a
+// stamped `?` (the bitmap renderer's failure mode, which
+// destroyed Bengali dialogue in burned-in subtitles while
+// its SRT sidecar stayed perfect). When NO face resolves
+// for a run the whole line reports failure and the caller
+// falls back to the bitmap stamp: on a font-less system a
+// legible stamp beats a blank. Bundling fonts so even that
+// fallback never fires is IA-RM2-6 in this seat's findings.
+// ---------------------------------------------------------------------
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// One resolved font face: font-file bytes plus the face
+/// index within the file (collections carry several faces).
+struct FontFace {
+    data: Arc<Vec<u8>>,
+    index: u32,
+}
+
+impl FontFace {
+    fn font(&self) -> Option<swash::FontRef<'_>> {
+        swash::FontRef::from_index(&self.data, self.index as usize)
+    }
+
+    /// How many of `chars` the face's charmap maps to a
+    /// real glyph (id != 0). Coverage is PROVEN per face,
+    /// never assumed from a family name.
+    fn covered_count(&self, chars: &[char]) -> usize {
+        let Some(font) = self.font() else { return 0 };
+        let charmap = font.charmap();
+        chars.iter().filter(|&&ch| charmap.map(ch) != 0).count()
+    }
+}
+
+/// The lazily built font library: the enumerated font
+/// files plus the per-script faces resolved so far.
+struct FontLibrary {
+    files: Vec<PathBuf>,
+    /// Faces that proved coverage for a script, best first.
+    faces: HashMap<swash::text::Script, Vec<Arc<FontFace>>>,
+    /// Per-script scan cursor into the candidate order, so
+    /// a later probe with new characters resumes where the
+    /// earlier one stopped instead of rescanning.
+    cursors: HashMap<swash::text::Script, usize>,
+    /// Scripts whose candidate list is exhausted.
+    exhausted: HashMap<swash::text::Script, bool>,
+}
+
+fn font_library() -> &'static Mutex<FontLibrary> {
+    static LIB: OnceLock<Mutex<FontLibrary>> = OnceLock::new();
+    LIB.get_or_init(|| {
+        Mutex::new(FontLibrary {
+            files: collect_font_files(),
+            faces: HashMap::new(),
+            cursors: HashMap::new(),
+            exhausted: HashMap::new(),
+        })
+    })
+}
+
+/// Platform font directories. Nonexistent ones are skipped
+/// by the walk, so the list is written unconditionally.
+fn font_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![
+        PathBuf::from("/usr/share/fonts"),
+        PathBuf::from("/usr/local/share/fonts"),
+        PathBuf::from("/System/Library/Fonts"),
+        PathBuf::from("/Library/Fonts"),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        dirs.push(home.join(".fonts"));
+        dirs.push(home.join(".local/share/fonts"));
+        dirs.push(home.join("Library/Fonts"));
+    }
+    if let Some(windir) = std::env::var_os("WINDIR") {
+        dirs.push(PathBuf::from(windir).join("Fonts"));
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        dirs.push(PathBuf::from(local).join("Microsoft/Windows/Fonts"));
+    }
+    dirs
+}
+
+/// Every font file under the font directories (recursive,
+/// `.ttf`/`.otf`/`.ttc`), sorted by file name so candidate
+/// order is deterministic across runs and machines.
+fn collect_font_files() -> Vec<PathBuf> {
+    fn walk(dir: &std::path::Path, depth: usize, out: &mut Vec<PathBuf>) {
+        if depth > 4 || out.len() > 8192 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, depth + 1, out);
+            } else if path
+                .extension()
+                .map(|e| {
+                    let e = e.to_string_lossy().to_ascii_lowercase();
+                    e == "ttf" || e == "otf" || e == "ttc"
+                })
+                .unwrap_or(false)
+            {
+                out.push(path);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for dir in font_dirs() {
+        walk(&dir, 0, &mut out);
+    }
+    out.sort_by(|a, b| {
+        a.file_name()
+            .unwrap_or_default()
+            .cmp(b.file_name().unwrap_or_default())
+            .then(a.cmp(b))
+    });
+    out
+}
+
+/// File-name fragments that suggest a face serves
+/// `script`, best first. Only ever a SEARCH ORDER: the
+/// charmap proof in [`resolve_face`] is what qualifies a
+/// face, so a wrong hint costs time, never correctness.
+fn script_name_hints(script: swash::text::Script) -> &'static [&'static str] {
+    use swash::text::Script as S;
+    match script {
+        S::Bengali => &["bengali", "bangla", "lohitbeng", "hindsiliguri", "siyam"],
+        S::Arabic => &["arab", "naskh", "amiri", "scheherazade"],
+        S::Hebrew => &["hebrew", "culmus", "frank", "david"],
+        S::Han => &[
+            "cjk", "notosanssc", "notoserifsc", "hanazono", "wqy", "uming", "ukai",
+            "droidsansfallback",
+        ],
+        S::Devanagari => &["devanagari", "mangal", "lohitdeva"],
+        S::Latin => &[
+            "dejavu", "liberation", "notosans", "inter", "roboto", "freesans", "droidsans",
+            "arial", "helvetica",
+        ],
+        _ => &[],
+    }
+}
+
+/// The candidate order for one resolution pass: files
+/// whose names hint at `script` first (in file order),
+/// then every remaining file.
+fn candidate_order(lib: &FontLibrary, script: swash::text::Script) -> Vec<usize> {
+    let hints = script_name_hints(script);
+    let name_of = |i: usize| {
+        lib.files[i]
+            .file_name()
+            .map(|n| n.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default()
+    };
+    let mut order: Vec<usize> = (0..lib.files.len())
+        .filter(|&i| {
+            let name = name_of(i);
+            hints.iter().any(|h| name.contains(h))
+        })
+        .collect();
+    order.extend((0..lib.files.len()).filter(|&i| {
+        let name = name_of(i);
+        !hints.iter().any(|h| name.contains(h))
+    }));
+    order
+}
+
+/// Resolve a face for `script` whose charmap proves
+/// coverage of every char in `probe` (the run's strong
+/// characters). Falls back to the best partially covering
+/// face when no face covers the whole probe; `None` when
+/// no face covers any probe char at all.
+fn resolve_face(
+    lib: &mut FontLibrary,
+    script: swash::text::Script,
+    probe: &[char],
+) -> Option<Arc<FontFace>> {
+    if probe.is_empty() {
+        // Nothing to prove: any cached face, else the
+        // generic resolution below will seed one.
+        if let Some(face) = lib.faces.get(&script).and_then(|v| v.first()) {
+            return Some(face.clone());
+        }
+    } else if let Some(faces) = lib.faces.get(&script) {
+        for face in faces {
+            if face.covered_count(probe) == probe.len() {
+                return Some(face.clone());
+            }
+        }
+    }
+    if lib.exhausted.get(&script).copied().unwrap_or(false) {
+        // The scan is done: the best partial face, if any.
+        return lib
+            .faces
+            .get(&script)
+            .and_then(|faces| {
+                faces
+                    .iter()
+                    .max_by_key(|f| f.covered_count(probe))
+                    .filter(|f| f.covered_count(probe) > 0)
+                    .cloned()
+            });
+    }
+    let order = candidate_order(lib, script);
+    let mut cursor = lib.cursors.get(&script).copied().unwrap_or(0);
+    let mut best_partial: Option<(usize, Arc<FontFace>)> = None;
+    while cursor < order.len() {
+        let path = lib.files[order[cursor]].clone();
+        cursor += 1;
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        if bytes.len() > 96 * 1024 * 1024 {
+            continue;
+        }
+        let data = Arc::new(bytes);
+        for index in 0..16u32 {
+            let Some(font) = swash::FontRef::from_index(&data, index as usize) else {
+                break;
+            };
+            let face = Arc::new(FontFace {
+                data: data.clone(),
+                index,
+            });
+            let covered = face.covered_count(probe);
+            if covered == probe.len() && !probe.is_empty() {
+                lib.faces.entry(script).or_default().push(face.clone());
+                lib.cursors.insert(script, cursor);
+                return Some(face);
+            }
+            if covered > 0 {
+                match &best_partial {
+                    Some((n, _)) if *n >= covered => {}
+                    _ => best_partial = Some((covered, face.clone())),
+                }
+                // Keep the partial face cached for the
+                // exhausted-scan answer.
+                lib.faces.entry(script).or_default().push(face);
+            }
+            let _ = font;
+        }
+    }
+    lib.cursors.insert(script, cursor);
+    lib.exhausted.insert(script, true);
+    best_partial.map(|(_, face)| face)
+}
+
+/// The script a character belongs to, for the scripts
+/// this renderer segments on; `None` for characters that
+/// attach to their neighbours (Latin is returned
+/// explicitly — it is a strong script of its own here).
+fn script_of(ch: char) -> Option<swash::text::Script> {
+    use swash::text::Script as S;
+    Some(match ch {
+        '\u{0900}'..='\u{097F}' => S::Devanagari,
+        '\u{0980}'..='\u{09FF}' => S::Bengali,
+        '\u{0A00}'..='\u{0A7F}' => S::Gurmukhi,
+        '\u{0A80}'..='\u{0AFF}' => S::Gujarati,
+        '\u{0B00}'..='\u{0B7F}' => S::Oriya,
+        '\u{0B80}'..='\u{0BFF}' => S::Tamil,
+        '\u{0C00}'..='\u{0C7F}' => S::Telugu,
+        '\u{0C80}'..='\u{0CFF}' => S::Kannada,
+        '\u{0D00}'..='\u{0D7F}' => S::Malayalam,
+        '\u{0E00}'..='\u{0E7F}' => S::Thai,
+        '\u{0E80}'..='\u{0EFF}' => S::Lao,
+        '\u{1000}'..='\u{109F}' => S::Myanmar,
+        '\u{10A0}'..='\u{10FF}' => S::Georgian,
+        '\u{1100}'..='\u{11FF}' | '\u{AC00}'..='\u{D7AF}' => S::Hangul,
+        '\u{1200}'..='\u{137F}' => S::Ethiopic,
+        '\u{1780}'..='\u{17FF}' => S::Khmer,
+        '\u{1800}'..='\u{18AF}' => S::Mongolian,
+        '\u{0590}'..='\u{05FF}' => S::Hebrew,
+        '\u{0600}'..='\u{06FF}'
+        | '\u{0750}'..='\u{077F}'
+        | '\u{08A0}'..='\u{08FF}'
+        | '\u{FB50}'..='\u{FDFF}'
+        | '\u{FE70}'..='\u{FEFF}' => S::Arabic,
+        '\u{0400}'..='\u{04FF}' => S::Cyrillic,
+        '\u{0370}'..='\u{03FF}' => S::Greek,
+        '\u{0530}'..='\u{058F}' => S::Armenian,
+        '\u{0D80}'..='\u{0DFF}' => S::Sinhala,
+        '\u{0F00}'..='\u{0FFF}' => S::Tibetan,
+        '\u{3040}'..='\u{309F}' => S::Hiragana,
+        '\u{30A0}'..='\u{30FF}' => S::Katakana,
+        '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' => S::Han,
+        _ => return None,
+    })
+}
+
+/// A character that attaches to the run beside it rather
+/// than starting one: whitespace, controls, ASCII
+/// punctuation and digits.
+fn is_common_char(ch: char) -> bool {
+    ch.is_whitespace()
+        || ch.is_control()
+        || ch.is_ascii_punctuation()
+        || ch.is_ascii_digit()
+}
+
+/// One script run of a line: the shaper's unit.
+struct TextRun {
+    script: swash::text::Script,
+    text: String,
+}
+
+/// Split a line into script runs. Common characters
+/// attach to the run in progress (leading commons wait
+/// for the first strong run); characters outside the
+/// segmented scripts form Latin runs so ordinary Latin
+/// text (accents included) shapes as one run.
+fn split_runs(content: &str) -> Vec<TextRun> {
+    let mut runs: Vec<TextRun> = Vec::new();
+    let mut pending = String::new();
+    for ch in content.chars() {
+        if is_common_char(ch) {
+            if runs.is_empty() {
+                pending.push(ch);
+            } else {
+                runs.last_mut().expect("runs non-empty").text.push(ch);
+            }
+            continue;
+        }
+        let script = script_of(ch).unwrap_or(swash::text::Script::Latin);
+        let same_script = matches!(runs.last(), Some(run) if run.script == script);
+        if same_script {
+            runs.last_mut().expect("runs non-empty").text.push(ch);
+        } else {
+            let mut text = std::mem::take(&mut pending);
+            text.push(ch);
+            runs.push(TextRun { script, text });
+        }
+    }
+    if runs.is_empty() && !pending.is_empty() {
+        runs.push(TextRun {
+            script: swash::text::Script::Latin,
+            text: pending,
+        });
+    } else if let Some(first) = runs.first_mut() {
+        if !pending.is_empty() {
+            let mut text = std::mem::take(&mut pending);
+            text.push_str(&first.text);
+            first.text = text;
+        }
+    }
+    runs
+}
+
+/// One shaped glyph: its face, its glyph id, and its pen
+/// position in pixels relative to the line's start (x) and
+/// the baseline (y, font space, positive up).
+struct ShapedGlyph {
+    face: Arc<FontFace>,
+    id: u16,
+    x: f32,
+    y: f32,
+}
+
+/// A shaped line at a pixel size: positioned glyphs plus
+/// the metrics the caller centres with.
+struct ShapedLine {
+    glyphs: Vec<ShapedGlyph>,
+    /// Total advance, pixels.
+    width: f32,
+    /// Line ascent above the baseline, pixels (positive).
+    ascent: f32,
+    /// Line descent below the baseline, pixels (positive).
+    descent: f32,
+}
+
+thread_local! {
+    static SHAPE_CTX: RefCell<swash::shape::ShapeContext> =
+        RefCell::new(swash::shape::ShapeContext::new());
+    static SCALE_CTX: RefCell<swash::scale::ScaleContext> =
+        RefCell::new(swash::scale::ScaleContext::new());
+}
+
+/// Shape one line (no `\n`) at `size_px`. `None` when any
+/// run resolves to no face at all — the caller's cue to
+/// fall back to the bitmap stamp for the line.
+fn shape_line(content: &str, size_px: f32) -> Option<ShapedLine> {
+    let runs = split_runs(content);
+    let mut glyphs: Vec<ShapedGlyph> = Vec::new();
+    let mut pen = 0.0f32;
+    let mut ascent = size_px * 0.8;
+    let mut descent = size_px * 0.2;
+    for run in &runs {
+        let mut probe: Vec<char> =
+            run.text.chars().filter(|c| !is_common_char(*c)).collect();
+        if probe.is_empty() {
+            // A run of commons only (a digits-and-spaces
+            // line): seed the coverage proof with a digit —
+            // near-universal, and it qualifies the face the
+            // run's real characters will render from.
+            probe.push('0');
+        }
+        let face = {
+            let mut lib = font_library().lock().ok()?;
+            resolve_face(&mut lib, run.script, &probe)?
+        };
+        let font = face.font()?;
+        let metrics = font.metrics(&[]);
+        if metrics.units_per_em > 0 {
+            let scale = size_px / metrics.units_per_em as f32;
+            ascent = ascent.max(metrics.ascent * scale);
+            descent = descent.max(-metrics.descent * scale);
+        }
+        let direction = if matches!(
+            run.script,
+            swash::text::Script::Arabic | swash::text::Script::Hebrew
+        ) {
+            swash::shape::Direction::RightToLeft
+        } else {
+            swash::shape::Direction::LeftToRight
+        };
+        SHAPE_CTX.with(|ctx| {
+            let mut ctx = ctx.borrow_mut();
+            let mut shaper = ctx
+                .builder(font)
+                .script(run.script)
+                .direction(direction)
+                .size(size_px)
+                .build();
+            shaper.add_str(&run.text);
+            shaper.shape_with(|cluster| {
+                for g in cluster.glyphs {
+                    // A glyph id of 0 is the face's .notdef:
+                    // the charmap proof makes it rare, and
+                    // when it happens the glyph is SKIPPED —
+                    // never drawn as a stamped `?`.
+                    if g.id != 0 {
+                        glyphs.push(ShapedGlyph {
+                            face: face.clone(),
+                            id: g.id,
+                            x: pen + g.x,
+                            y: g.y,
+                        });
+                    }
+                    pen += g.advance;
+                }
+            });
+        });
+    }
+    Some(ShapedLine {
+        glyphs,
+        width: pen,
+        ascent,
+        descent,
+    })
+}
+
+/// True when every run of `content` resolves to a face.
+/// The probe for surfaces that must choose a renderer
+/// before drawing a line — the stage subtitle adoption
+/// (IA-RM2-4 in this seat's findings) is its first caller
+/// in waiting; the burn-in itself routes through the
+/// funnel, whose per-item fallback covers it.
+pub fn shaped_text_resolves(content: &str) -> bool {
+    shape_line(content, 20.0).map(|l| !l.glyphs.is_empty() || content.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// Rasterise one glyph's alpha mask at `size_px`.
+fn render_glyph_mask(face: &FontFace, id: u16, size_px: f32) -> Option<swash::scale::image::Image> {
+    let font = face.font()?;
+    SCALE_CTX.with(|ctx| {
+        let mut ctx = ctx.borrow_mut();
+        let mut scaler = ctx.builder(font).size(size_px).hint(false).build();
+        swash::scale::Render::new(&[swash::scale::Source::Outline])
+            .format(swash::scale::Format::Alpha)
+            .render(&mut scaler, id)
+    })
+}
+
+/// Blend one alpha mask into `img` at pixel offset
+/// (`ox`, `oy`) in `color` at strength `alpha` — the
+/// source-over maths `composite_text_bitmap` stamps with.
+fn blit_mask(
+    img: &mut RgbaImage,
+    mask: &swash::scale::image::Image,
+    ox: i32,
+    oy: i32,
+    color: [u8; 3],
+    alpha: f32,
+) {
+    if mask.content != swash::scale::image::Content::Mask {
+        return;
+    }
+    let w = mask.placement.width as i32;
+    let h = mask.placement.height as i32;
+    for row in 0..h {
+        for col in 0..w {
+            let cov = mask.data[(row * w + col) as usize] as f32 / 255.0;
+            if cov <= 0.0 {
+                continue;
+            }
+            let x = ox + col;
+            let y = oy + row;
+            if x < 0 || y < 0 || (x as u32) >= img.width() || (y as u32) >= img.height() {
+                continue;
+            }
+            let sa = cov * alpha;
+            let dp = img.get_pixel_mut(x as u32, y as u32);
+            let da = dp[3] as f32 / 255.0;
+            let out_a = sa + da * (1.0 - sa);
+            if out_a > 0.0 {
+                for ch in 0..3 {
+                    let blended =
+                        (color[ch] as f32 * sa + dp[ch] as f32 * da * (1.0 - sa)) / out_a;
+                    dp[ch] = blended.round().clamp(0.0, 255.0) as u8;
+                }
+                dp[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+}
+
+/// Draw ONE shaped line into `img`, centred on `centre`
+/// (image pixels) at em size `size_px`, in `color` at
+/// strength `alpha`. Returns false when the line resolves
+/// to no face (the caller falls back); true when the line
+/// shaped — a whitespace-only line shapes trivially and
+/// draws nothing. This is the subtitle burn-in's shaped
+/// entry (export.rs) and the funnel tile's building block.
+pub fn composite_shaped_text(
+    img: &mut RgbaImage,
+    centre: [f32; 2],
+    content: &str,
+    size_px: f32,
+    color: u32,
+    alpha: f32,
+) -> bool {
+    let alpha = alpha.clamp(0.0, 1.0);
+    if alpha <= 0.0 || size_px <= 0.0 || content.is_empty() {
+        return false;
+    }
+    let Some(line) = shape_line(content, size_px) else {
+        return false;
+    };
+    let rgb = [
+        ((color >> 16) & 0xFF) as u8,
+        ((color >> 8) & 0xFF) as u8,
+        (color & 0xFF) as u8,
+    ];
+    // Centre the line's em box on `centre`: the baseline
+    // sits half the (ascent - descent) below the centre.
+    let baseline = centre[1] + (line.ascent - line.descent) / 2.0;
+    let start_x = centre[0] - line.width / 2.0;
+    for g in &line.glyphs {
+        let Some(mask) = render_glyph_mask(&g.face, g.id, size_px) else {
+            continue;
+        };
+        let ox = (start_x + g.x).round() as i32 + mask.placement.left;
+        let oy = (baseline - g.y).round() as i32 - mask.placement.top;
+        blit_mask(img, &mask, ox, oy, rgb, alpha);
+    }
+    true
+}
+
+/// The shaped path for funnel text items (text instances
+/// and segment text): rasterise the content into a
+/// straight-alpha tile in the item's colour, then splat
+/// the tile through the view with the item's rotation
+/// composed with the view's own — the bitmap stamp's
+/// forward-mapping discipline, one tile pixel per output
+/// pixel. Multi-line content stacks at 1.2× the size,
+/// centred on the anchor as the stamp centred its block.
+/// False when any line resolves to no face.
+#[allow(clippy::too_many_arguments)]
+fn composite_text_shaped(
+    pos: V2,
+    angle_deg: f32,
+    content: &str,
+    size: f32,
+    color: u32,
+    alpha: f32,
+    img: &mut RgbaImage,
+    view: &dyn Fn(V2) -> [f32; 2],
+    view_scale: f32,
+) -> bool {
+    let alpha = alpha.clamp(0.0, 1.0);
+    if alpha <= 0.0 || size <= 0.0 || content.is_empty() {
+        return false;
+    }
+    let size_px = size * view_scale;
+    let line_step = size_px * 1.2;
+    let lines: Vec<&str> = content.split('\n').collect();
+    let mut shaped: Vec<ShapedLine> = Vec::with_capacity(lines.len());
+    for line in &lines {
+        match shape_line(line, size_px) {
+            Some(s) => shaped.push(s),
+            None => return false,
+        }
+    }
+    let tile_w = shaped
+        .iter()
+        .map(|l| l.width.ceil() as u32)
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let tile_h = ((lines.len() as f32 * line_step).ceil() as u32).max(1);
+    let mut tile = RgbaImage::new(tile_w, tile_h);
+    let rgb = [
+        ((color >> 16) & 0xFF) as u8,
+        ((color >> 8) & 0xFF) as u8,
+        (color & 0xFF) as u8,
+    ];
+    for (i, line) in shaped.iter().enumerate() {
+        let centre_y = (i as f32 + 0.5) * line_step;
+        let baseline = centre_y + (line.ascent - line.descent) / 2.0;
+        let start_x = (tile_w as f32 - line.width) / 2.0;
+        for g in &line.glyphs {
+            let Some(mask) = render_glyph_mask(&g.face, g.id, size_px) else {
+                continue;
+            };
+            let ox = (start_x + g.x).round() as i32 + mask.placement.left;
+            let oy = (baseline - g.y).round() as i32 - mask.placement.top;
+            blit_mask(&mut tile, &mask, ox, oy, rgb, alpha);
+        }
+    }
+    // Splat the tile: its centre lands on the item's
+    // anchor, rotated by the item angle composed with the
+    // view's own rotation (the view basis angle).
+    let o = view([0.0, 0.0]);
+    let ex = view([1.0, 0.0]);
+    let view_ang = (ex[1] - o[1]).atan2(ex[0] - o[0]);
+    let total = angle_deg.to_radians() + view_ang;
+    let (cs, sn) = (total.cos(), total.sin());
+    let centre = view(pos);
+    for ty in 0..tile.height() {
+        for tx in 0..tile.width() {
+            let p = tile.get_pixel(tx, ty);
+            if p[3] == 0 {
+                continue;
+            }
+            let lx = tx as f32 + 0.5 - tile.width() as f32 / 2.0;
+            let ly = ty as f32 + 0.5 - tile.height() as f32 / 2.0;
+            let x = (centre[0] + lx * cs - ly * sn).round() as i32;
+            let y = (centre[1] + lx * sn + ly * cs).round() as i32;
+            if x < 0 || y < 0 || (x as u32) >= img.width() || (y as u32) >= img.height() {
+                continue;
+            }
+            let sa = p[3] as f32 / 255.0;
+            let dp = img.get_pixel_mut(x as u32, y as u32);
+            let da = dp[3] as f32 / 255.0;
+            let out_a = sa + da * (1.0 - sa);
+            if out_a > 0.0 {
+                for ch in 0..3 {
+                    let blended =
+                        (p[ch] as f32 * sa + dp[ch] as f32 * da * (1.0 - sa)) / out_a;
+                    dp[ch] = blended.round().clamp(0.0, 255.0) as u8;
+                }
+                dp[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    true
+}
+
+/// Stamp ONE line with the legacy 3×5 bitmap font in raw
+/// image-pixel space (identity view): the subtitle
+/// burn-in's explicit Pixel style (and its shaped
+/// fallback) draws through this, at the same centres the
+/// shared layout gives the shaped renderer.
+pub fn composite_bitmap_text(
+    img: &mut RgbaImage,
+    centre: [f32; 2],
+    content: &str,
+    size_px: f32,
+    color: u32,
+    alpha: f32,
+) {
+    composite_text_bitmap(centre, 0.0, content, size_px, color, alpha, img, &|p| p, 1.0);
+}
+
+/// Funnel text entry (text instances, segment text —
+/// `MediaItem::Text`): shaped rendering first; the bitmap
+/// stamp only when no covering font resolves on this
+/// system (or the content is empty).
 #[allow(clippy::too_many_arguments)]
 fn composite_text(
+    pos: V2,
+    angle_deg: f32,
+    content: &str,
+    size: f32,
+    color: u32,
+    alpha: f32,
+    img: &mut RgbaImage,
+    view: &dyn Fn(V2) -> [f32; 2],
+    view_scale: f32,
+) {
+    if composite_text_shaped(pos, angle_deg, content, size, color, alpha, img, view, view_scale) {
+        return;
+    }
+    composite_text_bitmap(pos, angle_deg, content, size, color, alpha, img, view, view_scale);
+}
+
+/// The legacy 3×5 bitmap stamp — before RM2 the only
+/// raster text renderer. Kept as the explicit pixel style
+/// (via [`composite_bitmap_text`]) and as the funnel's
+/// no-covering-font fallback; its glyphs, fold-to-uppercase
+/// and `?` substitution below are the pixel style's
+/// defining behaviour, unchanged.
+#[allow(clippy::too_many_arguments)]
+fn composite_text_bitmap(
     pos: V2,
     angle_deg: f32,
     content: &str,
@@ -3113,6 +4114,50 @@ mod tests {
     }
 
     #[test]
+    fn decoded_asset_cache_serves_identical_content_only() {
+        // Roadmap Wave 1 (RM6, F-5): the cache behind
+        // png_dims / composite_image is keyed by (asset
+        // index, full-content hash) — a hit is only ever
+        // the decode of the bytes it names.
+        let mut project = demo_project();
+        let a = decoded_asset(&project, 0).expect("asset 0 decodes");
+        let b = decoded_asset(&project, 0).expect("asset 0 decodes again");
+        assert!(
+            std::rc::Rc::ptr_eq(&a, &b),
+            "the same (index, content) is served from the cache"
+        );
+        assert_eq!((a.width, a.height), (4, 2));
+        assert_eq!(png_dims(&project, 0), Some((4, 2)), "png_dims reads the same decode");
+        // Replace the bytes in place (same index): the
+        // content half of the key changes, so the stale
+        // decode can never be served for the new image.
+        project.assets[0].png = png_bytes(6, 3, Rgba([0, 200, 0, 255]));
+        let c = decoded_asset(&project, 0).expect("the replaced asset decodes");
+        assert!(!std::rc::Rc::ptr_eq(&a, &c), "changed bytes miss the cache");
+        assert_eq!(png_dims(&project, 0), Some((6, 3)));
+        // Out of range stays None on both readers.
+        assert!(decoded_asset(&project, 99).is_none());
+        assert_eq!(png_dims(&project, 99), None);
+    }
+
+    #[test]
+    fn composite_media_output_does_not_depend_on_cache_state() {
+        // Roadmap Wave 1 (RM6, F-5): a cold composite (the
+        // decode happens inside the call) and a warm one
+        // (served from the decoded-asset cache) produce
+        // byte-identical output.
+        let project = demo_project();
+        let render = |project: &Project| {
+            let mut img = RgbaImage::from_pixel(400, 300, Rgba([255, 255, 255, 255]));
+            composite_media(project, 0.0, &mut img, &|p| p);
+            img.into_raw()
+        };
+        let cold = render(&project);
+        let warm = render(&project);
+        assert_eq!(cold, warm, "cached and uncached composites agree byte for byte");
+    }
+
+    #[test]
     fn sprite_instance_item_geometry_and_sampling() {
         let mut project = demo_project();
         project.sprites.push(SpriteInstance {
@@ -3210,6 +4255,157 @@ mod tests {
     }
 
     #[test]
+    fn text_instance_item_carries_the_sampled_key_opacity() {
+        // Roadmap Wave 1 (RM22, P-12 — the P0-watch item):
+        // a text instance's keys carry opacity, and the
+        // item pass must honour the SAMPLED value — before
+        // this pin the pass hardcoded alpha 1.0, so the
+        // fade below rendered fully opaque.
+        let mut project = demo_project();
+        let key = |frame: f32, opacity: f32| InstanceKey {
+            frame,
+            x: 100.0,
+            y: 400.0,
+            scale: 1.0,
+            angle: 0.0,
+            opacity,
+            flip_x: false,
+            flip_y: false,
+            scale_y: 0.0,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
+        };
+        project.texts.push(TextInstance {
+            content: "FADE".into(),
+            size: 20.0,
+            color: 0xFFFFFF,
+            keys: vec![key(0.0, 0.25), key(10.0, 0.75)],
+        });
+        let alpha_at = |frame_f: f32| {
+            media_items(&project, frame_f)
+                .iter()
+                .rev()
+                .find_map(|i| match i {
+                    MediaItem::Text { content, alpha, .. } if content == "FADE" => Some(*alpha),
+                    _ => None,
+                })
+                .expect("a text instance item")
+        };
+        assert_eq!(alpha_at(0.0), 0.25, "the stored key opacity, verbatim");
+        assert_eq!(alpha_at(10.0), 0.75);
+        assert!(
+            (alpha_at(5.0) - 0.5).abs() < 1e-6,
+            "opacity interpolates like the sprite pass reads it: {}",
+            alpha_at(5.0)
+        );
+        // A stored opacity outside 0..=1 (a hand-edited or
+        // imported file) clamps, exactly as the sprite pass
+        // clamps its items.
+        let mine = project.texts.len() - 1;
+        project.texts[mine].keys[0].opacity = 1.4;
+        assert_eq!(alpha_at(0.0), 1.0, "clamped to the blendable range");
+    }
+
+    #[test]
+    fn asset_rows_report_dims_bytes_and_reference_counts() {
+        // Roadmap Wave 1 (RM22, P-12): the GUI Asset
+        // Manager's data source — the same census the MCP
+        // list reports, with dimensions through the F-5
+        // decoded cache.
+        let mut core = asset_core();
+        // demo_project: asset 0 is segment-attached (see
+        // assets_list_and_info_report_dimensions_and_
+        // references); add a sprite on a second asset and
+        // leave a third unreferenced.
+        core.project.assets.push(ImageAsset {
+            name: "prop".into(),
+            png: png_bytes(4, 2, Rgba([0, 255, 0, 255])),
+        });
+        core.project.assets.push(ImageAsset {
+            name: "spare".into(),
+            png: png_bytes(1, 1, Rgba([0, 0, 255, 255])),
+        });
+        core.project.sprites.push(SpriteInstance {
+            asset: 1,
+            keys: vec![InstanceKey {
+                frame: 0.0,
+                x: 0.0,
+                y: 0.0,
+                scale: 1.0,
+                angle: 0.0,
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
+            }],
+        });
+        let rows = asset_rows(&core.project);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].name, "prop");
+        assert_eq!(rows[1].dims, Some((4, 2)), "decoded dimensions");
+        assert_eq!(rows[1].bytes, core.project.assets[1].png.len());
+        assert_eq!(rows[1].sprites, 1);
+        assert_eq!(rows[1].total_refs(), 1);
+        assert_eq!(rows[2].total_refs(), 0, "the spare is removable");
+        assert!(rows[0].segments >= 1, "the demo segment reference counts");
+    }
+
+    #[test]
+    fn gui_asset_ops_share_the_tool_contracts() {
+        // Roadmap Wave 1 (RM22, P-12): the factored ops
+        // the Asset Manager calls carry the tools' own
+        // contracts — gate, naming default, one undo step
+        // per mutation, refusal with counts.
+        let mut core = asset_core();
+        let png = png_bytes(2, 2, Rgba([255, 0, 0, 255]));
+        let path = temp_asset_file("gui-ops", &png);
+        let depth = core.undo_depth();
+        let imported = import_asset_file(&mut core, path.to_str().unwrap(), None)
+            .expect("import through the shared op");
+        assert_eq!(imported.width, 2);
+        assert_eq!(imported.height, 2);
+        assert!(
+            imported.name.contains("gui-ops"),
+            "the file name is the default asset name: {}",
+            imported.name
+        );
+        assert_eq!(core.undo_depth(), depth + 1, "one undo step");
+        assert_eq!(
+            core.status,
+            format!(
+                "Asset imported ('{}', asset {}).",
+                imported.name,
+                imported.index + 1
+            )
+        );
+        // Rename: a real change spends one step, a no-op
+        // spends none, a blank name is refused.
+        assert!(rename_asset(&mut core, imported.index, "  hero  ").unwrap());
+        assert_eq!(core.project.assets[imported.index].name, "hero");
+        assert_eq!(core.undo_depth(), depth + 2);
+        assert!(!rename_asset(&mut core, imported.index, "hero").unwrap());
+        assert_eq!(core.undo_depth(), depth + 2, "no-op rename spends nothing");
+        assert!(rename_asset(&mut core, imported.index, "   ").is_err());
+        // Removal: refused while a sprite references the
+        // asset (with the census in the sentence), then —
+        // unreferenced — one step that remaps nothing.
+        core.project.sprites.push(SpriteInstance {
+            asset: imported.index,
+            keys: Vec::new(),
+        });
+        let err = remove_asset(&mut core, imported.index).expect_err("referenced");
+        assert!(err.contains("1 sprite instance(s)"), "err: {err}");
+        assert_eq!(core.undo_depth(), depth + 2, "a refusal spends nothing");
+        core.project.sprites.clear();
+        let remapped = remove_asset(&mut core, imported.index).expect("unreferenced");
+        assert_eq!(remapped, 0);
+        assert_eq!(core.undo_depth(), depth + 3);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn composite_instances_draw_over_segment_media() {
         let mut project = demo_project();
         project.assets.push(ImageAsset {
@@ -3268,6 +4464,113 @@ mod tests {
             }
         }
         assert!(blue > 10, "text instance painted only {blue} blue pixels");
+    }
+
+    // ---- Roadmap Wave 1 (RM2, F-2): shaped text ----
+
+    #[test]
+    fn shaped_bengali_line_renders_real_glyphs() {
+        // The P0-2 acceptance pin: a Bengali line comes out
+        // of the shaped renderer as proved glyphs — ink in
+        // the band, and a shaped word far wider than any
+        // run of bitmap cells.
+        let mut img = RgbaImage::from_pixel(240, 120, Rgba([0, 0, 0, 255]));
+        let drew =
+            composite_shaped_text(&mut img, [120.0, 60.0], "বাংলা", 40.0, 0xFFFFFF, 1.0);
+        assert!(drew, "no covering font resolved for Bengali");
+        let mut ink = 0u32;
+        let (mut min_x, mut max_x) = (u32::MAX, 0u32);
+        for y in 30..90 {
+            for x in 0..240 {
+                if img.get_pixel(x, y)[0] > 200 {
+                    ink += 1;
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                }
+            }
+        }
+        assert!(ink > 100, "Bengali line painted only {ink} ink pixels");
+        assert!(
+            max_x - min_x > 40,
+            "Bengali ink spans only {} px",
+            max_x - min_x
+        );
+    }
+
+    #[test]
+    fn shaped_bengali_conjuncts_form_fewer_glyphs_than_chars() {
+        // বাংল = ব + া + ং ligates/conjuncts: the shaper
+        // emits fewer glyphs than the string has chars, and
+        // every glyph is a proved face glyph (never .notdef).
+        let line = shape_line("বাংলা", 40.0).expect("Bengali shapes on this system");
+        assert!(line.glyphs.iter().all(|g| g.id != 0), "a .notdef glyph slipped in");
+        assert!(
+            line.glyphs.len() < "বাংলা".chars().count(),
+            "no shaping happened: {} glyphs for {} chars",
+            line.glyphs.len(),
+            "বাংলা".chars().count()
+        );
+        assert!(line.width > 40.0, "shaped width {} implausibly small", line.width);
+    }
+
+    #[test]
+    fn shaped_latin_line_renders() {
+        let mut img = RgbaImage::from_pixel(240, 120, Rgba([0, 0, 0, 255]));
+        let drew =
+            composite_shaped_text(&mut img, [120.0, 60.0], "Hello", 40.0, 0xFFFFFF, 1.0);
+        assert!(drew, "no covering font resolved for Latin");
+        let ink = (30..90)
+            .flat_map(|y| (0..240).map(move |x| (x, y)))
+            .filter(|&(x, y)| img.get_pixel(x, y)[0] > 200)
+            .count();
+        assert!(ink > 100, "Latin line painted only {ink} ink pixels");
+    }
+
+    #[test]
+    fn funnel_text_instance_with_bengali_content_paints_ink() {
+        // The funnel default: a Bengali TEXT INSTANCE rides
+        // the shaped path through composite_media (the tile
+        // splat), not the stamp.
+        let mut project = demo_project();
+        project.texts.push(TextInstance {
+            content: "বাংলা".into(),
+            size: 25.0,
+            color: 0xFFFFFF,
+            keys: vec![InstanceKey {
+                frame: 0.0,
+                x: 100.0,
+                y: 250.0,
+                scale: 1.0,
+                angle: 0.0,
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
+            }],
+        });
+        let mut img = RgbaImage::from_pixel(400, 300, Rgba([0, 0, 0, 255]));
+        composite_media(&project, 0.0, &mut img, &|p| p);
+        let ink = (225..275)
+            .flat_map(|y| (30..170).map(move |x| (x, y)))
+            .filter(|&(x, y)| img.get_pixel(x, y)[0] > 200)
+            .count();
+        assert!(ink > 40, "Bengali instance painted only {ink} ink pixels");
+    }
+
+    #[test]
+    fn bitmap_stamp_renders_uncovered_char_as_question_mark() {
+        // The pixel style's defining behaviour, pinned so
+        // the fallback stays honest: through the bitmap
+        // renderer a Bengali char stamps EXACTLY the `?`
+        // glyph — the shaped renderer's refusal to do this
+        // is the whole point of F-2.
+        let mut a = RgbaImage::from_pixel(60, 40, Rgba([0, 0, 0, 255]));
+        composite_bitmap_text(&mut a, [30.0, 20.0], "ব", 20.0, 0xFFFFFF, 1.0);
+        let mut b = RgbaImage::from_pixel(60, 40, Rgba([0, 0, 0, 255]));
+        composite_bitmap_text(&mut b, [30.0, 20.0], "?", 20.0, 0xFFFFFF, 1.0);
+        assert_eq!(a.as_raw(), b.as_raw());
     }
 
     // ---- Wave 12: asset-table MCP handlers ----

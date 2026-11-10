@@ -297,13 +297,46 @@
 //! (`audio_readout_i18n_keys_exist_and_match_the_english`)
 //! asserts the two agree. Status sentences stay
 //! English throughout.
+//!
+//! Roadmap Wave 1 (RM20, P-10 — audio panel depth)
+//! builds the four depths the audit asked for:
+//! (1) a TRIM control: Start/End number fields (the
+//! F-3 kit, seconds domain) over the engine's existing
+//! `EditorCore::audio_trim` — the op stops being
+//! engine+MCP-only; an Apply press is the one snapshot.
+//! (2) A BROWSE add flow: `./audio/`'s audio files (the
+//! op's own scan set) list as pressable rows under the
+//! add row, so adding stops being typing-only; the
+//! typed field stays for paths outside `./audio/`.
+//! (3) Gain in decibels: the Position & gain group's
+//! stepper becomes the kit's bounded-value composite on
+//! a dB spec (slider + typeable field + the same
+//! `audio-gain-dn`/`audio-gain-up` steppers), and a
+//! level-meter block under the readout shows the target
+//! clip's post-gain peak/RMS from the probe (the probe
+//! now carries RMS beside peak). Scrubs write quietly
+//! under one lazy snapshot (the camera scrub-gesture
+//! discipline, homed here); typed commits and stepper
+//! presses ride `audio_set_gain_at` as before.
+//! (4) Effect SETTINGS: the five DSP effects stop being
+//! fixed-parameter — `audio_ops` grew parameterised
+//! `*_with` twins (the fixed ops delegate at the
+//! published constants, byte-identical), and a settings
+//! block under the Effects group holds one stepper per
+//! parameter (session state, defaults = the constants).
+//! The Wave 4 caption that NAMED the fixed values is
+//! retired with the fixity it described. The Pitch
+//! button's label drops its "+2" for the same reason
+//! (IA-RM20-2). New copy resolves through new `audio_*`
+//! keys (IA-RM20-2) on the Q7 pattern; the
+//! `sync_number_edits` poll call is IA-RM20-1.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::SystemTime;
 
 use rune::tok::{type_, Theme};
-use rune::{row, text, El, TextEdit, Tx};
+use rune::{col, el, row, text, Drag, El, Phase, TextEdit, Tx};
 use stykanimate_rs::audio_edit;
 use stykanimate_rs::audio_ops;
 use stykanimate_rs::editor::EditorCore;
@@ -343,6 +376,35 @@ pub struct AudioPanelState {
     /// only when a file appears or changes. See
     /// `probe_clip`.
     pub probe_cache: RefCell<ProbeCache>,
+    /// Roadmap Wave 1 (RM20): the gain field's type
+    /// session (the F-3 kit's [`design::NumberEdit`]).
+    pub gain_edit: design::NumberEdit,
+    /// Roadmap Wave 1 (RM20): the gain scrub's undo
+    /// bookkeeping (see [`ScrubGesture`]).
+    pub gain_scrub: ScrubGesture,
+    /// Roadmap Wave 1 (RM20): the trim Start field's
+    /// type session.
+    pub trim_start_edit: design::NumberEdit,
+    /// Roadmap Wave 1 (RM20): the trim End field's type
+    /// session.
+    pub trim_end_edit: design::NumberEdit,
+    /// Roadmap Wave 1 (RM20): the pending trim values
+    /// (seconds) — panel state, not project state: they
+    /// take effect only at the Apply press, which is
+    /// the op's one snapshot. `trim_for` names the clip
+    /// index they were seeded/adopted for; any other
+    /// target renders the seed defaults instead (see
+    /// `trim_values`).
+    pub trim_start: f32,
+    pub trim_end: f32,
+    pub trim_for: Option<usize>,
+    /// Roadmap Wave 1 (RM20): the effect parameters the
+    /// next effect press applies (session state; see
+    /// [`FxParams`]).
+    pub fx: FxParams,
+    /// Roadmap Wave 1 (RM20): whether the `./audio/`
+    /// browse list is open under the add row.
+    pub browse_open: bool,
 }
 
 impl AudioPanelState {
@@ -351,6 +413,208 @@ impl AudioPanelState {
             name: TextEdit::new(""),
             selected: None,
             probe_cache: RefCell::new(HashMap::new()),
+            gain_edit: design::NumberEdit::new(),
+            gain_scrub: ScrubGesture::default(),
+            trim_start_edit: design::NumberEdit::new(),
+            trim_end_edit: design::NumberEdit::new(),
+            trim_start: 0.0,
+            trim_end: 0.0,
+            trim_for: None,
+            fx: FxParams::default(),
+            browse_open: false,
+        }
+    }
+}
+
+/// One number-field scrub gesture's undo bookkeeping
+/// (Roadmap Wave 1, RM20 — the camera panel's F-3
+/// discipline, homed here for the gain slider/field):
+/// the gain op snapshots per call, so a scrub writing
+/// through it would flood the undo stack — instead the
+/// gesture takes ONE snapshot, lazily, at its first
+/// real change, and every write after that is
+/// field-level ([`write_gain_quiet`]). `press` is the
+/// gain the gesture started from: the kit's cancel path
+/// calls the scrub write once more with exactly that
+/// value, which seals the gesture (see
+/// [`gain_scrub_write`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScrubGesture {
+    /// A snapshot has been taken for the in-flight scrub.
+    pub open: bool,
+    /// The gain the in-flight scrub started from.
+    pub press: f32,
+}
+
+/// The effect parameters the next DSP press applies
+/// (Roadmap Wave 1, RM20): session state for the
+/// settings steppers under the Effects group, seeded
+/// from the `audio_ops` constants — a press today
+/// behaves exactly as the fixed ops always did until
+/// the user steps a value. The values are NOT project
+/// state and do not persist: they shape the next
+/// materialised edit, whose product file is the record.
+#[derive(Clone, Copy, Debug)]
+pub struct FxParams {
+    pub fade_in: f32,
+    pub fade_out: f32,
+    pub echo_delay: f32,
+    pub echo_feedback: f32,
+    pub lowpass_hz: f32,
+    pub pitch_st: f32,
+    pub comp_threshold: f32,
+    pub comp_ratio: f32,
+}
+
+impl Default for FxParams {
+    fn default() -> Self {
+        FxParams {
+            fade_in: audio_ops::FADE_IN_SECS,
+            fade_out: audio_ops::FADE_OUT_SECS,
+            echo_delay: audio_ops::ECHO_DELAY_SECS,
+            echo_feedback: audio_ops::ECHO_FEEDBACK,
+            lowpass_hz: audio_ops::LOWPASS_HZ,
+            pitch_st: audio_ops::PITCH_SEMITONES,
+            comp_threshold: audio_ops::COMP_THRESHOLD,
+            comp_ratio: audio_ops::COMP_RATIO,
+        }
+    }
+}
+
+/// One effect parameter's identity for the settings
+/// steppers (Roadmap Wave 1, RM20): its field in
+/// [`FxParams`], its stepper contract, its label key
+/// and its readout format. The specs' ranges ARE the
+/// `*_with` ops' sanitise ranges and their defaults
+/// the ops' constants, so a value the stepper can
+/// reach is a value the op applies unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FxParam {
+    FadeIn,
+    FadeOut,
+    EchoDelay,
+    EchoFeedback,
+    LowpassHz,
+    PitchSt,
+    CompThreshold,
+    CompRatio,
+}
+
+impl FxParam {
+    /// Every parameter, in the settings block's row
+    /// order (the Effects group's button order, fade
+    /// first).
+    pub const ALL: [FxParam; 8] = [
+        FxParam::FadeIn,
+        FxParam::FadeOut,
+        FxParam::EchoDelay,
+        FxParam::EchoFeedback,
+        FxParam::LowpassHz,
+        FxParam::PitchSt,
+        FxParam::CompThreshold,
+        FxParam::CompRatio,
+    ];
+
+    /// The parameter's field in `fx` plus its contract.
+    pub fn access(self, fx: &mut FxParams) -> (&mut f32, design::NumSpec) {
+        match self {
+            FxParam::FadeIn => (&mut fx.fade_in, Self::secs_spec(0.0, 10.0, 0.05)),
+            FxParam::FadeOut => (&mut fx.fade_out, Self::secs_spec(0.0, 10.0, 0.05)),
+            FxParam::EchoDelay => (&mut fx.echo_delay, Self::secs_spec(0.01, 2.0, 0.01)),
+            FxParam::EchoFeedback => (
+                &mut fx.echo_feedback,
+                design::NumSpec::percent(0.0, 0.95, 0.05),
+            ),
+            FxParam::LowpassHz => {
+                let mut spec = design::NumSpec::new(40.0, 16000.0, 100.0);
+                spec.suffix = " Hz";
+                (&mut fx.lowpass_hz, spec)
+            }
+            FxParam::PitchSt => {
+                let mut spec = design::NumSpec::new(-24.0, 24.0, 1.0);
+                spec.suffix = " st";
+                (&mut fx.pitch_st, spec)
+            }
+            FxParam::CompThreshold => {
+                let mut spec = design::NumSpec::new(0.05, 1.0, 0.05);
+                spec.decimals = 2;
+                (&mut fx.comp_threshold, spec)
+            }
+            FxParam::CompRatio => {
+                let mut spec = design::NumSpec::new(1.0, 20.0, 0.5);
+                spec.suffix = ":1";
+                (&mut fx.comp_ratio, spec)
+            }
+        }
+    }
+
+    fn secs_spec(min: f32, max: f32, step: f32) -> design::NumSpec {
+        let mut spec = design::NumSpec::new(min, max, step);
+        spec.decimals = 2;
+        spec.suffix = " s";
+        spec
+    }
+
+    /// The parameter's current value in `fx` (read-only
+    /// twin of [`Self::access`]).
+    pub fn value(self, fx: &FxParams) -> f32 {
+        match self {
+            FxParam::FadeIn => fx.fade_in,
+            FxParam::FadeOut => fx.fade_out,
+            FxParam::EchoDelay => fx.echo_delay,
+            FxParam::EchoFeedback => fx.echo_feedback,
+            FxParam::LowpassHz => fx.lowpass_hz,
+            FxParam::PitchSt => fx.pitch_st,
+            FxParam::CompThreshold => fx.comp_threshold,
+            FxParam::CompRatio => fx.comp_ratio,
+        }
+    }
+
+    /// The parameter's stepper contract (for the view's
+    /// StepForms and readouts).
+    pub fn spec(self) -> design::NumSpec {
+        let mut fx = FxParams::default();
+        self.access(&mut fx).1
+    }
+
+    /// The settings row's label key (IA-RM20-2).
+    pub fn label_key(self) -> &'static str {
+        match self {
+            FxParam::FadeIn => "audio_fx_fade_in",
+            FxParam::FadeOut => "audio_fx_fade_out",
+            FxParam::EchoDelay => "audio_fx_echo_delay",
+            FxParam::EchoFeedback => "audio_fx_echo_feedback",
+            FxParam::LowpassHz => "audio_fx_lowpass",
+            FxParam::PitchSt => "audio_fx_pitch",
+            FxParam::CompThreshold => "audio_fx_comp_threshold",
+            FxParam::CompRatio => "audio_fx_comp_ratio",
+        }
+    }
+
+    /// The key suffix for the parameter's stepper keys
+    /// (`audio-fx-{slug}-dn` / `-up`).
+    pub fn slug(self) -> &'static str {
+        match self {
+            FxParam::FadeIn => "fade-in",
+            FxParam::FadeOut => "fade-out",
+            FxParam::EchoDelay => "echo-delay",
+            FxParam::EchoFeedback => "echo-fb",
+            FxParam::LowpassHz => "lowpass",
+            FxParam::PitchSt => "pitch",
+            FxParam::CompThreshold => "comp-thr",
+            FxParam::CompRatio => "comp-ratio",
+        }
+    }
+
+    /// The parameter's readout text: the spec's format,
+    /// except pitch, whose sign is the information
+    /// ("+2 st", "-3 st").
+    pub fn readout(self, fx: &FxParams) -> String {
+        let value = self.value(fx);
+        if self == FxParam::PitchSt {
+            format!("{value:+.0} st")
+        } else {
+            self.spec().format(value)
         }
     }
 }
@@ -857,6 +1121,10 @@ pub struct ClipProbe {
     pub health: ClipHealth,
     pub duration_secs: Option<f32>,
     pub peak: Option<f32>,
+    /// Roadmap Wave 1 (RM20): the decoded file's RMS
+    /// level, beside the peak — the level meters' second
+    /// row. `None` exactly when `peak` is.
+    pub rms: Option<f32>,
 }
 
 impl ClipProbe {
@@ -867,6 +1135,7 @@ impl ClipProbe {
             health: ClipHealth::Missing,
             duration_secs: None,
             peak: None,
+            rms: None,
         }
     }
 }
@@ -971,6 +1240,7 @@ fn classify_clip(clip: &AudioClip) -> ClipProbe {
             health: ClipHealth::Unsupported,
             duration_secs: None,
             peak: None,
+            rms: None,
         };
     }
     match audio_edit::read_wav(&clip.path) {
@@ -984,12 +1254,14 @@ fn classify_clip(clip: &AudioClip) -> ClipProbe {
                 health: ClipHealth::Healthy,
                 duration_secs,
                 peak: Some(audio_edit::peak(&wav)),
+                rms: Some(audio_edit::rms(&wav)),
             }
         }
         Err(_) => ClipProbe {
             health: ClipHealth::Unreadable,
             duration_secs: None,
             peak: None,
+            rms: None,
         },
     }
 }
@@ -1093,19 +1365,344 @@ pub fn probes_with_shared_missing(
     probes
 }
 
-/// The fixed settings the one-click effects apply,
-/// stated before the fact (audit D3): fade length, echo
-/// delay/feedback, lowpass cutoff, pitch shift and
-/// compressor threshold/ratio are constants inside the
-/// `audio_ops` ops — the panel cannot offer parameter
-/// controls the ops would not honour, so it names the
-/// values instead (audit I-4 parameterises the ops).
-/// Every number here is the op's own: fade 0.25 s in /
-/// 0.25 s out (`FADE_IN_SECS` / `FADE_OUT_SECS`), echo
-/// 0.18 s / 0.35, lowpass 1200 Hz, pitch +2 semitones,
-/// compress threshold 0.5 ratio 4.0.
+/// The line under the Effects group. Until Roadmap
+/// Wave 1 it NAMED the effects' fixed settings (audit
+/// D3: the panel could not offer parameter controls
+/// the ops would not honour, so it stated the constants
+/// before the fact). RM20 parameterised the ops
+/// (`audio_ops`' `*_with` twins) and the steppers below
+/// ARE the settings now, so the line states the rule
+/// instead: the values are session state, seeded from
+/// the old constants (fade 0.25 s in/out, echo 0.18 s /
+/// 35 %, lowpass 1200 Hz, pitch +2, compress 0.5 / 4:1),
+/// applied at the next press. English by classification,
+/// like its predecessor.
 pub fn effects_settings_line() -> &'static str {
-    "Fixed settings — fade 0.25 s in/out · echo 0.18 s delay, 35% feedback · lowpass 1200 Hz · pitch +2 semitones · compress 0.5 threshold, 4:1 ratio"
+    "Effect settings — the steppers below set the values the next effect press applies; they start at the classic values and last for the session."
+}
+
+// ---- Roadmap Wave 1 (RM20): dB gain, trim, meters ----
+//
+// The pure machinery of the RM20 surfaces, unit-tested
+// below: the dB conversions and specs the gain composite
+// and trim fields share, the pending-trim resolution,
+// the meter mappings, and the `./audio/` browse scan.
+
+/// Linear gain → decibels (`20·log10(gain)`). Gain 0
+/// (and any non-positive or non-finite input) reads as
+/// −∞ — the caller formats it; the gain spec's floor
+/// keeps field/slider values finite regardless.
+pub fn gain_to_db(gain: f32) -> f32 {
+    if gain > 0.0 && gain.is_finite() {
+        20.0 * gain.log10()
+    } else {
+        f32::NEG_INFINITY
+    }
+}
+
+/// Decibels → linear gain (`10^(db/20)`), the inverse
+/// of [`gain_to_db`] over the audible range.
+pub fn db_to_gain(db: f32) -> f32 {
+    10f32.powf(db / 20.0)
+}
+
+/// The dB readout for a linear gain: `"+6.0 dB"` /
+/// `"+0.0 dB"` / `"-6.0 dB"`, and `"-∞ dB"` at gain 0 —
+/// the truth the field's clamped floor cannot show.
+pub fn gain_db_text(gain: f32) -> String {
+    let db = gain_to_db(gain);
+    if db.is_finite() {
+        format!("{db:+.1} dB")
+    } else {
+        "-∞ dB".to_string()
+    }
+}
+
+/// The gain field/slider contract (Roadmap Wave 1,
+/// RM20): the dB domain over the audible range of the
+/// op's own clamp (`audio_set_gain_at` clamps the
+/// linear gain to 0.0..=2.0 = −∞..=+6.02 dB). The floor
+/// is −36 dB (≈ ×0.016, effectively silent; exact 0
+/// stays the steppers'/mute's province and reads "−∞ dB"
+/// in [`gain_db_text`]), the ceiling +6.1 dB so a typed
+/// maximum still lands on the op's exact 2.0 clamp, and
+/// the step is 0.5 dB. The slider's fraction runs over
+/// this same range, so slider, field and steppers are
+/// three doors onto one dB value.
+pub fn gain_spec() -> design::NumSpec {
+    let mut spec = design::NumSpec::new(-36.0, 6.1, 0.5);
+    spec.suffix = " dB";
+    spec
+}
+
+/// The trim field contract for a clip of `duration`
+/// seconds (the probed duration when known): 0..=duration
+/// at 0.1 s steps, two decimals (a 0.25 s trim must be
+/// typeable even though the step is coarser). An
+/// unprobeable clip gets a nominal one-hour ceiling —
+/// the op itself validates the range against the real
+/// file and refuses an empty trim, so the ceiling only
+/// bounds typing, never invents content.
+pub fn trim_spec(duration: Option<f32>) -> design::NumSpec {
+    let max = duration.filter(|d| *d > 0.0).unwrap_or(3600.0);
+    let mut spec = design::NumSpec::new(0.0, max, 0.1);
+    spec.decimals = 2;
+    spec.suffix = " s";
+    spec
+}
+
+/// The trim values the panel shows and Apply uses for
+/// clip `target`: the pending pair while they belong
+/// to that clip (`trim_for == Some(target)`), else the
+/// seed defaults — start 0, end the probed duration
+/// (0 while unknown, which the field's spec still
+/// renders and the op still validates).
+pub fn trim_values(state: &AudioPanelState, target: usize, duration: Option<f32>) -> (f32, f32) {
+    if state.trim_for == Some(target) {
+        (state.trim_start, state.trim_end)
+    } else {
+        (0.0, duration.unwrap_or(0.0))
+    }
+}
+
+/// Adopt `target` for the pending trim values: the
+/// first write (field commit or scrub) aimed at a clip
+/// the pending pair does not belong to seeds the pair
+/// from that clip's defaults, so a write can never
+/// carry one clip's trim into another's. `duration` is
+/// the target's probed duration at render time.
+fn adopt_trim(s: &mut State, duration: Option<f32>) {
+    let Some(target) = effective_target(s.audio_panel.selected, s.core.project.audio.len())
+    else {
+        return;
+    };
+    if s.audio_panel.trim_for != Some(target) {
+        let (start, end) = trim_values(&s.audio_panel, target, duration);
+        s.audio_panel.trim_start = start;
+        s.audio_panel.trim_end = end;
+        s.audio_panel.trim_for = Some(target);
+    }
+}
+
+/// [`adopt_trim`] with the duration probed on the spot
+/// (a cache hit — the render probed every clip already)
+/// for the trim fields' write closures, which run
+/// outside the render that owned the probe list.
+fn adopt_trim_now(s: &mut State) {
+    let Some(target) = effective_target(s.audio_panel.selected, s.core.project.audio.len())
+    else {
+        return;
+    };
+    let duration = probe_clip(&s.audio_panel.probe_cache, &s.core.project.audio[target])
+        .duration_secs;
+    adopt_trim(s, duration);
+}
+
+/// Write clip `index`'s gain WITHOUT a snapshot or a
+/// status — the scrub discipline's field-level write.
+/// Sanitises exactly as `audio_set_gain_at` does (NaN
+/// → unity, clamp 0.0..=2.0); an out-of-range index
+/// writes nothing. The gesture's one snapshot is
+/// [`gain_scrub_write`]'s business.
+pub fn write_gain_quiet(core: &mut EditorCore, index: usize, gain: f32) {
+    if let Some(clip) = core.project.audio.get_mut(index) {
+        clip.gain = if gain.is_nan() {
+            1.0
+        } else {
+            gain.clamp(0.0, 2.0)
+        };
+    }
+}
+
+/// A gain scrub's silent write, under
+/// [`ScrubGesture`]'s bookkeeping (the camera panel's
+/// F-3 discipline): the first write that actually
+/// changes the target's gain takes the gesture's one
+/// snapshot; later writes are field-level. A write of
+/// exactly the press gain while a gesture is open is
+/// the kit's cancel-restore — it writes the value back
+/// and seals the gesture.
+fn gain_scrub_write(s: &mut State, db: f32) {
+    let Some(i) = effective_target(s.audio_panel.selected, s.core.project.audio.len()) else {
+        return;
+    };
+    let gain = db_to_gain(db);
+    let current = s.core.project.audio[i].gain;
+    let gesture = &mut s.audio_panel.gain_scrub;
+    if gesture.open && gain == gesture.press {
+        write_gain_quiet(&mut s.core, i, gain);
+        gesture.open = false;
+        return;
+    }
+    if !gesture.open {
+        if gain == current {
+            return;
+        }
+        s.core.snapshot();
+        gesture.press = current;
+        gesture.open = true;
+    }
+    write_gain_quiet(&mut s.core, i, gain);
+}
+
+/// A gain scrub's release: the final quiet write and
+/// the one status recap, in `audio_set_gain_at`'s own
+/// wording. A scrub that changed nothing leaves no
+/// trace — no snapshot, no recap.
+fn gain_scrub_finish(s: &mut State, db: f32) {
+    let Some(i) = effective_target(s.audio_panel.selected, s.core.project.audio.len()) else {
+        return;
+    };
+    let gain = db_to_gain(db).clamp(0.0, 2.0);
+    let current = s.core.project.audio[i].gain;
+    if s.audio_panel.gain_scrub.open {
+        write_gain_quiet(&mut s.core, i, gain);
+    } else if gain != current {
+        s.core.snapshot();
+        write_gain_quiet(&mut s.core, i, gain);
+    } else {
+        return;
+    }
+    s.audio_panel.gain_scrub.open = false;
+    s.core.status = format!("Audio clip {} gain set to {gain:.2}.", i + 1);
+}
+
+/// Commit a dB value as the target's gain through the
+/// op itself (typed field commits and the composite's
+/// steppers): one snapshot and the op's status, with
+/// the no-clips line coming from the `_last` op.
+fn gain_commit_db(s: &mut State, db: f32) {
+    s.audio_panel.gain_scrub.open = false;
+    let gain = db_to_gain(db);
+    match effective_target(s.audio_panel.selected, s.core.project.audio.len()) {
+        Some(i) => s.core.audio_set_gain_at(i, gain),
+        None => s.core.audio_set_gain_last(gain),
+    }
+}
+
+/// One stepper press on the gain row: step the
+/// target's current dB by the spec's step and commit
+/// through [`gain_commit_db`] — the row steppers'
+/// handler (the linear `audio_clip_gain_step` handler
+/// of the stepper era is retired with its buttons).
+fn gain_step_db(s: &mut State, dir: i32) {
+    let spec = gain_spec();
+    let current = spec.clamp(gain_to_db(
+        target_gain(&s.core.project.audio, s.audio_panel.selected).unwrap_or(1.0),
+    ));
+    gain_commit_db(s, spec.stepped(current, dir));
+}
+
+/// The gain slider's drag: a press anchors the current gain in
+/// `Drag::data`; moves map the pointer's fraction of
+/// the track onto the dB spec and scrub quietly
+/// ([`gain_scrub_write`]); the release finishes the
+/// scrub ([`gain_scrub_finish`]), and a cancelled drag
+/// restores the press gain behind the gesture's
+/// snapshot and seals it.
+fn gain_slider_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
+    match d.phase {
+        Phase::Down => {
+            d.data = target_gain(&s.core.project.audio, s.audio_panel.selected).unwrap_or(1.0);
+        }
+        Phase::Move => {
+            if d.w > 0.0 {
+                let db = gain_spec().value_at_frac(d.x / d.w);
+                gain_scrub_write(s, db);
+                tx.instant();
+            }
+        }
+        Phase::Up => {
+            if d.cancelled() {
+                if s.audio_panel.gain_scrub.open {
+                    if let Some(i) =
+                        effective_target(s.audio_panel.selected, s.core.project.audio.len())
+                    {
+                        let press = s.audio_panel.gain_scrub.press;
+                        write_gain_quiet(&mut s.core, i, press);
+                    }
+                    s.audio_panel.gain_scrub.open = false;
+                }
+            } else if d.w > 0.0 {
+                let db = gain_spec().value_at_frac(d.x / d.w);
+                gain_scrub_finish(s, db);
+            }
+        }
+    }
+}
+
+/// A level's meter fraction: 0 at −60 dB, 1 at 0 dB,
+/// clamped — the meter's whole scale, so a +6 dB peak
+/// reads full and its over-0 truth rides the label and
+/// the bar's error ink instead of a longer track.
+pub fn level_frac(db: f32) -> f32 {
+    if db.is_finite() {
+        ((db + 60.0) / 60.0).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// The meter label for a post-gain amplitude:
+/// `"-3.2 dB"` / `"+0.0 dB"` / `"+1.5 dB"`, `"-∞ dB"`
+/// for silence.
+pub fn level_db_text(amp: f32) -> String {
+    let db = gain_to_db(amp);
+    if db.is_finite() {
+        format!("{db:+.1} dB")
+    } else {
+        "-∞ dB".to_string()
+    }
+}
+
+/// The maximum number of files the browse list shows;
+/// a larger `./audio/` is reported by the trailing
+/// "more not shown" line rather than building a row
+/// per file without bound.
+pub const BROWSE_CAP: usize = 100;
+
+/// The audio files in `dir`, sorted by path — the
+/// browse list's source. The extension set and the
+/// sort are `EditorCore::first_file_with`'s own (the
+/// scan `add_audio_clip` picks from): wav/mp3/ogg,
+/// case-insensitive. A missing or unreadable directory
+/// yields an empty vec — the list then shows its
+/// no-files line, which is the truth either way.
+/// Paths come back in the same relative form the
+/// typed add stores (`audio/<name>` for `./audio/`).
+pub fn audio_files_in(dir: &std::path::Path) -> Vec<String> {
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.extension()
+                        .map(|x| {
+                            ["wav", "mp3", "ogg"]
+                                .iter()
+                                .any(|e| x.eq_ignore_ascii_case(e))
+                        })
+                        .unwrap_or(false)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+    files
+        .into_iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Poll sync (the `sync_name_edit` idiom, called from
+/// the shell's `poll` — IA-RM20-1): revert any audio
+/// number-field session the framework has blurred —
+/// Escape lands here as a revert, per the kit's
+/// session rules ([`design::NumberEdit::reconcile`]).
+pub fn sync_number_edits(s: &mut State) {
+    s.audio_panel.gain_edit.reconcile();
+    s.audio_panel.trim_start_edit.reconcile();
+    s.audio_panel.trim_end_edit.reconcile();
 }
 
 // ---- Handlers ----
@@ -1124,20 +1721,31 @@ fn add_clip(s: &mut State) {
     if name.is_empty() {
         s.core.add_audio_clip();
     } else {
-        let status = format!(
-            "Audio clip added at frame {}: {name}",
-            s.core.current + 1
-        );
-        s.core.snapshot();
-        s.core.project.audio.push(AudioClip {
-            path: name,
-            start_frame: s.core.current,
-            gain: 1.0,
-            muted: false,
-        });
-        s.core.status = status;
+        add_clip_path(s, name);
     }
     s.audio_panel.name.clear();
+}
+
+/// Roadmap Wave 1 (RM20): add a clip for `path` at the
+/// playhead — the typed add's construction, shared with
+/// the browse list's rows so both doors build the same
+/// clip and speak the same status. (Existence is NOT
+/// checked here, exactly as the typed add never checked
+/// it: a wrong path becomes a clip whose row reports
+/// the missing file through the health probe.)
+fn add_clip_path(s: &mut State, path: String) {
+    let status = format!(
+        "Audio clip added at frame {}: {path}",
+        s.core.current + 1
+    );
+    s.core.snapshot();
+    s.core.project.audio.push(AudioClip {
+        path,
+        start_frame: s.core.current,
+        gain: 1.0,
+        muted: false,
+    });
+    s.core.status = status;
 }
 
 /// Enter in the file-name field adds the clip (the field's
@@ -1238,15 +1846,16 @@ fn mute_target(s: &mut State) {
     }
 }
 
-/// Fade the target clip: the indexed op when a clip is
-/// selected, the `_last` op otherwise (which also covers
-/// the no-clips status line). DEPENDENCY (Phase G): calls
-/// `EditorCore::audio_fade_at` from the parallel
-/// `audio_ops` section — until that lands this file does
-/// not compile, by design.
+/// Fade the target clip with the panel's current fade
+/// settings (Roadmap Wave 1, RM20): the parameterised
+/// op on the effective target; the fixed `_last` op
+/// only for the no-clips status line. (Pre-RM20 this
+/// dispatched to the fixed `audio_fade_at`, which now
+/// delegates to the same twin at the constants.)
 fn fade_target(s: &mut State) {
-    match live_target(s) {
-        Some(i) => s.core.audio_fade_at(i),
+    let fx = s.audio_panel.fx;
+    match effective_target(s.audio_panel.selected, s.core.project.audio.len()) {
+        Some(i) => s.core.audio_fade_at_with(i, fx.fade_in, fx.fade_out),
         None => s.core.audio_fade_last(),
     }
 }
@@ -1261,16 +1870,12 @@ fn reverse_target(s: &mut State) {
     }
 }
 
-/// Step the target clip's gain by `delta`; same dispatch
-/// as `fade_target`. Calls
-/// `EditorCore::audio_clip_gain_step_at` (Phase G
-/// `audio_ops` dependency, as above).
-fn gain_step_target(s: &mut State, delta: f32) {
-    match live_target(s) {
-        Some(i) => s.core.audio_clip_gain_step_at(i, delta),
-        None => s.core.audio_clip_gain_step(delta),
-    }
-}
+/// (Roadmap Wave 1, RM20: the gain stepper handler
+/// that lived here — `gain_step_target`, dispatching to
+/// `audio_clip_gain_step_at` — is retired: the dB
+/// composite's steppers commit through
+/// [`gain_commit_db`] on the dB step instead. The op
+/// itself is untouched and still serves MCP.)
 
 /// Move the target clip by `delta_frames`; same dispatch
 /// as `fade_target`. Calls `EditorCore::audio_move_at`
@@ -1282,25 +1887,25 @@ fn move_target(s: &mut State, delta_frames: i32) {
     }
 }
 
-/// Echo the target clip; same dispatch as `fade_target`.
-/// DEPENDENCY (Phase H): calls `EditorCore::audio_echo_at`
-/// from the parallel `audio_ops` section (§37) — until
-/// that lands this file does not compile, by design. The
-/// no-selection fallback keeps the `editor.rs` `_last` op,
-/// whose no-clips status is unchanged.
+/// Echo the target clip with the panel's current echo
+/// settings (Roadmap Wave 1, RM20): the parameterised
+/// op on the effective target; the `editor.rs` `_last`
+/// op only for the no-clips status line.
 fn echo_target(s: &mut State) {
-    match live_target(s) {
-        Some(i) => s.core.audio_echo_at(i),
+    let fx = s.audio_panel.fx;
+    match effective_target(s.audio_panel.selected, s.core.project.audio.len()) {
+        Some(i) => s.core.audio_echo_at_with(i, fx.echo_delay, fx.echo_feedback),
         None => s.core.audio_echo_last(),
     }
 }
 
-/// Low-pass the target clip; same dispatch as
-/// `echo_target`. Calls `EditorCore::audio_lowpass_at`
-/// (Phase H `audio_ops` dependency, as above).
+/// Low-pass the target clip with the panel's current
+/// cutoff (Roadmap Wave 1, RM20); same dispatch as
+/// `echo_target`.
 fn lowpass_target(s: &mut State) {
-    match live_target(s) {
-        Some(i) => s.core.audio_lowpass_at(i),
+    let fx = s.audio_panel.fx;
+    match effective_target(s.audio_panel.selected, s.core.project.audio.len()) {
+        Some(i) => s.core.audio_lowpass_at_with(i, fx.lowpass_hz),
         None => s.core.audio_lowpass_last(),
     }
 }
@@ -1335,17 +1940,15 @@ fn split_silences_target(s: &mut State) {
 }
 
 /// Pitch-shift the target clip; same dispatch as
-/// `echo_target`. Calls `EditorCore::audio_pitch_at`
-/// (Phase H `audio_ops` dependency, as above) with the
-/// index ONLY: verified against the `editor.rs` original
-/// — `audio_pitch_last` takes no amount argument; the
-/// +2 semitones is fixed inside the op
-/// (`audio_edit::pitch_shift(&mut wav, 2.0)`), so the
-/// indexed twin's signature is the `_last` signature plus
-/// the leading index, with no semitones parameter.
+/// `echo_target`. (The Phase H note that the op took
+/// no amount argument is retired by RM20: the
+/// parameterised `audio_pitch_at_with` takes the
+/// panel's semitones, and the fixed `audio_pitch_at`
+/// delegates at +2.)
 fn pitch_target(s: &mut State) {
-    match live_target(s) {
-        Some(i) => s.core.audio_pitch_at(i),
+    let fx = s.audio_panel.fx;
+    match effective_target(s.audio_panel.selected, s.core.project.audio.len()) {
+        Some(i) => s.core.audio_pitch_at_with(i, fx.pitch_st),
         None => s.core.audio_pitch_last(),
     }
 }
@@ -1354,9 +1957,48 @@ fn pitch_target(s: &mut State) {
 /// `echo_target`. Calls `EditorCore::audio_compress_at`
 /// (Phase H `audio_ops` dependency, as above).
 fn compress_target(s: &mut State) {
-    match live_target(s) {
-        Some(i) => s.core.audio_compress_at(i),
+    let fx = s.audio_panel.fx;
+    match effective_target(s.audio_panel.selected, s.core.project.audio.len()) {
+        Some(i) => s.core.audio_compress_at_with(i, fx.comp_threshold, fx.comp_ratio),
         None => s.core.audio_compress_last(),
+    }
+}
+
+/// Roadmap Wave 1 (RM20): step one effect parameter by
+/// `dir` along its spec (the settings steppers under
+/// the Effects group). Session state only — no
+/// snapshot, no status: the value readout updates, and
+/// the next effect press's own status names the values
+/// it applied. The specs are the `*_with` ops'
+/// sanitise ranges, so a stepped value is always one
+/// the op will honour as-is.
+fn fx_step(s: &mut State, param: FxParam, dir: i32) {
+    let fx = &mut s.audio_panel.fx;
+    let (value, spec) = param.access(fx);
+    *value = spec.stepped(*value, dir);
+}
+
+/// Roadmap Wave 1 (RM20): apply the pending trim to
+/// the target clip through the engine op (its one
+/// snapshot, its own status). The pending pair clears
+/// either way: after a successful trim the clip points
+/// at a new, shorter file, so stale values must not
+/// survive into the next render's fields. With no
+/// clips the handler speaks the op family's no-clips
+/// line itself (the Wave 10 discipline — there is no
+/// `_last` trim to report through).
+fn trim_apply(s: &mut State) {
+    match effective_target(s.audio_panel.selected, s.core.project.audio.len()) {
+        Some(i) => {
+            let duration = probe_clip(&s.audio_panel.probe_cache, &s.core.project.audio[i])
+                .duration_secs;
+            let (start, end) = trim_values(&s.audio_panel, i, duration);
+            s.audio_panel.trim_for = None;
+            s.core.audio_trim(i, start, end);
+        }
+        None => {
+            s.core.status = "Audio trim failed: there are no audio clips.".into();
+        }
     }
 }
 
@@ -1368,6 +2010,114 @@ fn delete_row_clip(s: &mut State, i: usize) {
     s.core.delete_audio_clip(i);
     let len_after = s.core.project.audio.len();
     s.audio_panel.selected = selection_after_delete(s.audio_panel.selected, i, len_after);
+}
+
+/// Meter bar width (points): the level meters' track —
+/// wide enough to read against the −60..0 dB scale,
+/// narrow enough to share its row with the label.
+const METER_W: f32 = 150.0;
+
+/// A meter bar's fill (Roadmap Wave 1, RM20): the
+/// level's span at [`level_frac`] of [`METER_W`]. A
+/// peak past unity (post-gain clipping) draws in the
+/// error ink; every other level in the theme accent,
+/// the waveform's hue. Keyless — the keyed rail that
+/// carries it is built in [`meter_block`], so the
+/// track keys sit in census-visible `.key(...)`
+/// literals there (a key passed through a helper as a
+/// parameter would be invisible to the key census).
+fn meter_fill(amp: f32, hot: bool, t: &Theme) -> El {
+    let frac = level_frac(gain_to_db(amp));
+    let fill = if hot {
+        app_theme::error_on(t)
+    } else {
+        app_theme::accent(t)
+    };
+    el().size(METER_W * frac, 6.0).radius(3.0).fill(fill)
+}
+
+/// One meter row: the level's label (the
+/// `audio_meter_peak` / `audio_meter_rms` template over
+/// [`level_db_text`]) beside its keyed track rail.
+fn meter_row(label: String, track: El, t: &Theme) -> El {
+    row()
+        .gap(6.0)
+        .center_y()
+        .w_full()
+        .child(text(label).font(type_::LABEL).color(t.text_secondary).grow(1.0))
+        .child(track)
+}
+
+/// The target clip's level meters (Roadmap Wave 1,
+/// RM20): peak and RMS rows for the POST-GAIN levels —
+/// what the mix will actually hear — from the probe's
+/// decoded peak/RMS scaled by the clip's gain. The
+/// block exists only for a healthy, decoded target
+/// (the caller gates on the probe); a silent clip
+/// meters at −∞ with empty bars, which is the truth.
+fn meter_block(core: &EditorCore, peak_amp: f32, rms_amp: f32, t: &Theme) -> El {
+    col()
+        .key("audio-meters")
+        .gap(4.0)
+        .w_full()
+        .child(meter_row(
+            i18n_wire::tr(core, "audio_meter_peak")
+                .replace("{db}", &level_db_text(peak_amp)),
+            el()
+                .key("audio-meter-peak")
+                .size(METER_W, 6.0)
+                .radius(3.0)
+                .fill(t.control_track)
+                .child(meter_fill(peak_amp, peak_amp > 1.0, t)),
+            t,
+        ))
+        .child(meter_row(
+            i18n_wire::tr(core, "audio_meter_rms")
+                .replace("{db}", &level_db_text(rms_amp)),
+            el()
+                .key("audio-meter-rms")
+                .size(METER_W, 6.0)
+                .radius(3.0)
+                .fill(t.control_track)
+                .child(meter_fill(rms_amp, false, t)),
+            t,
+        ))
+}
+
+/// One effect-settings row (Roadmap Wave 1, RM20):
+/// the parameter's label, its −/+ steppers on the
+/// parameter's spec (the StepForm discipline — a
+/// stepper at its clamp reads as a no-op) and the
+/// value readout between them, in the panel's
+/// stepper-row idiom.
+fn fx_setting_row(s: &State, param: FxParam, t: &Theme) -> El {
+    let spec = param.spec();
+    let value = param.value(&s.audio_panel.fx);
+    row()
+        .gap(6.0)
+        .center_y()
+        .w_full()
+        .child(
+            text(i18n_wire::tr(&s.core, param.label_key()))
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .grow(1.0),
+        )
+        .child(design::step_btn(
+            &format!("audio-fx-{}-dn", param.slug()),
+            "−",
+            spec.step_form(value, -1),
+            t,
+            move |s: &mut State| fx_step(s, param, -1),
+        ))
+        .child(design::stepper_value(&param.readout(&s.audio_panel.fx), t))
+        .child(design::step_btn(
+            &format!("audio-fx-{}-up", param.slug()),
+            "+",
+            spec.step_form(value, 1),
+            t,
+            move |s: &mut State| fx_step(s, param, 1),
+        ))
 }
 
 // ---- View ----
@@ -1583,6 +2333,20 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                     .w_full(),
             );
         }
+        // Roadmap Wave 1 (RM20): the target's level
+        // meters, directly under the readout they
+        // quantify — post-gain peak/RMS from the target's
+        // probe, gated on a decoded (healthy) probe: an
+        // unprobeable target has no levels to show, and
+        // its row/readout already carry the health word.
+        if let (Some(i), Some(probe)) =
+            (effective_target(selected, clips.len()), target_probe)
+        {
+            if let (Some(peak), Some(rms)) = (probe.peak, probe.rms) {
+                let gain = clips[i].gain;
+                panel = panel.child(meter_block(core, peak * gain, rms * gain, t));
+            }
+        }
     }
 
     // Operations toolbar. Phase G aims Fade, Reverse,
@@ -1674,6 +2438,16 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             .wrap()
             .w_full(),
     );
+    // Roadmap Wave 1 (RM20): the settings steppers the
+    // caption announces — one row per parameter, in the
+    // Effects group's own order. Session state: the
+    // rows render in every project state (like the
+    // toolbar), because the values outlive any one
+    // clip list and the presses they shape report
+    // through their ops.
+    for param in FxParam::ALL {
+        panel = panel.child(fx_setting_row(s, param, t));
+    }
     // Wave 9: the group is named for its contents (the
     // "Position & gain" compound style) — bare "Clip"
     // said nothing the other two group headers don't.
@@ -1709,21 +2483,6 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             .center_y()
             .flex_wrap()
             .w_full()
-            .child(btn("audio-gain-dn", &i18n_wire::tr(core, "audio_gain_down"), false, t, |s| {
-                gain_step_target(s, -0.1);
-            }))
-            // Phase N: the gain readout is the kit
-            // stepper value (centred mono, min-width 34);
-            // the readout string itself is unchanged.
-            // The − / + buttons keep their `btn` form and
-            // labels; the readout carries the name.
-            .child(design::stepper_value(
-                &target_gain_readout(core, clips, selected),
-                t,
-            ))
-            .child(btn("audio-gain-up", &i18n_wire::tr(core, "audio_gain_up"), false, t, |s| {
-                gain_step_target(s, 0.1);
-            }))
             .child(icon_btn("audio-move-earlier", "chevron-left", &i18n_wire::tr(core, "audio_earlier"), false, t, |s| {
                 move_target(s, -1);
             }))
@@ -1731,6 +2490,91 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                 move_target(s, 1);
             })),
     );
+    // Roadmap Wave 1 (RM20): the gain control proper —
+    // the F-3 bounded-value row on the dB spec
+    // ([`gain_spec`]), assembled from the kit's parts
+    // exactly as `design::bounded_value_row` assembles
+    // them (label, slider, −, field, +) but at the call
+    // site, because the composite's key PARAMETERS are
+    // invisible to the element-key census: here the
+    // `audio-gain-dn` / `audio-gain-up` steppers (their
+    // keys unchanged from the stepper era — now the
+    // kit's step forms on the dB step), the
+    // `audio-gain-slider` drag surface and the
+    // `audio-gain-field` number field all carry their
+    // keys in census forms, and the keyless
+    // `stepper_value` readout is retired in favour of
+    // the field, whose display is the dB readout.
+    // Commits and stepper presses ride
+    // `audio_set_gain_at` (one snapshot, the op's
+    // status); slider and field scrubs write quietly
+    // under one lazy snapshot and recap at release.
+    {
+        let spec = gain_spec();
+        let target = target_gain(clips, selected);
+        let db = spec.clamp(gain_to_db(target.unwrap_or(1.0)));
+        let display = match target {
+            Some(gain) => gain_db_text(gain),
+            None => i18n_wire::tr(core, "audio_gain_value_none"),
+        };
+        let label = i18n_wire::tr(core, "audio_gain");
+        let invalid = i18n_wire::tr(core, "number_field_invalid");
+        panel = panel.child(
+            row()
+                .w_full()
+                .center_y()
+                .gap(8.0)
+                .child(
+                    text(label.clone())
+                        .font(type_::LABEL)
+                        .color(t.text_secondary)
+                        .grow(1.0),
+                )
+                .child(
+                    el()
+                        .key("audio-gain-slider")
+                        .size(200.0, 22.0)
+                        .on_drag(gain_slider_drag)
+                        .child(design::slider_track(spec.frac_of(db), t)),
+                )
+                .child(design::step_btn(
+                    "audio-gain-dn",
+                    "−",
+                    spec.step_form(db, -1),
+                    t,
+                    |s: &mut State| gain_step_db(s, -1),
+                ))
+                .child(design::number_field(
+                    "audio-gain-field",
+                    &s.audio_panel.gain_edit,
+                    &spec,
+                    db,
+                    &display,
+                    &label,
+                    Some(&invalid),
+                    t,
+                    design::NumWiring {
+                        access: |s: &mut State| &mut s.audio_panel.gain_edit,
+                        commit: |s: &mut State, db: f32| gain_commit_db(s, db),
+                        reject: |s: &mut State| {
+                            s.core.status =
+                                i18n_wire::tr(&s.core, "number_field_invalid");
+                        },
+                        scrub_write: |s: &mut State, db: f32| gain_scrub_write(s, db),
+                        scrub_finish: |s: &mut State, db: f32| {
+                            gain_scrub_finish(s, db)
+                        },
+                    },
+                ))
+                .child(design::step_btn(
+                    "audio-gain-up",
+                    "+",
+                    spec.step_form(db, 1),
+                    t,
+                    |s: &mut State| gain_step_db(s, 1),
+                )),
+        );
+    }
 
     // Phase J: the project-wide normalise row. Every
     // control in the toolbar above is aimed by the row
@@ -1781,6 +2625,112 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
         );
     }
 
+    // Roadmap Wave 1 (RM20): the TRIM control — the
+    // panel home the engine's seconds trim never had.
+    // Start/End are F-3 number fields over PENDING
+    // values (see `trim_values`): typing or scrubbing
+    // edits the pair, the Apply press runs
+    // `EditorCore::audio_trim` once (its snapshot, its
+    // status). The section renders in every state, like
+    // the toolbar — with no clips the fields show the
+    // seed defaults and Apply speaks the no-clips line.
+    panel = panel.child(design::section_label(&i18n_wire::tr(core, "audio_trim"), t));
+    {
+        let target = effective_target(selected, clips.len());
+        let duration = target
+            .map(|i| probe_clip(&s.audio_panel.probe_cache, &clips[i]).duration_secs)
+            .unwrap_or(None);
+        let (start, end) = target
+            .map(|i| trim_values(&s.audio_panel, i, duration))
+            .unwrap_or((0.0, 0.0));
+        let spec = trim_spec(duration);
+        let help = i18n_wire::tr(core, "number_field_help");
+        let invalid = i18n_wire::tr(core, "number_field_invalid");
+        panel = panel.child(
+            row()
+                .key("audio-trim-row")
+                .gap(6.0)
+                .center_y()
+                .flex_wrap()
+                .w_full()
+                .child(
+                    text(i18n_wire::tr(core, "audio_trim_start"))
+                        .font(type_::LABEL)
+                        .color(t.text_secondary),
+                )
+                .child(design::number_field(
+                    "audio-trim-start",
+                    &s.audio_panel.trim_start_edit,
+                    &spec,
+                    start,
+                    &spec.format(start),
+                    &help,
+                    Some(&invalid),
+                    t,
+                    design::NumWiring {
+                        access: |s: &mut State| &mut s.audio_panel.trim_start_edit,
+                        commit: |s: &mut State, v: f32| {
+                            adopt_trim_now(s);
+                            s.audio_panel.trim_start = v;
+                        },
+                        reject: |s: &mut State| {
+                            s.core.status =
+                                i18n_wire::tr(&s.core, "number_field_invalid");
+                        },
+                        scrub_write: |s: &mut State, v: f32| {
+                            adopt_trim_now(s);
+                            s.audio_panel.trim_start = v;
+                        },
+                        scrub_finish: |s: &mut State, v: f32| {
+                            adopt_trim_now(s);
+                            s.audio_panel.trim_start = v;
+                        },
+                    },
+                ))
+                .child(
+                    text(i18n_wire::tr(core, "audio_trim_end"))
+                        .font(type_::LABEL)
+                        .color(t.text_secondary),
+                )
+                .child(design::number_field(
+                    "audio-trim-end",
+                    &s.audio_panel.trim_end_edit,
+                    &spec,
+                    end,
+                    &spec.format(end),
+                    &help,
+                    Some(&invalid),
+                    t,
+                    design::NumWiring {
+                        access: |s: &mut State| &mut s.audio_panel.trim_end_edit,
+                        commit: |s: &mut State, v: f32| {
+                            adopt_trim_now(s);
+                            s.audio_panel.trim_end = v;
+                        },
+                        reject: |s: &mut State| {
+                            s.core.status =
+                                i18n_wire::tr(&s.core, "number_field_invalid");
+                        },
+                        scrub_write: |s: &mut State, v: f32| {
+                            adopt_trim_now(s);
+                            s.audio_panel.trim_end = v;
+                        },
+                        scrub_finish: |s: &mut State, v: f32| {
+                            adopt_trim_now(s);
+                            s.audio_panel.trim_end = v;
+                        },
+                    },
+                ))
+                .child(btn(
+                    "audio-trim-apply",
+                    &i18n_wire::tr(core, "audio_trim_apply"),
+                    false,
+                    t,
+                    trim_apply,
+                )),
+        );
+    }
+
     // Add-clip row: file-name entry + Add. Enter in the
     // field submits too.
     panel = panel.child(
@@ -1804,6 +2754,71 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             )
             .child(icon_btn("add-audio", "music", &i18n_wire::tr(core, "audio_add_clip"), false, t, |s| add_clip(s))),
     );
+
+    // Roadmap Wave 1 (RM20): the browse add flow — a
+    // toggle under the add row lists `./audio/`'s audio
+    // files (the op's own scan set, `audio_files_in`) as
+    // pressable rows; a press adds that file at the
+    // playhead through the typed add's own construction
+    // (`add_clip_path`). The list re-scans while open
+    // (a directory listing per render — no decode, and
+    // the panel's probe discipline is untouched), caps
+    // at `BROWSE_CAP` rows and reports the overflow.
+    // The typed field above stays: it is the only door
+    // to paths outside `./audio/`.
+    panel = panel.child(
+        row()
+            .key("audio-browse-row")
+            .w_full()
+            .center_y()
+            .gap(6.0)
+            .child(icon_btn(
+                "audio-browse",
+                "folder-open",
+                &i18n_wire::tr(core, "audio_browse"),
+                s.audio_panel.browse_open,
+                t,
+                |s: &mut State| {
+                    s.audio_panel.browse_open = !s.audio_panel.browse_open;
+                },
+            )),
+    );
+    if s.audio_panel.browse_open {
+        let files = audio_files_in(std::path::Path::new("audio"));
+        let mut list = col().key("audio-browse-list").gap(4.0).w_full();
+        if files.is_empty() {
+            list = list.child(
+                text(i18n_wire::tr(core, "audio_browse_empty"))
+                    .font(type_::LABEL)
+                    .color(t.text_secondary)
+                    .wrap()
+                    .w_full(),
+            );
+        }
+        for (i, path) in files.iter().take(BROWSE_CAP).enumerate() {
+            let added = path.clone();
+            list = list.child(btn(
+                &format!("audio-file-{i}"),
+                clip_file_name(path),
+                false,
+                t,
+                move |s: &mut State| add_clip_path(s, added.clone()),
+            ));
+        }
+        if files.len() > BROWSE_CAP {
+            list = list.child(
+                text(
+                    i18n_wire::tr(core, "audio_browse_more")
+                        .replace("{count}", &(files.len() - BROWSE_CAP).to_string()),
+                )
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .wrap()
+                .w_full(),
+            );
+        }
+        panel = panel.child(list);
+    }
 
     // Wave Q (Q7, the P31 slice): the Subtitles section
     // closes the Audio workspace's panel — the cue list,
@@ -2168,7 +3183,13 @@ mod tests {
             ("audio_lowpass", "Lowpass"),
             ("audio_trim_silence", "Trim silence"),
             ("audio_split_silences", "Split silences"),
-            ("audio_pitch", "Pitch +2"),
+            // Roadmap Wave 1 (RM20): "Pitch +2" → "Pitch"
+            // (IA-RM20-2) — the button applies the panel's
+            // current semitones now, so the baked-in amount
+            // would be a lie at any other setting. This
+            // expectation passes once the IA updates the
+            // table's English (the Q7 pattern).
+            ("audio_pitch", "Pitch"),
             ("audio_compress", "Compress"),
             ("audio_fade", "Fade"),
             ("audio_reverse", "Reverse"),
@@ -2734,16 +3755,17 @@ mod tests {
     }
 
     #[test]
-    fn effects_settings_line_states_the_ops_fixed_values() {
-        // The caption is the panel's honest answer to
-        // audit D3 until the ops take parameters (I-4):
-        // every value is the op constant in `audio_ops`.
+    fn effects_settings_line_states_the_settings_rule() {
+        // Roadmap Wave 1 (RM20): the caption no longer
+        // names fixed values — the ops take parameters
+        // now and the steppers under the line ARE the
+        // settings. The line states the rule the block
+        // follows (session values, applied at the next
+        // press); the defaults themselves are pinned by
+        // `fx_params_default_to_the_op_constants`.
         let line = effects_settings_line();
-        assert!(line.contains("fade 0.25 s in/out"), "{line}");
-        assert!(line.contains("echo 0.18 s delay, 35% feedback"), "{line}");
-        assert!(line.contains("lowpass 1200 Hz"), "{line}");
-        assert!(line.contains("pitch +2 semitones"), "{line}");
-        assert!(line.contains("compress 0.5 threshold, 4:1 ratio"), "{line}");
+        assert!(line.starts_with("Effect settings"), "{line}");
+        assert!(line.contains("next effect press"), "{line}");
     }
 
     #[test]
@@ -2966,6 +3988,10 @@ mod tests {
             show_right: true,
             key_clipboard: None,
             key_follow_graph: false,
+            key_sel: Default::default(),
+            help_panel: Default::default(),
+            camera_panel: Default::default(),
+            segment_numbers: Default::default(),
             export_recap: String::new(),
             export_job: None,
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
@@ -3265,5 +4291,245 @@ playback_speed: 1.0,
         let mut s = state_with(core);
         mute_target(&mut s);
         assert!(s.core.project.audio.is_empty());
+    }
+
+    // ---- Roadmap Wave 1 (RM20) ----
+
+    #[test]
+    fn audio_rm20_i18n_keys_exist_and_match_the_english() {
+        // Roadmap Wave 1 (RM20): every new label the
+        // RM20 surfaces render resolves from a new
+        // `audio_*` key (IA-RM20-2) whose English value
+        // is byte-identical to the copy composed here.
+        // Passes only after the integrator inserts the
+        // keys into `src/i18n.rs` — until then `tr`
+        // falls back to the key itself (the Q7 pattern)
+        // and `key_in_table` reports them missing.
+        let core = EditorCore::new();
+        for (key, english) in [
+            ("audio_gain", "Gain"),
+            ("audio_trim", "Trim"),
+            ("audio_trim_start", "Start"),
+            ("audio_trim_end", "End"),
+            ("audio_trim_apply", "Apply trim"),
+            ("audio_meter_peak", "Peak {db}"),
+            ("audio_meter_rms", "RMS {db}"),
+            ("audio_browse", "Browse ./audio"),
+            ("audio_browse_empty", "No audio files in ./audio/."),
+            ("audio_browse_more", "{count} more files not shown"),
+            ("audio_fx_fade_in", "Fade in"),
+            ("audio_fx_fade_out", "Fade out"),
+            ("audio_fx_echo_delay", "Echo delay"),
+            ("audio_fx_echo_feedback", "Echo feedback"),
+            ("audio_fx_lowpass", "Lowpass cutoff"),
+            ("audio_fx_pitch", "Pitch"),
+            ("audio_fx_comp_threshold", "Comp threshold"),
+            ("audio_fx_comp_ratio", "Comp ratio"),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
+    }
+
+    #[test]
+    fn gain_db_conversions_round_trip() {
+        assert_eq!(gain_to_db(1.0), 0.0);
+        assert!((gain_to_db(2.0) - 6.0206).abs() < 0.001);
+        assert!((gain_to_db(0.5) + 6.0206).abs() < 0.001);
+        assert_eq!(gain_to_db(0.0), f32::NEG_INFINITY);
+        assert_eq!(gain_to_db(-1.0), f32::NEG_INFINITY);
+        assert_eq!(gain_to_db(f32::NAN), f32::NEG_INFINITY);
+        for gain in [0.016, 0.25, 0.5, 1.0, 1.5, 2.0] {
+            assert!(
+                (db_to_gain(gain_to_db(gain)) - gain).abs() < 0.001,
+                "round trip {gain}"
+            );
+        }
+        assert_eq!(db_to_gain(0.0), 1.0);
+    }
+
+    #[test]
+    fn gain_db_text_names_the_extremes() {
+        assert_eq!(gain_db_text(1.0), "+0.0 dB");
+        assert_eq!(gain_db_text(0.5), "-6.0 dB");
+        assert_eq!(gain_db_text(2.0), "+6.0 dB");
+        assert_eq!(gain_db_text(0.0), "-∞ dB");
+    }
+
+    #[test]
+    fn gain_spec_covers_the_ops_clamp_in_db() {
+        let spec = gain_spec();
+        // The floor catches even −∞ (a gain-0 clip opens
+        // the field at the floor, never at a non-finite
+        // value).
+        assert_eq!(spec.clamp(f32::NEG_INFINITY), -36.0);
+        assert_eq!(spec.clamp(99.0), 6.1);
+        // Unity sits at 0 dB, a bit past a third of the
+        // slider's travel.
+        let frac = spec.frac_of(0.0);
+        assert!((frac - 36.0 / 42.1).abs() < 0.001, "{frac}");
+        assert!((spec.value_at_frac(frac) - 0.0).abs() < 0.001);
+        // The ceiling converts back onto the op's exact
+        // 2.0 clamp.
+        assert!(db_to_gain(spec.max) >= 2.0);
+    }
+
+    #[test]
+    fn trim_values_serve_pending_only_for_their_clip() {
+        let mut state = AudioPanelState::new();
+        // Unseeded: the defaults (0, duration).
+        assert_eq!(trim_values(&state, 0, Some(2.5)), (0.0, 2.5));
+        assert_eq!(trim_values(&state, 0, None), (0.0, 0.0));
+        // Seeded for clip 1: clip 1 sees the pair, clip 0
+        // still sees its own defaults.
+        state.trim_for = Some(1);
+        state.trim_start = 0.25;
+        state.trim_end = 1.75;
+        assert_eq!(trim_values(&state, 1, Some(2.5)), (0.25, 1.75));
+        assert_eq!(trim_values(&state, 0, Some(2.5)), (0.0, 2.5));
+    }
+
+    #[test]
+    fn trim_spec_bounds_to_the_probed_duration() {
+        assert_eq!(trim_spec(Some(2.5)).max, 2.5);
+        assert_eq!(trim_spec(None).max, 3600.0);
+        assert_eq!(trim_spec(Some(0.0)).max, 3600.0);
+        assert_eq!(trim_spec(Some(2.5)).decimals, 2);
+    }
+
+    #[test]
+    fn level_meter_mapping_and_labels() {
+        assert_eq!(level_frac(0.0), 1.0);
+        assert_eq!(level_frac(-60.0), 0.0);
+        assert_eq!(level_frac(-30.0), 0.5);
+        assert_eq!(level_frac(6.0), 1.0);
+        assert_eq!(level_frac(f32::NEG_INFINITY), 0.0);
+        assert_eq!(level_db_text(1.0), "+0.0 dB");
+        assert_eq!(level_db_text(0.5), "-6.0 dB");
+        assert_eq!(level_db_text(0.0), "-∞ dB");
+    }
+
+    #[test]
+    fn fx_params_default_to_the_op_constants() {
+        let fx = FxParams::default();
+        assert_eq!(fx.fade_in, audio_ops::FADE_IN_SECS);
+        assert_eq!(fx.fade_out, audio_ops::FADE_OUT_SECS);
+        assert_eq!(fx.echo_delay, audio_ops::ECHO_DELAY_SECS);
+        assert_eq!(fx.echo_feedback, audio_ops::ECHO_FEEDBACK);
+        assert_eq!(fx.lowpass_hz, audio_ops::LOWPASS_HZ);
+        assert_eq!(fx.pitch_st, audio_ops::PITCH_SEMITONES);
+        assert_eq!(fx.comp_threshold, audio_ops::COMP_THRESHOLD);
+        assert_eq!(fx.comp_ratio, audio_ops::COMP_RATIO);
+    }
+
+    #[test]
+    fn fx_readouts_and_stepper_clamps() {
+        let fx = FxParams::default();
+        assert_eq!(FxParam::FadeIn.readout(&fx), "0.25 s");
+        assert_eq!(FxParam::EchoFeedback.readout(&fx), "35%");
+        assert_eq!(FxParam::LowpassHz.readout(&fx), "1200 Hz");
+        assert_eq!(FxParam::PitchSt.readout(&fx), "+2 st");
+        assert_eq!(FxParam::CompRatio.readout(&fx), "4.0:1");
+        // A stepper at its clamp is a no-op form and a
+        // stepped value stays on the clamp.
+        let pitch = FxParam::PitchSt.spec();
+        assert_eq!(pitch.step_form(24.0, 1), design::StepForm::Noop);
+        assert_eq!(pitch.stepped(24.0, 1), 24.0);
+        assert_eq!(pitch.stepped(-24.0, -1), -24.0);
+        // Every parameter's default sits strictly inside
+        // its spec (both steppers live at the defaults).
+        for param in FxParam::ALL {
+            let spec = param.spec();
+            let value = param.value(&fx);
+            assert_eq!(spec.step_form(value, -1), design::StepForm::Live, "{param:?}");
+            assert_eq!(spec.step_form(value, 1), design::StepForm::Live, "{param:?}");
+        }
+    }
+
+    #[test]
+    fn fx_step_moves_the_session_value() {
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(clip("fake/theme.wav", 0, 1.0));
+        let mut s = state_with(core);
+        fx_step(&mut s, FxParam::PitchSt, 1);
+        assert_eq!(s.audio_panel.fx.pitch_st, 3.0);
+        fx_step(&mut s, FxParam::PitchSt, -1);
+        fx_step(&mut s, FxParam::PitchSt, -1);
+        assert_eq!(s.audio_panel.fx.pitch_st, 1.0);
+        // Session state only: no snapshot was taken.
+        assert_eq!(s.core.edits_since_autosave(), 0);
+    }
+
+    #[test]
+    fn write_gain_quiet_sanitises_without_a_snapshot() {
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(clip("fake/theme.wav", 0, 1.0));
+        write_gain_quiet(&mut core, 0, 3.5);
+        assert_eq!(core.project.audio[0].gain, 2.0);
+        write_gain_quiet(&mut core, 0, f32::NAN);
+        assert_eq!(core.project.audio[0].gain, 1.0);
+        write_gain_quiet(&mut core, 9, 0.5);
+        assert_eq!(core.edits_since_autosave(), 0, "no snapshot");
+    }
+
+    #[test]
+    fn trim_apply_without_clips_speaks_the_family_line() {
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        let mut s = state_with(core);
+        trim_apply(&mut s);
+        assert_eq!(
+            s.core.status,
+            "Audio trim failed: there are no audio clips."
+        );
+    }
+
+    #[test]
+    fn probe_reports_rms_beside_peak() {
+        // A constant 0.5 signal: peak 0.5, RMS 0.5 — the
+        // meters' two rows agree exactly where the maths
+        // says they must.
+        let wav = audio_edit::WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: vec![0.5; 8000],
+        };
+        let path = std::env::temp_dir().join(format!(
+            "stykanimate-rune-audio-panel-rms-{}.wav",
+            std::process::id()
+        ));
+        std::fs::write(&path, audio_edit::write_wav(&wav)).unwrap();
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(clip(&path.to_string_lossy(), 0, 1.0));
+        let probe = probe_at(&core, 0);
+        assert_eq!(probe.health, ClipHealth::Healthy);
+        assert_eq!(probe.peak, Some(0.5));
+        assert_eq!(probe.rms, Some(0.5));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn audio_files_in_filters_sorts_and_tolerates_absence() {
+        let dir = std::env::temp_dir().join(format!(
+            "stykanimate-rune-audio-panel-browse-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["b.wav", "a.mp3", "c.txt", "D.OGG", "e.flac"] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        let files = audio_files_in(&dir);
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| clip_file_name(p).to_string())
+            .collect();
+        assert_eq!(names, vec!["D.OGG", "a.mp3", "b.wav"]);
+        // A missing directory is an empty list, not an
+        // error.
+        assert!(audio_files_in(&dir.join("nope")).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

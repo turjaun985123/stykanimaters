@@ -176,7 +176,7 @@ pub const INSERT_COUNT_DEFAULT: usize = 4;
 
 /// UI-side frame-ops state (see the module docs). Stored on the
 /// shell's `State` as `frame_ops`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrameOpsState {
     /// Timeline range selection as `(anchor, focus)` — the
     /// frame where a shift-click selection started and the
@@ -220,6 +220,70 @@ pub struct FrameOpsState {
     /// timeline section already owns this struct and the
     /// `State` field census is integrator-gated.
     pub timeline_collapsed: bool,
+    /// Whether the timeline card's marker row is shown
+    /// (Roadmap Wave 1, RM12 — F-11's timeline space
+    /// model). One flag per data-gated lane of the card:
+    /// this one, [`FrameOpsState::show_clips_lane`],
+    /// [`FrameOpsState::show_dopesheet_lane`] and
+    /// [`FrameOpsState::show_subtitle_lane`]. A flag is
+    /// the USER's half of its lane's mount rule — the
+    /// lane mounts only when its data exists AND its
+    /// flag is set (the rule is
+    /// `timeline_marks::lane_mounted`; the builder is
+    /// the only reader). The ruler and the frame chips
+    /// carry no flag: they are the card's spine, mounted
+    /// in every form (the collapsed card is chips-only).
+    /// All four default to shown, so a state that
+    /// predates the flags behaves exactly as the card
+    /// always has. They are flipped by the card's own
+    /// lane row (`timeline_marks::lane_toggles_row`) and
+    /// by nothing else; a flip is a view preference —
+    /// no snapshot, no dirty mark, the
+    /// `timeline_collapsed` discipline.
+    ///
+    /// Session-only for now: the persisted mirror in
+    /// `LayoutPrefs` is recorded as IA-RM12-2 (this wave
+    /// the prefs struct region belongs to RM10's F-9
+    /// seat), so until that lands a restart restores
+    /// every lane — the same asymmetry `State::show_right`
+    /// has always had. They live here, beside
+    /// `timeline_collapsed`, for the reason that field
+    /// records.
+    pub show_marker_lane: bool,
+    /// The clips lane's visibility flag — see
+    /// [`FrameOpsState::show_marker_lane`].
+    pub show_clips_lane: bool,
+    /// The dopesheet lane's visibility flag — see
+    /// [`FrameOpsState::show_marker_lane`]. The lane's
+    /// other gate is the Animate workspace (its builder
+    /// is mounted from the timeline builder's call
+    /// site); this flag is the user's half only.
+    pub show_dopesheet_lane: bool,
+    /// The subtitle lane's visibility flag — see
+    /// [`FrameOpsState::show_marker_lane`].
+    pub show_subtitle_lane: bool,
+    /// The timeline's chip width in points (Roadmap
+    /// Wave 1, RM13 — P-1 timeline zoom). The ONE zoom
+    /// value every timeline-geometry consumer reads
+    /// through [`FrameOpsState::chip_w`], which clamps
+    /// to the timeline's zoom range; the raw field is
+    /// written only through [`FrameOpsState::set_zoom`]
+    /// / [`FrameOpsState::zoom_step`], the zoom row and
+    /// the `init` seed. Its persisted mirror is
+    /// `LayoutPrefs::timeline_zoom` (the
+    /// `timeline_collapsed` discipline: this field is
+    /// the live source of truth, the prefs field never
+    /// leads). Defaults to `timeline_marks::CHIP_W` —
+    /// the pre-zoom geometry, so a state that predates
+    /// the zoom behaves exactly as the card always has.
+    pub timeline_zoom: f32,
+    /// Whether the timeline follows the playhead during
+    /// playback (Roadmap Wave 1, RM13 — P-1): while
+    /// playing, `main.rs`'s `poll` scrolls the strip to
+    /// keep the current frame's chip in view (the pure
+    /// half is `timeline_marks::chip_visible`). Its
+    /// persisted mirror is `LayoutPrefs::timeline_follow`.
+    pub timeline_follow: bool,
 }
 
 impl Default for FrameOpsState {
@@ -230,6 +294,108 @@ impl Default for FrameOpsState {
             range_copied: false,
             insert_count: INSERT_COUNT_DEFAULT,
             timeline_collapsed: false,
+            show_marker_lane: true,
+            show_clips_lane: true,
+            show_dopesheet_lane: true,
+            show_subtitle_lane: true,
+            timeline_zoom: crate::rune_sec::timeline_marks::CHIP_W,
+            timeline_follow: false,
+        }
+    }
+}
+
+/// One data-gated lane of the timeline card (Roadmap
+/// Wave 1, RM12 — F-11's timeline space model): the
+/// unit the per-lane visibility flags on
+/// [`FrameOpsState`] address. The ruler and the frame
+/// chips are not lanes — they are the card's spine and
+/// carry no flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineLane {
+    /// The marker row (`timeline-markers`): camera /
+    /// graph markers, data-gated on markers existing.
+    Markers,
+    /// The clips lane (`timeline-clips`): audio / FX
+    /// clip spans, data-gated on clips existing.
+    Clips,
+    /// The dopesheet lane (`dopesheet-lane`):
+    /// workspace-gated on Animate.
+    Dopesheet,
+    /// The subtitle lane (`subtitle-lane`): cue
+    /// blocks, data-gated on cues existing.
+    Subtitles,
+}
+
+impl FrameOpsState {
+    /// Whether the user has `lane` shown. The lane's
+    /// data gate is the other half of the mount rule
+    /// (see `timeline_marks::lane_mounted`).
+    pub fn lane_shown(&self, lane: TimelineLane) -> bool {
+        match lane {
+            TimelineLane::Markers => self.show_marker_lane,
+            TimelineLane::Clips => self.show_clips_lane,
+            TimelineLane::Dopesheet => self.show_dopesheet_lane,
+            TimelineLane::Subtitles => self.show_subtitle_lane,
+        }
+    }
+
+    /// Flip `lane`'s visibility flag and return the new
+    /// value. A view preference: no snapshot, no dirty
+    /// mark — the `timeline_collapsed` discipline.
+    pub fn toggle_lane(&mut self, lane: TimelineLane) -> bool {
+        let flag = match lane {
+            TimelineLane::Markers => &mut self.show_marker_lane,
+            TimelineLane::Clips => &mut self.show_clips_lane,
+            TimelineLane::Dopesheet => &mut self.show_dopesheet_lane,
+            TimelineLane::Subtitles => &mut self.show_subtitle_lane,
+        };
+        *flag = !*flag;
+        *flag
+    }
+
+    /// The live chip width in points: the stored zoom
+    /// clamped to the timeline's zoom range
+    /// (`timeline_marks::ZOOM_MIN_W..=ZOOM_MAX_W`), or
+    /// the pre-zoom `timeline_marks::CHIP_W` when the
+    /// stored value is not finite (a hand-edited prefs
+    /// file is the only way that happens —
+    /// [`FrameOpsState::set_zoom`] refuses non-finite
+    /// writes). Every geometry consumer reads through
+    /// here, never the raw field.
+    pub fn chip_w(&self) -> f32 {
+        if self.timeline_zoom.is_finite() {
+            self.timeline_zoom.clamp(
+                crate::rune_sec::timeline_marks::ZOOM_MIN_W,
+                crate::rune_sec::timeline_marks::ZOOM_MAX_W,
+            )
+        } else {
+            crate::rune_sec::timeline_marks::CHIP_W
+        }
+    }
+
+    /// Set the zoom to `w` points per chip, clamped to
+    /// the zoom range; a non-finite `w` keeps the
+    /// current value. A view preference: no snapshot,
+    /// no dirty mark — the `timeline_collapsed`
+    /// discipline; `poll` persists it.
+    pub fn set_zoom(&mut self, w: f32) {
+        if w.is_finite() {
+            self.timeline_zoom = w.clamp(
+                crate::rune_sec::timeline_marks::ZOOM_MIN_W,
+                crate::rune_sec::timeline_marks::ZOOM_MAX_W,
+            );
+        }
+    }
+
+    /// Step the zoom one notch: `dir > 0` zooms in,
+    /// `dir < 0` zooms out, by the zoom step factor
+    /// (`timeline_marks::ZOOM_STEP`); `dir == 0` does
+    /// nothing.
+    pub fn zoom_step(&mut self, dir: i32) {
+        if dir > 0 {
+            self.set_zoom(self.timeline_zoom * crate::rune_sec::timeline_marks::ZOOM_STEP);
+        } else if dir < 0 {
+            self.set_zoom(self.timeline_zoom / crate::rune_sec::timeline_marks::ZOOM_STEP);
         }
     }
 }
@@ -1044,6 +1210,38 @@ mod tests {
     }
 
     #[test]
+    fn default_state_shows_every_timeline_lane() {
+        // Roadmap Wave 1 (RM12): the per-lane flags
+        // start shown — a State built without any lane
+        // wiring renders the card exactly as it did
+        // before the space model existed.
+        let ops = FrameOpsState::default();
+        for lane in [
+            TimelineLane::Markers,
+            TimelineLane::Clips,
+            TimelineLane::Dopesheet,
+            TimelineLane::Subtitles,
+        ] {
+            assert!(ops.lane_shown(lane), "{lane:?} starts shown");
+        }
+    }
+
+    #[test]
+    fn toggle_lane_flips_one_lane_and_reports_the_new_value() {
+        // Roadmap Wave 1 (RM12): a toggle touches its
+        // own flag only, returns the value it landed on,
+        // and a second toggle restores the default.
+        let mut ops = FrameOpsState::default();
+        assert!(!ops.toggle_lane(TimelineLane::Clips));
+        assert!(!ops.lane_shown(TimelineLane::Clips));
+        assert!(ops.lane_shown(TimelineLane::Markers));
+        assert!(ops.lane_shown(TimelineLane::Dopesheet));
+        assert!(ops.lane_shown(TimelineLane::Subtitles));
+        assert!(ops.toggle_lane(TimelineLane::Clips));
+        assert!(ops.lane_shown(TimelineLane::Clips));
+    }
+
+    #[test]
     fn selected_range_is_none_without_selection() {
         let core = EditorCore::new();
         assert_eq!(selected_range(&core, &FrameOpsState::default()), None);
@@ -1704,5 +1902,47 @@ mod tests {
             Some("Sel 1".to_string())
         );
         assert_eq!(duration_label(&core), "1.00×");
+    }
+
+    // ---- timeline zoom state (Roadmap Wave 1, RM13 — P-1) ----
+
+    #[test]
+    fn zoom_defaults_to_the_pre_zoom_geometry() {
+        let ops = FrameOpsState::default();
+        assert_eq!(ops.chip_w(), crate::rune_sec::timeline_marks::CHIP_W);
+        assert!(!ops.timeline_follow);
+    }
+
+    #[test]
+    fn zoom_step_round_trips_and_clamps_at_both_ends() {
+        let mut ops = FrameOpsState::default();
+        ops.zoom_step(1);
+        let in_w = ops.chip_w();
+        assert!(in_w > crate::rune_sec::timeline_marks::CHIP_W);
+        ops.zoom_step(-1);
+        assert!((ops.chip_w() - crate::rune_sec::timeline_marks::CHIP_W).abs() < 0.01);
+        for _ in 0..40 {
+            ops.zoom_step(1);
+        }
+        assert_eq!(ops.chip_w(), crate::rune_sec::timeline_marks::ZOOM_MAX_W);
+        for _ in 0..80 {
+            ops.zoom_step(-1);
+        }
+        assert_eq!(ops.chip_w(), crate::rune_sec::timeline_marks::ZOOM_MIN_W);
+        ops.zoom_step(0);
+        assert_eq!(ops.chip_w(), crate::rune_sec::timeline_marks::ZOOM_MIN_W);
+    }
+
+    #[test]
+    fn set_zoom_clamps_and_keeps_the_old_value_on_non_finite() {
+        let mut ops = FrameOpsState::default();
+        ops.set_zoom(1000.0);
+        assert_eq!(ops.chip_w(), crate::rune_sec::timeline_marks::ZOOM_MAX_W);
+        ops.set_zoom(1.0);
+        assert_eq!(ops.chip_w(), crate::rune_sec::timeline_marks::ZOOM_MIN_W);
+        ops.set_zoom(f32::NAN);
+        assert_eq!(ops.chip_w(), crate::rune_sec::timeline_marks::ZOOM_MIN_W);
+        ops.timeline_zoom = f32::INFINITY;
+        assert_eq!(ops.chip_w(), crate::rune_sec::timeline_marks::CHIP_W);
     }
 }

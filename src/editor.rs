@@ -32,6 +32,43 @@ pub enum DrawTool {
     Eraser,
 }
 
+/// Roadmap Wave 1 (RM24, P-14 — A15 H1): one undoable
+/// edit, as the history stacks store it: WHAT happened
+/// (the label the History panel lists and the app bar's
+/// "Undo {label}" button speaks) plus the whole project
+/// as it was BEFORE the edit (the payload `undo()`
+/// restores — the pre-RM24 `Vec<String>` stack's strings,
+/// unchanged in form and cost). Runtime only, like the
+/// stacks themselves: undo never crosses a project swap
+/// and nothing here is serialised.
+#[derive(Clone)]
+pub struct HistoryEntry {
+    pub label: String,
+    pub project: String,
+}
+
+/// Roadmap Wave 1 (RM24, P-14 — A15 R4): the project's
+/// truth about its NAMED file, split from the recovery
+/// snapshot's story (which `edits_since_autosave` keeps
+/// telling on its own segment): a project can be fully
+/// covered by the recovery snapshot and still never have
+/// been saved anywhere the user chose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveState {
+    /// No successful named save (and no open from a
+    /// named file) since this project entered the core:
+    /// it exists only in the session and the recovery
+    /// snapshot.
+    NeverSaved,
+    /// The named file holds exactly the current edit
+    /// baseline — no counted edit since the save/open.
+    Saved,
+    /// Counted edits have landed since the last named
+    /// save/open; the file on disk is older than the
+    /// session.
+    ModifiedSinceSave,
+}
+
 pub struct EditorCore {
     pub project: Project,
     pub current: usize,
@@ -77,13 +114,35 @@ pub struct EditorCore {
     /// lazily per stepped-to frame in `drag_to`).
     drag_cameras_before: Vec<(usize, (f32, f32, f32))>,
     pub status: String,
-    undo: Vec<String>,
-    redo: Vec<String>,
-    /// Wave 9: edits counted at `snapshot()` (the undo choke
-    /// point) over this core's lifetime. A few appearance
-    /// cyclers (segment colour/shape, figure opacity) mutate
-    /// without snapshotting by design and are NOT counted —
-    /// autosave is driven by undoable edits.
+    undo: Vec<HistoryEntry>,
+    redo: Vec<HistoryEntry>,
+    /// Roadmap Wave 1 (RM24, P-14): true only in the
+    /// instant after a snapshot push — the licence
+    /// [`EditorCore::snapshot_coalesced`] needs to fold a
+    /// continuing stepper/cycler/scrub run into the entry
+    /// on top of the stack instead of pushing another.
+    /// Cleared by `undo`, `redo` and every wholesale
+    /// project replacement, so a coalesced write can never
+    /// merge across a history navigation or a swap.
+    history_coalesce: bool,
+    /// Roadmap Wave 1 (RM24, P-14): `edit_count` at the
+    /// last successful NAMED save (or open from a named
+    /// file) — the baseline [`EditorCore::save_state`]
+    /// reads. `None` while this project has never met a
+    /// named file in this session (fresh, recovered or
+    /// imported): the strip's dot then tells the truth
+    /// that the recovery snapshot alone cannot. Runtime
+    /// only, like the other counters: undo snapshots
+    /// cover the project, not this.
+    last_save_count: Option<u64>,
+    /// Wave 9: edits counted at the snapshot choke points
+    /// over this core's lifetime (plus the one remaining
+    /// `mark_dirty` class — see its doc). Since Roadmap
+    /// Wave 1 (RM24, P-14) every project mutation snapshots,
+    /// so this counts every edit; before RM24 a few
+    /// appearance cyclers (segment colour/shape, figure
+    /// opacity) mutated unsnapshotted by design and were
+    /// invisible here.
     edit_count: u64,
     /// Wave 9: `edit_count` at the last successful autosave.
     last_autosave_count: u64,
@@ -93,6 +152,40 @@ pub struct EditorCore {
     /// state changed" and clear index-based panel selections
     /// that would otherwise point into the new project.
     project_swaps: usize,
+    /// Roadmap Wave 1 (RM6, F-5): the project revision — a
+    /// monotone counter bumped at exactly the choke points
+    /// that count an edit for autosave: the snapshot family
+    /// (every undoable mutation — since RM24, P-14, that is
+    /// every project mutation), `mark_dirty()` (the one
+    /// remaining un-undoable class: session bookkeeping
+    /// that follows an external file event), and the
+    /// wholesale-replacement funnels (`undo` / `redo`
+    /// restores, `note_project_swapped`,
+    /// `note_project_replaced`). The house rule those sites
+    /// already enforce — a mutation either snapshots exactly
+    /// once or marks dirty, never neither — is what makes
+    /// this counter complete: the project content cannot
+    /// change without the revision moving. Unlike
+    /// `edit_count` it is NEVER reset (a swap restarts the
+    /// autosave baseline, but a revision that went backwards
+    /// could collide with a cache entry cut against the
+    /// previous project). Runtime only, like `project_swaps`:
+    /// undo snapshots cover the project, not this.
+    revision: u64,
+    /// Roadmap Wave 1 (RM6, F-5): the evaluate-once cache —
+    /// `(revision, frame bits, evaluated frame)` entries,
+    /// newest last, capped at a handful of frames of the
+    /// CURRENT revision (entries for older revisions are
+    /// unreachable by construction and dropped on the next
+    /// miss). The key is the Wave L lesson made structural:
+    /// frame alone is never a valid cache key in this
+    /// editor (a frame-keyed subtitle cache once served
+    /// stale cues under a stationary playhead); revision +
+    /// frame is, because evaluation is a pure function of
+    /// (project, frame) and the revision moves on every
+    /// project change. Session-only derived data: never
+    /// serialised, and a miss simply re-evaluates.
+    eval_cache: std::cell::RefCell<Vec<(u64, u32, std::rc::Rc<crate::graph::ChannelResult>)>>,
     /// Wave P (P14): stored paths of the current project's
     /// unmuted audio clips whose files did not exist at the
     /// last refresh — one entry per missing clip, in timeline
@@ -157,6 +250,12 @@ pub struct EditorCore {
     pub project_files: Vec<PathBuf>,
     pub project_index: usize,
     /// UI language for toolbar labels (see i18n.rs).
+    /// Defaults to English here; the shell's `init`
+    /// seeds it from the persisted `LayoutPrefs.lang`
+    /// and the shell's `poll` writes changes back to
+    /// that field (Roadmap F-9), so a language picked
+    /// in Settings survives a relaunch. The core itself
+    /// never reads or writes the prefs file.
     pub lang: crate::i18n::Lang,
     /// Active 3D editing session (fig3d), if any. Runtime only:
     /// undo snapshots cover the project, not this state.
@@ -298,9 +397,13 @@ impl EditorCore {
             status: "Drag a joint to pose. Hands and feet use IK; drag the hips to move.".into(),
             undo: Vec::new(),
             redo: Vec::new(),
+            history_coalesce: false,
+            last_save_count: None,
             edit_count: 0,
             last_autosave_count: 0,
             project_swaps: 0,
+            revision: 0,
+            eval_cache: std::cell::RefCell::new(Vec::new()),
             missing_audio: Vec::new(),
             progress_sink: None,
             clipboard: None,
@@ -429,9 +532,31 @@ impl EditorCore {
         evaluate(&fig.def, &self.project.frames[frame].poses[fi])
     }
 
+    /// The undo choke point: every undoable project
+    /// mutation records exactly one history entry here
+    /// BEFORE it writes. Unlabelled by default — the
+    /// generic "Edit" the History panel shows for doors
+    /// that have not taken a label yet; labelled doors
+    /// call [`EditorCore::snapshot_labeled`] directly.
     pub fn snapshot(&mut self) {
+        self.snapshot_labeled("Edit");
+    }
+
+    /// Roadmap Wave 1 (RM24, P-14 — A15 H1): record one
+    /// undoable edit under `label` — the name the History
+    /// panel lists and the "Undo {label}" surfaces speak.
+    /// The payload is the whole project serialised BEFORE
+    /// the caller's write (the stacks' standing form);
+    /// the push caps the stack at 60 (the oldest entry
+    /// evicts silently, as before), clears redo, and
+    /// counts the edit for the autosave cadence and the
+    /// revision (the RM6 choke-point rule).
+    pub fn snapshot_labeled(&mut self, label: &str) {
         if let Ok(s) = serde_json::to_string(&self.project) {
-            self.undo.push(s);
+            self.undo.push(HistoryEntry {
+                label: label.to_string(),
+                project: s,
+            });
             if self.undo.len() > 60 {
                 self.undo.remove(0);
             }
@@ -439,15 +564,70 @@ impl EditorCore {
             // Wave 9: every recorded undo step is one counted
             // edit for the autosave cadence.
             self.edit_count += 1;
+            // Roadmap Wave 1 (RM6, F-5): the same choke point
+            // moves the project revision — every undoable
+            // mutation passes through here exactly once.
+            self.revision += 1;
+            self.history_coalesce = true;
+        }
+    }
+
+    /// Roadmap Wave 1 (RM24, P-14 — A15 H3): record one
+    /// undoable edit under `label`, folding a CONTINUING
+    /// run of the same edit into the entry already on top
+    /// of the stack instead of pushing another: a stepper
+    /// held down, a cycler pressed repeatedly, a scrub's
+    /// tenth Move — the run costs ONE undo step, which
+    /// restores the state from before the run began (the
+    /// board's "one snapshot per project mutation,
+    /// gesture-coalesced"). The fold is licensed only in
+    /// the instant after a push (`history_coalesce`) and
+    /// only into a same-label top entry, so a different
+    /// edit — or any undo/redo/swap — always starts a
+    /// fresh entry. A folded write still counts as an
+    /// edit (autosave cadence, revision): the project
+    /// really changed again, it just already has its
+    /// undo entry.
+    pub fn snapshot_coalesced(&mut self, label: &str) {
+        if self.history_coalesce
+            && self.undo.last().map(|e| e.label == label).unwrap_or(false)
+        {
+            self.edit_count += 1;
+            self.revision += 1;
+            return;
+        }
+        self.snapshot_labeled(label);
+    }
+
+    /// Roadmap Wave 1 (RM24, P-14): take back the entry a
+    /// `snapshot_coalesced` push just made — the slider
+    /// gesture that ends where it began (cancelled, or
+    /// released on its press value) leaves no phantom
+    /// step behind: the caller restores the press value
+    /// itself, this drops the entry and un-counts the
+    /// edit. The revision is NOT rewound (RM6: it never
+    /// goes backwards; a spare bump only costs a cache
+    /// re-evaluation). A no-op unless the coalesce
+    /// licence is live and the top entry carries `label`.
+    pub fn rollback_coalesced(&mut self, label: &str) {
+        if self.history_coalesce
+            && self.undo.last().map(|e| e.label == label).unwrap_or(false)
+        {
+            self.undo.pop();
+            self.history_coalesce = false;
+            self.edit_count = self.edit_count.saturating_sub(1);
         }
     }
 
     pub fn redo(&mut self) {
-        if let Some(s) = self.redo.pop() {
+        if let Some(entry) = self.redo.pop() {
             if let Ok(current) = serde_json::to_string(&self.project) {
-                self.undo.push(current);
+                self.undo.push(HistoryEntry {
+                    label: entry.label.clone(),
+                    project: current,
+                });
             }
-            if let Ok(p) = serde_json::from_str::<Project>(&s) {
+            if let Ok(p) = serde_json::from_str::<Project>(&entry.project) {
                 self.project = p;
                 self.current = self.current.min(self.project.frames.len().saturating_sub(1));
                 // Wave 13 (B2): mirror undo's clamp — a
@@ -460,9 +640,23 @@ impl EditorCore {
                 self.selected_figure = self
                     .selected_figure
                     .min(self.project.figures.len().saturating_sub(1));
-                self.repair_clip_session_after_history();
+                let session_dropped = self.repair_clip_session_after_history();
                 self.refresh_missing_audio();
-                self.status = "Redone.".into();
+                // Roadmap Wave 1 (RM6, F-5): a restore replaces
+                // the project wholesale, so the revision moves —
+                // never backwards, even though the restored
+                // content may equal an older state.
+                self.revision += 1;
+                self.history_coalesce = false;
+                // Roadmap Wave 1 (RM24, P-14 — A15 H6): a
+                // restore that had to drop the clip-edit
+                // session says so in the recap instead of
+                // the bare word.
+                self.status = if session_dropped {
+                    "Redone. (Clip session closed — its clip is gone.)".into()
+                } else {
+                    "Redone.".into()
+                };
             }
         } else {
             self.status = "Nothing to redo.".into();
@@ -470,19 +664,32 @@ impl EditorCore {
     }
 
     pub fn undo(&mut self) {
-        if let Some(s) = self.undo.pop() {
+        if let Some(entry) = self.undo.pop() {
             if let Ok(current) = serde_json::to_string(&self.project) {
-                self.redo.push(current);
+                self.redo.push(HistoryEntry {
+                    label: entry.label.clone(),
+                    project: current,
+                });
             }
-            if let Ok(p) = serde_json::from_str::<Project>(&s) {
+            if let Ok(p) = serde_json::from_str::<Project>(&entry.project) {
                 self.project = p;
                 self.current = self.current.min(self.project.frames.len().saturating_sub(1));
                 self.selected_figure = self
                     .selected_figure
                     .min(self.project.figures.len().saturating_sub(1));
-                self.repair_clip_session_after_history();
+                let session_dropped = self.repair_clip_session_after_history();
                 self.refresh_missing_audio();
-                self.status = "Undone.".into();
+                // Roadmap Wave 1 (RM6, F-5): the revision moves
+                // on a wholesale restore, as in `redo`.
+                self.revision += 1;
+                self.history_coalesce = false;
+                // Roadmap Wave 1 (RM24, P-14 — A15 H6): as
+                // `redo` — the dropped-session case speaks.
+                self.status = if session_dropped {
+                    "Undone. (Clip session closed — its clip is gone.)".into()
+                } else {
+                    "Undone.".into()
+                };
             }
         } else {
             self.status = "Nothing to undo.".into();
@@ -499,7 +706,14 @@ impl EditorCore {
     /// The undo/redo status stands; the panel simply shows
     /// no session, and the next session op reports the
     /// no-session case as usual.
-    fn repair_clip_session_after_history(&mut self) {
+    ///
+    /// Roadmap Wave 1 (RM24, P-14 — A15 H6): returns
+    /// whether a session was actually dropped, so the
+    /// undo/redo recaps can SAY so instead of the bare
+    /// "Undone." — the swap funnels ignore the answer
+    /// (their own status lines already name the bigger
+    /// event).
+    fn repair_clip_session_after_history(&mut self) -> bool {
         if let Some(session) = &self.clip_edit {
             let alive = self
                 .project
@@ -509,8 +723,10 @@ impl EditorCore {
                 .unwrap_or(false);
             if !alive {
                 self.clip_edit = None;
+                return true;
             }
         }
+        false
     }
 
     /// Number of edits that can currently be undone (the undo
@@ -524,15 +740,130 @@ impl EditorCore {
         self.redo.len()
     }
 
+    /// Roadmap Wave 1 (RM24, P-14): the label of the edit
+    /// the next `undo()` would revert — what the app bar's
+    /// "Undo {label}" button and the History panel's
+    /// current-position row speak. `None` at depth 0.
+    pub fn undo_label(&self) -> Option<&str> {
+        self.undo.last().map(|e| e.label.as_str())
+    }
+
+    /// Roadmap Wave 1 (RM24, P-14): the label of the edit
+    /// the next `redo()` would re-apply. `None` when the
+    /// redo stack is empty.
+    pub fn redo_label(&self) -> Option<&str> {
+        self.redo.last().map(|e| e.label.as_str())
+    }
+
+    /// Roadmap Wave 1 (RM24, P-14): the undo stack's
+    /// labels, oldest first — the History panel's rows
+    /// below the current position (it reverses them for
+    /// its newest-first list).
+    pub fn undo_labels(&self) -> Vec<String> {
+        self.undo.iter().map(|e| e.label.clone()).collect()
+    }
+
+    /// Roadmap Wave 1 (RM24, P-14): the redo stack's
+    /// labels, oldest first — the LAST entry is the edit
+    /// the next `redo()` re-applies.
+    pub fn redo_labels(&self) -> Vec<String> {
+        self.redo.iter().map(|e| e.label.clone()).collect()
+    }
+
+    /// Roadmap Wave 1 (RM24, P-14): jump `steps` entries
+    /// through history in one press (the History panel's
+    /// row clicks): negative undoes, positive redoes,
+    /// clamped at the stacks' ends. Each step is a full
+    /// `undo()`/`redo()` restore (repairs included); only
+    /// the final recap speaks, in the single-step
+    /// vocabulary extended with the count.
+    pub fn history_jump(&mut self, steps: i32) {
+        if steps == 0 {
+            return;
+        }
+        let mut done = 0usize;
+        if steps < 0 {
+            while done < steps.unsigned_abs() as usize && self.undo_depth() > 0 {
+                self.undo();
+                done += 1;
+            }
+            self.status = if done == 0 {
+                "Nothing to undo.".into()
+            } else if done == 1 {
+                "Undone.".into()
+            } else {
+                format!("Undid {done} steps.")
+            };
+        } else {
+            while done < steps as usize && self.redo_depth() > 0 {
+                self.redo();
+                done += 1;
+            }
+            self.status = if done == 0 {
+                "Nothing to redo.".into()
+            } else if done == 1 {
+                "Redone.".into()
+            } else {
+                format!("Redid {done} steps.")
+            };
+        }
+    }
+
+    /// Roadmap Wave 1 (RM24, P-14): counted edits since
+    /// the last successful NAMED save (or open from a
+    /// named file) — `None` while this project has never
+    /// met a named file in this session. The counter is
+    /// the autosave counter's sibling, not its rival:
+    /// `edits_since_autosave` answers "is the recovery
+    /// snapshot current?", this answers "is MY FILE
+    /// current?" — the two diverge exactly when autosave
+    /// has covered work the user never saved.
+    pub fn edits_since_save(&self) -> Option<u64> {
+        self.last_save_count
+            .map(|saved| self.edit_count.saturating_sub(saved))
+    }
+
+    /// Roadmap Wave 1 (RM24, P-14): [`SaveState`] from
+    /// the counter — see the enum for the three truths.
+    pub fn save_state(&self) -> SaveState {
+        match self.edits_since_save() {
+            None => SaveState::NeverSaved,
+            Some(0) => SaveState::Saved,
+            Some(_) => SaveState::ModifiedSinceSave,
+        }
+    }
+
+    /// Roadmap Wave 1 (RM24, P-14): note that the project
+    /// now in the core IS the content of its named file —
+    /// called by the successful named save and by the
+    /// file-open funnels, right after the swap funnel
+    /// reset the baseline to "never saved" (the truth
+    /// for New / Recover / import swaps, which reach no
+    /// such note).
+    fn note_save_baseline(&mut self) {
+        self.last_save_count = Some(self.edit_count);
+    }
+
     /// Hit test in stage coordinates. Returns (figure, node).
     pub fn hit_test(&self, p: V2) -> Option<(usize, usize)> {
-        self.hit_test_impl(p, false)
+        self.hit_test_impl(p, false, 13.0)
+    }
+
+    /// [`hit_test`] with the pick radius as a parameter
+    /// (Roadmap Wave 1, IA-RM15-2): the shell passes a
+    /// screen-space radius (`stage_view::pick_radius`)
+    /// so the on-screen target size is zoom-independent.
+    /// The setup arm is preserved: in setup mode the
+    /// rest-pose positions are tested, exactly the
+    /// positions the press path's setup twin tests.
+    pub fn hit_test_with_radius(&self, p: V2, radius: f32) -> Option<(usize, usize)> {
+        self.hit_test_impl(p, self.setup_mode, radius)
     }
 
     /// Wave Y (Y8, P-10): the hit test, against the current
     /// frame's positions or — in setup mode — the rest-pose
     /// positions the stage actually draws.
-    fn hit_test_impl(&self, p: V2, setup: bool) -> Option<(usize, usize)> {
+    fn hit_test_impl(&self, p: V2, setup: bool, radius: f32) -> Option<(usize, usize)> {
         let mut best: Option<(usize, usize, f32)> = None;
         for fi in 0..self.project.figures.len() {
             for (ni, joint) in (if setup {
@@ -544,7 +875,7 @@ impl EditorCore {
             .enumerate()
             {
                 let d = dist(p, *joint);
-                if d <= 13.0 && best.map(|(_, _, bd)| d < bd).unwrap_or(true) {
+                if d <= radius && best.map(|(_, _, bd)| d < bd).unwrap_or(true) {
                     best = Some((fi, ni, d));
                 }
             }
@@ -587,11 +918,45 @@ impl EditorCore {
         let Some((fi, ni)) = self.hit_test(p) else {
             return false;
         };
+        self.begin_drag_at(fi, ni, p)
+    }
+
+    /// [`begin_drag`] with the pick radius as a parameter
+    /// (Roadmap Wave 1, IA-RM15-2): the shell passes a
+    /// screen-space radius so the press target is the
+    /// same size on screen at any view zoom. Setup mode
+    /// routes to the setup twin, exactly as `begin_drag`
+    /// routes to `begin_setup_drag`.
+    pub fn begin_drag_with_radius(&mut self, p: V2, radius: f32) -> bool {
+        if self.playing {
+            return false;
+        }
+        if self.setup_mode {
+            return self.begin_setup_drag_with_radius(p, radius);
+        }
+        let Some((fi, ni)) = self.hit_test_with_radius(p, radius) else {
+            return false;
+        };
+        self.begin_drag_at(fi, ni, p)
+    }
+
+    /// The post-hit half of `begin_drag` (Roadmap Wave 1,
+    /// IA-RM15-5): the guards, the gesture's one snapshot,
+    /// the selection writes, the drag-kind choice and the
+    /// first `drag_to` — everything after the press's hit
+    /// test has named (figure, node). The shell's segment
+    /// press enters here with `stage_view::segment_hit`'s
+    /// answer, so a grab on a limb's middle starts the
+    /// same drag a grab on its child joint starts (a
+    /// root segment starts the Root drag; a mid joint's
+    /// segment starts its Aim). Locked/playing behaviour
+    /// is the extracted body's own.
+    pub fn begin_drag_at(&mut self, fi: usize, ni: usize, p: V2) -> bool {
         if self.project.figures[fi].locked {
             self.status = "Figure is locked — unlock it in the figures list.".into();
             return false;
         }
-        self.snapshot();
+        self.snapshot_labeled("Move joint");
         self.selected_figure = fi;
         self.selected_node = Some(ni);
         let fig = &self.project.figures[fi];
@@ -642,10 +1007,16 @@ impl EditorCore {
     /// plainly grabbed) with a status saying so, and
     /// takes NO snapshot.
     pub fn begin_setup_drag(&mut self, p: V2) -> bool {
+        self.begin_setup_drag_with_radius(p, 13.0)
+    }
+
+    /// [`begin_setup_drag`] with the pick radius as a
+    /// parameter (Roadmap Wave 1, IA-RM15-2).
+    pub fn begin_setup_drag_with_radius(&mut self, p: V2, radius: f32) -> bool {
         if self.playing {
             return false;
         }
-        let Some((fi, ni)) = self.hit_test_impl(p, true) else {
+        let Some((fi, ni)) = self.hit_test_impl(p, true, radius) else {
             return false;
         };
         if self.project.figures[fi].locked {
@@ -659,7 +1030,7 @@ impl EditorCore {
             self.selected_node = Some(ni);
             return true;
         }
-        self.snapshot();
+        self.snapshot_labeled("Adjust rig");
         self.selected_figure = fi;
         self.selected_node = Some(ni);
         let fig = &self.project.figures[fi];
@@ -687,7 +1058,7 @@ impl EditorCore {
         // pre-drag camera — the first of `end_drag`'s
         // per-frame recap baselines (see the field docs).
         self.drag_cameras_before = vec![(self.current, self.camera_here())];
-        self.snapshot();
+        self.snapshot_labeled("Camera drag");
         self.dragging = Some(DragKind::Camera);
         self.camera_last = Some(p);
     }
@@ -861,7 +1232,7 @@ impl EditorCore {
     }
 
     pub fn add_frame(&mut self) {
-        self.snapshot();
+        self.snapshot_labeled("Add frame");
         // Zero-frame recovery (Wave 10, E9): a project with
         // no frames — an import or an emptied timeline —
         // has no current frame to clone, and indexing one
@@ -906,8 +1277,19 @@ impl EditorCore {
             self.status = "Cannot delete the only frame.".into();
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Delete frame");
         self.project.frames.remove(self.current);
+        // Roadmap Wave 1 (RM18, P-6b): the camera key on
+        // the deleted frame goes with it; later keys shift
+        // one frame earlier (the delete mapping for a
+        // one-frame block at the playhead).
+        let removed = self.current;
+        self.project.camera.retain(|k| k.frame != removed);
+        for key in &mut self.project.camera {
+            if key.frame > removed {
+                key.frame -= 1;
+            }
+        }
         if self.current >= self.project.frames.len() {
             self.current = self.project.frames.len() - 1;
         }
@@ -957,7 +1339,7 @@ impl EditorCore {
             );
             return false;
         };
-        self.snapshot();
+        self.snapshot_labeled("Delete keyframe");
         self.project.frames[frame].poses[fi] = held;
         // Hold the bends too (see the doc comment): the target
         // frame's entry, when it has one, takes the previous
@@ -1031,7 +1413,7 @@ impl EditorCore {
     }
 
     pub fn add_figure(&mut self) {
-        self.snapshot();
+        self.snapshot_labeled("Add figure");
         let idx = self.project.figures.len();
         let color = FIGURE_COLORS[idx % FIGURE_COLORS.len()];
         let root = [300.0 + 90.0 * idx as f32, 470.0];
@@ -1047,7 +1429,7 @@ impl EditorCore {
             self.status = "Inbetween needs a following frame.".into();
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Insert inbetween");
         let a = self.project.frames[self.current].poses.clone();
         let b = self.project.frames[self.current + 1].poses.clone();
         let poses: Vec<crate::model::Pose> = a
@@ -1073,7 +1455,7 @@ impl EditorCore {
             .selected_node
             .filter(|n| *n < def.nodes.len())
             .unwrap_or(def.nodes.len() - 1);
-        self.snapshot();
+        self.snapshot_labeled("Add segment");
         let ni = self.project.figures[fi].def.nodes.len();
         self.project.figures[fi].def.nodes.push(NodeDef {
             min_angle: None,
@@ -1107,7 +1489,12 @@ impl EditorCore {
     }
 
     /// Delete the selected leaf segment. Root and segments that
-    /// still have children are refused.
+    /// still have children are refused. The index remap is the
+    /// full §4.0 set (Roadmap Wave 1, RM19, IA-RM19-6): parents,
+    /// pose angles, frame bends and node-indexed graph channels
+    /// all move together — a channel targeting the deleted node
+    /// is dropped and counted on the status line, never left
+    /// dangling.
     pub fn delete_segment(&mut self) {
         let Some(ni) = self.selected_node else {
             self.status = "Select a segment first.".into();
@@ -1123,7 +1510,7 @@ impl EditorCore {
             self.status = "That segment has children; delete them first.".into();
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Delete segment");
         let def = &mut self.project.figures[fi].def;
         def.nodes.remove(ni);
         for node in def.nodes.iter_mut() {
@@ -1148,44 +1535,320 @@ impl EditorCore {
                 }
             }
         }
+        // Frame bends (IA-RM19-6): the per-figure bend row is
+        // node-indexed exactly like the angle row — remove the
+        // slot with the same absence/short-row guards, or every
+        // later node's bend silently slides one segment over.
+        for frame in &mut self.project.frames {
+            if let Some(row) = frame.bends.get_mut(fi) {
+                if ni < row.len() {
+                    row.remove(ni);
+                }
+            }
+        }
+        // Graph channels (IA-RM19-6): this figure's channels
+        // whose target names a node past the hole decrement; a
+        // channel targeting the deleted node itself is dropped
+        // and counted — the §4.0 rule (dropped with a status
+        // count, never left dangling). RootX/RootY channels and
+        // other figures' channels are not node-indexed here
+        // and pass untouched.
+        let mut dropped_channels = 0usize;
+        self.project.channels.retain_mut(|ch| {
+            if ch.figure != fi {
+                return true;
+            }
+            let target = match &mut ch.target {
+                crate::graph::ChannelTarget::Angle(t)
+                | crate::graph::ChannelTarget::Length(t)
+                | crate::graph::ChannelTarget::Bend(t) => t,
+                _ => return true,
+            };
+            if *target == ni {
+                dropped_channels += 1;
+                false
+            } else {
+                if *target > ni {
+                    *target -= 1;
+                }
+                true
+            }
+        });
         self.selected_node = None;
-        self.status = "Segment deleted.".into();
+        self.status = if dropped_channels > 0 {
+            format!(
+                "Segment deleted. ({dropped_channels} graph channel{} removed)",
+                if dropped_channels == 1 { "" } else { "s" }
+            )
+        } else {
+            "Segment deleted.".into()
+        };
+    }
+
+    /// The segment length range every length door clamps
+    /// with (Roadmap Wave 1, RM3 — F-3): these bounds used
+    /// to live as inline literals inside `adjust_length`,
+    /// so a typed value (the kit `NumberField`) had no one
+    /// home to take its form from. The consts and the pure
+    /// clamps below are that home: `adjust_length`,
+    /// `set_length` and the panels' field specs all read
+    /// the same numbers, so a stepper's form, the op's
+    /// clamp and the field's validation cannot disagree
+    /// (the StepForm discipline, made literal).
+    pub const LENGTH_MIN: f32 = 4.0;
+    /// See [`EditorCore::LENGTH_MIN`].
+    pub const LENGTH_MAX: f32 = 220.0;
+    /// The segment thickness range — see
+    /// [`EditorCore::LENGTH_MIN`].
+    pub const THICKNESS_MIN: f32 = 1.0;
+    /// See [`EditorCore::THICKNESS_MIN`].
+    pub const THICKNESS_MAX: f32 = 18.0;
+    /// The taper range — see [`EditorCore::LENGTH_MIN`].
+    /// (The write itself is `style::set_node_taper`.)
+    pub const TAPER_MIN: f32 = 0.0;
+    /// See [`EditorCore::TAPER_MIN`].
+    pub const TAPER_MAX: f32 = 1.0;
+
+    /// Clamp a segment length into
+    /// [`EditorCore::LENGTH_MIN`]..=[`EditorCore::LENGTH_MAX`]
+    /// — the one clamp every length write applies.
+    pub fn length_clamped(value: f32) -> f32 {
+        value.clamp(Self::LENGTH_MIN, Self::LENGTH_MAX)
+    }
+
+    /// Clamp a segment thickness — see
+    /// [`EditorCore::length_clamped`].
+    pub fn thickness_clamped(value: f32) -> f32 {
+        value.clamp(Self::THICKNESS_MIN, Self::THICKNESS_MAX)
+    }
+
+    /// Clamp a taper — see [`EditorCore::length_clamped`].
+    pub fn taper_clamped(value: f32) -> f32 {
+        value.clamp(Self::TAPER_MIN, Self::TAPER_MAX)
+    }
+
+    /// Whether a length write of `value` through the
+    /// doors below would actually change the selected
+    /// segment (selection present, parented node, the
+    /// clamped value different) — the doors snapshot on
+    /// exactly this condition, so a clamped-to-same press
+    /// spends no undo step.
+    fn length_write_changes(&self, value: f32) -> bool {
+        let Some(ni) = self.selected_node else {
+            return false;
+        };
+        let Some(node) = self
+            .project
+            .figures
+            .get(self.selected_figure)
+            .and_then(|f| f.def.nodes.get(ni))
+        else {
+            return false;
+        };
+        node.parent.is_some() && Self::length_clamped(value) != node.length
     }
 
     pub fn adjust_length(&mut self, delta: f32) {
+        // Roadmap Wave 1 (RM24, P-14 — A15 H3): the Wave 13
+        // B2 stepper exemption is closed — a real change
+        // takes an undo step, coalesced so a held stepper
+        // run costs one step, not one per press.
+        let cur = self.selected_node.and_then(|ni| {
+            self.project
+                .figures
+                .get(self.selected_figure)?
+                .def
+                .nodes
+                .get(ni)
+                .filter(|n| n.parent.is_some())
+                .map(|n| n.length)
+        });
+        if let Some(cur) = cur {
+            if Self::length_clamped(cur + delta) != cur {
+                self.snapshot_coalesced("Segment length");
+            }
+        }
+        self.adjust_length_raw(delta);
+    }
+
+    /// The length step's write itself — status recap
+    /// included, NO undo step and no dirty mark of its
+    /// own: composed ops that record their own single
+    /// snapshot (`scale_selected_figure` in the shell)
+    /// call this per node, under their step.
+    pub fn adjust_length_raw(&mut self, delta: f32) {
         let Some(ni) = self.selected_node else { return };
-        let (name, length, changed) = {
+        let (name, length) = {
             let node = &mut self.project.figures[self.selected_figure].def.nodes[ni];
             if node.parent.is_none() {
                 return;
             }
-            let next = (node.length + delta).clamp(4.0, 220.0);
+            node.length = Self::length_clamped(node.length + delta);
+            (node.name.clone(), node.length)
+        };
+        self.status = format!("{} length {:.0}", name, length);
+    }
+
+    /// Set the selected segment's length to an exact value
+    /// (Roadmap Wave 1, RM3 — F-3): the typed-entry
+    /// counterpart of `adjust_length`, which is delta-only.
+    /// Same selection rules (no selection, or the origin
+    /// node, writes nothing and says nothing), the same
+    /// clamp ([`EditorCore::length_clamped`]) and the same
+    /// status wording, so a typed commit reads exactly
+    /// like the steps that would have reached the same
+    /// value. Discipline since RM24 (P-14, A15 H3): a real
+    /// change takes a coalesced undo step (see
+    /// `adjust_length`) — RM3's B2 mark-only discipline is
+    /// superseded. The write itself is
+    /// [`EditorCore::write_length`]; this door announces.
+    pub fn set_length(&mut self, value: f32) {
+        if self.length_write_changes(value) {
+            self.snapshot_coalesced("Segment length");
+        }
+        self.write_length(value, true);
+    }
+
+    /// [`EditorCore::set_length`] without the status
+    /// recap: the write a drag-scrub performs mid-gesture
+    /// (mid-drag writes stay silent so a scrub does not
+    /// spam the status line or the toasts fed from it; the
+    /// gesture's release announces once, through
+    /// `set_length`). The coalesced step makes the whole
+    /// scrub one undo step, exactly like the stepper run.
+    pub fn set_length_quiet(&mut self, value: f32) {
+        if self.length_write_changes(value) {
+            self.snapshot_coalesced("Segment length");
+        }
+        self.write_length(value, false);
+    }
+
+    /// The one length write behind `set_length` /
+    /// `set_length_quiet`: `announce` gates only the
+    /// status recap — the clamp and the selection rules
+    /// are identical either way. Records nothing itself:
+    /// the doors above own the undo step (and composed
+    /// callers their own). Returns whether the value
+    /// changed.
+    fn write_length(&mut self, value: f32, announce: bool) -> bool {
+        let Some(ni) = self.selected_node else {
+            return false;
+        };
+        let (name, length, changed) = {
+            let node = &mut self.project.figures[self.selected_figure].def.nodes[ni];
+            if node.parent.is_none() {
+                return false;
+            }
+            let next = Self::length_clamped(value);
             let changed = next != node.length;
             node.length = next;
             (node.name.clone(), node.length, changed)
         };
-        // Wave 13 (B2): a stepper tweak — no snapshot, but
-        // a real change counts for dirty/autosave.
-        if changed {
-            self.mark_dirty();
+        if announce {
+            self.status = format!("{} length {:.0}", name, length);
         }
-        self.status = format!("{} length {:.0}", name, length);
+        changed
+    }
+
+    /// Whether a thickness write of `value` would change
+    /// the selected segment — the thickness doors'
+    /// snapshot condition, as
+    /// [`EditorCore::length_write_changes`] (no origin
+    /// refusal here: thickness is a property of the node
+    /// itself, not of a segment running from a parent).
+    fn thickness_write_changes(&self, value: f32) -> bool {
+        let Some(ni) = self.selected_node else {
+            return false;
+        };
+        let Some(node) = self
+            .project
+            .figures
+            .get(self.selected_figure)
+            .and_then(|f| f.def.nodes.get(ni))
+        else {
+            return false;
+        };
+        Self::thickness_clamped(value) != node.thickness
     }
 
     pub fn adjust_thickness(&mut self, delta: f32) {
+        // Roadmap Wave 1 (RM24, P-14 — A15 H3): as
+        // `adjust_length` — a real change takes a
+        // coalesced undo step.
+        let cur = self.selected_node.and_then(|ni| {
+            self.project
+                .figures
+                .get(self.selected_figure)?
+                .def
+                .nodes
+                .get(ni)
+                .map(|n| n.thickness)
+        });
+        if let Some(cur) = cur {
+            if Self::thickness_clamped(cur + delta) != cur {
+                self.snapshot_coalesced("Segment thickness");
+            }
+        }
         let Some(ni) = self.selected_node else { return };
+        let (name, thickness) = {
+            let node = &mut self.project.figures[self.selected_figure].def.nodes[ni];
+            node.thickness = Self::thickness_clamped(node.thickness + delta);
+            (node.name.clone(), node.thickness)
+        };
+        self.status = format!("{} thickness {:.0}", name, thickness);
+    }
+
+    /// Set the selected segment's thickness to an exact
+    /// value (Roadmap Wave 1, RM3 — F-3): the typed-entry
+    /// counterpart of `adjust_thickness`, under the same
+    /// rules as [`EditorCore::set_length`] — the shared
+    /// clamp ([`EditorCore::thickness_clamped`]), a
+    /// coalesced undo step on a real change (RM24, P-14 —
+    /// RM3's mark-only discipline superseded), the op's
+    /// own status wording. (No origin refusal:
+    /// `adjust_thickness` has none — thickness is a
+    /// property of the node itself, not of a segment
+    /// running from a parent.) The write itself is
+    /// [`EditorCore::write_thickness`]; this door
+    /// announces, [`EditorCore::set_thickness_quiet`]
+    /// is the scrub's silent form.
+    pub fn set_thickness(&mut self, value: f32) {
+        if self.thickness_write_changes(value) {
+            self.snapshot_coalesced("Segment thickness");
+        }
+        self.write_thickness(value, true);
+    }
+
+    /// [`EditorCore::set_thickness`] without the status
+    /// recap — the drag-scrub form, as
+    /// [`EditorCore::set_length_quiet`].
+    pub fn set_thickness_quiet(&mut self, value: f32) {
+        if self.thickness_write_changes(value) {
+            self.snapshot_coalesced("Segment thickness");
+        }
+        self.write_thickness(value, false);
+    }
+
+    /// The one thickness write behind `set_thickness` /
+    /// `set_thickness_quiet` — see
+    /// [`EditorCore::write_length`] for the shape (the
+    /// doors own the undo step; this records nothing).
+    /// Returns whether the value changed.
+    fn write_thickness(&mut self, value: f32, announce: bool) -> bool {
+        let Some(ni) = self.selected_node else {
+            return false;
+        };
         let (name, thickness, changed) = {
             let node = &mut self.project.figures[self.selected_figure].def.nodes[ni];
-            let next = (node.thickness + delta).clamp(1.0, 18.0);
+            let next = Self::thickness_clamped(value);
             let changed = next != node.thickness;
             node.thickness = next;
             (node.name.clone(), node.thickness, changed)
         };
-        // Wave 13 (B2): as `adjust_length`.
-        if changed {
-            self.mark_dirty();
+        if announce {
+            self.status = format!("{} thickness {:.0}", name, thickness);
         }
-        self.status = format!("{} thickness {:.0}", name, thickness);
+        changed
     }
 
     const NODE_COLORS: [Option<u32>; 7] = [
@@ -1202,6 +1865,11 @@ impl EditorCore {
     /// -> square -> pentagon -> line.
     pub fn cycle_shape(&mut self) {
         let Some(ni) = self.selected_node else { return };
+        // Roadmap Wave 1 (RM24, P-14 — A15 H3): the B2
+        // cycler exemption is closed — the shape always
+        // changes, so the step is taken up front, coalesced
+        // so a run of presses costs one undo step.
+        self.snapshot_coalesced("Segment shape");
         let (name, shape) = {
             let node = &mut self.project.figures[self.selected_figure].def.nodes[ni];
             node.shape = match node.shape {
@@ -1212,14 +1880,13 @@ impl EditorCore {
             };
             (node.name.clone(), node.shape)
         };
-        // Wave 13 (B2): a cycler — no snapshot, but the
-        // shape always changes, so it always marks.
-        self.mark_dirty();
         self.status = format!("{} shape: {:?}.", name, shape);
     }
 
     pub fn cycle_node_color(&mut self) {
         let Some(ni) = self.selected_node else { return };
+        // Roadmap Wave 1 (RM24, P-14): as `cycle_shape`.
+        self.snapshot_coalesced("Segment colour");
         let name = {
             let node = &mut self.project.figures[self.selected_figure].def.nodes[ni];
             let idx = Self::NODE_COLORS
@@ -1229,17 +1896,16 @@ impl EditorCore {
             node.color = Self::NODE_COLORS[(idx + 1) % Self::NODE_COLORS.len()];
             node.name.clone()
         };
-        // Wave 13 (B2): as `cycle_shape`.
-        self.mark_dirty();
         self.status = format!("{} colour changed.", name);
     }
 
     /// Set the selected segment's colour directly (the colour
     /// picker panel). Writes the same `NodeDef.color` the cycle
-    /// op steps through, as `Some(rgb)`; like the cycle op it
-    /// does not snapshot — but since Wave 13 (B2) a write that
-    /// actually changes the colour marks dirty. (The shared
-    /// `write_node_color` itself stays unmarked: its other
+    /// op steps through, as `Some(rgb)`; since Roadmap Wave 1
+    /// (RM24, P-14 — A15 H3) a write that actually changes the
+    /// colour takes a coalesced undo step first, so a picker
+    /// drag is one step, not a stack of them. (The shared
+    /// `write_node_color` itself stays unrecorded: its other
     /// caller, `set_node_style_atomic`, snapshots.)
     pub fn set_node_color(&mut self, rgb: u32) {
         let before = self.selected_node.and_then(|ni| {
@@ -1251,12 +1917,12 @@ impl EditorCore {
                 .get(ni)
                 .map(|n| n.color)
         });
-        self.write_node_color(rgb);
         if let Some(before) = before {
             if before != Some(rgb) {
-                self.mark_dirty();
+                self.snapshot_coalesced("Segment colour");
             }
         }
+        self.write_node_color(rgb);
     }
 
     /// The colour write itself, without `set_node_color`'s
@@ -1277,7 +1943,7 @@ impl EditorCore {
     }
 
     pub fn camera_zoom_by(&mut self, factor: f32) {
-        self.snapshot();
+        self.snapshot_labeled("Camera zoom");
         let (x, y, zoom) = self.camera_here();
         let zoom = (zoom * factor).clamp(0.3, 4.0);
         self.project.set_camera_key(self.current, x, y, zoom);
@@ -1285,12 +1951,17 @@ impl EditorCore {
     }
 
     pub fn camera_clear_key(&mut self) {
+        // Roadmap Wave 1 (RM24, P-14 — A15 H3): the Wave 13
+        // census A6 exemption is closed — a real removal
+        // takes exactly one undo step, like the
+        // `delete_camera_key` sibling always did. (The
+        // panel button's "Clear key (no undo)" label is
+        // retired with it — see IA-RM24-4; the panel's MCP
+        // twin `clear_camera_key` moved in the same wave.)
+        if self.project.camera.iter().any(|k| k.frame == self.current) {
+            self.snapshot_labeled("Clear camera key");
+        }
         if self.project.remove_camera_key(self.current) {
-            // Wave 13 (census A6): the camera panel sells
-            // this path as its "Clear key (no undo)" button
-            // — no snapshot, by the label's own contract —
-            // but a real removal counts for dirty/autosave.
-            self.mark_dirty();
             self.status = "Camera key removed.".into();
         } else {
             self.status = "No camera key on this frame.".into();
@@ -1303,7 +1974,7 @@ impl EditorCore {
     /// angle 0, snapping any interpolated rotation — the same
     /// fix-up `rotate_camera` applies.
     fn set_camera_key_here(&mut self, x: f32, y: f32, zoom: f32) {
-        self.snapshot();
+        self.snapshot_labeled("Camera key");
         let frame = self.current;
         let angle = self.project.camera_angle_at(frame as f32);
         self.project.set_camera_key(frame, x, y, zoom);
@@ -1394,7 +2065,7 @@ impl EditorCore {
     }
 
     pub fn add_quadruped(&mut self) {
-        self.snapshot();
+        self.snapshot_labeled("Add quadruped");
         let idx = self.project.figures.len();
         let color = FIGURE_COLORS[idx % FIGURE_COLORS.len()];
         let root = [260.0 + 60.0 * idx as f32, 430.0];
@@ -1406,7 +2077,7 @@ impl EditorCore {
     }
 
     pub fn add_simple(&mut self) {
-        self.snapshot();
+        self.snapshot_labeled("Add figure");
         let idx = self.project.figures.len();
         let color = FIGURE_COLORS[(idx + 2) % FIGURE_COLORS.len()];
         let root = [340.0 + 70.0 * idx as f32, 470.0];
@@ -1434,37 +2105,51 @@ impl EditorCore {
     /// Advance the playhead by wall-clock seconds, honouring fps and
     /// per-frame durations. Loops at the end — or, when a loop range
     /// is set, at the end of the range (see `set_loop_range`).
+    ///
+    /// Roadmap Wave 1 (RM7 / F-6): the advance walks the timeline
+    /// on the project's shared duration-weighted clock
+    /// (`Project::beats_at_frame_time` / `frame_time_at_beats`):
+    /// the tick's beats are spent frame by frame, each frame
+    /// charged at its own duration, so a tick that crosses a
+    /// boundary lands part-way through the next frame at THAT
+    /// frame's rate. The pre-RM7 shape charged the whole tick at
+    /// the rate of the frame current when the tick began, which
+    /// mis-timed every boundary crossing — the disagreement the
+    /// audio side's `expected_frame_walk` documented against it.
+    /// Folding happens in beats: the loop window is the range's
+    /// beat span (or the whole timeline's), and overshoot folds
+    /// back by that span, preserving the fractional remainder.
     pub fn advance_play(&mut self, dt_secs: f32) {
         let n = self.project.frames.len();
         if n == 0 {
             return;
         }
-        let duration = self.project.frames[self.current].duration.max(0.05);
-        self.playhead += dt_secs * self.project.fps.max(1.0) / duration;
-        match self.loop_range {
+        let mut beats = self.project.beats_at_frame_time(self.playhead);
+        if dt_secs.is_finite() && dt_secs > 0.0 {
+            beats += dt_secs * self.project.fps.max(1.0);
+        }
+        let (fold_start, fold_end) = match self.loop_range {
             Some((a, b)) => {
                 // Clamp defensively: frames may have been deleted
-                // since the range was set.
+                // since the range was set. The range is inclusive,
+                // so the window ends at the end of frame b; a
+                // playhead below a (e.g. after a `goto` outside
+                // the range) plays forward into the range and
+                // only folds once it reaches that end.
                 let b = b.min(n - 1);
                 let a = a.min(b);
-                // The range is inclusive, so the playhead wraps when
-                // it reaches the end of frame b (playhead == b + 1),
-                // stepping back by the range's span to a. A playhead
-                // below a (e.g. after a `goto` outside the range)
-                // never triggers this: it just plays forward into the
-                // range, and the range itself is left untouched.
-                let end = (b + 1) as f32;
-                let span = end - a as f32;
-                while self.playhead >= end {
-                    self.playhead -= span;
-                }
+                (
+                    self.project.beats_at_frame_time(a as f32),
+                    self.project.beats_at_frame_time((b + 1) as f32),
+                )
             }
-            None => {
-                while self.playhead >= n as f32 {
-                    self.playhead -= n as f32;
-                }
-            }
+            None => (0.0, self.project.timeline_beats()),
+        };
+        let span = fold_end - fold_start;
+        if span > 0.0 && beats >= fold_end {
+            beats = fold_start + (beats - fold_start).rem_euclid(span);
         }
+        self.playhead = self.project.frame_time_at_beats(beats);
         self.current = (self.playhead.floor() as usize).min(n - 1);
     }
 
@@ -1559,7 +2244,7 @@ impl EditorCore {
             return false;
         }
         let target = target as usize;
-        self.snapshot();
+        self.snapshot_labeled("Shift frames");
         // Drain the block, then re-insert it at `target`. The
         // insert index is the same in the drained vec for both
         // directions: exactly the frames that must precede the
@@ -1570,6 +2255,15 @@ impl EditorCore {
             self.project.frames.insert(target + i, frame);
         }
         self.remap_after_frame_move(from, count, target);
+        // Roadmap Wave 1 (RM18, P-6b): camera keys ride the
+        // same permutation as the playhead — a key on a moved
+        // frame travels with it, a key the block jumps over
+        // shifts against the move. Re-sorted afterwards:
+        // `set_camera_key`'s invariant is an ascending list.
+        for key in &mut self.project.camera {
+            key.frame = Self::remap_after_shift(key.frame, from, count, target);
+        }
+        self.project.camera.sort_by_key(|k| k.frame);
         self.status = format!(
             "Moved {count} frame(s) to position {}.",
             target + 1
@@ -1590,7 +2284,7 @@ impl EditorCore {
         if count < 2 {
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Reverse frames");
         self.project.frames[from..from + count].reverse();
         let last = from + count - 1;
         let flip = |idx: usize| {
@@ -1606,6 +2300,12 @@ impl EditorCore {
             let (a, b) = (flip(a), flip(b));
             self.loop_range = Some(if a <= b { (a, b) } else { (b, a) });
         }
+        // Roadmap Wave 1 (RM18, P-6b): camera keys inside
+        // the reversed block flip with their frames.
+        for key in &mut self.project.camera {
+            key.frame = flip(key.frame);
+        }
+        self.project.camera.sort_by_key(|k| k.frame);
         self.status = format!("Reversed frames {}–{}.", from + 1, from + count);
     }
 
@@ -1639,6 +2339,18 @@ impl EditorCore {
                 }
             };
         }
+        // Roadmap Wave 1 (RM18, P-6b): camera keys follow
+        // the delete mapping — a key on a deleted frame is
+        // removed with its content, a key after the block
+        // shifts earlier by `count`. Keys before the block
+        // are untouched; ascending order is preserved, so
+        // no re-sort is needed.
+        self.project.camera.retain(|k| k.frame < from || k.frame >= end);
+        for key in &mut self.project.camera {
+            if key.frame >= end {
+                key.frame -= count;
+            }
+        }
     }
 
     /// Delete the block of `count` frames starting at `from`.
@@ -1646,9 +2358,11 @@ impl EditorCore {
     /// removal is structural. The count is clamped to the timeline
     /// end, like `reverse_range`; an empty or out-of-range block is
     /// refused, as is deleting every frame — a project always keeps
-    /// at least one frame. Frame-indexed project data outside
-    /// `Frame` (camera keys and FX clip start frames) is NOT
-    /// remapped, matching `shift_frames`/`reverse_range`.
+    /// at least one frame. Camera keys ARE remapped (RM18,
+    /// P-6b: keys on deleted frames are removed with their
+    /// content, later keys shift earlier); other
+    /// frame-indexed project data outside `Frame` (FX clip
+    /// start frames) is NOT remapped.
     pub fn delete_range(&mut self, from: usize, count: usize) -> bool {
         let n = self.project.frames.len();
         if count == 0 || from >= n {
@@ -1658,7 +2372,7 @@ impl EditorCore {
         if count == n {
             return false;
         }
-        self.snapshot();
+        self.snapshot_labeled("Delete frames");
         self.project.frames.drain(from..from + count);
         self.remap_after_frame_delete(from, count);
         self.status = format!(
@@ -1703,6 +2417,16 @@ impl EditorCore {
             let b = if b >= at { b + count } else { b };
             self.loop_range = Some((a, b));
         }
+        // Roadmap Wave 1 (RM18, P-6b): camera keys at or
+        // after the paste point shift later with the frames
+        // they were authored against (the same rule the
+        // playhead follows above). Ascending order is
+        // preserved, so no re-sort is needed.
+        for key in &mut self.project.camera {
+            if key.frame >= at {
+                key.frame += count;
+            }
+        }
     }
 
     /// Insert the range clipboard's frames at index `at` (clamped
@@ -1710,8 +2434,10 @@ impl EditorCore {
     /// frames. Refused when the range clipboard is empty, or when a
     /// copied frame's figure count no longer matches the project
     /// (the same guard as `paste_frame`). Frame-indexed project
-    /// data outside `Frame` (camera keys and FX clip start frames)
-    /// is NOT remapped, matching `shift_frames`/`reverse_range`.
+    /// data outside `Frame`. Camera keys ARE remapped (RM18,
+    /// P-6b: keys at or after the paste point shift later
+    /// with their frames); other frame-indexed project data
+    /// (FX clip start frames) is NOT remapped.
     pub fn paste_range(&mut self, at: usize) -> bool {
         if self.frame_clipboard.is_empty() {
             return false;
@@ -1740,7 +2466,7 @@ impl EditorCore {
         let at = at.min(self.project.frames.len());
         let block = self.frame_clipboard.clone();
         let count = block.len();
-        self.snapshot();
+        self.snapshot_labeled("Paste frames");
         for (i, frame) in block.into_iter().enumerate() {
             self.project.frames.insert(at + i, frame);
         }
@@ -1765,7 +2491,7 @@ impl EditorCore {
             self.status = "No such frame or figure to nudge.".into();
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Nudge motion path");
         let root = &mut self.project.frames[frame].poses[fi].root;
         root[0] += delta[0];
         root[1] += delta[1];
@@ -1809,7 +2535,7 @@ impl EditorCore {
             self.status = "Motion path already smooth.".into();
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Smooth motion path");
         let changed = updates.len();
         for (f, root) in updates {
             self.project.frames[f].poses[fi].root = root;
@@ -1820,16 +2546,75 @@ impl EditorCore {
         );
     }
 
-    pub fn positions_f(&self, frame_f: f32, fi: usize) -> Vec<V2> {
-        if self.project.channels.is_empty() {
-            let poses = self.project.poses_at(frame_f);
-            let fig = &self.project.figures[fi];
-            evaluate(&fig.def, &poses[fi])
-        } else {
-            // Wave 5: graph channels override the sampled pose/def.
-            let r = crate::graph::apply_channels(&self.project, &self.project.channels, frame_f);
-            evaluate(&r.defs[fi], &r.poses[fi])
+    /// Roadmap Wave 1 (RM6, F-5): the current project
+    /// revision (see the `revision` field). Paired with a
+    /// frame it is the only honest cache key for anything
+    /// derived from the project — the Wave L lesson.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Roadmap Wave 1 (RM6, F-5): the display frame's full
+    /// channel evaluation — poses, defs and bend rows —
+    /// computed ONCE per (revision, frame) and shared by
+    /// every consumer of this redraw. Before this funnel the
+    /// stage paid the evaluation per figure (`positions_f`
+    /// ran `poses_at` or `apply_channels` for every figure,
+    /// and the bend fetch ran `apply_channels` a second time
+    /// per figure: O(figures²) clone work per redraw).
+    ///
+    /// The evaluation itself is exactly
+    /// [`crate::graph::apply_channels`] on the project's own
+    /// channels, in both branches: with no channels its poses
+    /// are `poses_at` verbatim and its defs are the figures'
+    /// own defs (cloned, read identically), so
+    /// [`Self::positions_f`] and the stage's bend rows return
+    /// byte-identical results to the per-figure paths they
+    /// replace — the only change is how often the work runs.
+    pub fn evaluated_frame(
+        &self,
+        frame_f: f32,
+    ) -> std::rc::Rc<crate::graph::ChannelResult> {
+        let bits = frame_f.to_bits();
+        {
+            let cache = self.eval_cache.borrow();
+            if let Some(hit) = cache
+                .iter()
+                .find(|(r, b, _)| *r == self.revision && *b == bits)
+                .map(|(_, _, v)| v.clone())
+            {
+                return hit;
+            }
         }
+        let fresh = std::rc::Rc::new(crate::graph::apply_channels(
+            &self.project,
+            &self.project.channels,
+            frame_f,
+        ));
+        let mut cache = self.eval_cache.borrow_mut();
+        // Entries cut against older revisions can never be
+        // served again (the counter is monotone); drop them
+        // here so the cache only ever holds this revision's
+        // frames, a handful at most (the display frame plus
+        // scrub/onion neighbours).
+        cache.retain(|(r, _, _)| *r == self.revision);
+        if cache.len() >= 8 {
+            cache.remove(0);
+        }
+        cache.push((self.revision, bits, fresh.clone()));
+        fresh
+    }
+
+    pub fn positions_f(&self, frame_f: f32, fi: usize) -> Vec<V2> {
+        // Roadmap Wave 1 (RM6, F-5): read through the one
+        // shared evaluation (see `evaluated_frame`) instead
+        // of re-running `poses_at` / `apply_channels` per
+        // figure. Both former branches are the same values:
+        // with channels, `apply_channels`' poses and defs
+        // verbatim — the historical Wave 5 path; without,
+        // `poses_at` poses against the figure's own def.
+        let ev = self.evaluated_frame(frame_f);
+        evaluate(&ev.defs[fi], &ev.poses[fi])
     }
 
     // ---- Wave 5 integration ops -------------------------------------
@@ -1846,7 +2631,7 @@ impl EditorCore {
         if to == fi {
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Reorder figure");
         if crate::layers::move_figure(&mut self.project, fi, dir) {
             self.selected_figure = crate::layers::remapped_index(self.selected_figure, fi, to);
             if let Some(solo) = self.solo {
@@ -1861,7 +2646,7 @@ impl EditorCore {
     /// Rotate the camera at the current frame (wave 6): upserts a
     /// camera key carrying the existing pan/zoom plus the new angle.
     pub fn rotate_camera(&mut self, delta_deg: f32) {
-        self.snapshot();
+        self.snapshot_labeled("Rotate camera");
         let frame = self.current;
         let (x, y, zoom) = self.project.camera_at(frame as f32);
         let angle = crate::model::norm_deg(self.project.camera_angle_at(frame as f32) + delta_deg);
@@ -1909,7 +2694,7 @@ impl EditorCore {
             .map(|(i, _)| i)
             .unwrap_or(0);
         let next = STEPS[(nearest + 1) % STEPS.len()];
-        self.snapshot();
+        self.snapshot_labeled("Bend");
         let nodes = self.project.figures[fi].def.nodes.len();
         let frame = &mut self.project.frames[self.current];
         if frame.bends.len() <= fi {
@@ -1928,12 +2713,15 @@ impl EditorCore {
     }
 
     pub fn toggle_figure_lock(&mut self, fi: usize) {
+        // Roadmap Wave 1 (RM24, P-14 — A15 H3): the Wave 13
+        // B2 layers exemption is closed — the toggle takes
+        // exactly one undo step (peeked first, so a missing
+        // figure spends nothing).
+        if self.project.figures.get(fi).is_some() {
+            self.snapshot_labeled("Figure lock");
+        }
         match crate::layers::toggle_lock(&mut self.project, fi) {
             Some(locked) => {
-                // Wave 13 (B2): no snapshot by design
-                // (layers family), but the write counts
-                // for dirty/autosave via the seam.
-                self.mark_dirty();
                 self.status = format!("Figure {} {}.", fi + 1, if locked { "locked" } else { "unlocked" })
             }
             None => self.status = "No such figure.".into(),
@@ -1941,10 +2729,13 @@ impl EditorCore {
     }
 
     pub fn cycle_figure_opacity(&mut self, fi: usize) {
+        // Roadmap Wave 1 (RM24, P-14): as `toggle_figure_lock`,
+        // coalesced — a run of cycle presses is one step.
+        if self.project.figures.get(fi).is_some() {
+            self.snapshot_coalesced("Figure opacity");
+        }
         match crate::layers::cycle_opacity(&mut self.project, fi) {
             Some(o) => {
-                // Wave 13 (B2): as `toggle_figure_lock`.
-                self.mark_dirty();
                 self.status = format!("Figure {} opacity {:.0}%.", fi + 1, o * 100.0)
             }
             None => self.status = "No such figure.".into(),
@@ -1955,10 +2746,10 @@ impl EditorCore {
     /// via the layers engine's clamped setter — so the bounds and NaN
     /// handling match every other opacity write. The target is rounded
     /// to two decimals so repeated steps land on clean percentages.
-    /// Like `cycle_figure_opacity`, this does not snapshot — but
-    /// since Wave 13 (B2) a step that actually changes the value
-    /// marks dirty, so the write is no longer invisible to the
-    /// dirty dot and the autosave cadence.
+    /// Since Roadmap Wave 1 (RM24, P-14 — A15 H3) a step that
+    /// actually changes the value takes a coalesced undo step
+    /// (a held stepper is one step), where Wave 13 (B2) only
+    /// marked it dirty.
     pub fn step_figure_opacity(&mut self, fi: usize, delta: f32) {
         let Some(fig) = self.project.figures.get(fi) else {
             self.status = "No such figure.".into();
@@ -1966,11 +2757,16 @@ impl EditorCore {
         };
         let before = fig.opacity;
         let next = ((fig.opacity + delta) * 100.0).round() / 100.0;
+        // The engine's clamped result, peeked so a step
+        // clamped onto the current value spends no step
+        // (and a NaN step, which the engine refuses
+        // outright, spends nothing either).
+        let effective = next.clamp(crate::layers::MIN_OPACITY, crate::layers::MAX_OPACITY);
+        if effective.is_finite() && effective != before {
+            self.snapshot_coalesced("Figure opacity");
+        }
         if crate::layers::set_opacity(&mut self.project, fi, next) {
             let o = self.project.figures[fi].opacity;
-            if o != before {
-                self.mark_dirty();
-            }
             self.status = format!("Figure {} opacity {:.0}%.", fi + 1, o * 100.0);
         } else {
             self.status = "No such figure.".into();
@@ -2025,7 +2821,7 @@ impl EditorCore {
         // button — it must be an undo step like every other
         // mutation; previously it neither snapshotted nor
         // counted toward the autosave cadence.
-        self.snapshot();
+        self.snapshot_labeled("Key angle");
         let ch = crate::graph::channel_mut(
             &mut self.project.channels,
             fi,
@@ -2045,7 +2841,7 @@ impl EditorCore {
             self.status = "No graph channels to clear.".into();
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Clear graph channels");
         self.project.channels.clear();
         self.status = "Graph channels cleared.".into();
     }
@@ -2063,7 +2859,7 @@ impl EditorCore {
             return;
         }
         let n = self.project.channels.len();
-        self.snapshot();
+        self.snapshot_labeled("Auto tangents");
         for ch in &mut self.project.channels {
             crate::graph::smooth_channel(ch);
         }
@@ -2092,7 +2888,7 @@ impl EditorCore {
             self.status = format!("No graph channels for figure {}.", fi + 1);
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Tangent preset");
         for ch in &mut self.project.channels {
             if ch.figure != fi {
                 continue;
@@ -2152,7 +2948,7 @@ impl EditorCore {
             self.status = format!("No graph keys for figure {} joint {}.", fi + 1, ni);
             return;
         };
-        self.snapshot();
+        self.snapshot_labeled("Key interpolation");
         let key = &mut self.project.channels[ci].keys[ki];
         key.interp = mode;
         let frame = key.frame;
@@ -2226,7 +3022,7 @@ impl EditorCore {
                 (out.poses, out.bends)
             })
             .collect();
-        self.snapshot();
+        self.snapshot_labeled("Bake graph channels");
         for ((poses, bends), f) in baked.into_iter().zip(lo..=hi) {
             self.project.frames[f].poses = poses;
             for (fi, row) in bends.into_iter().enumerate() {
@@ -2283,7 +3079,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Mirror pose");
         let pose = &mut self.project.frames[self.current].poses[fi];
         for a in &mut pose.angles {
             *a = -*a;
@@ -2339,7 +3135,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Copy pose");
         self.project.frames[cur].poses[to_fig] = pose;
         self.status = format!(
             "Copied figure {}'s pose to figure {} on frame {}.",
@@ -2375,6 +3171,7 @@ impl EditorCore {
                 self.selected_node = None;
                 self.solo = None;
                 self.note_project_swapped();
+                self.note_save_baseline();
                 self.status =
                     format!("Opened {}{}", path.display(), self.missing_audio_note());
             }
@@ -2427,7 +3224,13 @@ impl EditorCore {
             .map_err(std::io::Error::other)
             .and_then(|s| std::fs::write(&path, s))
         {
-            Ok(()) => self.status = format!("Saved to {}", path.display()),
+            Ok(()) => {
+                // Roadmap Wave 1 (RM24, P-14): this IS a
+                // write of the project to a named file, so
+                // the save-state baseline stamps here too.
+                self.note_save_baseline();
+                self.status = format!("Saved to {}", path.display())
+            }
             Err(e) => self.status = format!("Save failed: {e}"),
         }
     }
@@ -2445,6 +3248,7 @@ impl EditorCore {
                 self.selected_node = None;
                 self.undo.clear();
                 self.note_project_swapped();
+                self.note_save_baseline();
                 self.status =
                     format!("Loaded {}{}", path.display(), self.missing_audio_note());
             }
@@ -2493,23 +3297,36 @@ impl EditorCore {
     /// `note_recovery_written` covers it exactly the same
     /// way.
     ///
-    /// The seam exists for the core ops that mutate the
-    /// project with undoability deliberately OFF (the
-    /// layers family — lock / hide / opacity — and the
-    /// project-settings and segment tweak cyclers and
-    /// steppers: their docs have always said "does not
-    /// snapshot", and the panels are built on a stepper
-    /// press costing zero undo entries). Before this
-    /// seam those writes were invisible to the dirty dot
-    /// and could slip a whole session past the 25-edit
-    /// autosave cadence (the Wave 12 E8 remainder). The
-    /// house rule stands: a mutation either snapshots
-    /// exactly once or calls this — never neither.
-    /// Callers mark only when a value actually changed;
-    /// a refused or clamped-to-same-value call marks
-    /// nothing.
+    /// History: the seam existed for the core ops that
+    /// mutated the project with undoability deliberately
+    /// OFF (the layers family — lock / hide / opacity —
+    /// and the project-settings and segment tweak cyclers
+    /// and steppers), whose pre-seam writes were invisible
+    /// to the dirty dot and could slip a whole session
+    /// past the 25-edit autosave cadence (the Wave 12 E8
+    /// remainder).
+    ///
+    /// Roadmap Wave 1 (RM24, P-14 — A15 H3) closed that
+    /// census: every one of those ops now snapshots (the
+    /// stepper/cycler/scrub families coalesced, the rest
+    /// labelled), so a Project mutation NEVER routes here
+    /// any more. What remains is the one class whose undo
+    /// would desync state outside the project: session
+    /// bookkeeping that follows an external event (the
+    /// project-file rename handler re-pointing the session
+    /// name at the file that now exists on disk — undoing
+    /// it would restore a name whose file is gone). The
+    /// house rule stands, narrowed: a mutation either
+    /// snapshots exactly once or — only for that class —
+    /// calls this; never neither. Callers mark only when
+    /// a value actually changed; a refused or
+    /// clamped-to-same-value call marks nothing.
     pub fn mark_dirty(&mut self) {
         self.edit_count += 1;
+        // Roadmap Wave 1 (RM6, F-5): a marked edit is a real
+        // project mutation, so the revision moves here too —
+        // the two counters share their choke points by design.
+        self.revision += 1;
     }
 
     /// Wave 9: if at least `AUTOSAVE_EVERY` edits have
@@ -2579,7 +3396,7 @@ impl EditorCore {
             self.status = "Keep at least one figure.".into();
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Delete figure");
         let fi = self.selected_figure.min(self.project.figures.len() - 1);
         self.project.figures.remove(fi);
         for frame in &mut self.project.frames {
@@ -2616,7 +3433,7 @@ impl EditorCore {
         if target < 0 || target as usize >= self.project.figures.len() {
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Reorder figure");
         let target = target as usize;
         let figure_count = self.project.figures.len();
         self.project.figures.swap(fi, target);
@@ -2662,15 +3479,16 @@ impl EditorCore {
     }
 
     pub fn toggle_figure_hidden(&mut self) {
+        // Roadmap Wave 1 (RM24, P-14 — A15 H3): the Wave 13
+        // B2 layers exemption is closed — the flip takes
+        // exactly one undo step.
+        self.snapshot_labeled("Figure visibility");
         let fi = self.selected_figure;
         let (name, hidden) = {
             let fig = &mut self.project.figures[fi];
             fig.hidden = !fig.hidden;
             (fig.name.clone(), fig.hidden)
         };
-        // Wave 13 (B2): layers family — no snapshot, but
-        // the flip counts for dirty/autosave.
-        self.mark_dirty();
         self.status = format!("{} {}.", name, if hidden { "hidden" } else { "shown" });
     }
 
@@ -2736,7 +3554,7 @@ impl EditorCore {
             self.status = "Copied frame's poses no longer match the figures' rigs.".into();
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Paste frame");
         // Wave 11 (E6): an empty timeline has no current
         // frame to insert after — `insert(current + 1)`
         // panicked on it — so the pasted frame becomes
@@ -2752,29 +3570,32 @@ impl EditorCore {
     }
 
     pub fn adjust_frame_duration(&mut self, factor: f32) {
-        let (before, after) = {
-            let frame = &mut self.project.frames[self.current];
-            let before = frame.duration;
-            frame.duration = (frame.duration * factor).clamp(0.25, 8.0);
-            (before, frame.duration)
-        };
-        // Wave 13 (B2): a timing tweak — no snapshot, but
-        // a real change counts for dirty/autosave.
-        if after != before {
-            self.mark_dirty();
+        // Roadmap Wave 1 (RM24, P-14 — A15 H3): a real
+        // change takes a coalesced undo step (peeked so a
+        // factor clamped onto the current value spends
+        // none), where Wave 13 (B2) only marked it dirty.
+        let peek_before = self.project.frames[self.current].duration;
+        if (peek_before * factor).clamp(0.25, 8.0) != peek_before {
+            self.snapshot_coalesced("Frame duration");
         }
+        let after = {
+            let frame = &mut self.project.frames[self.current];
+            frame.duration = (frame.duration * factor).clamp(0.25, 8.0);
+            frame.duration
+        };
         self.status = format!("Frame {} duration {:.2}x.", self.current + 1, after);
     }
 
     pub fn adjust_fps(&mut self, delta: f32) {
         let before = self.project.fps;
-        self.project.fps = (self.project.fps + delta).clamp(1.0, 60.0);
-        // Wave 13 (B2): as `adjust_frame_duration`. (The
-        // deliberate setter `set_project_fps` snapshots;
-        // this stepper never did.)
-        if self.project.fps != before {
-            self.mark_dirty();
+        // Roadmap Wave 1 (RM24, P-14 — A15 H3): as
+        // `adjust_frame_duration` — a real change takes a
+        // coalesced undo step. (The deliberate setter
+        // `set_project_fps` snapshots, as it always did.)
+        if (before + delta).clamp(1.0, 60.0) != before {
+            self.snapshot_coalesced("Frame rate");
         }
+        self.project.fps = (self.project.fps + delta).clamp(1.0, 60.0);
         self.status = format!("{} fps.", self.project.fps as i32);
     }
 
@@ -2810,7 +3631,7 @@ impl EditorCore {
             self.status = "Frame rate unchanged.".into();
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Frame rate");
         self.project.fps = fps;
         self.status = format!("Frame rate set to {} fps.", Self::setting_number(fps));
     }
@@ -2831,7 +3652,7 @@ impl EditorCore {
             self.status = "Stage size unchanged.".into();
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Stage size");
         self.project.stage = stage;
         self.status = format!(
             "Stage size set to {}×{}.",
@@ -2868,7 +3689,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Head ring size");
         self.project.head_ring_scale = scale;
         self.status = format!(
             "Head ring size set to {}×.",
@@ -2877,33 +3698,33 @@ impl EditorCore {
     }
 
     pub fn cycle_easing(&mut self) {
+        // Roadmap Wave 1 (RM24, P-14 — A15 H3): the B2
+        // settings exemption is closed — the value always
+        // changes, so the coalesced step is taken up front.
+        self.snapshot_coalesced("Easing");
         self.project.easing = self.project.easing.next();
-        // Wave 13 (B2): a settings cycler — no snapshot,
-        // but the value always changes, so it always
-        // marks dirty.
-        self.mark_dirty();
         self.status = format!("Easing: {}.", self.project.easing.label());
     }
 
     /// Set the project easing directly (the easing picker's
-    /// preset buttons). Like `cycle_easing` it does not
-    /// snapshot — project-settings tweaks are not undoable
-    /// edits in this core — but since Wave 13 (B2) a set
-    /// that changes the value marks dirty.
+    /// preset buttons). Since Roadmap Wave 1 (RM24, P-14 —
+    /// A15 H3) a set that changes the value takes exactly
+    /// one undo step, like the MCP twin always should have
+    /// (Wave 13 (B2) only marked it dirty).
     pub fn set_project_easing(&mut self, easing: crate::model::Easing) {
-        let changed = self.project.easing != easing;
-        self.project.easing = easing;
-        if changed {
-            self.mark_dirty();
+        if self.project.easing != easing {
+            self.snapshot_labeled("Easing");
         }
+        self.project.easing = easing;
         self.status = format!("Easing: {}.", self.project.easing.label());
     }
 
     pub fn toggle_tween_playback(&mut self) {
+        // Roadmap Wave 1 (RM24, P-14 — A15 H3): the flip
+        // always changes the serialized flag, so it takes
+        // exactly one undo step.
+        self.snapshot_labeled("Tween playback");
         self.project.tween_playback = !self.project.tween_playback;
-        // Wave 13 (B2): a serialized project flag — the
-        // flip always changes it, so it always marks.
-        self.mark_dirty();
         self.status = format!(
             "Tween playback {}.",
             if self.project.tween_playback { "on" } else { "off" }
@@ -2911,14 +3732,14 @@ impl EditorCore {
     }
 
     pub fn toggle_camera_follow(&mut self) {
+        // Roadmap Wave 1 (RM24, P-14 — A15 H3): as
+        // `toggle_tween_playback`.
+        self.snapshot_labeled("Camera follow");
         self.project.camera_follow = if self.project.camera_follow == Some(self.selected_figure) {
             None
         } else {
             Some(self.selected_figure)
         };
-        // Wave 13 (B2): a serialized project field — the
-        // toggle always changes it, so it always marks.
-        self.mark_dirty();
         self.status = match self.project.camera_follow {
             // Wave 11 (C2 flag): resolve the name fallibly — a
             // stale selection must not panic the status line.
@@ -2939,7 +3760,7 @@ impl EditorCore {
     ];
 
     pub fn add_particle(&mut self, kind_idx: usize) {
-        self.snapshot();
+        self.snapshot_labeled("Add particle event");
         let fi = self.selected_figure;
         let (figure, node, x, y) = match self.selected_node {
             Some(ni) => {
@@ -2969,7 +3790,7 @@ impl EditorCore {
     }
 
     pub fn clear_particles(&mut self) {
-        self.snapshot();
+        self.snapshot_labeled("Clear particles");
         self.project.particles.clear();
         self.project.fx_clips.clear();
         self.status = "Particle effects cleared.".into();
@@ -2985,7 +3806,7 @@ impl EditorCore {
         match std::fs::read(&path) {
             Ok(bytes) => match crate::nodes_anim::import_nodes_animation(&bytes) {
                 Ok(project) => {
-                    self.snapshot();
+                    self.snapshot_labeled("Import animation");
                     self.project = project;
                     self.current = 0;
                     self.playhead = 0.0;
@@ -3010,7 +3831,7 @@ impl EditorCore {
     }
 
     pub fn cycle_node_cap(&mut self) {
-        self.snapshot();
+        self.snapshot_labeled("Segment cap");
         match self.selected_node_mut() {
             Some(node) => {
                 node.style.cap = crate::style::cycle_cap(node.style.cap);
@@ -3021,7 +3842,7 @@ impl EditorCore {
     }
 
     pub fn cycle_node_taper(&mut self) {
-        self.snapshot();
+        self.snapshot_labeled("Segment taper");
         match self.selected_node_mut() {
             Some(node) => {
                 node.style.taper = match node.style.taper {
@@ -3036,8 +3857,23 @@ impl EditorCore {
         }
     }
 
+    /// Set the selected segment's taper to an exact value
+    /// (Roadmap Wave 1, RM3 — F-3): the panel door for the
+    /// direct write that has existed since Wave 11 only as
+    /// the MCP free function `style::set_node_taper` — the
+    /// style panel could only cycle, because the write had
+    /// no `EditorCore` method. The value is clamped here
+    /// ([`EditorCore::taper_clamped`] — the validation the
+    /// free function asks its caller to have done) and the
+    /// write itself is that function's: exactly one
+    /// snapshot, the cycle op's status wording, the
+    /// no-selection refusal in the same voice.
+    pub fn set_node_taper(&mut self, taper: f32) {
+        crate::style::set_node_taper(self, Self::taper_clamped(taper));
+    }
+
     pub fn cycle_node_gradient(&mut self) {
-        self.snapshot();
+        self.snapshot_labeled("Segment gradient");
         match self.selected_node_mut() {
             Some(node) => {
                 node.style.color2 = match node.style.color2 {
@@ -3058,7 +3894,7 @@ impl EditorCore {
     /// panel's segmented control) instead of cycling it.
     /// Snapshots and reports exactly like `cycle_node_cap`.
     pub fn set_node_cap(&mut self, cap: crate::model::CapKind) {
-        self.snapshot();
+        self.snapshot_labeled("Segment cap");
         self.write_node_cap(cap);
     }
 
@@ -3079,7 +3915,7 @@ impl EditorCore {
     /// swatch row). Snapshots and reports exactly like
     /// `cycle_node_gradient`.
     pub fn set_node_color2(&mut self, color2: Option<u32>) {
-        self.snapshot();
+        self.snapshot_labeled("Segment gradient");
         self.write_node_color2(color2);
     }
 
@@ -3105,7 +3941,7 @@ impl EditorCore {
     /// segment can never be made fully invisible by accident.
     /// Snapshots and reports like the other style setters.
     pub fn set_node_opacity(&mut self, opacity: f32) {
-        self.snapshot();
+        self.snapshot_labeled("Segment opacity");
         self.write_node_opacity(opacity);
     }
 
@@ -3144,7 +3980,7 @@ impl EditorCore {
             self.status = "Select a joint first.".into();
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Segment style");
         self.write_node_color(color);
         self.write_node_color2(color2);
         self.write_node_cap(cap);
@@ -3186,7 +4022,7 @@ impl EditorCore {
         };
         match std::fs::read(&path) {
             Ok(bytes) => {
-                self.snapshot();
+                self.snapshot_labeled("Attach image to segment");
                 let asset = self.project.assets.len();
                 self.project.assets.push(crate::model::ImageAsset {
                     name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
@@ -3222,7 +4058,7 @@ impl EditorCore {
             self.status = "Select a joint first.".into();
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Clear segment media");
         if let Some(node) = self.selected_node_mut() {
             node.media = None;
             self.status = "Segment media cleared.".into();
@@ -3297,9 +4133,46 @@ impl EditorCore {
         }
     }
 
+    /// The file stem this core's own export ops name
+    /// their single-file destinations from (Roadmap
+    /// Wave 1, RM23 — IA-RM23-1): the project name,
+    /// lowercased, with every run of non-alphanumeric
+    /// characters collapsed to one `-` and no
+    /// leading/trailing dash; underscores are kept; a
+    /// name with no alphanumeric characters at all
+    /// falls back to `animation`. This is the
+    /// library-side mirror of the naming home — the
+    /// bin's `export_panel::project_stem`, whose
+    /// `ExportOp::dest_named` builds the same file
+    /// names from the same stem; the two must agree.
+    fn export_stem(&self) -> String {
+        let mut stem = String::new();
+        let mut pending_dash = false;
+        for ch in self.project.name.chars() {
+            if ch.is_alphanumeric() || ch == '_' {
+                if pending_dash && !stem.is_empty() {
+                    stem.push('-');
+                }
+                pending_dash = false;
+                stem.extend(ch.to_lowercase());
+            } else {
+                pending_dash = true;
+            }
+        }
+        if stem.is_empty() {
+            "animation".to_string()
+        } else {
+            stem
+        }
+    }
+
     pub fn export_apng_file(&mut self) {
-        match crate::export::export_apng(&self.project, std::path::Path::new("out/animation.apng")) {
-            Ok(_) => self.status = "Exported out/animation.apng.".into(),
+        let stem = self.export_stem();
+        match crate::export::export_apng(
+            &self.project,
+            std::path::Path::new(&format!("out/{stem}.apng")),
+        ) {
+            Ok(_) => self.status = format!("Exported out/{stem}.apng."),
             Err(e) => self.status = format!("APNG export failed: {e}"),
         }
     }
@@ -3319,7 +4192,7 @@ impl EditorCore {
         match std::fs::read(&path) {
             Ok(bytes) => match crate::nodes::import_nodes(&bytes) {
                 Ok(project) => {
-                    self.snapshot();
+                    self.snapshot_labeled("Import figure");
                     self.project = project;
                     self.current = 0;
                     self.selected_figure = 0;
@@ -3338,7 +4211,7 @@ impl EditorCore {
 
     pub fn cycle_frame_easing(&mut self) {
         use crate::model::Easing;
-        self.snapshot();
+        self.snapshot_labeled("Frame easing");
         let cur = self.current.min(self.project.frames.len().saturating_sub(1));
         if let Some(frame) = self.project.frames.get_mut(cur) {
             frame.easing = match frame.easing {
@@ -3360,7 +4233,7 @@ impl EditorCore {
     /// picker's Apply / None buttons), with the same snapshot +
     /// status behaviour as `cycle_frame_easing`.
     pub fn set_frame_easing(&mut self, easing: Option<crate::model::Easing>) {
-        self.snapshot();
+        self.snapshot_labeled("Frame easing");
         let cur = self.current.min(self.project.frames.len().saturating_sub(1));
         if let Some(frame) = self.project.frames.get_mut(cur) {
             frame.easing = easing;
@@ -3387,7 +4260,7 @@ impl EditorCore {
             self.status = "Select a joint first, then add the FX clip.".into();
             return;
         };
-        self.snapshot();
+        self.snapshot_labeled("Add FX clip");
         let color = self
             .project
             .figures
@@ -3468,7 +4341,7 @@ impl EditorCore {
             }
         };
         clip.start = self.current as f32;
-        self.snapshot();
+        self.snapshot_labeled("FX preset");
         self.project.fx_clips.push(crate::model::FxClipEntry {
             clip,
             figure: self.selected_figure,
@@ -3498,7 +4371,7 @@ impl EditorCore {
         if self.library.is_empty() {
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Insert library figure");
         let (name, mut def) = self.library[self.library_index].clone();
         // Wave 12 (B7): strip segment IMAGE media on insert.
         // A library file stores the FigureDef only — no asset
@@ -3563,7 +4436,7 @@ impl EditorCore {
         let path = std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join("export")
-            .join("animation.gif");
+            .join(format!("{}.gif", self.export_stem()));
         match render_gif(&self.project, &path) {
             Ok(n) => self.status = format!("Exported {n}-frame GIF to {}", path.display()),
             Err(e) => self.status = format!("GIF export failed: {e}"),
@@ -3620,7 +4493,7 @@ impl EditorCore {
         };
         match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| crate::pivot::import_stk(&b)) {
             Ok((def, name)) => {
-                self.snapshot();
+                self.snapshot_labeled("Import figure");
                 let idx = self.project.figures.len();
                 let color = FIGURE_COLORS[idx % FIGURE_COLORS.len()];
                 let label = if name.is_empty() { "Imported figure".to_string() } else { name };
@@ -3713,7 +4586,7 @@ impl EditorCore {
             // An eraser drag erases around the pointer instead of
             // recording a stroke; it continues in `draw_to`. One
             // snapshot covers the whole drag, like `lasso_erase`.
-            self.snapshot();
+            self.snapshot_labeled("Draw stroke");
             let frame = self.current;
             let radius = self.eraser_radius();
             self.erase_changed =
@@ -3731,7 +4604,7 @@ impl EditorCore {
         // neither undoable nor counted. Never in
         // `draw_to`: per-move snapshots would flood the
         // undo stack.
-        self.snapshot();
+        self.snapshot_labeled("Draw stroke");
         // Wave 13: a scatter brush (scatter > 0) records a spray
         // mark on the stroke. The seed is derived from the frame
         // and the stroke's own index in `project.strokes`, so the
@@ -3854,7 +4727,7 @@ impl EditorCore {
             self.status = format!("No stroke {} to delete.", index + 1);
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Delete stroke");
         self.project.strokes.remove(index);
         self.status = format!("Stroke {} deleted.", index + 1);
     }
@@ -3869,7 +4742,7 @@ impl EditorCore {
         // so the MCP handler takes none of its own. An
         // empty frame spends nothing.
         if on_frame > 0 {
-            self.snapshot();
+            self.snapshot_labeled("Clear frame drawings");
         }
         self.project.strokes.retain(|s| s.frame != self.current);
         let removed = before - self.project.strokes.len();
@@ -3904,7 +4777,7 @@ impl EditorCore {
         }
         let color = src.color;
         let n_points = path.len();
-        self.snapshot();
+        self.snapshot_labeled("Fill stroke");
         if let Some(s) = self
             .project
             .strokes
@@ -3955,7 +4828,7 @@ impl EditorCore {
             self.status = "Lasso erased nothing: no stroke lies mostly inside it.".into();
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Lasso erase");
         self.project.strokes.retain(|s| !mostly_inside(s));
         self.status = format!("Lasso erased {n} stroke(s).");
     }
@@ -3980,7 +4853,7 @@ impl EditorCore {
             return;
         }
         let cx = self.project.stage[0] / 2.0;
-        self.snapshot();
+        self.snapshot_labeled("Mirror strokes");
         for s in &mut self.project.strokes {
             if s.frame == frame {
                 s.points = crate::paint::mirror_points_x(&s.points, cx);
@@ -4003,7 +4876,7 @@ impl EditorCore {
         let brush = self.active_brush();
         let color = self.project.figures[self.selected_figure].color;
         let n = points.len();
-        self.snapshot();
+        self.snapshot_labeled(&format!("Stamp {what}"));
         self.project.strokes.push(crate::model::Stroke {
             frame: self.current,
             points,
@@ -4100,7 +4973,7 @@ impl EditorCore {
             self.status = "Put an audio file (.wav/.mp3/.ogg) in ./audio/ first.".into();
             return;
         };
-        self.snapshot();
+        self.snapshot_labeled("Add audio clip");
         self.project.audio.push(crate::model::AudioClip {
             path: path.to_string_lossy().into_owned(),
             start_frame: self.current,
@@ -4159,7 +5032,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Normalize audio");
         self.project.audio[clip_idx].path = out.to_string_lossy().into_owned();
         self.status = format!(
             "Audio clip {} normalised to peak 0.90 (gain {gain:.2}x): {}.",
@@ -4215,7 +5088,7 @@ impl EditorCore {
         } else {
             0
         };
-        self.snapshot();
+        self.snapshot_labeled("Trim audio clip");
         let clip = &mut self.project.audio[clip_idx];
         clip.path = out.to_string_lossy().into_owned();
         clip.start_frame = clip.start_frame.saturating_add(shift);
@@ -4289,7 +5162,7 @@ impl EditorCore {
         }
         first.path = first_path.to_string_lossy().into_owned();
         second.path = second_path.to_string_lossy().into_owned();
-        self.snapshot();
+        self.snapshot_labeled("Split audio clip");
         self.project.audio[clip_idx] = first;
         self.project.audio.insert(clip_idx + 1, second);
         self.status = format!(
@@ -4386,7 +5259,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Crossfade audio");
         self.project.audio[clip_idx].path = out.to_string_lossy().into_owned();
         self.project.audio.remove(clip_idx + 1);
         self.status = format!(
@@ -4429,7 +5302,7 @@ impl EditorCore {
             self.status = format!("Audio echo failed: could not write {}: {e}", out.display());
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Echo audio");
         self.project.audio[clip_idx].path = out.to_string_lossy().into_owned();
         self.status = format!(
             "Echo applied to audio clip {} (0.18s delay, 35% feedback): {}.",
@@ -4468,7 +5341,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Lowpass audio");
         self.project.audio[clip_idx].path = out.to_string_lossy().into_owned();
         self.status = format!(
             "Low-pass filter (1200 Hz) applied to audio clip {}: {}.",
@@ -4514,7 +5387,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Trim silence");
         self.project.audio[clip_idx].path = out.to_string_lossy().into_owned();
         self.status = format!(
             "Trimmed {} silent frame(s) ({} at the start, {} at the end) from audio clip {}: {}.",
@@ -4559,7 +5432,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Pitch audio");
         self.project.audio[clip_idx].path = out.to_string_lossy().into_owned();
         self.status = format!(
             "Pitch shift (+2 semitones) applied to audio clip {}: {}.",
@@ -4600,7 +5473,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Compress audio");
         self.project.audio[clip_idx].path = out.to_string_lossy().into_owned();
         self.status = format!(
             "Compressor (threshold 0.5, ratio 4.0) applied to audio clip {}: {}.",
@@ -4680,7 +5553,7 @@ impl EditorCore {
             });
         }
         let n = segments.len();
-        self.snapshot();
+        self.snapshot_labeled("Split audio at silences");
         // The first segment replaces the split clip; the rest
         // are inserted immediately after it, in order (the
         // placement `audio_split` uses for its second half).
@@ -4709,7 +5582,7 @@ impl EditorCore {
             self.status = "No figure selected to make a clip from.".into();
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Make movieclip");
         let fig = &self.project.figures[fi];
         let mut fallback =
             fig.def.rest_pose([self.project.stage[0] / 2.0, self.project.stage[1] / 2.0]);
@@ -4740,7 +5613,7 @@ impl EditorCore {
             self.status = "No movieclips yet — select a figure and use Make clip.".into();
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Insert clip figure");
         let ci = 0;
         let clip = self.project.clips[ci].clone();
         let idx = self.project.figures.len();
@@ -4842,7 +5715,7 @@ impl EditorCore {
             return;
         }
         let Some((ci, _)) = self.clip_session() else { return };
-        self.snapshot();
+        self.snapshot_labeled("Add clip frame");
         let pose = self.project.clips[ci]
             .frames
             .last()
@@ -4869,7 +5742,7 @@ impl EditorCore {
             self.status = "A movieclip needs at least one frame.".into();
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Delete clip frame");
         self.project.clips[ci].frames.remove(fi);
         let last = self.project.clips[ci].frames.len() - 1;
         if let Some(s) = self.clip_edit.as_mut() {
@@ -4907,13 +5780,15 @@ impl EditorCore {
             return;
         }
         self.clip_fit_frame(ci, fi);
-        // Wave 13 (census A19): a session pose tweak — no
-        // snapshot (the pose-tweak rule the tool
-        // descriptions pin), but a real change counts for
-        // dirty/autosave via the seam.
+        // Roadmap Wave 1 (RM24, P-14 — A15 H3): the Wave 13
+        // census A19 exemption is closed — a real change
+        // takes a coalesced undo step, so a clip-pose drag
+        // costs one step, not one per move (and not zero,
+        // as the old pose-tweak rule had it). The fit above
+        // is an invariant repair and rides the same step.
         if self.project.clips[ci].frames[fi].angles[node] != degrees {
+            self.snapshot_coalesced("Movieclip frame");
             self.project.clips[ci].frames[fi].angles[node] = degrees;
-            self.mark_dirty();
         }
     }
 
@@ -4924,11 +5799,11 @@ impl EditorCore {
             return;
         }
         let Some((ci, fi)) = self.clip_session() else { return };
-        // Wave 13 (census A20): as `clip_set_angle` — no
-        // snapshot, a real change marks dirty.
+        // Roadmap Wave 1 (RM24, P-14 — A15 H3): as
+        // `clip_set_angle` — the A20 exemption is closed.
         if self.project.clips[ci].frames[fi].root != root {
+            self.snapshot_coalesced("Movieclip frame");
             self.project.clips[ci].frames[fi].root = root;
-            self.mark_dirty();
         }
     }
 
@@ -4965,7 +5840,7 @@ impl EditorCore {
             self.status = "No frames to build a movieclip from.".into();
             return None;
         }
-        self.snapshot();
+        self.snapshot_labeled("Create movieclip");
         let (name, def) = {
             let fig = &self.project.figures[fi];
             (format!("{} clip", fig.name), fig.def.clone())
@@ -5034,7 +5909,7 @@ impl EditorCore {
             );
             return None;
         }
-        self.snapshot();
+        self.snapshot_labeled("Create movieclip");
         let (name, def) = {
             let fig = &self.project.figures[fi];
             (
@@ -5144,7 +6019,7 @@ impl EditorCore {
             self.status = format!("Assign clip failed: {}", self.clip_guard_status(fi, ci));
             return false;
         }
-        self.snapshot();
+        self.snapshot_labeled("Assign clip");
         self.project.figures[fi].clip = Some(ci);
         let name = self.project.clips[ci].name.clone();
         self.status = format!("Figure {} now loops clip {} ({name}).", fi + 1, ci + 1);
@@ -5173,7 +6048,7 @@ impl EditorCore {
             .get(ci)
             .map(|c| c.name.clone())
             .unwrap_or_else(|| format!("clip {}", ci + 1));
-        self.snapshot();
+        self.snapshot_labeled("Unlink figure");
         self.project.figures[fi].clip = None;
         self.status = if has_states {
             format!(
@@ -5222,7 +6097,7 @@ impl EditorCore {
             );
             return false;
         }
-        self.snapshot();
+        self.snapshot_labeled("Set state key");
         let fig = &mut self.project.figures[fi];
         fig.states.retain(|k| k.frame != key.frame);
         fig.states.push(key);
@@ -5250,7 +6125,7 @@ impl EditorCore {
             self.status = format!("Figure {} has no state key at frame {}.", fi + 1, frame + 1);
             return false;
         }
-        self.snapshot();
+        self.snapshot_labeled("Remove state key");
         self.project.figures[fi].states.retain(|k| k.frame != frame);
         self.status = format!("Figure {} state key at frame {} removed.", fi + 1, frame + 1);
         true
@@ -5292,7 +6167,7 @@ impl EditorCore {
         if already_rest {
             return false;
         }
-        self.snapshot();
+        self.snapshot_labeled("Set rest pose");
         let mode = if rebase {
             SetRestMode::Rebase
         } else {
@@ -5323,7 +6198,7 @@ impl EditorCore {
             self.status = "No such clip.".into();
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Clip loop mode");
         let clip = &mut self.project.clips[index];
         clip.loop_mode = match clip.loop_mode {
             crate::model::ClipLoop::Loop => crate::model::ClipLoop::PingPong,
@@ -5354,7 +6229,7 @@ impl EditorCore {
         if clip.loop_mode == mode {
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Clip loop mode");
         self.project.clips[index].loop_mode = mode;
         self.status = format!(
             "Clip loop: {}.",
@@ -5384,7 +6259,7 @@ impl EditorCore {
         // angle at the end keys (see `angle_deg`), and the
         // hold writes it onto every frame of the span.
         let angle = crate::model::norm_deg(self.project.camera_angle_at(self.current as f32));
-        self.snapshot();
+        self.snapshot_labeled("Hold camera");
         for frame in from..=to {
             self.project.set_camera_key(frame, x, y, zoom);
             if let Some(k) = self.project.camera.iter_mut().find(|k| k.frame == frame) {
@@ -5412,7 +6287,7 @@ impl EditorCore {
         };
         let mut copy = clip.clone();
         copy.name = format!("{} copy", copy.name);
-        self.snapshot();
+        self.snapshot_labeled("Duplicate clip");
         self.project.clips.push(copy);
         let new_index = self.project.clips.len() - 1;
         self.status = format!(
@@ -5442,7 +6317,7 @@ impl EditorCore {
         if name == current {
             return false;
         }
-        self.snapshot();
+        self.snapshot_labeled("Rename clip");
         self.project.clips[clip_idx].name = name.clone();
         if let Some(session) = self.clip_edit.as_mut() {
             if session.clip == clip_idx {
@@ -5464,7 +6339,7 @@ impl EditorCore {
             self.status = "No such clip.".into();
             return false;
         };
-        self.snapshot();
+        self.snapshot_labeled("Delete clip");
         self.project.clips.remove(clip_idx);
         for fig in &mut self.project.figures {
             fig.clip = clip_target_after_delete(fig.clip, clip_idx);
@@ -5501,7 +6376,7 @@ impl EditorCore {
         } else {
             clip_idx + 1
         };
-        self.snapshot();
+        self.snapshot_labeled("Reorder clip");
         self.project.clips.swap(clip_idx, other);
         for fig in &mut self.project.figures {
             fig.clip = clip_target_after_swap(fig.clip, clip_idx, other);
@@ -5534,7 +6409,7 @@ impl EditorCore {
             self.status = "No such clip.".into();
             return false;
         };
-        self.snapshot();
+        self.snapshot_labeled("Insert clip figure");
         let idx = self.project.figures.len();
         let color = FIGURE_COLORS[(idx + 3) % FIGURE_COLORS.len()];
         self.project.add_figure_with(
@@ -5576,6 +6451,21 @@ impl EditorCore {
     pub fn note_project_swapped(&mut self) {
         self.edit_count = 0;
         self.last_autosave_count = 0;
+        // Roadmap Wave 1 (RM24, P-14): a swapped-in
+        // project starts as "never saved" — the file-open
+        // funnels re-stamp the baseline right after this
+        // (see `note_save_baseline`); New / Recover /
+        // import swaps never do, which is their truth.
+        self.last_save_count = None;
+        // A coalesced stepper run can never merge across
+        // a swap either (the stacks are cleared by the
+        // callers, but the licence dies here regardless).
+        self.history_coalesce = false;
+        // Roadmap Wave 1 (RM6, F-5): the revision deliberately
+        // does NOT restart with the autosave counters — it
+        // moves forward by one, so no cache entry cut against
+        // the previous project can ever be served for this one.
+        self.revision += 1;
         // Wave 11 (E9): record the swap for the shell's poll.
         self.project_swaps += 1;
         // Wave 11 (C6): a clip-edit session must settle against
@@ -5603,6 +6493,15 @@ impl EditorCore {
     /// survives — but panel selections must still settle).
     pub fn note_project_replaced(&mut self) {
         self.project_swaps += 1;
+        // Roadmap Wave 1 (RM24, P-14): replaced content
+        // arrived from a tool payload, not a named file —
+        // the save baseline resets to "never saved", and
+        // no coalesced run folds across the replacement.
+        self.last_save_count = None;
+        self.history_coalesce = false;
+        // Roadmap Wave 1 (RM6, F-5): a snapshot-first replace
+        // is still new project content under the session.
+        self.revision += 1;
         self.repair_clip_session_after_history();
         // Wave P (P14): a snapshot-first replace is still a
         // new project under the session — refresh the
@@ -5721,6 +6620,11 @@ impl EditorCore {
                 // (the shell refreshes the recovery
                 // snapshot with this same state next).
                 self.last_autosave_count = self.edit_count;
+                // Roadmap Wave 1 (RM24, P-14): and it is
+                // the NAMED-save baseline in its own right
+                // — the save-state the strip now speaks
+                // separately from the recovery story.
+                self.note_save_baseline();
                 self.status = format!("Project saved to {}", path.display());
                 true
             }
@@ -5766,6 +6670,7 @@ impl EditorCore {
                 // every figure in the newly opened one.
                 self.solo = None;
                 self.note_project_swapped();
+                self.note_save_baseline();
                 self.status =
                     format!("Opened {}{}", path.display(), self.missing_audio_note());
             }
@@ -5834,7 +6739,7 @@ impl EditorCore {
         let path = std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join("export")
-            .join("spritesheet.png");
+            .join(format!("{}-spritesheet.png", self.export_stem()));
         match render_sheet(&self.project, &path) {
             Ok(n) => self.status = format!("Exported {n}-frame spritesheet."),
             Err(e) => self.status = format!("Spritesheet failed: {e}"),
@@ -6036,7 +6941,7 @@ impl EditorCore {
             self.status = "Enter 3D mode first.".into();
             return;
         };
-        self.snapshot();
+        self.snapshot_labeled("Bake 3D pose");
         let idx = self.project.figures.len();
         self.project.add_figure_with(def, &name, color, root);
         self.selected_figure = idx;
@@ -6199,7 +7104,7 @@ impl EditorCore {
             };
             return;
         };
-        self.snapshot();
+        self.snapshot_labeled("Bake 3D animation");
         let idx = self.project.figures.len();
         self.project.add_figure_with(def, &name, color, root);
         // Grow the timeline if the baked range is longer than the
@@ -6447,7 +7352,7 @@ fn eds_weather_json(weather: Option<Weather>) -> Value {
 // TOOL ENTRY SPEC (integrator: register in mcp_tools::tools()):
 //   Tool {
 //       name: "set_weather_kind",
-//       description: "Set the scene weather kind (the Scene panel's kind picker): switching kinds keeps the tuned amount/wind, and enabling a kind from off applies the panel's per-kind preset. \"off\" turns weather off. A project-settings tweak — no undo step; a real change marks the project dirty, exactly like the panel.",
+//       description: "Set the scene weather kind (the Scene panel's kind picker): switching kinds keeps the tuned amount/wind, and enabling a kind from off applies the panel's per-kind preset. \"off\" turns weather off. One undo step on a real change, exactly like the panel.",
 //       schema: obj_schema(
 //           json!({
 //               "kind": { "type": "string", "enum": ["rain", "snow", "fireflies", "fog", "storm", "off"] }
@@ -6457,7 +7362,7 @@ fn eds_weather_json(weather: Option<Weather>) -> Value {
 //       handler: crate::editor::tool_set_weather_kind,
 //   }
 // MCP.md row (registry catalogue, beside `set_weather`):
-//   | `set_weather_kind` | Set the scene weather kind (the Scene panel's kind picker): switching kinds keeps the tuned amount/wind; enabling from off applies the panel's per-kind preset. A project-settings tweak — not an undo step; a real change marks the project dirty. | `kind` | — |
+//   | `set_weather_kind` | Set the scene weather kind (the Scene panel's kind picker): switching kinds keeps the tuned amount/wind; enabling from off applies the panel's per-kind preset. One undo step on a real change. | `kind` | — |
 /// MCP handler: set the weather kind, the Scene panel
 /// picker's exact semantics (its `set_weather_kind` in
 /// `rune_sec/scene_panel.rs`, re-implemented here
@@ -6466,21 +7371,17 @@ fn eds_weather_json(weather: Option<Weather>) -> Value {
 /// off applies the kind's preset, and the status
 /// strings are the panel's own.
 ///
-/// Discipline chosen: mark_dirty-only — NO undo step.
-/// The panel never snapshots a weather write (its
-/// module's documented rule); since Wave 13 a real
-/// change marks dirty via the seam, and this handler
-/// matches that exactly.
+/// Discipline: exactly one undo step on a real change
+/// (Roadmap Wave 1, RM24, P-14 — A15 H3 closed the
+/// Wave 13 mark_dirty-only census for the whole
+/// weather family, panel and tools together).
 pub fn tool_set_weather_kind(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let kind = eds_parse_weather_kind(eds_req_str(args, "kind")?)?;
     let before = core.project.weather;
-    match kind {
-        None => {
-            core.project.weather = None;
-            core.status = "Weather: off.".into();
-        }
+    let (next, label): (Option<Weather>, &'static str) = match kind {
+        None => (None, "Weather: off."),
         Some(kind) => {
-            core.project.weather = Some(match core.project.weather {
+            let next = Some(match before {
                 Some(mut w) => {
                     w.kind = kind;
                     w
@@ -6494,12 +7395,14 @@ pub fn tool_set_weather_kind(core: &mut EditorCore, args: &Value) -> Result<Valu
                 WeatherKind::Fog => "Weather: fog.",
                 WeatherKind::Storm => "Weather: storm.",
             };
-            core.status = label.into();
+            (next, label)
         }
+    };
+    if next != before {
+        core.snapshot_labeled("Weather");
+        core.project.weather = next;
     }
-    if core.project.weather != before {
-        core.mark_dirty();
-    }
+    core.status = label.into();
     Ok(json!({
         "ok": true,
         "weather": eds_weather_json(core.project.weather),
@@ -6510,12 +7413,12 @@ pub fn tool_set_weather_kind(core: &mut EditorCore, args: &Value) -> Result<Valu
 // TOOL ENTRY SPEC (integrator: register in mcp_tools::tools()):
 //   Tool {
 //       name: "cycle_weather",
-//       description: "Cycle the scene weather like the Scene group's Cycle weather button: off -> rain -> snow -> fireflies -> off, applying each kind's preset wholesale (fog and storm are not in the cycle; cycling from either turns weather off). A project-settings tweak — no undo step; a real change marks the project dirty, exactly like the panel.",
+//       description: "Cycle the scene weather like the Scene group's Cycle weather button: off -> rain -> snow -> fireflies -> off, applying each kind's preset wholesale (fog and storm are not in the cycle; cycling from either turns weather off). One undo step, exactly like the panel.",
 //       schema: obj_schema(json!({}), &[]),
 //       handler: crate::editor::tool_cycle_weather,
 //   }
 // MCP.md row (registry catalogue, beside `set_weather`):
-//   | `cycle_weather` | Cycle the scene weather (the Scene group's Cycle weather button): off → rain → snow → fireflies → off, each kind's preset applied wholesale; fog and storm are not in the cycle (cycling from either turns weather off). Not an undo step; a real change marks the project dirty. | — | — |
+//   | `cycle_weather` | Cycle the scene weather (the Scene group's Cycle weather button): off → rain → snow → fireflies → off, each kind's preset applied wholesale; fog and storm are not in the cycle (cycling from either turns weather off). One undo step. | — | — |
 /// MCP handler: cycle the weather kinds, the Scene
 /// panel's `cycle_weather` semantics (re-implemented
 /// here; the panel is bin-crate code): the cycle is
@@ -6523,8 +7426,9 @@ pub fn tool_set_weather_kind(core: &mut EditorCore, args: &Value) -> Result<Valu
 /// kind's preset applied wholesale — unlike the
 /// picker, cycling does NOT keep tuned amount/wind.
 ///
-/// Discipline chosen: mark_dirty-only — NO undo step,
-/// on a real change only, exactly like the panel fn.
+/// Discipline: exactly one undo step — the cycle
+/// always changes the weather (Roadmap Wave 1, RM24,
+/// P-14; the Wave 13 mark_dirty-only rule is closed).
 pub fn tool_cycle_weather(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
     let (next, label) = match core.project.weather {
         None => (Some(eds_kind_preset(WeatherKind::Rain)), "Weather: rain."),
@@ -6542,8 +7446,8 @@ pub fn tool_cycle_weather(core: &mut EditorCore, _args: &Value) -> Result<Value,
         },
     };
     if core.project.weather != next {
+        core.snapshot_labeled("Weather");
         core.project.weather = next;
-        core.mark_dirty();
     }
     core.status = label.into();
     Ok(json!({
@@ -6556,7 +7460,7 @@ pub fn tool_cycle_weather(core: &mut EditorCore, _args: &Value) -> Result<Value,
 // TOOL ENTRY SPEC (integrator: register in mcp_tools::tools()):
 //   Tool {
 //       name: "set_weather_amount",
-//       description: "Set the weather's particle amount absolutely (the Scene panel's Amount stepper/slider): clamped to 0..=200. Errors when the weather is off — pick a kind first (set_weather_kind). A project-settings tweak — no undo step; a real change marks the project dirty, exactly like the panel's steppers.",
+//       description: "Set the weather's particle amount absolutely (the Scene panel's Amount stepper/slider): clamped to 0..=200. Errors when the weather is off — pick a kind first (set_weather_kind). One undo step on a real change, exactly like the panel's steppers.",
 //       schema: obj_schema(
 //           json!({
 //               "amount": { "type": "number", "description": "Particles per frame at steady state, 0..=200" }
@@ -6566,22 +7470,20 @@ pub fn tool_cycle_weather(core: &mut EditorCore, _args: &Value) -> Result<Value,
 //       handler: crate::editor::tool_set_weather_amount,
 //   }
 // MCP.md row (registry catalogue, beside `set_weather`):
-//   | `set_weather_amount` | Set the weather's particle amount absolutely (the Scene panel's Amount stepper/slider), clamped to 0..=200. Errors when the weather is off. Not an undo step; a real change marks the project dirty. | `amount` | — |
+//   | `set_weather_amount` | Set the weather's particle amount absolutely (the Scene panel's Amount stepper/slider), clamped to 0..=200. Errors when the weather is off. One undo step on a real change. | `amount` | — |
 /// MCP handler: set the weather amount absolutely —
 /// the amount half of the Scene panel's stepper/slider
 /// pair, which `set_weather` cannot express without
 /// also naming a kind and resending the wind.
 ///
-/// Discipline chosen: mark_dirty-only — NO undo step.
-/// The panel's STEPPER discipline is the match for a
-/// discrete call: a step that changes the stored value
-/// marks dirty, a fully-clamped step marks nothing.
-/// (The panel's slider setters never mark per Move —
-/// the gesture marks once at release; a single MCP
-/// call is one discrete change, so the stepper rule
-/// applies.) With weather off the panel is status-only;
-/// an MCP call refuses instead, with the panel's own
-/// wording, so no edit is spent.
+/// Discipline: exactly one undo step on a real change
+/// (Roadmap Wave 1, RM24, P-14 — the panel's steppers
+/// take a coalesced step for a run; a single MCP call
+/// is one discrete change, so it takes one labelled
+/// step; a fully-clamped call changes nothing and
+/// spends none). With weather off the panel is
+/// status-only; an MCP call refuses instead, with the
+/// panel's own wording, so no edit is spent.
 pub fn tool_set_weather_amount(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let value = eds_req_f32(args, "amount")?;
     let Some(mut w) = core.project.weather else {
@@ -6589,9 +7491,9 @@ pub fn tool_set_weather_amount(core: &mut EditorCore, args: &Value) -> Result<Va
     };
     let amount = value.clamp(0.0, 200.0);
     if amount != w.amount {
+        core.snapshot_labeled("Weather amount");
         w.amount = amount;
         core.project.weather = Some(w);
-        core.mark_dirty();
     }
     core.status = format!("Weather amount: {:.0}.", w.amount);
     Ok(json!({
@@ -6604,7 +7506,7 @@ pub fn tool_set_weather_amount(core: &mut EditorCore, args: &Value) -> Result<Va
 // TOOL ENTRY SPEC (integrator: register in mcp_tools::tools()):
 //   Tool {
 //       name: "set_weather_wind",
-//       description: "Set the weather's wind (horizontal drift, stage units per second) absolutely (the Scene panel's Wind stepper/slider): clamped to -200..=200. Errors when the weather is off — pick a kind first (set_weather_kind). A project-settings tweak — no undo step; a real change marks the project dirty, exactly like the panel's steppers.",
+//       description: "Set the weather's wind (horizontal drift, stage units per second) absolutely (the Scene panel's Wind stepper/slider): clamped to -200..=200. Errors when the weather is off — pick a kind first (set_weather_kind). One undo step on a real change, exactly like the panel's steppers.",
 //       schema: obj_schema(
 //           json!({
 //               "wind": { "type": "number", "description": "Horizontal drift in stage units per second, -200..=200" }
@@ -6614,13 +7516,12 @@ pub fn tool_set_weather_amount(core: &mut EditorCore, args: &Value) -> Result<Va
 //       handler: crate::editor::tool_set_weather_wind,
 //   }
 // MCP.md row (registry catalogue, beside `set_weather`):
-//   | `set_weather_wind` | Set the weather's wind (horizontal drift) absolutely (the Scene panel's Wind stepper/slider), clamped to -200..=200. Errors when the weather is off. Not an undo step; a real change marks the project dirty. | `wind` | — |
+//   | `set_weather_wind` | Set the weather's wind (horizontal drift) absolutely (the Scene panel's Wind stepper/slider), clamped to -200..=200. Errors when the weather is off. One undo step on a real change. | `wind` | — |
 /// MCP handler: set the weather wind absolutely — the
 /// wind half of the Scene panel's stepper/slider pair.
-/// Discipline chosen: mark_dirty-only, exactly as
-/// [`tool_set_weather_amount`] (see its comment for
-/// the stepper-vs-slider reasoning); the clamp is the
-/// panel's −200..=200. (The registry's `set_weather`
+/// Discipline: exactly one undo step on a real change,
+/// exactly as [`tool_set_weather_amount`]; the clamp is
+/// the panel's −200..=200. (The registry's `set_weather`
 /// deliberately does not clamp wind; this handler
 /// follows the PANEL, not that tool.)
 pub fn tool_set_weather_wind(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
@@ -6630,9 +7531,9 @@ pub fn tool_set_weather_wind(core: &mut EditorCore, args: &Value) -> Result<Valu
     };
     let wind = value.clamp(-200.0, 200.0);
     if wind != w.wind {
+        core.snapshot_labeled("Weather wind");
         w.wind = wind;
         core.project.weather = Some(w);
-        core.mark_dirty();
     }
     core.status = format!("Weather wind: {}.", w.wind);
     Ok(json!({
@@ -6645,25 +7546,25 @@ pub fn tool_set_weather_wind(core: &mut EditorCore, args: &Value) -> Result<Valu
 // TOOL ENTRY SPEC (integrator: register in mcp_tools::tools()):
 //   Tool {
 //       name: "clear_camera_key",
-//       description: "Remove the camera key at the CURRENT frame without an undo step (the camera panel's 'Clear key (no undo)' button): the removal counts for dirty/autosave but cannot be undone — for the undoable delete at any frame, use delete_camera_key. Errors when the current frame holds no camera key.",
+//       description: "Remove the camera key at the CURRENT frame with one undo step (the camera panel's Clear key button). For a delete at any frame, delete_camera_key also works. Errors when the current frame holds no camera key.",
 //       schema: obj_schema(json!({}), &[]),
 //       handler: crate::editor::tool_clear_camera_key,
 //   }
 // MCP.md row (registry catalogue, beside `set_camera`):
-//   | `clear_camera_key` | Remove the camera key at the current frame WITHOUT an undo step (the camera panel's "Clear key (no undo)" button): counts for dirty/autosave only. For the undoable delete at any frame, use delete_camera_key. Errors when the current frame holds no camera key. | — | — |
-/// MCP handler: the camera panel's "Clear key (no
-/// undo)" button — [`EditorCore::camera_clear_key`] at
-/// the current frame. The undoable sibling is the
-/// `delete_camera_key` built-in (any frame, one undo
-/// step); this is the OTHER removal the panel offers,
-/// and until now it had no tool.
+//   | `clear_camera_key` | Remove the camera key at the current frame. One undo step. Errors when the current frame holds no camera key. | — | — |
+/// MCP handler: the camera panel's Clear key button —
+/// [`EditorCore::camera_clear_key`] at the current
+/// frame. (The `delete_camera_key` built-in deletes at
+/// any frame; this is the current-frame removal the
+/// panel offers.)
 ///
-/// Discipline chosen: mark_dirty-only — the backing
-/// op takes NO snapshot by its own documented
-/// contract ("Clear key (no undo)"), and a real
-/// removal marks dirty inside the op. The existence
-/// check runs first so a keyless frame refuses with
-/// the op's own status wording and spends nothing.
+/// Discipline: exactly one undo step, taken inside
+/// the backing op since Roadmap Wave 1 (RM24, P-14 —
+/// A15 H3 closed the old "Clear key (no undo)"
+/// exemption; the panel button's label was retired
+/// with it, IA-RM24-4). The existence check runs first
+/// so a keyless frame refuses with the op's own status
+/// wording and spends nothing.
 pub fn tool_clear_camera_key(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
     if !core.project.camera.iter().any(|k| k.frame == core.current) {
         return Err("No camera key on this frame.".to_string());
@@ -6920,7 +7821,7 @@ impl EditorCore {
                 return None;
             }
         };
-        self.snapshot();
+        self.snapshot_labeled("Add subtitle");
         let cue = crate::subtitles::SubtitleCue {
             start_frame,
             end_frame,
@@ -6977,7 +7878,7 @@ impl EditorCore {
                 return None;
             }
         };
-        self.snapshot();
+        self.snapshot_labeled("Edit subtitle");
         self.project.subtitles.remove(index);
         let cue = crate::subtitles::SubtitleCue {
             start_frame,
@@ -7004,10 +7905,88 @@ impl EditorCore {
             self.status = format!("Subtitle delete failed: no subtitle {}.", index + 1);
             return false;
         }
-        self.snapshot();
+        self.snapshot_labeled("Delete subtitle");
         self.project.subtitles.remove(index);
         self.status = format!("Subtitle {} deleted.", index + 1);
         true
+    }
+
+    /// Shift EVERY cue by `ms` milliseconds (Roadmap
+    /// Wave 1, RM21's core half, IA-RM21-3): the op under
+    /// the Subtitles panel's Shift-all and the MCP
+    /// `subtitle_shift_all` tool — one home for the bulk
+    /// discipline (clone, shift, re-sort, one snapshot),
+    /// so the panel and the tool cannot drift. The
+    /// millisecond delta converts at the project rate
+    /// ([`crate::subtitles::nudge_delta_frames`]: rounded,
+    /// never zero for a non-zero shift) and each cue
+    /// clamps at frame 0 individually, duration preserved
+    /// ([`crate::subtitles::shifted_window`]). Returns how
+    /// many cues actually moved; a shift in which no cue
+    /// moves (or an empty list) reports on the status
+    /// line and spends no undo step. The panel stands
+    /// its selection and edit session down after a
+    /// successful call — shell state this op never sees.
+    pub fn subtitle_shift_all(&mut self, ms: i32) -> usize {
+        let delta = crate::subtitles::nudge_delta_frames(ms, self.project.fps);
+        let mut cues = self.project.subtitles.clone();
+        let mut moved = 0usize;
+        for cue in cues.iter_mut() {
+            if let Some((start, end)) = crate::subtitles::shifted_window(cue, delta) {
+                cue.start_frame = start;
+                cue.end_frame = end;
+                moved += 1;
+            }
+        }
+        if moved == 0 {
+            self.status = "Shift all subtitles: no cue moved.".to_string();
+            return 0;
+        }
+        crate::subtitles::sort_subtitle_cues(&mut cues);
+        self.snapshot_labeled("Shift all subtitles");
+        self.project.subtitles = cues;
+        self.status = format!("Shifted {moved} subtitle cue(s) by {ms} ms.");
+        moved
+    }
+
+    /// Retime EVERY cue from `from_fps` to the project's
+    /// current rate (Roadmap Wave 1, RM21's core half,
+    /// IA-RM21-3): the op under the panel's Retime cues
+    /// press and the MCP `subtitle_retime` tool. Each
+    /// cue's window rescales by the rate ratio, the
+    /// half-open minimum re-established
+    /// ([`crate::subtitles::retimed_window`]), and the
+    /// status line names BOTH rates — retiming is never
+    /// silent. Returns the number of cues in the retimed
+    /// list; an equal-rate call, or a rescale that lands
+    /// every cue where it already sits, reports and
+    /// spends no undo step. `from_fps` is the caller's
+    /// validated rate (the window math itself refuses
+    /// unusable rates by leaving windows unchanged,
+    /// which lands here as the no-change report).
+    pub fn subtitle_retime(&mut self, from_fps: f32) -> usize {
+        let to = self.project.fps;
+        if (from_fps - to).abs() < f32::EPSILON {
+            self.status =
+                "Subtitle retime: cues already match the project frame rate.".to_string();
+            return 0;
+        }
+        let mut cues = self.project.subtitles.clone();
+        for cue in cues.iter_mut() {
+            let (start, end) = crate::subtitles::retimed_window(cue, from_fps, to);
+            cue.start_frame = start;
+            cue.end_frame = end;
+        }
+        if cues == self.project.subtitles {
+            self.status = "Subtitle retime: no cue window changed.".to_string();
+            return 0;
+        }
+        let count = cues.len();
+        crate::subtitles::sort_subtitle_cues(&mut cues);
+        self.snapshot_labeled("Retime subtitles");
+        self.project.subtitles = cues;
+        self.status = format!("Retimed {count} subtitle cue(s) from {from_fps} fps to {to} fps.");
+        count
     }
 
     /// All cues, in the list's kept order: sorted by
@@ -7063,7 +8042,7 @@ impl EditorCore {
                 return Err(reason);
             }
         };
-        self.snapshot();
+        self.snapshot_labeled("Subtitle style");
         self.project.subtitle_style = style;
         self.status = "Subtitle style updated.".to_string();
         Ok(())
@@ -7223,6 +8202,7 @@ mod subtitle_ops_tests {
             font_scale: 2.0,
             text_color: 0xFF_FF_00,
             box_color: 0x10_20_30,
+            font: Default::default(),
         };
         core.set_subtitle_style(style).expect("a valid style sets");
         assert_eq!(core.subtitle_style(), style);
@@ -7330,9 +8310,10 @@ mod wave14_settings_mcp_tests {
         assert_eq!((w.amount, w.wind), (90.0, 25.0));
         assert_eq!(out["weather"]["kind"], "rain");
         assert_eq!(core.status, "Weather: rain.");
-        // Mark_dirty-only: a counted edit, no undo step.
-        assert_eq!(core.undo_depth(), 0, "no undo step");
-        assert_eq!(core.edits_since_autosave(), edits + 1, "one dirty mark");
+        // RM24: a counted edit AND exactly one undo step.
+        assert_eq!(core.undo_depth(), 1, "one undo step");
+        assert_eq!(core.undo_label(), Some("Weather"));
+        assert_eq!(core.edits_since_autosave(), edits + 1, "one counted edit");
     }
 
     #[test]
@@ -7383,7 +8364,9 @@ mod wave14_settings_mcp_tests {
         core.project.weather = Some(eds_kind_preset(WeatherKind::Fog));
         tool_cycle_weather(&mut core, &json!({})).unwrap();
         assert_eq!(core.project.weather, None);
-        assert_eq!(core.undo_depth(), 0, "cycling never snapshots");
+        // RM24: every cycle is a real change, so every
+        // cycle took its undo step (5 in this walk).
+        assert_eq!(core.undo_depth(), 5, "each cycle is one undo step");
     }
 
     #[test]
@@ -7398,13 +8381,16 @@ mod wave14_settings_mcp_tests {
         tool_set_weather_wind(&mut core, &json!({ "wind": -999.0 })).unwrap();
         assert_eq!(core.project.weather.map(|w| w.wind), Some(-200.0));
         assert_eq!(core.status, "Weather wind: -200.");
-        assert_eq!(core.undo_depth(), 0, "settings writes never snapshot");
+        // RM24: the amount and wind writes took one step each.
+        assert_eq!(core.undo_depth(), 2, "one undo step per settings write");
         // A non-finite amount is refused by the finiteness rule.
         assert!(tool_set_weather_amount(&mut core, &json!({ "amount": 1e300 })).is_err());
     }
 
     #[test]
-    fn clear_camera_key_marks_dirty_without_an_undo_step() {
+    fn clear_camera_key_takes_one_undo_step() {
+        // (Wave 14 pinned this as mark-only; RM24 closed
+        // the "no undo" exemption — see IA-RM24-4.)
         let mut core = clean_core();
         // No key anywhere: refused, nothing spent.
         let err = tool_clear_camera_key(&mut core, &json!({}))
@@ -7414,8 +8400,11 @@ mod wave14_settings_mcp_tests {
         let edits = core.edits_since_autosave();
         tool_clear_camera_key(&mut core, &json!({})).unwrap();
         assert!(core.project.camera.is_empty(), "the key is gone");
-        assert_eq!(core.undo_depth(), 0, "clear takes no undo step");
-        assert_eq!(core.edits_since_autosave(), edits + 1, "but it marks dirty");
+        assert_eq!(core.undo_depth(), 1, "clear takes one undo step");
+        assert_eq!(core.undo_label(), Some("Clear camera key"));
+        assert_eq!(core.edits_since_autosave(), edits + 1, "and it counts one edit");
+        core.undo();
+        assert_eq!(core.project.camera.len(), 1, "undo restores the cleared key");
     }
 
     #[test]
@@ -7549,6 +8538,14 @@ mod tests {
         // `mark_dirty` — one per real change — while the
         // undo stack stays exactly where the snapshots
         // left it.
+        //
+        // Roadmap Wave 1 (RM24, P-14): those mutators
+        // snapshot now (coalesced), so the counter moves
+        // the same way — one per real change — and the
+        // undo stack grows with them; `mark_dirty` itself
+        // remains for the one session-bookkeeping class
+        // (see its doc and
+        // `mark_dirty_advances_the_counter_without_an_undo_step`).
         let mut core = EditorCore::new();
         core.selected_node = Some(1);
         core.snapshot();
@@ -7559,7 +8556,7 @@ mod tests {
         assert_eq!(core.edits_since_autosave(), 4);
         core.cycle_figure_opacity(0);
         assert_eq!(core.edits_since_autosave(), 5);
-        assert_eq!(core.undo_depth(), 3, "marked edits are not undo steps");
+        assert_eq!(core.undo_depth(), 5, "the cyclers are undo steps since RM24");
     }
 
     #[test]
@@ -7581,13 +8578,417 @@ mod tests {
         assert_eq!(core.edits_since_autosave(), 0);
     }
 
+    // -----------------------------------------------------------------
+    // Roadmap Wave 1 (RM24, P-14): labelled history, coalescing,
+    // the History-panel jump, the named-save state, and the H6
+    // dropped-session recap.
+    // -----------------------------------------------------------------
+
     #[test]
-    fn layer_ops_mark_dirty_without_an_undo_step() {
+    fn rm24_labels_ride_the_stacks() {
+        let mut core = EditorCore::new();
+        assert_eq!(core.undo_label(), None);
+        assert_eq!(core.redo_label(), None);
+        core.set_figure_color(0, 0x112233);
+        assert_eq!(core.undo_label(), Some("Figure colour"));
+        assert_eq!(core.undo_labels(), vec!["Figure colour".to_string()]);
+        core.undo();
+        assert_eq!(core.undo_label(), None);
+        assert_eq!(core.redo_label(), Some("Figure colour"));
+        assert_eq!(core.redo_labels(), vec!["Figure colour".to_string()]);
+        core.redo();
+        assert_eq!(core.undo_label(), Some("Figure colour"));
+        assert_eq!(core.project.figures[0].color, 0x112233);
+    }
+
+    #[test]
+    fn rm24_coalesced_run_is_one_step_restoring_the_start() {
+        let mut core = EditorCore::new();
+        let start = core.project.figures[0].color;
+        // A colour-picker run: three picks, one gesture.
+        core.set_figure_color(0, 0x111111);
+        core.set_figure_color(0, 0x222222);
+        core.set_figure_color(0, 0x333333);
+        assert_eq!(core.undo_depth(), 1, "the run folds into one step");
+        assert_eq!(core.edits_since_autosave(), 3, "every pick still counts");
+        core.undo();
+        assert_eq!(core.project.figures[0].color, start, "one undo reverts the run");
+    }
+
+    #[test]
+    fn rm24_coalescing_licence_dies_on_history_navigation() {
+        let mut core = EditorCore::new();
+        core.set_figure_color(0, 0x111111);
+        core.set_figure_color(0, 0x222222);
+        assert_eq!(core.undo_depth(), 1);
+        core.undo();
+        core.redo();
+        // Same label, but the run was interrupted by history
+        // navigation: the next pick starts a NEW step.
+        core.set_figure_color(0, 0x333333);
+        assert_eq!(core.undo_depth(), 2, "no fold across an undo/redo");
+    }
+
+    #[test]
+    fn rm24_rollback_coalesced_pops_only_its_own_entry() {
+        let mut core = EditorCore::new();
+        core.snapshot_coalesced("Test gesture");
+        assert_eq!(core.undo_depth(), 1);
+        let edits = core.edits_since_autosave();
+        // A rollback naming another gesture is a no-op.
+        core.rollback_coalesced("Other gesture");
+        assert_eq!(core.undo_depth(), 1);
+        assert_eq!(core.edits_since_autosave(), edits);
+        core.rollback_coalesced("Test gesture");
+        assert_eq!(core.undo_depth(), 0, "the gesture's own entry pops");
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits - 1,
+            "and its counted edit is given back"
+        );
+    }
+
+    #[test]
+    fn rm24_history_jump_walks_and_clamps() {
+        let mut core = EditorCore::new();
+        core.add_frame();
+        core.add_frame();
+        core.add_frame();
+        assert_eq!(core.undo_depth(), 3);
+        core.history_jump(-2);
+        assert_eq!(core.undo_depth(), 1);
+        assert_eq!(core.redo_depth(), 2);
+        assert_eq!(core.status, "Undid 2 steps.");
+        core.history_jump(1);
+        assert_eq!(core.redo_depth(), 1);
+        assert_eq!(core.status, "Redone.");
+        // Clamped at the end of the redo stack.
+        core.history_jump(99);
+        assert_eq!(core.redo_depth(), 0);
+        assert_eq!(core.undo_depth(), 3);
+        // Zero is a no-op that leaves the recap alone.
+        core.history_jump(0);
+        assert_eq!(core.status, "Redid 2 steps.");
+        // And at the bottom of the undo stack.
+        core.history_jump(-99);
+        assert_eq!(core.undo_depth(), 0);
+        core.history_jump(-1);
+        assert_eq!(core.status, "Nothing to undo.");
+    }
+
+    #[test]
+    fn rm24_save_state_follows_the_named_baseline() {
+        let mut core = EditorCore::new();
+        // A fresh core has never met a named file.
+        assert_eq!(core.save_state(), SaveState::NeverSaved);
+        assert_eq!(core.edits_since_save(), None);
+        // A file open / named save stamps the baseline.
+        core.note_save_baseline();
+        assert_eq!(core.save_state(), SaveState::Saved);
+        assert_eq!(core.edits_since_save(), Some(0));
+        core.add_frame();
+        assert_eq!(core.save_state(), SaveState::ModifiedSinceSave);
+        assert_eq!(core.edits_since_save(), Some(1));
+        // A swap forgets the baseline entirely.
+        core.note_project_swapped();
+        assert_eq!(core.save_state(), SaveState::NeverSaved);
+        assert_eq!(core.edits_since_save(), None);
+    }
+
+    #[test]
+    fn rm24_undo_names_a_dropped_clip_session() {
+        let mut core = EditorCore::new();
+        let ci = core.create_clip_from_figure(0).unwrap();
+        assert!(core.enter_clip(ci));
+        // Undoing the create removes the clip under the live
+        // session: the recap must say the session closed.
+        core.undo();
+        assert!(core.clip_edit.is_none(), "the orphaned session is dropped");
+        assert_eq!(
+            core.status, "Undone. (Clip session closed — its clip is gone.)",
+            "H6: the recap names the side effect"
+        );
+        // A plain undo keeps the bare historical word (the
+        // exact string older suites pin).
+        let mut core = EditorCore::new();
+        core.add_frame();
+        core.undo();
+        assert_eq!(core.status, "Undone.");
+    }
+
+    #[test]
+    fn set_length_writes_the_exact_value_through_the_shared_clamp() {
+        // Roadmap Wave 1 (RM3, F-3): the typed-entry
+        // counterpart of `adjust_length` — the value lands
+        // exactly, out-of-range input clamps to the same
+        // bounds the stepper op uses, and the write counts
+        // one edit on a real change, with the op's status
+        // wording. Discipline since RM24 (P-14): the set
+        // takes a coalesced undo step (RM3 shipped it as a
+        // Wave 13 B2 mark-only tweak).
+        let mut core = EditorCore::new();
+        core.selected_node = Some(1);
+        let edits = core.edits_since_autosave();
+        core.set_length(120.0);
+        assert_eq!(core.project.figures[0].def.nodes[1].length, 120.0);
+        assert_eq!(core.edits_since_autosave(), edits + 1);
+        assert_eq!(core.undo_depth(), 1, "a set is one coalesced undo step");
+        assert!(
+            core.status.ends_with("length 120"),
+            "status: {}",
+            core.status
+        );
+        // Clamp parity with `adjust_length`, both ends.
+        core.set_length(999.0);
+        assert_eq!(
+            core.project.figures[0].def.nodes[1].length,
+            EditorCore::LENGTH_MAX
+        );
+        core.set_length(0.0);
+        assert_eq!(
+            core.project.figures[0].def.nodes[1].length,
+            EditorCore::LENGTH_MIN
+        );
+        // A no-change set moves nothing.
+        let edits = core.edits_since_autosave();
+        core.set_length(EditorCore::LENGTH_MIN);
+        assert_eq!(core.edits_since_autosave(), edits);
+        // The origin has no segment to lengthen: node 0
+        // refuses silently, exactly as `adjust_length`.
+        core.selected_node = Some(0);
+        let before = core.project.figures[0].def.nodes[0].length;
+        core.set_length(100.0);
+        assert_eq!(core.project.figures[0].def.nodes[0].length, before);
+        // And with no selection at all: no write, no panic.
+        core.selected_node = None;
+        core.set_length(100.0);
+    }
+
+    #[test]
+    fn set_thickness_writes_the_exact_value_through_the_shared_clamp() {
+        // Roadmap Wave 1 (RM3, F-3): as `set_length`,
+        // against `adjust_thickness`'s bounds and wording.
+        let mut core = EditorCore::new();
+        core.selected_node = Some(1);
+        core.set_thickness(9.0);
+        assert_eq!(core.project.figures[0].def.nodes[1].thickness, 9.0);
+        assert!(
+            core.status.ends_with("thickness 9"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.undo_depth(), 1, "one coalesced step (RM24)");
+        core.set_thickness(99.0);
+        assert_eq!(
+            core.project.figures[0].def.nodes[1].thickness,
+            EditorCore::THICKNESS_MAX
+        );
+        core.set_thickness(0.0);
+        assert_eq!(
+            core.project.figures[0].def.nodes[1].thickness,
+            EditorCore::THICKNESS_MIN
+        );
+    }
+
+    #[test]
+    fn quiet_setters_write_without_a_recap() {
+        // Roadmap Wave 1 (RM3, F-3): the scrub doors —
+        // same write, same dirty discipline as the
+        // announcing setters, but the status line is left
+        // exactly as it was (mid-drag silence; the
+        // gesture's release announces once).
+        let mut core = EditorCore::new();
+        core.selected_node = Some(1);
+        core.status = "Standing line.".into();
+        let edits = core.edits_since_autosave();
+        core.set_length_quiet(88.0);
+        assert_eq!(core.project.figures[0].def.nodes[1].length, 88.0);
+        assert_eq!(core.edits_since_autosave(), edits + 1);
+        assert_eq!(core.status, "Standing line.");
+        core.set_thickness_quiet(7.0);
+        assert_eq!(core.project.figures[0].def.nodes[1].thickness, 7.0);
+        assert_eq!(core.status, "Standing line.");
+        // RM24: each scrub door took its own coalesced
+        // step (different labels, so no fold).
+        assert_eq!(core.undo_depth(), 2);
+    }
+
+    #[test]
+    fn set_node_taper_clamps_and_takes_the_family_snapshot() {
+        // Roadmap Wave 1 (RM3, F-3): the panel door for
+        // `style::set_node_taper` — the value is clamped
+        // to 0..=1 here, the write is the free function's:
+        // exactly one snapshot and the cycle op's status
+        // wording ("Segment Taper …").
+        let mut core = EditorCore::new();
+        core.selected_node = Some(1);
+        core.set_node_taper(0.6);
+        assert_eq!(core.project.figures[0].def.nodes[1].style.taper, 0.6);
+        assert_eq!(core.undo_depth(), 1, "one snapshot, like the cycle");
+        assert!(
+            core.status.starts_with("Segment Taper"),
+            "status: {}",
+            core.status
+        );
+        core.set_node_taper(2.5);
+        assert_eq!(core.project.figures[0].def.nodes[1].style.taper, 1.0);
+        core.set_node_taper(-1.0);
+        assert_eq!(core.project.figures[0].def.nodes[1].style.taper, 0.0);
+        // No selection: the free function's refusal, and
+        // no snapshot taken for it.
+        core.selected_node = None;
+        let depth = core.undo_depth();
+        core.set_node_taper(0.5);
+        assert_eq!(core.undo_depth(), depth);
+        assert_eq!(core.status, "Select a joint first.");
+    }
+
+    #[test]
+    fn shared_clamps_are_the_stepper_ops_bounds() {
+        // Roadmap Wave 1 (RM3, F-3): the pure helpers the
+        // kit's field specs read — pinned at the consts so
+        // a future bounds change moves the ops, the
+        // setters and the fields together, or fails here.
+        assert_eq!(EditorCore::length_clamped(2.0), EditorCore::LENGTH_MIN);
+        assert_eq!(EditorCore::length_clamped(120.0), 120.0);
+        assert_eq!(EditorCore::length_clamped(500.0), EditorCore::LENGTH_MAX);
+        assert_eq!(
+            EditorCore::thickness_clamped(0.5),
+            EditorCore::THICKNESS_MIN
+        );
+        assert_eq!(
+            EditorCore::thickness_clamped(30.0),
+            EditorCore::THICKNESS_MAX
+        );
+        assert_eq!(EditorCore::taper_clamped(-0.25), 0.0);
+        assert_eq!(EditorCore::taper_clamped(0.25), 0.25);
+        assert_eq!(EditorCore::taper_clamped(1.25), 1.0);
+    }
+
+    #[test]
+    fn revision_moves_at_the_edit_choke_points_only() {
+        // Roadmap Wave 1 (RM6, F-5): the revision shares
+        // edit_count's choke points — snapshot, mark_dirty,
+        // the undo/redo restores and the swap funnels move
+        // it; pure navigation does not (the frame is the
+        // cache key's other half, not a project change).
+        let mut core = EditorCore::new();
+        let r0 = core.revision();
+        core.goto(1.min(core.frame_count() - 1));
+        assert_eq!(core.revision(), r0, "navigation is not a project change");
+        core.snapshot();
+        assert_eq!(core.revision(), r0 + 1, "snapshot bumps");
+        core.snapshot();
+        core.mark_dirty();
+        assert_eq!(core.revision(), r0 + 3, "mark_dirty bumps");
+        core.undo();
+        assert_eq!(core.revision(), r0 + 4, "an undo restore bumps");
+        core.redo();
+        assert_eq!(core.revision(), r0 + 5, "a redo restore bumps");
+        core.note_project_swapped();
+        assert_eq!(
+            core.revision(),
+            r0 + 6,
+            "a swap bumps forward — it never restarts the counter"
+        );
+        core.note_project_replaced();
+        assert_eq!(core.revision(), r0 + 7, "a replace bumps");
+    }
+
+    #[test]
+    fn revision_never_moves_backwards_across_undo() {
+        // Roadmap Wave 1 (RM6, F-5): undo restores earlier
+        // CONTENT; the revision must still move forward, or
+        // a cache entry cut before the edit could be served
+        // for the restored project.
+        let mut core = EditorCore::new();
+        core.snapshot();
+        let r_before_edit = core.revision();
+        core.project.background = 0x123456;
+        core.snapshot();
+        assert!(core.revision() > r_before_edit);
+        core.undo();
+        assert_eq!(core.project.background, 0x123456, "undo spent the edit snapshot");
+        core.undo();
+        assert_ne!(core.project.background, 0x123456, "content went back");
+        assert!(
+            core.revision() > r_before_edit,
+            "but the revision only ever moves forward"
+        );
+    }
+
+    #[test]
+    fn evaluated_frame_is_shared_per_revision_and_frame() {
+        // Roadmap Wave 1 (RM6, F-5): evaluate-once — two
+        // reads of the same (revision, frame) return the
+        // SAME allocation; a different frame evaluates
+        // separately; any project mutation (here a snapshot
+        // with no content change — the gesture-start shape)
+        // invalidates by revision.
+        let core = EditorCore::new();
+        let a = core.evaluated_frame(0.0);
+        let b = core.evaluated_frame(0.0);
+        assert!(std::rc::Rc::ptr_eq(&a, &b), "one evaluation per (revision, frame)");
+        let c = core.evaluated_frame(1.0);
+        assert!(!std::rc::Rc::ptr_eq(&a, &c), "a different frame evaluates separately");
+        let a2 = core.evaluated_frame(0.0);
+        assert!(std::rc::Rc::ptr_eq(&a, &a2), "the first frame stays cached");
+
+        let mut core = EditorCore::new();
+        let before = core.evaluated_frame(0.0);
+        core.snapshot();
+        let after = core.evaluated_frame(0.0);
+        assert!(
+            !std::rc::Rc::ptr_eq(&before, &after),
+            "a mutation invalidates by revision even at the same frame"
+        );
+        assert_eq!(before.poses.len(), after.poses.len());
+    }
+
+    #[test]
+    fn positions_f_reads_the_shared_evaluation_in_both_branches() {
+        // Roadmap Wave 1 (RM6, F-5): positions_f through
+        // the evaluated frame returns exactly the values
+        // the per-figure paths returned — raw poses_at
+        // without channels, the apply_channels result with.
+        let mut core = EditorCore::new();
+        for fi in 0..core.project.figures.len() {
+            let want = {
+                let poses = core.project.poses_at(1.0);
+                evaluate(&core.project.figures[fi].def, &poses[fi])
+            };
+            assert_eq!(core.positions_f(1.0, fi), want, "no-channel figure {fi}");
+        }
+        core.project.channels.push(crate::graph::Channel {
+            figure: 0,
+            target: crate::graph::ChannelTarget::RootX,
+            keys: vec![crate::graph::Key::flat(0.0, 123.5)],
+        });
+        let r = crate::graph::apply_channels(&core.project, &core.project.channels, 1.0);
+        for fi in 0..core.project.figures.len() {
+            assert_eq!(
+                core.positions_f(1.0, fi),
+                evaluate(&r.defs[fi], &r.poses[fi]),
+                "channelled figure {fi}"
+            );
+            assert_eq!(
+                core.evaluated_frame(1.0).bends[fi],
+                r.bends[fi],
+                "the stage's bend rows are the same evaluation's, figure {fi}"
+            );
+        }
+    }
+
+    #[test]
+    fn layer_ops_spend_one_step_per_real_change() {
         // Wave 13 (B2): the E8 family that lives in this
         // file — lock, opacity cycle/step, hide — each
-        // real change counts once, spends no undo step,
-        // and a refusal or a clamped no-change step
-        // counts nothing.
+        // real change counts once and a refusal or a
+        // clamped no-change step counts nothing.
+        // Roadmap Wave 1 (RM24, P-14): the changes are
+        // undo steps now — the opacity step FOLDS into
+        // the cycle's entry (same label, one gesture
+        // family), so four counted edits are three steps.
         let mut core = EditorCore::new();
         let edits = core.edits_since_autosave();
         let depth = core.undo_depth();
@@ -7599,7 +9000,7 @@ mod tests {
         assert_eq!(core.edits_since_autosave(), edits + 3);
         core.toggle_figure_hidden();
         assert_eq!(core.edits_since_autosave(), edits + 4);
-        assert_eq!(core.undo_depth(), depth, "no undo steps were spent");
+        assert_eq!(core.undo_depth(), depth + 3, "lock + folded opacity run + hide");
         // Refusals spend nothing.
         core.toggle_figure_lock(99);
         core.cycle_figure_opacity(99);
@@ -7619,8 +9020,11 @@ mod tests {
         // wider non-snapshot family in this file —
         // settings setters/cyclers, segment tweaks and
         // the frame-clear — each real change counts
-        // once, no-change calls count nothing, and no
-        // undo step is spent anywhere.
+        // once and no-change calls count nothing.
+        // Roadmap Wave 1 (RM24, P-14): each real change
+        // is an undo step now; the pass below spends
+        // exactly seven (easing cycle, easing set, fps,
+        // tween, follow, shape, colour).
         let mut core = EditorCore::new();
         core.selected_node = Some(1);
         let depth = core.undo_depth();
@@ -7654,7 +9058,7 @@ mod tests {
         assert_eq!(core.edits_since_autosave(), edits);
         core.set_node_color(0x112233);
         assert_eq!(core.edits_since_autosave(), edits);
-        assert_eq!(core.undo_depth(), depth, "no undo steps were spent");
+        assert_eq!(core.undo_depth(), depth + 7, "one undo step per real change (RM24)");
         // Clearing an empty frame spends nothing. Plant a
         // stroke through the draw path (which snapshots
         // at the gesture start — census A18) and
@@ -7665,7 +9069,7 @@ mod tests {
         // peer stroke-destruction op).
         core.clear_frame_drawings();
         assert_eq!(core.edits_since_autosave(), edits);
-        assert_eq!(core.undo_depth(), depth, "an empty clear spends no undo step");
+        assert_eq!(core.undo_depth(), depth + 7, "an empty clear spends no undo step");
         core.begin_draw([100.0, 100.0]);
         core.draw_to([140.0, 120.0]);
         core.end_draw();
@@ -8520,6 +9924,75 @@ mod tests {
         core.selected_node = Some(1); // chest has children
         core.delete_segment();
         assert_eq!(core.project.figures[0].def.nodes.len(), nodes_before);
+    }
+
+    /// IA-RM19-6 (RM19 SS4.0): the delete remap covers bends
+    /// and node-indexed graph channels, not just parents and
+    /// pose angles — both misalignments reproduced here.
+    #[test]
+    fn delete_segment_remaps_bends_and_channels() {
+        let mut core = EditorCore::new();
+        let fi = 0usize;
+        let n = core.project.figures[fi].def.nodes.len();
+        // The first leaf past the root: later nodes exist after
+        // it, so the decrement half is exercised too.
+        let leaf = (1..n)
+            .find(|&i| {
+                core.project.figures[fi]
+                    .def
+                    .nodes
+                    .iter()
+                    .all(|nd| nd.parent != Some(i))
+            })
+            .expect("the demo figure has a leaf segment");
+        assert!(leaf + 1 < n, "a later node must exist");
+        // Distinct bend per node on frame 0, so a slid row is
+        // visible value-by-value.
+        let bends0: Vec<f32> = (0..n).map(|i| i as f32 * 0.1).collect();
+        core.project.frames[0].bends = vec![bends0.clone()];
+        let chan = |figure: usize, target: crate::graph::ChannelTarget| crate::graph::Channel {
+            figure,
+            target,
+            keys: vec![crate::graph::Key::flat(0.0, 1.0)],
+        };
+        core.project.channels = vec![
+            chan(fi, crate::graph::ChannelTarget::Angle(leaf)),
+            chan(fi, crate::graph::ChannelTarget::Bend(leaf + 1)),
+            chan(fi, crate::graph::ChannelTarget::RootX),
+            chan(1, crate::graph::ChannelTarget::Angle(leaf)),
+        ];
+        let depth_before = core.undo_depth();
+        core.selected_node = Some(leaf);
+        core.delete_segment();
+        assert_eq!(core.project.figures[fi].def.nodes.len(), n - 1);
+        assert_eq!(core.undo_depth(), depth_before + 1, "one snapshot");
+        // Bends: slot `leaf` gone, later values unmoved.
+        let mut expected = bends0;
+        expected.remove(leaf);
+        assert_eq!(core.project.frames[0].bends[fi], expected);
+        // Channels: the Angle(leaf) channel dropped + counted,
+        // Bend(leaf + 1) decremented onto the same node, the
+        // root channel and the other figure's channel intact.
+        assert_eq!(core.project.channels.len(), 3);
+        assert!(core
+            .project
+            .channels
+            .iter()
+            .any(|c| c.figure == fi
+                && c.target == crate::graph::ChannelTarget::Bend(leaf)));
+        assert!(core
+            .project
+            .channels
+            .iter()
+            .any(|c| c.figure == fi
+                && c.target == crate::graph::ChannelTarget::RootX));
+        assert!(core
+            .project
+            .channels
+            .iter()
+            .any(|c| c.figure == 1
+                && c.target == crate::graph::ChannelTarget::Angle(leaf)));
+        assert_eq!(core.status, "Segment deleted. (1 graph channel removed)");
     }
 
     #[test]
@@ -9801,6 +11274,74 @@ mod tests {
         assert!(core.playhead.abs() < 1e-4, "playhead: {}", core.playhead);
         core.advance_play(step);
         assert_eq!(core.current, 1);
+    }
+
+    #[test]
+    fn roadmap_f6_advance_play_walks_durations_across_boundaries() {
+        // Roadmap Wave 1 (RM7 / F-6): a tick is charged frame
+        // by frame at each frame's own duration. Frame 0 lasts
+        // 1 beat and frame 1 lasts 4, so a 2-beat tick from the
+        // top crosses frame 0 (1 beat) and spends its second
+        // beat inside frame 1 — a quarter of that frame — for
+        // a playhead of 1.25. The pre-RM7 integrator charged
+        // both beats at frame 0's rate and landed on frame 2.
+        let mut core = EditorCore::new();
+        core.project.fps = 24.0;
+        core.project.frames[0].duration = 1.0;
+        core.project.frames[1].duration = 4.0;
+        core.project.frames[2].duration = 1.5;
+        core.project.frames[3].duration = 0.5;
+        core.project.frames[4].duration = 1.0;
+        core.goto(0);
+        core.advance_play(2.0 / 24.0);
+        assert_eq!(core.current, 1, "crossed into the held frame");
+        assert!(
+            (core.playhead - 1.25).abs() < 1e-4,
+            "playhead: {}",
+            core.playhead
+        );
+        // Three more beats finish frame 1 exactly (1 + 3 of its
+        // 4 beats spent), landing on frame 2's first instant.
+        core.advance_play(3.0 / 24.0);
+        assert_eq!(core.current, 2);
+        assert!((core.playhead - 2.0).abs() < 1e-4, "playhead: {}", core.playhead);
+        // Fractional holds are charged as authored while they
+        // are left: 1.5 beats leaves frame 2, 0.5 leaves frame 3.
+        core.advance_play(1.5 / 24.0);
+        assert_eq!(core.current, 3, "the 1.5-beat hold lasted 1.5 beats");
+        core.advance_play(0.5 / 24.0);
+        assert_eq!(core.current, 4, "the 0.5-beat hold lasted 0.5 beats");
+        // One more beat wraps the whole 8-beat timeline.
+        core.advance_play(1.0 / 24.0);
+        assert_eq!(core.current, 0);
+        assert!(core.playhead.abs() < 1e-4, "playhead: {}", core.playhead);
+    }
+
+    #[test]
+    fn roadmap_f6_advance_play_loop_range_folds_in_beats() {
+        // The loop fold is measured in beats, not frame counts:
+        // frames 1..=2 below span 1.5 + 0.5 = 2 beats, so a
+        // 2-beat tick from the range's start returns exactly to
+        // its start, and a 3-beat tick lands one beat into it.
+        let mut core = EditorCore::new();
+        core.project.fps = 24.0;
+        core.project.frames[0].duration = 1.0;
+        core.project.frames[1].duration = 1.5;
+        core.project.frames[2].duration = 0.5;
+        core.project.frames[3].duration = 1.0;
+        core.project.frames[4].duration = 1.0;
+        core.set_loop_range(1, 2);
+        core.goto(1);
+        core.advance_play(2.0 / 24.0);
+        assert_eq!(core.current, 1, "one full beat-span loop returns to the start");
+        assert!((core.playhead - 1.0).abs() < 1e-4, "playhead: {}", core.playhead);
+        core.advance_play(3.0 / 24.0);
+        assert_eq!(core.current, 1);
+        assert!(
+            (core.playhead - (1.0 + 1.0 / 1.5)).abs() < 1e-4,
+            "one beat into frame 1's 1.5-beat hold: {}",
+            core.playhead
+        );
     }
 
     #[test]
