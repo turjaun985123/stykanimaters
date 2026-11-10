@@ -23,6 +23,18 @@
 //! app "Home" was a group shown in every workspace, never
 //! a workspace itself).
 //!
+//! Wave 2 amendment (W2-21, roadmap P-8 / RM19 design):
+//! the merge is **split back out** — [`Workspace::Build`]
+//! exists again as its own workspace (inserted before
+//! [`Workspace::Build3D`] in row order, per RM19's
+//! D-RM19-1 recommendation), homing the 2D rigging
+//! surface ([`Section::RigTree`] plus the figure/library/
+//! inspector sections that already ride Animate).
+//! `Build3D` keeps its variant name, label and persisted
+//! `"3D"` string untouched, so old prefs files resolve
+//! exactly as before; `"Build"` is a new persisted string
+//! no old prefs file can contain.
+//!
 //! # Integrator wiring (required)
 //!
 //! ```ignore
@@ -56,7 +68,7 @@
 //! mounted by `main.rs` in the centre column — the
 //! centre always mounts; only the side columns are
 //! View-toggle gated) is permanent furniture: it
-//! renders in **all eight workspaces**, and no
+//! renders in **all nine workspaces**, and no
 //! [`Section`] gates it or anything inside it.
 //! (`chrome_view::timeline_row` is the card's unused
 //! predecessor builder; the live card is
@@ -103,14 +115,14 @@
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
 use stykanimate_rs::editor::EditorCore;
-use stykanimate_rs::shell::{load_layout, save_layout, LayoutPrefs};
+use stykanimate_rs::shell::{load_layout, save_layout, LayoutPrefs, WorkspaceLayout};
 
 use crate::rune_sec::design;
 use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::icon_btn;
 use crate::State;
 
-/// One of the eight workspaces. The active workspace
+/// One of the nine workspaces. The active workspace
 /// decides which [`Section`]s the shell mounts
 /// ([`section_visible`]); it is persisted across runs as
 /// [`Workspace::name`] in `LayoutPrefs.workspace`.
@@ -121,6 +133,7 @@ pub enum Workspace {
     Graph,
     Effects,
     Audio,
+    Build,
     Build3D,
     Export,
     Home,
@@ -137,7 +150,7 @@ impl Default for Workspace {
 /// Every mounted `rune_sec` panel the workspace switch
 /// can gate. Variants follow the mounted builders in
 /// `main.rs`'s view: the left column (Home, Project,
-/// Figures, Library, Layers) and the right column
+/// Figures, Library, RigTree, Layers) and the right column
 /// (inspectors, pose/keyframe tools, camera, scene,
 /// onion, playback, frame ops, graph, easing, draw,
 /// stroke inspector, text, FX browser/clips, audio,
@@ -146,6 +159,7 @@ impl Default for Workspace {
 pub enum Section {
     Figures,
     Library,
+    RigTree,
     Layers,
     Project,
     InspectorSegment,
@@ -177,14 +191,20 @@ pub enum Section {
 }
 
 impl Workspace {
-    /// All eight workspaces, in chip-row order.
-    pub fn all() -> [Workspace; 8] {
+    /// All nine workspaces, in chip-row order. Build sits
+    /// immediately before Build3D (RM19 D-RM19-1, the
+    /// INSERT resolution): the two rigging workspaces are
+    /// adjacent, at the price of renumbering the Alt
+    /// chords behind them (3D Alt+7, Export Alt+8, Home
+    /// Alt+9).
+    pub fn all() -> [Workspace; 9] {
         [
             Workspace::Animate,
             Workspace::Draw,
             Workspace::Graph,
             Workspace::Effects,
             Workspace::Audio,
+            Workspace::Build,
             Workspace::Build3D,
             Workspace::Export,
             Workspace::Home,
@@ -199,6 +219,7 @@ impl Workspace {
             Workspace::Graph => "Graph",
             Workspace::Effects => "Effects",
             Workspace::Audio => "Audio",
+            Workspace::Build => "Build",
             Workspace::Build3D => "3D",
             Workspace::Export => "Export",
             Workspace::Home => "Home",
@@ -224,6 +245,7 @@ impl Workspace {
             Workspace::Graph => "ws-graph",
             Workspace::Effects => "ws-effects",
             Workspace::Audio => "ws-audio",
+            Workspace::Build => "ws-build",
             Workspace::Build3D => "ws-3d",
             Workspace::Export => "ws-export",
             Workspace::Home => "ws-home",
@@ -236,8 +258,11 @@ impl Workspace {
     /// element key (`ws-animate`, hyphen form); this one
     /// is the translation key (`ws_animate`, underscore
     /// form). `Build3D` maps to `ws_3d` — its chip reads
-    /// "3D"; the merged-away Build workspace's `ws_build`
-    /// key has no chip of its own anymore.
+    /// "3D"; `Build` reclaims the `ws_build` key the
+    /// Wave 14 workspace key set reserved for it (the key
+    /// itself is spliced into the tables by IA-W2-21-3 —
+    /// until it lands, the catalogue pin below fails by
+    /// design, the shell's adopt-ahead idiom).
     pub fn i18n_key(self) -> &'static str {
         match self {
             Workspace::Animate => "ws_animate",
@@ -245,6 +270,7 @@ impl Workspace {
             Workspace::Graph => "ws_graph",
             Workspace::Effects => "ws_effects",
             Workspace::Audio => "ws_audio",
+            Workspace::Build => "ws_build",
             Workspace::Build3D => "ws_3d",
             Workspace::Export => "ws_export",
             Workspace::Home => "ws_home",
@@ -289,6 +315,9 @@ impl Workspace {
             Workspace::Audio => {
                 "Place sound clips and line them up against the animation."
             }
+            Workspace::Build => {
+                "Build and edit figure rigs: the node tree, segment properties, joint limits and the setup pose."
+            }
             Workspace::Build3D => {
                 "Pose the 3D figure and frame it with the camera."
             }
@@ -303,11 +332,12 @@ impl Workspace {
 }
 
 /// Parse a persisted workspace name (from
-/// `LayoutPrefs.workspace`). Unknown strings — including
-/// `"Build"`, the GPUI workspace that merged into
-/// [`Workspace::Build3D`] and has no persisted name of
-/// its own anymore — fall back to
-/// [`Workspace::Animate`], the shell default.
+/// `LayoutPrefs.workspace`). Unknown strings fall back
+/// to [`Workspace::Animate`], the shell default.
+/// `"Build"` resolves to [`Workspace::Build`] again
+/// since the Wave 2 split (W2-21); prefs written before
+/// the split can only contain the eight older names, so
+/// nothing migrates.
 pub fn from_name(name: &str) -> Workspace {
     Workspace::all()
         .into_iter()
@@ -333,25 +363,525 @@ pub fn prefs_with_workspace(prefs: &LayoutPrefs, ws: Workspace) -> LayoutPrefs {
     out
 }
 
+/// The setup-mode value a workspace switch leaves
+/// behind (Wave 2, W2-21 — RM19 §2): entering Build
+/// enters setup mode (the saved prior value rides
+/// `saved`); leaving Build restores the saved value;
+/// any other switch — including re-selecting the
+/// workspace already active — changes nothing. Pure, so
+/// the enter/leave contract is pinnable without a
+/// `State` (the `State` field itself is IA-W2-21-2).
+pub fn setup_mode_after_switch(
+    was_build: bool,
+    is_build: bool,
+    current: bool,
+    saved: &mut bool,
+) -> bool {
+    if is_build && !was_build {
+        *saved = current;
+        true
+    } else if was_build && !is_build {
+        *saved
+    } else {
+        current
+    }
+}
+
 /// Switch the shell's workspace and persist the choice:
-/// sets `s.workspace`, then load-modify-saves
-/// `LayoutPrefs` with the new workspace name, preserving
-/// every other field (theme, timeline, sidebar) — the
-/// same pattern `main.rs`'s `poll` uses for theme flips.
+/// applies the Build setup-mode rule ([`setup_mode_after_switch`]),
+/// sets `s.workspace`, runs the layout-memory transaction
+/// ([`switch_layouts`] — the outgoing workspace's live
+/// shape is stored, the incoming workspace's remembered
+/// shape is applied), then load-modify-saves `LayoutPrefs`
+/// with the new workspace name, preserving every other
+/// field (theme, timeline, sidebar) — the same pattern
+/// `main.rs`'s `poll` uses for theme flips. Every
+/// workspace change funnels here (chip row, Alt+number,
+/// palette jumps), so the setup rule and the layout
+/// memory cover all three doors alike.
 pub fn select_workspace(s: &mut State, ws: Workspace) {
+    // Stage focus never survives a workspace switch
+    // (W2-10): the restore belongs to the outgoing
+    // workspace's shape, and the incoming workspace
+    // applies its own remembered layout below — leaving
+    // focus set would strand the restore and make the
+    // capture below read a dead restore. The columns
+    // come back with the incoming record's own
+    // visibility via `apply_layout`. (The capture reads
+    // the restore's visibility either way — see
+    // `capture_visibility` — so the outgoing workspace
+    // remembers its pre-focus shape, not the hidden
+    // one.)
+    s.stage_focus_restore = None;
+    let was_build = s.workspace == Workspace::Build;
+    let is_build = ws == Workspace::Build;
+    s.core.setup_mode = setup_mode_after_switch(
+        was_build,
+        is_build,
+        s.core.setup_mode,
+        &mut s.setup_mode_before_build,
+    );
+    let outgoing = s.workspace;
     s.workspace = ws;
-    let prefs = prefs_with_workspace(&load_layout(), ws);
+    let mut prefs = load_layout();
+    let live = live_layout(s, &prefs);
+    let incoming = switch_layouts(&mut prefs, outgoing, ws, live);
+    apply_layout(s, incoming);
+    prefs.workspace = ws.name().to_string();
     save_layout(&prefs);
 }
 
+// ---- Layout memory (Roadmap Wave 2, W2-61 — PL-10) -------
+//
+// RM12's design (§4 of rm12.md), built. Every workspace
+// remembers its own panel layout — column widths, column
+// visibility, timeline collapse — across switches and
+// launches. The memory lives in
+// `LayoutPrefs.workspace_layouts` (shell.rs —
+// IA-W2-61-1); the record type is
+// `stykanimate_rs::shell::WorkspaceLayout`.
+//
+// The legacy global fields stay as the ACTIVE workspace's
+// mirror: the shell reads widths through
+// `main.rs::column_widths()` (which re-reads the prefs
+// file) and MCP's `shell_get_layout` reads the globals,
+// so every switch and every startup copies the active
+// record into the globals — older binaries and the layout
+// tools keep reading sane values, and the globals always
+// describe the workspace the user is looking at.
+//
+// Session vs persisted split: the five record fields are
+// the persisted half. NOT in the records, by RM12 §4.3.1:
+// the per-lane visibility flags (they answer project
+// data, not workspace furniture — they stay global), the
+// timeline zoom/follow pair (global prefs, RM13), and any
+// transient stage-focus state (W2-10, built in the
+// stage-focus section below — it lives only in `State`,
+// never in a record or a prefs field, so a restart can
+// never restore a focused stage).
+
+/// The shell's live panel layout at one instant — the
+/// bin-side shape of a [`WorkspaceLayout`] record, taken
+/// from the places the shell actually keeps the values:
+/// the widths from the prefs globals (the prefs file IS
+/// the live width store — `main.rs::column_widths()`
+/// re-reads it every frame and the splitter drags write
+/// it directly) and the visibility/collapse flags from
+/// `State`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LiveLayout {
+    pub col_left_w: f32,
+    pub col_right_w: f32,
+    pub show_left: bool,
+    pub show_right: bool,
+    pub timeline_collapsed: bool,
+}
+
+impl LiveLayout {
+    /// This live layout as a persisted record (widths
+    /// clamped to the load ranges — a record never holds
+    /// a width the loader would reject).
+    pub fn to_record(self) -> WorkspaceLayout {
+        WorkspaceLayout {
+            col_left_w: self.col_left_w,
+            col_right_w: self.col_right_w,
+            workspace_layouts: Vec::new(),
+            export_dir: String::new(),
+            export_naming: "project".to_string(),
+            export_quality: "standard".to_string(),
+            show_left: self.show_left,
+            show_right: self.show_right,
+            timeline_collapsed: self.timeline_collapsed,
+        }
+        .clamped()
+    }
+
+    /// The live layout a persisted record restores.
+    pub fn from_record(record: WorkspaceLayout) -> LiveLayout {
+        let record = record.clamped();
+        LiveLayout {
+            col_left_w: record.col_left_w,
+            col_right_w: record.col_right_w,
+            workspace_layouts: Vec::new(),
+            export_dir: String::new(),
+            export_naming: "project".to_string(),
+            export_quality: "standard".to_string(),
+            show_left: record.show_left,
+            show_right: record.show_right,
+            timeline_collapsed: record.timeline_collapsed,
+        }
+    }
+}
+
+/// Capture the live layout (see [`LiveLayout`] for where
+/// each value lives). While stage focus is active
+/// (W2-10 — see the stage-focus section below) the
+/// visibility half is read from the focus restore, not
+/// from the live flags: the flags read hidden *because*
+/// focus hid them, and a capture that believed them
+/// would remember "both columns hidden" as the
+/// workspace's layout.
+pub fn live_layout(s: &State, prefs: &LayoutPrefs) -> LiveLayout {
+    let (show_left, show_right) =
+        capture_visibility(s.show_left, s.show_right, s.stage_focus_restore);
+    LiveLayout {
+        col_left_w: prefs.col_left_w,
+        col_right_w: prefs.col_right_w,
+        workspace_layouts: Vec::new(),
+        export_dir: String::new(),
+        export_naming: "project".to_string(),
+        export_quality: "standard".to_string(),
+        show_left,
+        show_right,
+        timeline_collapsed: s.frame_ops.timeline_collapsed,
+    }
+}
+
+/// The visibility half of a layout capture, factored
+/// out pure so the focus rule is pinnable without a
+/// `State` (W2-10): a focus restore, when one is held,
+/// is the truth about the columns; otherwise the live
+/// flags are. Widths need no such care — the splitters
+/// unmount with their columns, so the prefs widths
+/// cannot move during focus — and `timeline_collapsed`
+/// is centre furniture that stays live under focus.
+fn capture_visibility(
+    show_left: bool,
+    show_right: bool,
+    restore: Option<LiveLayout>,
+) -> (bool, bool) {
+    match restore {
+        Some(saved) => (saved.show_left, saved.show_right),
+        None => (show_left, show_right),
+    }
+}
+
+/// Apply a remembered record to the live shell: the
+/// `State`-resident half. The width half needs no work
+/// here — [`switch_layouts`] / [`startup_layout`] mirror
+/// the record into the prefs globals, and
+/// `column_widths()` reads those.
+pub fn apply_layout(s: &mut State, record: WorkspaceLayout) {
+    let live = LiveLayout::from_record(record);
+    s.show_left = live.show_left;
+    s.show_right = live.show_right;
+    s.frame_ops.timeline_collapsed = live.timeline_collapsed;
+}
+
+/// The record the legacy global fields describe — the
+/// pre-PL-10 layout, and the fallback for any workspace
+/// with no record of its own. `show_right` has no legacy
+/// mirror (it was never persisted before PL-10 and has
+/// always started shown), so the legacy record shows it.
+pub fn legacy_layout(prefs: &LayoutPrefs) -> WorkspaceLayout {
+    WorkspaceLayout {
+        col_left_w: prefs.col_left_w,
+        col_right_w: prefs.col_right_w,
+        workspace_layouts: Vec::new(),
+        export_dir: String::new(),
+        export_naming: "project".to_string(),
+        export_quality: "standard".to_string(),
+        show_left: prefs.sidebar_visible,
+        show_right: true,
+        timeline_collapsed: prefs.timeline_collapsed,
+    }
+    .clamped()
+}
+
+/// The record a factory-fresh prefs file's legacy
+/// globals describe — the long-standing single layout
+/// (300 / 340, both columns shown, timeline expanded).
+/// The seeding rule below compares against it to tell
+/// "no arrangement was ever made" apart from "the user
+/// arranged the pre-memory layout".
+fn factory_layout() -> WorkspaceLayout {
+    legacy_layout(&LayoutPrefs::default())
+}
+
+/// One workspace's stage-share profile (Roadmap Wave
+/// 2, W2-10 — RM12 §5.3's priced table): the column
+/// widths this workspace seeds with when it has no
+/// remembered record of its own, so a fresh install
+/// opens each workspace at the shape the design priced
+/// for it instead of the one global 300 / 340. The
+/// centre column is what is left of the window's inner
+/// width after the two columns and the two 12 pt
+/// splitter junctions, so at 1440×900 (inner 1408) the
+/// shares run: Animate 924 pt = 65.6% — inside the
+/// 65–80% band the 2.0 directive sets for the stage,
+/// and the only workspace the band binds; Graph 848
+/// (60.2%), Draw 884 (62.8%), Build / Build3D /
+/// Effects 828 (58.8%), Audio / Export 808 (57.4%).
+/// Visibility and collapse are not profiled — every
+/// profile shows both columns with the timeline
+/// expanded, the historical defaults.
+///
+/// Two derivations, recorded: RM12 priced eight
+/// workspaces (its table predates the Build split), so
+/// Build inherits its sibling Build3D's 260 / 320 —
+/// the two rigging workspaces share the stage form.
+/// And Animate's 240 right column is only reachable
+/// because W2-10 also took RM12 §4.3.2's clamp decision
+/// (the right-column load minimum 260 → 240, in
+/// `shell.rs`); every width here sits inside the load
+/// clamps, so a profile can never be clamped away.
+///
+/// `None` for Home: RM12 priced no Home profile (its
+/// row awaited the A1 R11 centre takeover, which does
+/// not exist in this tree), so Home keeps the legacy
+/// seed until a takeover re-bases it.
+pub fn default_layout_for(ws: Workspace) -> Option<WorkspaceLayout> {
+    let widths = match ws {
+        Workspace::Animate => (220.0, 240.0),
+        Workspace::Draw => (220.0, 300.0),
+        Workspace::Graph => (260.0, 300.0),
+        Workspace::Effects => (260.0, 320.0),
+        Workspace::Audio => (280.0, 320.0),
+        Workspace::Build => (260.0, 320.0),
+        Workspace::Build3D => (260.0, 320.0),
+        Workspace::Export => (260.0, 340.0),
+        Workspace::Home => return None,
+    };
+    Some(WorkspaceLayout {
+        col_left_w: widths.0,
+        col_right_w: widths.1,
+        workspace_layouts: Vec::new(),
+        export_dir: String::new(),
+        export_naming: "project".to_string(),
+        export_quality: "standard".to_string(),
+        show_left: true,
+        show_right: true,
+        timeline_collapsed: false,
+    })
+}
+
+/// Seed a record for every workspace that lacks one
+/// (RM12 §4.2 migration, re-based by W2-10's
+/// stage-share recovery): a workspace with a priced
+/// profile ([`default_layout_for`]) seeds from it, and
+/// a workspace without one seeds from the legacy
+/// globals. One protection: when the legacy globals
+/// differ from the factory layout — evidence the user
+/// arranged the pre-memory single layout — the
+/// workspace the prefs name as active seeds from the
+/// legacy globals instead of its profile, because that
+/// arrangement was in effect *there*; the profiles are
+/// defaults, and defaults never override an existing
+/// user's arrangement. (A factory file's active
+/// workspace takes its profile: its "arrangement" is
+/// the factory default itself.) Nothing is prompted —
+/// this is layout, not user data (RM9's
+/// prompted-migration caution covers the projects dir,
+/// not prefs values). Existing records are never
+/// overwritten, so re-running is a no-op.
+pub fn seed_missing_workspace_layouts(prefs: &mut LayoutPrefs) {
+    let legacy = legacy_layout(prefs);
+    let protect = if legacy != factory_layout() {
+        Some(from_prefs(prefs))
+    } else {
+        None
+    };
+    for ws in Workspace::all() {
+        if !prefs
+            .workspace_layouts
+            .iter()
+            .any(|(name, _)| name == ws.name())
+        {
+            let seed = if protect == Some(ws) {
+                legacy
+            } else {
+                default_layout_for(ws).unwrap_or(legacy)
+            };
+            prefs.workspace_layouts.push((ws.name().to_string(), seed));
+        }
+    }
+}
+
+/// One workspace's remembered layout, clamped — its own
+/// record when it has one, the legacy globals otherwise.
+pub fn record_for(prefs: &LayoutPrefs, ws: Workspace) -> WorkspaceLayout {
+    prefs
+        .workspace_layouts
+        .iter()
+        .find(|(name, _)| name == ws.name())
+        .map(|(_, record)| *record)
+        .unwrap_or_else(|| legacy_layout(prefs))
+        .clamped()
+}
+
+/// Store one workspace's record (replacing any it had).
+pub fn store_record(prefs: &mut LayoutPrefs, ws: Workspace, record: WorkspaceLayout) {
+    let record = record.clamped();
+    if let Some(slot) = prefs
+        .workspace_layouts
+        .iter_mut()
+        .find(|(name, _)| name == ws.name())
+    {
+        slot.1 = record;
+    } else {
+        prefs.workspace_layouts.push((ws.name().to_string(), record));
+    }
+}
+
+/// Copy a record into the legacy global fields — the
+/// active-workspace mirror rule (see the section head).
+/// `show_right` has no global to mirror into; it lives
+/// only in the records.
+fn mirror_globals(prefs: &mut LayoutPrefs, record: WorkspaceLayout) {
+    prefs.col_left_w = record.col_left_w;
+    prefs.col_right_w = record.col_right_w;
+    prefs.sidebar_visible = record.show_left;
+    prefs.timeline_collapsed = record.timeline_collapsed;
+}
+
+/// The switch transaction, pure over the prefs (RM12
+/// §4.2's choke-point wiring): store the OUTGOING
+/// workspace's record from its live layout, seed any
+/// workspace still missing a record (its stage-share
+/// profile, or the legacy globals where no profile is
+/// priced — see [`seed_missing_workspace_layouts`]),
+/// then read the INCOMING workspace's record
+/// and mirror it into the globals. Returns the incoming
+/// record for [`apply_layout`]. Storing before seeding
+/// is the order that makes a first-ever switch behave
+/// as designed: the incoming workspace takes its own
+/// seeded shape, while the outgoing one keeps the
+/// shape it was actually left in.
+/// Re-selecting the active workspace stores and reapplies
+/// its own live layout — an identity.
+pub fn switch_layouts(
+    prefs: &mut LayoutPrefs,
+    from: Workspace,
+    to: Workspace,
+    live: LiveLayout,
+) -> WorkspaceLayout {
+    store_record(prefs, from, live.to_record());
+    seed_missing_workspace_layouts(prefs);
+    let incoming = record_for(prefs, to);
+    mirror_globals(prefs, incoming);
+    incoming
+}
+
+/// The startup half: seed any missing records, read the
+/// STARTING workspace's record (the one
+/// `prefs.workspace` names) and mirror it into the
+/// globals, so `init`'s existing seeds — the poll shadow,
+/// `column_widths()` — read the starting workspace's own
+/// shape. Returns the record for the `State`-resident
+/// seeds (`show_left` / `show_right` /
+/// `timeline_collapsed`). Wired into `main.rs::init` by
+/// IA-W2-61-2.
+pub fn startup_layout(prefs: &mut LayoutPrefs) -> WorkspaceLayout {
+    seed_missing_workspace_layouts(prefs);
+    let record = record_for(prefs, from_prefs(prefs));
+    mirror_globals(prefs, record);
+    record
+}
+
+/// Keep the ACTIVE workspace's record fresh from `poll`'s
+/// layout write-back (wired in by IA-W2-61-3): captures
+/// the live layout into the record of the workspace
+/// `prefs.workspace` names. Only the active record is
+/// ever written here, so the write-back cannot clobber
+/// another workspace's memory (RM12 §4.2). A `show_right`
+/// flip on its own does not trigger `poll`'s write-back
+/// (the shadow watches the collapsed/sidebar pair and the
+/// zoom pair); `show_right` is captured here whenever a
+/// write-back does fire, and always at the switch itself
+/// ([`switch_layouts`]), so its record can lag a flip by
+/// at most the rest of the session in that workspace.
+pub fn sync_active_record(prefs: &mut LayoutPrefs, s: &State) {
+    let ws = from_name(&prefs.workspace);
+    let live = live_layout(s, prefs);
+    store_record(prefs, ws, live.to_record());
+}
+
+// ---- Stage focus (Roadmap Wave 2, W2-10 — RM12 §5.1) ----
+//
+// The transient top of the stage-share band: both side
+// columns hidden, the centre — and with it the stage —
+// takes the whole main row (1408 pt at 1440×900, the
+// full 100% of the row; RM12 estimated ≈98.6% before
+// the mount rules were this exact). A1 R4's rule, kept:
+// focus is session-only — the restore lives in
+// `State::stage_focus_restore` (IA-W2-10-3), never in a
+// layout record or a prefs field, so a restart can
+// never restore a focused stage, and
+// [`select_workspace`] clears it (a switch applies the
+// incoming workspace's own remembered layout, which is
+// the honest shape to land on).
+//
+// The view needs no focus awareness: entering focus
+// writes the live flags themselves (both false) and
+// leaving writes the restore back, so `main.rs`'s
+// existing `show_left` / `show_right` mount gates do
+// the whole job. The one subtlety is capture: every
+// layout capture ([`live_layout`], the single door the
+// switch transaction and the poll write-back both use)
+// reads visibility from the restore while focus is
+// held ([`capture_visibility`]), so the workspace
+// remembers its pre-focus shape.
+
+/// The layout stage focus applies over `live`: both
+/// columns hidden, widths and timeline state carried
+/// untouched (they are not focus's to change — the
+/// widths cannot move while their splitters are
+/// unmounted, and the timeline is centre furniture).
+/// Pure, so the enter/exit contract is pinnable
+/// without a `State`.
+pub fn focus_enter(live: LiveLayout) -> LiveLayout {
+    LiveLayout {
+        show_left: false,
+        show_right: false,
+        ..live
+    }
+}
+
+/// The layout leaving stage focus restores: the
+/// saved record's column visibility over the live
+/// layout's everything-else — a timeline collapse the
+/// user made *during* focus survives the exit, because
+/// the timeline was never hidden.
+pub fn focus_exit(saved: LiveLayout, live: LiveLayout) -> LiveLayout {
+    LiveLayout {
+        show_left: saved.show_left,
+        show_right: saved.show_right,
+        ..live
+    }
+}
+
+/// Toggle stage focus (the View-menu door is
+/// IA-W2-10-4): entering saves the live layout into
+/// `State::stage_focus_restore` and hides both columns;
+/// leaving restores the saved visibility. The saved
+/// layout is a [`LiveLayout`], not a record — it is
+/// never clamped, persisted or mirrored.
+pub fn toggle_stage_focus(s: &mut State) {
+    match s.stage_focus_restore.take() {
+        Some(saved) => {
+            let restored = focus_exit(saved, live_layout(s, &load_layout()));
+            s.show_left = restored.show_left;
+            s.show_right = restored.show_right;
+        }
+        None => {
+            let live = live_layout(s, &load_layout());
+            s.stage_focus_restore = Some(live);
+            let focused = focus_enter(live);
+            s.show_left = focused.show_left;
+            s.show_right = focused.show_right;
+        }
+    }
+}
+
 impl Section {
-    /// All 30 gated sections (coverage tests iterate
+    /// All 31 gated sections (coverage tests iterate
     /// this; the integrator's view maps each mounted
     /// panel to one variant).
-    pub fn all() -> [Section; 30] {
+    pub fn all() -> [Section; 31] {
         [
             Section::Figures,
             Section::Library,
+            Section::RigTree,
             Section::Layers,
             Section::Project,
             Section::InspectorSegment,
@@ -483,6 +1013,26 @@ impl Section {
 // is the gating truth the mount must follow, and the
 // coverage test below already requires Sprites to be
 // visible somewhere, which Animate satisfies.
+//
+// Wave 2 (W2-21) — the Build split (roadmap P-8, RM19
+// §2): `Workspace::Build` is inserted before Build3D in
+// `Workspace::all()` (the D-RM19-1 INSERT resolution —
+// see the module header), taking the workspace count
+// 8 → 9 and renumbering the Alt chords behind the
+// insertion (3D Alt+6 → Alt+7, Export Alt+7 → Alt+8,
+// Home Alt+8 → Alt+9; the `main.rs` Alt range and the
+// keymap/palette bindings move by IA-W2-21-1/4).
+// `Section::RigTree` joins `Section::all()` (30 → 31)
+// and the union of the nine lists is exactly those 31
+// variants (50 list memberships). Build's own list is
+// the rig set: Figures, Library, RigTree, the three
+// inspectors and Project — all of which also stay in
+// Animate's list, so no section loses a home; Build3D's
+// list is unchanged, which is what makes the split
+// honest ("3D" now names only the 3D set). Reversing
+// D-RM19-1 (append instead of insert) is a table-only
+// change: move `Workspace::Build` to the end of `all()`
+// and re-move the same pins.
 
 /// Animate: the core animating set — figures, library,
 /// layers, project, all three inspectors, pose and
@@ -550,6 +1100,22 @@ const AUDIO_SECTIONS: &[Section] = &[
     Section::Figures,
 ];
 
+/// Build: the rig-construction set (Wave 2, W2-21 —
+/// RM19 §2) — the figures, their library, the rig tree,
+/// all three inspectors that edit the rig, and the
+/// project tools that name/save it. Every entry also
+/// rides Animate (which is unchanged); Build is an
+/// additional, rigging-focused home, not a move.
+const BUILD_SECTIONS: &[Section] = &[
+    Section::Figures,
+    Section::Library,
+    Section::RigTree,
+    Section::InspectorFigure,
+    Section::InspectorSegment,
+    Section::InspectorStyle,
+    Section::Project,
+];
+
 /// 3D: the 3D panel, the figures it poses, and the
 /// camera it frames with.
 const BUILD3D_SECTIONS: &[Section] = &[
@@ -581,6 +1147,7 @@ pub fn sections_of(ws: Workspace) -> &'static [Section] {
         Workspace::Graph => GRAPH_SECTIONS,
         Workspace::Effects => EFFECTS_SECTIONS,
         Workspace::Audio => AUDIO_SECTIONS,
+        Workspace::Build => BUILD_SECTIONS,
         Workspace::Build3D => BUILD3D_SECTIONS,
         Workspace::Export => EXPORT_SECTIONS,
         Workspace::Home => HOME_SECTIONS,
@@ -607,8 +1174,8 @@ pub fn blurb_line(ws: Workspace) -> &'static str {
 /// it as its own row under the menu bar.
 ///
 /// Each chip's text carries its keyboard shortcut as a
-/// quiet suffix — `Animate · Alt+1` … `Home · Alt+8`,
-/// matching the `Alt+1..8` bindings in `main.rs`'s
+/// quiet suffix — `Animate · Alt+1` … `Home · Alt+9`,
+/// matching the `Alt+1..9` bindings in `main.rs`'s
 /// `on_key` (chip position in [`Workspace::all`] + 1).
 /// The suffix is composed here, at the call site, rather
 /// than folded into [`Workspace::label`]: `label()` is
@@ -686,7 +1253,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_eight_workspaces_in_row_order() {
+    fn all_nine_workspaces_in_row_order() {
+        // Wave 2 (W2-21): Build inserted before Build3D
+        // (D-RM19-1 INSERT) — the array IS the chip order
+        // and the Alt+number order, so this pin carries
+        // the renumber (3D 7, Export 8, Home 9).
         assert_eq!(
             Workspace::all(),
             [
@@ -695,6 +1266,7 @@ mod tests {
                 Workspace::Graph,
                 Workspace::Effects,
                 Workspace::Audio,
+                Workspace::Build,
                 Workspace::Build3D,
                 Workspace::Export,
                 Workspace::Home,
@@ -767,6 +1339,10 @@ mod tests {
             "Place sound clips and line them up against the animation."
         );
         assert_eq!(
+            blurb_line(Workspace::Build),
+            "Build and edit figure rigs: the node tree, segment properties, joint limits and the setup pose."
+        );
+        assert_eq!(
             blurb_line(Workspace::Build3D),
             "Pose the 3D figure and frame it with the camera."
         );
@@ -785,6 +1361,89 @@ mod tests {
         assert_eq!(Workspace::Build3D.label(), "3D");
         assert_eq!(Workspace::Build3D.name(), "3D");
         assert_eq!(Workspace::Build3D.key(), "ws-3d");
+    }
+
+    #[test]
+    fn build_is_labelled_and_persisted_as_build() {
+        // Wave 2 (W2-21): the split workspace carries its
+        // own label/persisted name/element key — none of
+        // them is Build3D's, so prefs and chips can never
+        // confuse the two rigging workspaces.
+        assert_eq!(Workspace::Build.label(), "Build");
+        assert_eq!(Workspace::Build.name(), "Build");
+        assert_eq!(Workspace::Build.key(), "ws-build");
+    }
+
+    #[test]
+    fn ws_build_i18n_key_is_reused() {
+        // RM19 §7 / W2-21: Build's chip resolves through
+        // the Wave 14 workspace key reserved for it,
+        // `ws_build` — no new key family is invented.
+        // (The table entry itself is IA-W2-21-3; the
+        // catalogue pin in
+        // `workspace_i18n_keys_exist_in_the_table` covers
+        // its presence there.)
+        assert_eq!(Workspace::Build.i18n_key(), "ws_build");
+        assert_eq!(Workspace::Build3D.i18n_key(), "ws_3d");
+    }
+
+    #[test]
+    fn build_workspace_lists_the_rig_sections() {
+        // RM19 §2's list, exactly: the rig set, with the
+        // rig tree among them.
+        assert_eq!(
+            sections_of(Workspace::Build),
+            [
+                Section::Figures,
+                Section::Library,
+                Section::RigTree,
+                Section::InspectorFigure,
+                Section::InspectorSegment,
+                Section::InspectorStyle,
+                Section::Project,
+            ]
+            .as_slice()
+        );
+    }
+
+    #[test]
+    fn build3d_keeps_only_its_three_sections() {
+        // The split is honest only if Build3D's list did
+        // not grow a rig section on the way.
+        assert_eq!(
+            sections_of(Workspace::Build3D),
+            [Section::ThreeD, Section::Figures, Section::Camera].as_slice()
+        );
+        assert!(!section_visible(Workspace::Build3D, Section::RigTree));
+        assert!(!section_visible(Workspace::Build, Section::ThreeD));
+    }
+
+    #[test]
+    fn entering_build_enters_setup_mode_and_leaving_restores() {
+        // RM19 §2's plumbing, over the pure helper
+        // `select_workspace` applies: entering saves the
+        // prior flag and turns setup on; leaving restores
+        // the saved value — in both prior states.
+        let mut saved = false;
+        // Enter with setup off: saved 0, now on.
+        assert!(setup_mode_after_switch(false, true, false, &mut saved));
+        assert!(!saved);
+        // Leave: restored to the saved off.
+        assert!(!setup_mode_after_switch(true, false, true, &mut saved));
+        // Enter with setup already on: saved on, stays on.
+        assert!(setup_mode_after_switch(false, true, true, &mut saved));
+        assert!(saved);
+        // Leave: restored to on.
+        assert!(setup_mode_after_switch(true, false, false, &mut saved));
+        // Non-Build switches never touch the flag or the
+        // saved value, and re-selecting Build while in
+        // Build does not re-save over the original.
+        let mut saved2 = true;
+        assert!(!setup_mode_after_switch(false, false, false, &mut saved2));
+        assert!(saved2);
+        let mut saved3 = false;
+        assert!(setup_mode_after_switch(true, true, true, &mut saved3));
+        assert!(!saved3);
     }
 
     #[test]
@@ -823,6 +1482,9 @@ mod tests {
         assert_eq!(Workspace::Home.display_label(&core), "হোম");
         // `ws_3d` reads "3D" in every table.
         assert_eq!(Workspace::Build3D.display_label(&core), "3D");
+        // `ws_build` in Bengali — rides IA-W2-21-3's
+        // splice (the value pinned here is the IA's).
+        assert_eq!(Workspace::Build.display_label(&core), "বিল্ড");
         core.lang = Lang::De;
         assert_eq!(Workspace::Animate.display_label(&core), "Animieren");
         assert_eq!(Workspace::Home.display_label(&core), "Startseite");
@@ -844,10 +1506,10 @@ mod tests {
     fn from_name_falls_back_to_animate() {
         assert_eq!(from_name(""), Workspace::Animate);
         assert_eq!(from_name("bogus"), Workspace::Animate);
-        // The GPUI "Build" workspace merged into
-        // Build3D; its old persisted string has no
-        // exact match anymore and falls back too.
-        assert_eq!(from_name("Build"), Workspace::Animate);
+        // "Build" is NOT a fallback case since the
+        // Wave 2 split: it names Workspace::Build
+        // exactly (round-trip pinned above).
+        assert_eq!(from_name("Build"), Workspace::Build);
         // Names are exact: case matters.
         assert_eq!(from_name("animate"), Workspace::Animate);
         assert_eq!(from_name("Animate"), Workspace::Animate);
@@ -869,8 +1531,9 @@ mod tests {
         // switch must carry them across untouched, or
         // every chip press would reset the user's column
         // arrangement. The values sit inside the load
-        // clamps (220..=420 / 260..=480) so the disk
-        // round-trip test below sees them as written.
+        // clamps (220..=420 / 240..=480 since W2-10) so
+        // the disk round-trip test below sees them as
+        // written.
         let prefs = LayoutPrefs {
             workspace: "Animate".to_string(),
             dark: false,
@@ -881,8 +1544,15 @@ mod tests {
             sidebar_visible: false,
             palette_recents: Vec::new(),
             live_mcp: false,
+            autosave_enabled: true,
+            autosave_every: 25,
+            recovery_keep: 1,
             col_left_w: 260.0,
             col_right_w: 400.0,
+            workspace_layouts: Vec::new(),
+            export_dir: String::new(),
+            export_naming: "project".to_string(),
+            export_quality: "standard".to_string(),
         };
         let out = prefs_with_workspace(&prefs, Workspace::Audio);
         assert_eq!(out.workspace, "Audio");
@@ -927,21 +1597,24 @@ mod tests {
     fn section_counts_per_workspace_are_pinned() {
         // The census this file maintains, pinned exactly
         // so a gating change is always a deliberate test
-        // change: 30 sections in `Section::all()`, and
-        // the per-workspace list lengths below (43 list
+        // change: 31 sections in `Section::all()`, and
+        // the per-workspace list lengths below (50 list
         // memberships in total — sections legitimately
         // repeat ACROSS workspaces; the no-duplicates
         // test pins them unique WITHIN one list). Wave
         // 13: Animate 16 → 17 for `Section::Sprites`
         // (Animate-only; see the Wave 13 note above the
-        // table).
+        // table). Wave 2 (W2-21): Build joins with 7
+        // (the RM19 rig set) and `Section::RigTree`
+        // takes `Section::all()` 30 → 31.
         use Workspace as W;
-        assert_eq!(Section::all().len(), 30);
+        assert_eq!(Section::all().len(), 31);
         assert_eq!(sections_of(W::Animate).len(), 17);
         assert_eq!(sections_of(W::Draw).len(), 4);
         assert_eq!(sections_of(W::Graph).len(), 4);
         assert_eq!(sections_of(W::Effects).len(), 5);
         assert_eq!(sections_of(W::Audio).len(), 4);
+        assert_eq!(sections_of(W::Build).len(), 7);
         assert_eq!(sections_of(W::Build3D).len(), 3);
         assert_eq!(sections_of(W::Export).len(), 3);
         assert_eq!(sections_of(W::Home).len(), 3);
@@ -949,7 +1622,7 @@ mod tests {
             .into_iter()
             .map(|ws| sections_of(ws).len())
             .sum();
-        assert_eq!(total, 43);
+        assert_eq!(total, 50);
     }
 
     #[test]
@@ -1011,6 +1684,22 @@ mod tests {
         assert!(section_visible(W::Build3D, S::ThreeD));
         assert!(section_visible(W::Build3D, S::Camera));
         assert!(!section_visible(W::Build3D, S::Export));
+        // Build (Wave 2, W2-21): the rig set — rig tree,
+        // library, the inspectors, project; NOT the 3D
+        // panel, NOT the animation-timeline family.
+        assert!(section_visible(W::Build, S::RigTree));
+        assert!(section_visible(W::Build, S::Library));
+        assert!(section_visible(W::Build, S::InspectorSegment));
+        assert!(section_visible(W::Build, S::InspectorFigure));
+        assert!(section_visible(W::Build, S::InspectorStyle));
+        assert!(section_visible(W::Build, S::Project));
+        assert!(!section_visible(W::Build, S::ThreeD));
+        assert!(!section_visible(W::Build, S::FrameOps));
+        assert!(!section_visible(W::Build, S::Graph));
+        // The rig tree lives ONLY in Build.
+        for ws in [W::Animate, W::Draw, W::Graph, W::Effects, W::Audio, W::Build3D, W::Export, W::Home] {
+            assert!(!section_visible(ws, S::RigTree), "{ws:?} must not mount RigTree");
+        }
         // Export + Home.
         assert!(section_visible(W::Export, S::Export));
         assert!(section_visible(W::Export, S::Project));
@@ -1025,7 +1714,7 @@ mod tests {
         // only where nothing edits figures (Export,
         // Home). See the gating-table comment for why
         // these mounts are legitimate, not orphans.
-        for ws in [W::Animate, W::Draw, W::Graph, W::Effects, W::Audio, W::Build3D] {
+        for ws in [W::Animate, W::Draw, W::Graph, W::Effects, W::Audio, W::Build, W::Build3D] {
             assert!(section_visible(ws, S::Figures), "{ws:?} mounts Figures");
         }
         for ws in [W::Export, W::Home] {
@@ -1043,8 +1732,326 @@ mod tests {
         // alternative home, and this assert is what
         // keeps the rejection from drifting.
         assert!(section_visible(W::Animate, S::Sprites));
-        for ws in [W::Draw, W::Graph, W::Effects, W::Audio, W::Build3D, W::Export, W::Home] {
+        for ws in [W::Draw, W::Graph, W::Effects, W::Audio, W::Build, W::Build3D, W::Export, W::Home] {
             assert!(!section_visible(ws, S::Sprites), "{ws:?} must not mount Sprites");
         }
+    }
+
+    // ---- Layout memory (W2-61 — PL-10) -------------------
+
+    fn live(col_left_w: f32, col_right_w: f32, show_left: bool, show_right: bool, collapsed: bool) -> LiveLayout {
+        LiveLayout {
+            col_left_w,
+            col_right_w,
+            show_left,
+            show_right,
+            timeline_collapsed: collapsed,
+        }
+    }
+
+    #[test]
+    fn layout_memory_first_switch_seeds_every_workspace() {
+        // Fresh prefs (no records): one switch stores the
+        // outgoing workspace's live shape, seeds all nine
+        // records, and hands back the incoming workspace's
+        // record — since W2-10's stage-share re-base, its
+        // priced profile (Graph: 260 / 300), not the
+        // legacy globals W2-61 originally seeded; a
+        // factory file carries no user arrangement the
+        // legacy seed would be protecting.
+        let mut prefs = LayoutPrefs::default();
+        let left = live(260.0, 400.0, false, false, true);
+        let incoming = switch_layouts(&mut prefs, Workspace::Animate, Workspace::Graph, left);
+        assert_eq!(prefs.workspace_layouts.len(), 9);
+        assert_eq!(record_for(&prefs, Workspace::Animate), left.to_record());
+        let graph_profile = WorkspaceLayout {
+            col_left_w: 260.0,
+            col_right_w: 300.0,
+            workspace_layouts: Vec::new(),
+            export_dir: String::new(),
+            export_naming: "project".to_string(),
+            export_quality: "standard".to_string(),
+            show_left: true,
+            show_right: true,
+            timeline_collapsed: false,
+        };
+        assert_eq!(incoming, graph_profile);
+        assert_eq!(record_for(&prefs, Workspace::Graph), graph_profile);
+        // The globals mirror the now-active workspace.
+        assert_eq!(prefs.col_left_w, 260.0);
+        assert_eq!(prefs.col_right_w, 300.0);
+        assert!(prefs.sidebar_visible);
+        assert!(!prefs.timeline_collapsed);
+    }
+
+    #[test]
+    fn layout_memory_round_trips_per_workspace() {
+        // RM12 §4.4's snap sketch, over the pure
+        // transaction: Animate gets one shape, Graph
+        // another; switching back and forth restores each
+        // workspace's own and keeps the other's.
+        let mut prefs = LayoutPrefs::default();
+        let animate = live(260.0, 400.0, false, true, true);
+        let graph = live(220.0, 260.0, true, false, false);
+        let got = switch_layouts(&mut prefs, Workspace::Animate, Workspace::Graph, animate);
+        // Graph's first landing is its seeded shape —
+        // since W2-10, the stage-share profile, not the
+        // factory legacy record this assert originally
+        // pinned.
+        assert_eq!(got, default_layout_for(Workspace::Graph).unwrap());
+        let got = switch_layouts(&mut prefs, Workspace::Graph, Workspace::Animate, graph);
+        assert_eq!(got, animate.to_record());
+        let got = switch_layouts(&mut prefs, Workspace::Animate, Workspace::Graph, animate);
+        assert_eq!(got, graph.to_record());
+        assert_eq!(record_for(&prefs, Workspace::Animate), animate.to_record());
+        assert_eq!(record_for(&prefs, Workspace::Graph), graph.to_record());
+    }
+
+    #[test]
+    fn layout_memory_reselecting_active_workspace_is_identity() {
+        let mut prefs = LayoutPrefs::default();
+        let current = live(280.0, 360.0, true, true, false);
+        let got = switch_layouts(&mut prefs, Workspace::Draw, Workspace::Draw, current);
+        assert_eq!(got, current.to_record());
+        assert_eq!(record_for(&prefs, Workspace::Draw), current.to_record());
+    }
+
+    #[test]
+    fn layout_memory_record_widths_clamp_on_read() {
+        // A hand-edited record cannot squeeze the stage
+        // away: reads clamp to the loader's ranges, and a
+        // non-finite width falls back to the field
+        // default (the `clamp_col_width` contract).
+        let mut prefs = LayoutPrefs::default();
+        store_record(
+            &mut prefs,
+            Workspace::Audio,
+            WorkspaceLayout {
+                col_left_w: 9999.0,
+                col_right_w: f32::NAN,
+                workspace_layouts: Vec::new(),
+                export_dir: String::new(),
+                export_naming: "project".to_string(),
+                export_quality: "standard".to_string(),
+                show_left: true,
+                show_right: true,
+                timeline_collapsed: false,
+            },
+        );
+        let record = record_for(&prefs, Workspace::Audio);
+        assert_eq!(record.col_left_w, 420.0);
+        assert_eq!(record.col_right_w, 340.0);
+    }
+
+    #[test]
+    fn layout_memory_missing_record_falls_back_to_legacy() {
+        let mut prefs = LayoutPrefs::default();
+        prefs.col_left_w = 280.0;
+        prefs.sidebar_visible = false;
+        store_record(
+            &mut prefs,
+            Workspace::Animate,
+            WorkspaceLayout {
+                col_left_w: 240.0,
+                col_right_w: 300.0,
+                workspace_layouts: Vec::new(),
+                export_dir: String::new(),
+                export_naming: "project".to_string(),
+                export_quality: "standard".to_string(),
+                show_left: true,
+                show_right: false,
+                timeline_collapsed: true,
+            },
+        );
+        // Graph has no record: the legacy globals answer,
+        // with `show_right` shown (it has no legacy
+        // mirror and always started shown).
+        let fallback = record_for(&prefs, Workspace::Graph);
+        assert_eq!(fallback.col_left_w, 280.0);
+        assert!(!fallback.show_left);
+        assert!(fallback.show_right);
+        assert!(!fallback.timeline_collapsed);
+    }
+
+    #[test]
+    fn layout_memory_startup_seeds_and_mirrors() {
+        // A prefs file naming Audio, with its own global
+        // shape and no records: startup returns Audio's
+        // record — seeded from the globals, because a
+        // customised legacy layout protects its active
+        // workspace (W2-10) and Audio is it — and the
+        // globals already mirror it, so the shell's
+        // existing seeds read the same values. (The
+        // other eight seed from their profiles; this
+        // test does not pin them.)
+        let mut prefs = LayoutPrefs::default();
+        prefs.workspace = "Audio".to_string();
+        prefs.col_left_w = 280.0;
+        prefs.col_right_w = 360.0;
+        prefs.sidebar_visible = false;
+        prefs.timeline_collapsed = true;
+        let record = startup_layout(&mut prefs);
+        assert_eq!(prefs.workspace_layouts.len(), 9);
+        assert_eq!(record.col_left_w, 280.0);
+        assert_eq!(record.col_right_w, 360.0);
+        assert!(!record.show_left);
+        assert!(record.show_right);
+        assert!(record.timeline_collapsed);
+        assert_eq!(prefs.col_left_w, 280.0);
+        assert!(!prefs.sidebar_visible);
+        // An unknown persisted name falls back to
+        // Animate's record, like `from_prefs`.
+        let mut prefs = LayoutPrefs::default();
+        prefs.workspace = "bogus".to_string();
+        let record = startup_layout(&mut prefs);
+        assert_eq!(record, record_for(&prefs, Workspace::Animate));
+    }
+
+    // ---- Stage-share recovery (W2-10) ----------------
+
+    #[test]
+    fn stage_share_profiles_match_rm12_pricing() {
+        // RM12 §5.3's table, value for value. Build is
+        // the one derivation: RM12 priced eight
+        // workspaces, so Build inherits Build3D's
+        // 260 / 320 (see `default_layout_for`).
+        let priced = [
+            (Workspace::Animate, 220.0, 240.0),
+            (Workspace::Draw, 220.0, 300.0),
+            (Workspace::Graph, 260.0, 300.0),
+            (Workspace::Effects, 260.0, 320.0),
+            (Workspace::Audio, 280.0, 320.0),
+            (Workspace::Build, 260.0, 320.0),
+            (Workspace::Build3D, 260.0, 320.0),
+            (Workspace::Export, 260.0, 340.0),
+        ];
+        for (ws, left, right) in priced {
+            let profile = default_layout_for(ws).expect("priced profile");
+            assert_eq!(profile.col_left_w, left, "{ws:?} left");
+            assert_eq!(profile.col_right_w, right, "{ws:?} right");
+            // Profiles show both columns with the
+            // timeline expanded — the historical
+            // defaults; only widths are profiled.
+            assert!(profile.show_left && profile.show_right, "{ws:?}");
+            assert!(!profile.timeline_collapsed, "{ws:?}");
+            // Every profile width sits inside the load
+            // clamps (left 220..=420, right 240..=480
+            // since the §4.3.2 decision), so a profile
+            // can never be clamped away on read.
+            assert!((220.0..=420.0).contains(&profile.col_left_w), "{ws:?}");
+            assert!((240.0..=480.0).contains(&profile.col_right_w), "{ws:?}");
+        }
+        // Home has no priced profile (RM12 awaited the
+        // centre takeover) and keeps the legacy seed.
+        assert_eq!(default_layout_for(Workspace::Home), None);
+        // The band check, in the shell's own arithmetic:
+        // at 1440×900 the inner row is 1408 pt; the
+        // centre takes what the columns and the two
+        // 12 pt splitter junctions leave. Animate's
+        // profile centre is 924 pt = 65.6% — inside the
+        // 65–80% band, past the 915 pt the band's floor
+        // requires.
+        let animate = default_layout_for(Workspace::Animate).unwrap();
+        let centre = 1408.0 - animate.col_left_w - animate.col_right_w - 24.0;
+        assert_eq!(centre, 924.0);
+        assert!(centre / 1408.0 >= 0.65, "Animate centre share in band");
+        assert!(centre / 1408.0 <= 0.80, "Animate centre share in band");
+    }
+
+    #[test]
+    fn layout_memory_seeding_uses_profiles_on_a_factory_file() {
+        // A factory file (no records, globals at the
+        // long-standing defaults, Animate active):
+        // startup seeds every workspace from its
+        // profile; Home, unpriced, keeps the legacy
+        // seed; the returned record is Animate's
+        // profile and the globals mirror it.
+        let mut prefs = LayoutPrefs::default();
+        let record = startup_layout(&mut prefs);
+        assert_eq!(prefs.workspace_layouts.len(), 9);
+        assert_eq!(record, default_layout_for(Workspace::Animate).unwrap());
+        assert_eq!(
+            record_for(&prefs, Workspace::Graph),
+            default_layout_for(Workspace::Graph).unwrap()
+        );
+        assert_eq!(
+            record_for(&prefs, Workspace::Export),
+            default_layout_for(Workspace::Export).unwrap()
+        );
+        assert_eq!(record_for(&prefs, Workspace::Home), factory_layout());
+        assert_eq!(prefs.col_left_w, 220.0);
+        assert_eq!(prefs.col_right_w, 240.0);
+    }
+
+    #[test]
+    fn layout_memory_seeding_protects_a_customised_active_workspace() {
+        // A pre-memory user who arranged the single
+        // global layout (380 / 460, sidebar hidden) and
+        // was last in Graph: Graph — the workspace that
+        // arrangement was in effect in — seeds from the
+        // legacy globals, NOT its profile; every other
+        // workspace takes its profile.
+        let mut prefs = LayoutPrefs::default();
+        prefs.workspace = "Graph".to_string();
+        prefs.col_left_w = 380.0;
+        prefs.col_right_w = 460.0;
+        prefs.sidebar_visible = false;
+        let record = startup_layout(&mut prefs);
+        assert_eq!(record.col_left_w, 380.0);
+        assert_eq!(record.col_right_w, 460.0);
+        assert!(!record.show_left);
+        assert_eq!(record_for(&prefs, Workspace::Graph), record);
+        assert_eq!(
+            record_for(&prefs, Workspace::Animate),
+            default_layout_for(Workspace::Animate).unwrap()
+        );
+        // And a customised file whose active workspace
+        // has NO profile (Home) changes nothing: Home
+        // seeds legacy either way.
+        let mut prefs = LayoutPrefs::default();
+        prefs.workspace = "Home".to_string();
+        prefs.col_left_w = 380.0;
+        let record = startup_layout(&mut prefs);
+        assert_eq!(record.col_left_w, 380.0);
+    }
+
+    #[test]
+    fn stage_focus_enter_and_exit_move_visibility_only() {
+        // Enter: both columns hide; widths and the
+        // timeline flag ride through untouched.
+        let live = live(260.0, 400.0, true, false, true);
+        let focused = focus_enter(live);
+        assert!(!focused.show_left && !focused.show_right);
+        assert_eq!(focused.col_left_w, 260.0);
+        assert_eq!(focused.col_right_w, 400.0);
+        assert!(focused.timeline_collapsed);
+        // Exit: the saved visibility returns — including
+        // a column that was already hidden before focus
+        // (show_right here) — over the live layout, so a
+        // timeline change made during focus survives.
+        let during = LiveLayout {
+            timeline_collapsed: false,
+            ..focused
+        };
+        let restored = focus_exit(live, during);
+        assert!(restored.show_left);
+        assert!(!restored.show_right);
+        assert!(!restored.timeline_collapsed);
+        assert_eq!(restored.col_left_w, 260.0);
+    }
+
+    #[test]
+    fn stage_focus_capture_reads_the_restore_not_the_hidden_flags() {
+        // The capture rule `live_layout` applies: with
+        // no restore held, the live flags are the truth;
+        // with one held, the restore's visibility is —
+        // the hidden live flags must never be captured
+        // as a workspace's remembered layout.
+        assert_eq!(capture_visibility(true, false, None), (true, false));
+        let saved = live(260.0, 400.0, true, false, false);
+        assert_eq!(
+            capture_visibility(false, false, Some(saved)),
+            (true, false)
+        );
     }
 }

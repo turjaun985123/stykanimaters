@@ -1780,6 +1780,8 @@ fn convert_pose(inst: &RawInstance, scan: &FigureScan, container_build: i32) -> 
     Pose {
         root: [inst.x, inst.y],
         angles,
+        sx: 1.0,
+        sy: 1.0,
     }
 }
 
@@ -2410,6 +2412,10 @@ fn empty_project(name: String, fps: f32, auto_tween: bool) -> Project {
         subtitles: Vec::new(),
         subtitle_style: Default::default(),
         format_version: crate::model::FORMAT_VERSION_CURRENT,
+        chapters: Vec::new(),
+        stored_guides: Vec::new(),
+        title_cards: Default::default(),
+        beat_markers: Vec::new(),
     }
 }
 
@@ -2458,6 +2464,7 @@ fn camera_keys(frames_raw: &[RawFrame]) -> Vec<CameraKey> {
                 y: c.y + 540.0 / z,
                 zoom: z,
                 angle: c.rotation,
+                easing: crate::model::CameraEase::Linear,
             }
         })
         .collect()
@@ -5069,6 +5076,7 @@ mod tests {
                 y: 360.0,
                 zoom: 1.0,
                 angle: 0.0,
+                easing: crate::model::CameraEase::Linear,
             },
             CameraKey {
                 frame: 4,
@@ -5076,6 +5084,7 @@ mod tests {
                 y: 396.0,
                 zoom: 2.0,
                 angle: 30.0,
+                easing: crate::model::CameraEase::Linear,
             },
         ];
         let back = import_nodes_animation(&export_nodes_animation(&project)).unwrap();

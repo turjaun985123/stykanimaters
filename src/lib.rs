@@ -4,10 +4,13 @@
 //! (src/bin/mcp_server.rs) are both built on this library.
 
 pub mod audio;
+pub mod autosave;
 pub mod audio_edit;
 pub mod audio_ops;
 pub mod audio_play;
+pub mod beat_markers;
 pub mod dialogs;
+pub mod diagnostics;
 pub mod draw_ops;
 pub mod editor;
 pub mod export;
@@ -19,6 +22,7 @@ pub mod fx_ops;
 pub mod graph;
 pub mod graph_keys;
 pub mod graph_panel;
+pub mod harness_import;
 pub mod i18n;
 pub mod icon_path;
 pub mod layered_import;
@@ -43,9 +47,14 @@ pub mod shell;
 pub mod shell_tools_transport;
 pub mod sprite_ops;
 pub mod stats;
+pub mod fixtures;
+pub mod samples;
 pub mod style;
 pub mod subtitles;
+pub mod subtitle_timing;
 pub mod svg;
 pub mod text_edit;
+pub mod templates;
+pub mod title_cards;
 pub mod touch;
 pub mod vfx;

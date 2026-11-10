@@ -1156,7 +1156,7 @@ pub fn import_asset_file(
     // importer can never drift apart on what counts as an
     // importable image.
     let (asset, w, h) = asset_from_bytes(name.clone(), bytes)?;
-    core.snapshot();
+    core.snapshot_labeled("Import asset");
     let index = core.project.assets.len();
     core.project.assets.push(asset);
     core.status = format!("Asset imported ('{name}', asset {}).", index + 1);
@@ -1166,6 +1166,89 @@ pub fn import_asset_file(
         bytes: size,
         width: w,
         height: h,
+    })
+}
+
+/// What a successful [`import_spritesheet_file`] appended.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImportedSheet {
+    /// Indices of the new assets in `Project.assets`, in
+    /// sheet order.
+    pub indices: Vec<usize>,
+    /// The names the assets were stored under, in sheet
+    /// order.
+    pub names: Vec<String>,
+    /// True when slicing metadata was found and used (one
+    /// asset per frame); false when the sheet had no sidecar
+    /// and imported as one still image.
+    pub sliced: bool,
+}
+
+/// GUI-facing spritesheet import (Roadmap Wave 2, W2-49):
+/// the round-trip half of the sheet pack exports in
+/// `export.rs`. When a slicing sidecar (`<stem>.spritesheet.json`)
+/// sits next to the sheet at `path`, the sheet is sliced back
+/// into its frames and each frame is appended as its own
+/// asset — in sheet order, under the name its sidecar entry
+/// carries (names are data and are stored verbatim) — in
+/// exactly ONE undo step. Every recovered frame passes through
+/// the shared funnel ([`asset_from_bytes`]: size cap, PNG/JPEG
+/// gate, decode) BEFORE the snapshot is taken, so a sheet that
+/// fails validation anywhere appends nothing and spends no
+/// undo step. When NO sidecar exists the sheet imports as one
+/// still image through [`import_asset_file`] — the standing
+/// behaviour for any image; the layout is never guessed from
+/// the pixels (an explicit grid slice is available as
+/// `export::slice_sheet_grid` for callers that have a grid
+/// from the user). A sidecar that exists but is invalid, or
+/// that does not match the sheet, refuses the import.
+pub fn import_spritesheet_file(
+    core: &mut EditorCore,
+    path: &str,
+) -> Result<ImportedSheet, String> {
+    let frames = match crate::export::slice_spritesheet(std::path::Path::new(path)) {
+        Ok(Some(frames)) => frames,
+        Ok(None) => {
+            let one = import_asset_file(core, path, None)?;
+            return Ok(ImportedSheet {
+                indices: vec![one.index],
+                names: vec![one.name],
+                sliced: false,
+            });
+        }
+        Err(e) => return Err(e),
+    };
+    if frames.is_empty() {
+        return Err(format!(
+            "spritesheet '{path}' has slicing metadata but it lists no frames"
+        ));
+    }
+    // Validate the whole batch through the funnel before any
+    // mutation: one bad frame refuses the import whole.
+    let mut assets = Vec::with_capacity(frames.len());
+    for frame in &frames {
+        let (asset, _, _) = asset_from_bytes(frame.name.clone(), frame.png.clone())?;
+        assets.push(asset);
+    }
+    let sheet_name = std::path::Path::new(path)
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string());
+    core.snapshot_labeled("Import spritesheet");
+    let first = core.project.assets.len();
+    let names: Vec<String> = assets.iter().map(|a| a.name.clone()).collect();
+    core.project.assets.extend(assets);
+    let indices: Vec<usize> = (first..core.project.assets.len()).collect();
+    core.status = format!(
+        "Spritesheet imported ('{sheet_name}', {} frame(s) as assets {}–{}).",
+        indices.len(),
+        first + 1,
+        indices.last().map(|i| i + 1).unwrap_or(first + 1)
+    );
+    Ok(ImportedSheet {
+        indices,
+        names,
+        sliced: true,
     })
 }
 
@@ -1184,7 +1267,7 @@ pub fn rename_asset(core: &mut EditorCore, index: usize, name: &str) -> Result<b
     if core.project.assets[index].name == name {
         return Ok(false);
     }
-    core.snapshot();
+    core.snapshot_labeled("Rename asset");
     core.project.assets[index].name = name.clone();
     core.status = format!("Asset {} renamed to '{name}'.", index + 1);
     Ok(true)
@@ -1215,7 +1298,7 @@ pub fn remove_asset(core: &mut EditorCore, index: usize) -> Result<usize, String
     }
     let old_len = core.project.assets.len();
     let name = core.project.assets[index].name.clone();
-    core.snapshot();
+    core.snapshot_labeled("Remove asset");
     core.project.assets.remove(index);
     let remapped = remap_asset_refs(&mut core.project, index, old_len);
     core.status = format!(
@@ -1354,7 +1437,7 @@ pub fn tool_asset_attach(core: &mut EditorCore, args: &Value) -> Result<Value, S
     // wholesale, as it always has.
     let t = ast_opt_media_transform(args)?;
     let (offset, scale, angle_offset, flip, opacity) = t.fields();
-    core.snapshot();
+    core.snapshot_labeled("Attach asset");
     core.project.figures[fi].def.nodes[ni].media = Some(SegmentMedia::Image {
         asset,
         offset,
@@ -1985,7 +2068,7 @@ pub fn tool_clip_asset_attach(core: &mut EditorCore, args: &Value) -> Result<Val
     // the snapshot, so a refusal spends nothing.
     let t = ast_opt_media_transform(args)?;
     let (offset, scale, angle_offset, flip, opacity) = t.fields();
-    core.snapshot();
+    core.snapshot_labeled("Attach clip asset");
     core.project.clips[ci].def.nodes[ni].media = Some(SegmentMedia::Image {
         asset,
         offset,
@@ -2055,7 +2138,7 @@ pub fn tool_clip_clear_node_media(core: &mut EditorCore, args: &Value) -> Result
             "status": core.status,
         }));
     };
-    core.snapshot();
+    core.snapshot_labeled("Clear segment media");
     core.project.clips[ci].def.nodes[ni].media = None;
     core.status = "Segment media cleared.".into();
     Ok(json!({
@@ -2215,8 +2298,22 @@ fn composite_image(
 // its SRT sidecar stayed perfect). When NO face resolves
 // for a run the whole line reports failure and the caller
 // falls back to the bitmap stamp: on a font-less system a
-// legible stamp beats a blank. Bundling fonts so even that
-// fallback never fires is IA-RM2-6 in this seat's findings.
+// legible stamp beats a blank.
+//
+// Bundled tier (Roadmap Wave 2, W2-46 — IA-RM2-6): the
+// scripts with NO dependable system font on a stock machine
+// (Bengali, Arabic, Hebrew, Han) also carry a subset face
+// embedded in the binary from assets/fonts/ (Noto, SIL OFL
+// 1.1 — see the licence audit in W2-46's findings). The
+// resolution order is pinned: a system face that proves FULL
+// coverage always wins (a locally installed complete font
+// beats the bundle's deliberately subset repertoire); the
+// bundled face is tried only once the system scan is
+// exhausted, and it beats a partially covering system face —
+// a full-coverage subset beats a partial system face that
+// would skip glyphs. Han's bundle is audited and designed
+// but NOT embedded yet (its honest subset is ~8 MB; see
+// IA-W2-46-1), so Han resolves system-only today.
 // ---------------------------------------------------------------------
 
 use std::cell::RefCell;
@@ -2270,6 +2367,45 @@ fn font_library() -> &'static Mutex<FontLibrary> {
             exhausted: HashMap::new(),
         })
     })
+}
+
+/// The bundled fallback face for `script`, if this build
+/// embeds one (W2-46): the subset Noto faces under
+/// assets/fonts/, instanced at Regular and subset to their
+/// script blocks plus shared punctuation. Coverage is
+/// proven by the caller with the same charmap check as
+/// system faces — the bundle earns its place per probe,
+/// never by family name. `None` for scripts with no bundle
+/// (Han's is designed but not embedded — IA-W2-46-1).
+fn bundled_face(script: swash::text::Script) -> Option<Arc<FontFace>> {
+    use swash::text::Script as S;
+    static BUNDLED: OnceLock<Vec<(swash::text::Script, Arc<FontFace>)>> = OnceLock::new();
+    let faces = BUNDLED.get_or_init(|| {
+        let mk = |bytes: &'static [u8]| {
+            Arc::new(FontFace {
+                data: Arc::new(bytes.to_vec()),
+                index: 0,
+            })
+        };
+        vec![
+            (
+                S::Bengali,
+                mk(include_bytes!("../assets/fonts/NotoSansBengali-Regular.ttf")),
+            ),
+            (
+                S::Arabic,
+                mk(include_bytes!("../assets/fonts/NotoSansArabic-Regular.ttf")),
+            ),
+            (
+                S::Hebrew,
+                mk(include_bytes!("../assets/fonts/NotoSansHebrew-Regular.ttf")),
+            ),
+        ]
+    });
+    faces
+        .iter()
+        .find(|(s, _)| *s == script)
+        .map(|(_, f)| f.clone())
 }
 
 /// Platform font directories. Nonexistent ones are skipped
@@ -2405,7 +2541,17 @@ fn resolve_face(
         }
     }
     if lib.exhausted.get(&script).copied().unwrap_or(false) {
-        // The scan is done: the best partial face, if any.
+        // The scan is done: the bundled face outranks a
+        // partial system face (W2-46's pinned order); only
+        // when it cannot cover the probe does the best
+        // partial face answer.
+        if !probe.is_empty() {
+            if let Some(face) = bundled_face(script) {
+                if face.covered_count(probe) == probe.len() {
+                    return Some(face);
+                }
+            }
+        }
         return lib
             .faces
             .get(&script)
@@ -2456,6 +2602,18 @@ fn resolve_face(
     }
     lib.cursors.insert(script, cursor);
     lib.exhausted.insert(script, true);
+    // Bundled tier (W2-46): the scan found no full-coverage
+    // system face, so a bundled face that proves full
+    // coverage of the probe answers before any partial
+    // system face does.
+    if !probe.is_empty() {
+        if let Some(face) = bundled_face(script) {
+            if face.covered_count(probe) == probe.len() {
+                lib.faces.entry(script).or_default().push(face.clone());
+                return Some(face);
+            }
+        }
+    }
     best_partial.map(|(_, face)| face)
 }
 
@@ -2680,7 +2838,7 @@ fn render_glyph_mask(face: &FontFace, id: u16, size_px: f32) -> Option<swash::sc
         let mut ctx = ctx.borrow_mut();
         let mut scaler = ctx.builder(font).size(size_px).hint(false).build();
         swash::scale::Render::new(&[swash::scale::Source::Outline])
-            .format(swash::scale::Format::Alpha)
+            .format(zeno::Format::Alpha)
             .render(&mut scaler, id)
     })
 }
@@ -3176,6 +3334,8 @@ mod tests {
                 poses: vec![Pose {
                     root: [100.0, 100.0],
                     angles: vec![0.0, 90.0, 0.0],
+                    sx: 1.0,
+                    sy: 1.0,
                 }],
                 duration: 1.0,
                 easing: None,
@@ -3202,6 +3362,10 @@ mod tests {
             subtitles: Vec::new(),
             subtitle_style: Default::default(),
             format_version: crate::model::FORMAT_VERSION_CURRENT,
+            chapters: Vec::new(),
+            stored_guides: Vec::new(),
+            title_cards: Default::default(),
+            beat_markers: Vec::new(),
         }
     }
 
@@ -4405,6 +4569,120 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Write a sheet PNG plus a hand-authored sidecar for it —
+    /// a foreign tool's sheet, written the way the format
+    /// contract (export.rs, W2-49) describes: two distinct
+    /// 2x2 tiles on a 2x1 grid, with custom entry names.
+    /// Returns the sheet path; the sidecar sits next to it
+    /// under the conventional name.
+    fn foreign_sheet(tag: &str) -> std::path::PathBuf {
+        let mut sheet = RgbaImage::new(4, 2);
+        for dx in 0..2 {
+            for dy in 0..2 {
+                sheet.put_pixel(dx, dy, Rgba([200, 30, 30, 255]));
+                sheet.put_pixel(2 + dx, dy, Rgba([30, 30, 200, 255]));
+            }
+        }
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(sheet)
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        let path = temp_asset_file(tag, &bytes);
+        let sidecar = crate::export::spritesheet_sidecar_path(&path);
+        let meta = serde_json::json!({
+            "format": "stykanimate-spritesheet",
+            "version": 1,
+            "sheet": path.file_name().unwrap().to_string_lossy(),
+            "sheet_width": 4,
+            "sheet_height": 2,
+            "tile_width": 2,
+            "tile_height": 2,
+            "columns": 2,
+            "rows": 1,
+            "alpha": true,
+            "scale": 1.0,
+            "frames": [
+                { "index": 0, "name": "hero-stand.png", "x": 0, "y": 0, "width": 2, "height": 2 },
+                { "index": 1, "name": "hero-fall.png", "x": 2, "y": 0, "width": 2, "height": 2 }
+            ]
+        });
+        std::fs::write(&sidecar, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
+        path
+    }
+
+    #[test]
+    fn sheet_import_slices_frames_verbatim_in_one_undo_step() {
+        // Roadmap Wave 2 (W2-49): a sheet with a sidecar comes
+        // back as one asset per frame — sheet order, sidecar
+        // names verbatim, pixels equal to the tiles — and the
+        // whole batch is a single undo step.
+        let mut core = asset_core();
+        let base = core.project.assets.len();
+        let depth = core.undo_depth();
+        let path = foreign_sheet("sheet-rt");
+        let imported = import_spritesheet_file(&mut core, path.to_str().unwrap())
+            .expect("sheet with sidecar imports sliced");
+        assert!(imported.sliced);
+        assert_eq!(imported.indices, vec![base, base + 1]);
+        assert_eq!(imported.names, ["hero-stand.png", "hero-fall.png"]);
+        assert_eq!(core.undo_depth(), depth + 1, "one undo step for the batch");
+        assert_eq!(core.project.assets.len(), base + 2);
+        // The recovered assets are the tiles, pixel for pixel.
+        let stand = image::load_from_memory(&core.project.assets[base].png)
+            .unwrap()
+            .to_rgba8();
+        assert!(stand.pixels().all(|p| p.0 == [200, 30, 30, 255]));
+        let fall = image::load_from_memory(&core.project.assets[base + 1].png)
+            .unwrap()
+            .to_rgba8();
+        assert!(fall.pixels().all(|p| p.0 == [30, 30, 200, 255]));
+        assert!(
+            core.status.contains("2 frame(s) as assets"),
+            "status: {}",
+            core.status
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::export::spritesheet_sidecar_path(&path));
+    }
+
+    #[test]
+    fn sheet_import_without_sidecar_is_one_still_image() {
+        // The degraded case, unchanged from before W2-49: no
+        // metadata, no guessing — the sheet is a single asset.
+        let mut core = asset_core();
+        let base = core.project.assets.len();
+        let depth = core.undo_depth();
+        let png = png_bytes(4, 2, Rgba([10, 200, 10, 255]));
+        let path = temp_asset_file("sheet-still", &png);
+        let imported = import_spritesheet_file(&mut core, path.to_str().unwrap())
+            .expect("sheet without sidecar imports as a still");
+        assert!(!imported.sliced);
+        assert_eq!(imported.indices, vec![base]);
+        assert_eq!(core.project.assets.len(), base + 1);
+        assert_eq!(core.project.assets[base].png, png);
+        assert_eq!(core.undo_depth(), depth + 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sheet_import_refuses_a_sidecar_that_mismatches_the_sheet() {
+        // The sidecar claims a 4x2 sheet; the file is 2x2. The
+        // import refuses and appends nothing — slicing on a
+        // false layout would silently produce wrong frames.
+        let mut core = asset_core();
+        let base = core.project.assets.len();
+        let depth = core.undo_depth();
+        let path = foreign_sheet("sheet-mismatch");
+        std::fs::write(&path, png_bytes(2, 2, Rgba([1, 1, 1, 255]))).unwrap();
+        let err = import_spritesheet_file(&mut core, path.to_str().unwrap())
+            .expect_err("mismatched pairing refuses");
+        assert!(err.contains("metadata describes"), "err: {err}");
+        assert_eq!(core.project.assets.len(), base, "nothing appended");
+        assert_eq!(core.undo_depth(), depth, "a refusal spends nothing");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::export::spritesheet_sidecar_path(&path));
+    }
+
     #[test]
     fn composite_instances_draw_over_segment_media() {
         let mut project = demo_project();
@@ -4511,6 +4789,58 @@ mod tests {
             "বাংলা".chars().count()
         );
         assert!(line.width > 40.0, "shaped width {} implausibly small", line.width);
+    }
+
+    #[test]
+    fn bundled_faces_prove_coverage_for_their_scripts() {
+        // W2-46 (IA-RM2-6): the embedded subset faces must
+        // themselves pass the engine's coverage proof for
+        // representative lines — the bundle is not trusted
+        // on its family name. Han has no embedded face yet
+        // (IA-W2-46-1), pinned so the gap stays visible
+        // until it lands.
+        use swash::text::Script as S;
+        let cases: [(S, &str); 3] = [
+            (S::Bengali, "বাংলা"),
+            (S::Arabic, "العربية"),
+            (S::Hebrew, "שלום"),
+        ];
+        for (script, line) in cases {
+            let face = bundled_face(script).expect("bundled face present");
+            let probe: Vec<char> = line.chars().collect();
+            assert_eq!(
+                face.covered_count(&probe),
+                probe.len(),
+                "bundled face fails coverage for {line}"
+            );
+        }
+        assert!(
+            bundled_face(S::Han).is_none(),
+            "Han bundle landed — update IA-W2-46-1 and this pin"
+        );
+    }
+
+    #[test]
+    fn bundled_bengali_resolves_on_a_library_with_no_system_files() {
+        // The resolution ORDER, pinned at the tier boundary
+        // (W2-46): with an empty system file list the scan
+        // exhausts immediately and the bundled face must
+        // answer with full coverage — this is the font-less
+        // machine case IA-RM2-6 exists for. A system face
+        // proving full coverage still wins by construction
+        // (resolve_face returns inside its scan before the
+        // bundled tier is consulted); that half is pinned
+        // by RM2's shaped_* tests on font-ful systems.
+        let mut lib = FontLibrary {
+            files: Vec::new(),
+            faces: HashMap::new(),
+            cursors: HashMap::new(),
+            exhausted: HashMap::new(),
+        };
+        let probe: Vec<char> = "বাংলা".chars().collect();
+        let face = resolve_face(&mut lib, swash::text::Script::Bengali, &probe)
+            .expect("bundled face resolves with no system fonts");
+        assert_eq!(face.covered_count(&probe), probe.len());
     }
 
     #[test]
@@ -5496,6 +5826,8 @@ mod tests {
         let pose = Pose {
             root: [100.0, 100.0],
             angles: vec![0.0, 90.0, 0.0],
+            sx: 1.0,
+            sy: 1.0,
         };
         let mut project = demo_project();
         project.figures[0].def = skeleton(inst_media);

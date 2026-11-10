@@ -211,7 +211,7 @@ jobs:
           probe() { rm -rf ./projects; HOME="$(mktemp -d)" timeout "$@"; }
           mkdir -p headless-out
           missing=0
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error subtitles-populated subtitles-top subtitles-speaker home-missing-audio home-scan-fallback states-populated; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error subtitles-populated subtitles-top subtitles-speaker home-missing-audio home-scan-fallback states-populated build-workspace focus-field long-project dialogue-lane subtitles-assist marquee-selected sprites-flipped; do
             probe 60 "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
               > "headless-out/tree-$scene.log" 2>&1
             echo $? > "headless-out/tree-$scene.exit"
@@ -269,7 +269,7 @@ jobs:
           # absent without a word. The plain loop remains
           # the coverage contract (gate check 8); this list
           # is its recovery set, not a subset by design.
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error subtitles-populated subtitles-top subtitles-speaker home-missing-audio home-scan-fallback states-populated; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error subtitles-populated subtitles-top subtitles-speaker home-missing-audio home-scan-fallback states-populated build-workspace focus-field long-project dialogue-lane subtitles-assist marquee-selected sprites-flipped; do
             if [ ! -f "headless-out/tree-$scene.json" ]; then
               probe 60 xvfb-run -a "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
                 > "headless-out/tree-$scene-xvfb.log" 2>&1
@@ -327,6 +327,24 @@ jobs:
           probe 120 "$BIN" --snap headless-out/snap-menu-open.png --scene menu-open --at 0 \
             > headless-out/snap-menu-open.log 2>&1
           echo $? > headless-out/snap-menu-open.exit
+          # Roadmap Wave 2 (W2-77, IA-W2-77-5, optional): the
+          # flip's pixel proof — sprite 0 mirrored, sprite 1
+          # the control.
+          probe 120 "$BIN" --snap headless-out/snap-sprites-flipped.png --scene sprites-flipped --at 0 \
+            > headless-out/snap-sprites-flipped.log 2>&1
+          echo $? > headless-out/snap-sprites-flipped.exit
+          # Roadmap Wave 2 (W2-66, IA-W2-66-3): the scripted
+          # Tab walk and type probe over the pre-focused
+          # focus-field scene (fail-soft like the other
+          # probes; the focus census below reads them).
+          probe 60 "$BIN" --scene focus-field --script scripts/focus_tab_walk.json \
+            --tree headless-out/tree-focus-field-tab4.json --at 1 \
+            > headless-out/tree-focus-field-tab4.log 2>&1
+          echo $? > headless-out/tree-focus-field-tab4.exit
+          probe 60 "$BIN" --scene focus-field --script scripts/focus_type_probe.json \
+            --tree headless-out/tree-focus-field-type.json --at 1 \
+            > headless-out/tree-focus-field-type.log 2>&1
+          echo $? > headless-out/tree-focus-field-type.exit
           probe 120 "$BIN" --snap headless-out/snap-settings-open.png --scene settings-open --at 0 \
             > headless-out/snap-settings-open.log 2>&1
           echo $? > headless-out/snap-settings-open.exit
@@ -917,6 +935,35 @@ jobs:
               check(not is_err and (tl2 or {}).get("collapsed") is False,
                     "shell_set_timeline expands the timeline back", tl2_text[:200])
 
+              # 10. Roadmap Wave 2 (W2-79, IA-W2-79-2): the
+              #     subtitle speaker round-trip. Plant two
+              #     credited cues via MCP; the SRT export
+              #     must report both credits dropped (SRT
+              #     has no speaker syntax), and the VTT
+              #     export must carry <v NAME> spans with no
+              #     speakers_dropped field at all.
+              is_err, ad1, ad1_text = call_tool(16, "subtitle_add",
+                  {"start_frame": 0, "end_frame": 2, "text": "The bell rings.", "speaker": "NOVA"})
+              check(not is_err, "subtitle_add plants a credited cue", ad1_text[:200])
+              is_err, ad2, ad2_text = call_tool(17, "subtitle_add",
+                  {"start_frame": 2, "end_frame": 4, "text": "We run for the shore.", "speaker": "MARA"})
+              check(not is_err, "subtitle_add plants a second credited cue", ad2_text[:200])
+              is_err, srt, srt_text = call_tool(18, "subtitle_export_srt",
+                  {"path": "headless-out/probe-subtitles.srt"})
+              check(not is_err and (srt or {}).get("speakers_dropped") == 2,
+                    "SRT export reports both planted credits dropped", srt_text[:200])
+              is_err, vtt, vtt_text = call_tool(19, "subtitle_export_vtt",
+                  {"path": "headless-out/probe-subtitles.vtt"})
+              check(not is_err and vtt is not None and "speakers_dropped" not in (vtt or {}),
+                    "VTT export carries no speakers_dropped field", vtt_text[:200])
+              try:
+                  with open("headless-out/probe-subtitles.vtt") as fh:
+                      vtt_doc = fh.read()
+                  check("<v NOVA>" in vtt_doc and "<v MARA>" in vtt_doc,
+                        "VTT file carries the <v NAME> voice spans")
+              except OSError as e:
+                  check(False, "VTT file is readable after export", repr(e))
+
           try:
               main()
           except Exception as e:
@@ -950,6 +997,32 @@ jobs:
           echo $? > headless-out/overflow-scan.exit
           cat headless-out/overflow-scan.txt
 
+      # Roadmap Wave 2 (W2-71, IA-W2-71-2): the snapshot-diff
+      # debrief — a reviewed-baseline comparison of this run's
+      # dumps against the previous closing artifact's dumps.
+      # Fail-soft like the overflow scan: exit 1 from this step
+      # is a REPORT, not a gate failure (PL-12 posture — the
+      # baseline discipline runs report-only until it has a few
+      # closes behind it). The baseline directory is the
+      # preserved closing artifact under the integrator's
+      # .ci-watch store; when no baseline is preserved yet the
+      # step says so and does nothing.
+      - name: Snapshot diff — debrief against the closing baseline
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set +e
+          BASE="$HOME/.ci-watch/closing-baseline"
+          if [ -d "$BASE" ]; then
+            python3 scripts/snapshot_diff.py --brief "$BASE" headless-out \
+              > headless-out/snapshot-diff.txt 2>&1
+            echo $? > headless-out/snapshot-diff.exit
+            cat headless-out/snapshot-diff.txt
+          else
+            echo "no closing baseline preserved yet — snapshot diff skipped" \
+              | tee headless-out/snapshot-diff.txt
+          fi
+
       # Roadmap F-7 (A26 R1): fold every fail-soft transcript
       # (subtitle census, Home thumbnail probe, both Home
       # markers, live MCP probe) plus the overflow scan into
@@ -959,6 +1032,23 @@ jobs:
       # re-runs this same aggregator over the downloaded
       # artifact WITHOUT the fail-soft wrapper; its conclusion
       # is the verdict.
+      # Roadmap Wave 2 (W2-66, IA-W2-66-4, minimal tier):
+      # the focus census over this run's dumps — fail-soft;
+      # the transcript rides the artifact and a red census
+      # is visible in the debrief but does not bind (the
+      # D-2 tripwire's binding tier is a later ruling).
+      - name: Focus census — the D-2 tripwire, report-only
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set +e
+          python3 scripts/focus_census.py --self-test
+          python3 scripts/focus_census.py headless-out --check \
+            --expect scripts/focus_expectations.json \
+            > headless-out/focus-census.txt 2>&1
+          echo $? > headless-out/focus-census.exit
+          cat headless-out/focus-census.txt
+
       - name: Verdict aggregate — one machine-readable verdict
         if: ${{ !cancelled() }}
         continue-on-error: true

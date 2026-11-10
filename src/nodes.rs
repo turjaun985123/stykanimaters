@@ -973,6 +973,10 @@ pub fn import_nodes(data: &[u8]) -> Result<Project, String> {
         subtitles: Vec::new(),
         subtitle_style: Default::default(),
         format_version: crate::model::FORMAT_VERSION_CURRENT,
+        chapters: Vec::new(),
+        stored_guides: Vec::new(),
+        title_cards: Default::default(),
+        beat_markers: Vec::new(),
     })
 }
 

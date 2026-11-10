@@ -88,7 +88,8 @@
 //!   `EditorCore::insert_inbetween` and
 //!   `EditorCore::paste_frame` (editor.rs),
 //!   `insert_breakdowns` (this file, Roadmap Wave 1
-//!   RM17),
+//!   RM17) and `insert_breakdown_chain` (this file,
+//!   Roadmap Wave 2 W2-38),
 //!   `EditorCore::delete_range` and
 //!   `EditorCore::paste_range` (whose own doc comments
 //!   state the rule outright), `shift_frames` /
@@ -228,7 +229,7 @@ pub fn swap_frames(core: &mut EditorCore, a: usize, b: usize) -> bool {
         core.status = format!("Frame {} cannot be swapped with itself.", a + 1);
         return false;
     }
-    core.snapshot();
+    core.snapshot_labeled("Swap frames");
     let project = &mut core.project;
     project.frames.swap(a, b);
     // Camera keys: remapped, then re-sorted — the list is
@@ -430,7 +431,7 @@ pub fn insert_frames_after_current(core: &mut EditorCore, count: usize) -> usize
     };
     let at = core.current + 1;
     let after = core.current;
-    core.snapshot();
+    core.snapshot_labeled("Insert frames");
     let blanks: Vec<Frame> = (0..n).map(|_| blank.clone()).collect();
     // Collecting the Splice forces the replacement to
     // complete; the replaced range is empty, so nothing is
@@ -628,7 +629,7 @@ pub fn insert_breakdowns(core: &mut EditorCore, favour: f32, count: usize) -> us
             Frame { poses, duration: 1.0, easing: None, bends }
         })
         .collect();
-    core.snapshot();
+    core.snapshot_labeled("Insert breakdowns");
     let at = cur + 1;
     let _removed: Vec<Frame> = core.project.frames.splice(at..at, frames).collect();
     core.current = at;
@@ -694,6 +695,255 @@ pub fn tool_insert_breakdown(core: &mut EditorCore, args: &Value) -> Result<Valu
 //   }
 // MCP.md row:
 //   | `insert_breakdown` | Insert 'count' breakdown frames between the current frame and the next (the Frames panel's breakdown insert): the breakdowns sample the segment at favour-biased fractions — 'favour' 0.5 spaces them evenly (a single breakdown is the legacy midpoint inbetween), below 0.5 crowds them toward the current key, above 0.5 toward the next — with poses shaped by the segment's easing and bends interpolated linearly, exactly what tween playback shows at those points. 'favour' is clamped to 0.1–0.9 and 'count' to 8 by the op. One undo step; frame pins are not remapped (the timeline-length rule). | — | `count`, `favour` |
+
+/// Most breakdowns one [`insert_breakdown_chain`] call
+/// authors across a whole span. The per-segment cap
+/// ([`BREAKDOWN_COUNT_MAX`]) bounds one segment's
+/// samples; a chain is one gesture across up to
+/// [`BREAKDOWN_CHAIN_SPAN_MAX`] segments, so its cap is
+/// the span-scale counterpart — about intent, not
+/// recoverability (the insert is one undo step either
+/// way).
+pub const BREAKDOWN_CHAIN_COUNT_MAX: usize = 32;
+/// Most segments one [`insert_breakdown_chain`] call
+/// spans: the distance from the current frame to the
+/// chain's target key. At 24 fps, 64 frames is over two
+/// and a half seconds of timeline — past that, a "chain
+/// toward one target" is really several moves.
+pub const BREAKDOWN_CHAIN_SPAN_MAX: usize = 64;
+/// The span the MCP handler and the Frames panel start
+/// from: three segments — the shortest span whose even
+/// midpoint (favour 0.5, count 1) lands INSIDE a segment
+/// rather than exactly on the middle frame.
+pub const BREAKDOWN_CHAIN_SPAN_DEFAULT: usize = 3;
+
+/// Where [`insert_breakdown_chain`] samples: the
+/// `(segment, local fraction)` of every breakdown the
+/// chain authors, in timeline order. The distribution
+/// is [`breakdown_fractions`] over the WHOLE span — one
+/// favour curve from the current key to the target key
+/// `span` segments later — so a global fraction `u`
+/// lands at span position `u * span`: segment
+/// `floor(u * span)`, at the local fraction left over.
+///
+/// A position that lands EXACTLY on an existing frame
+/// (a whole-number span position — even spacing over a
+/// commensurate span does this: favour 0.5, count 3,
+/// span 4 puts all three positions on frames) is
+/// SKIPPED: that frame already holds a pose at that
+/// point of the span, and inserting a sampled copy
+/// beside it would author a duplicate, not a breakdown.
+/// The Frames panel's chain preview draws exactly these
+/// positions against the span's frame ticks, so a
+/// skipped position is visible before the press, never
+/// a surprise after it.
+///
+/// `favour` is clamped to
+/// [`BREAKDOWN_FAVOUR_MIN`]..=[`BREAKDOWN_FAVOUR_MAX`],
+/// `count` to 1..=[`BREAKDOWN_CHAIN_COUNT_MAX`] and
+/// `span` to 1..=[`BREAKDOWN_CHAIN_SPAN_MAX`]; a
+/// non-finite `favour` yields no positions. Positions
+/// are strictly increasing in timeline order, every
+/// local fraction inside (0, 1).
+pub fn breakdown_chain_positions(favour: f32, count: usize, span: usize) -> Vec<(usize, f32)> {
+    if !favour.is_finite() {
+        return Vec::new();
+    }
+    let favour = favour.clamp(BREAKDOWN_FAVOUR_MIN, BREAKDOWN_FAVOUR_MAX);
+    let count = count.clamp(1, BREAKDOWN_CHAIN_COUNT_MAX);
+    let span = span.clamp(1, BREAKDOWN_CHAIN_SPAN_MAX);
+    breakdown_fractions(favour, count)
+        .into_iter()
+        .filter_map(|u| {
+            let g = u * span as f32;
+            let seg = g.floor() as usize;
+            let local = g - seg as f32;
+            if seg >= span || local <= 0.0 {
+                None
+            } else {
+                Some((seg, local))
+            }
+        })
+        .collect()
+}
+
+/// Insert a chain of `count` breakdowns across the
+/// `span` segments from the current frame toward the
+/// target key at `current + span` (Roadmap Wave 2,
+/// W2-38 — the board's "breakdowns of breakdowns"):
+/// [`insert_breakdowns`] generalised from one segment
+/// to a span, under ONE favour curve.
+///
+/// Each breakdown SAMPLES ITS OWN segment exactly the
+/// way [`insert_breakdowns`] samples its one segment —
+/// poses at the segment's eased fraction (that
+/// segment's frame easing override, else the project
+/// easing), bends at the raw fraction — so the chain
+/// authors precisely the poses tween playback shows at
+/// those span positions, each a real breakdown of the
+/// segment it lands in. Positions come from
+/// [`breakdown_chain_positions`]: one global
+/// distribution; positions landing exactly on existing
+/// frames are skipped. With `span == 1` and `count`
+/// inside the per-segment cap, the chain authors
+/// exactly the frames [`insert_breakdowns`] would —
+/// poses, bends, playhead and status (pinned); the two
+/// ops differ in reach and in the count cap, not in
+/// sampling.
+///
+/// Clamps and refusals follow the house discipline: a
+/// non-finite `favour` refuses pre-snapshot (the
+/// [`insert_breakdowns`] sentence); `count` clamps to
+/// 1..=[`BREAKDOWN_CHAIN_COUNT_MAX`]; `span` clamps to
+/// 1..=[`BREAKDOWN_CHAIN_SPAN_MAX`] and then to the
+/// segments the timeline actually has left, so a chain
+/// reaching past the last frame covers what exists and
+/// the status names the span covered. No following
+/// frame — or every position landing on an existing
+/// frame — refuses with a status and NO snapshot. On
+/// success exactly ONE snapshot covers the whole chain
+/// (label "Insert breakdown chain"); the playhead lands
+/// on the first inserted breakdown; frame pins are NOT
+/// remapped (the module docs' timeline-length verdict).
+///
+/// Returns how many frames were inserted (0 on a
+/// refusal).
+pub fn insert_breakdown_chain(core: &mut EditorCore, favour: f32, count: usize, span: usize) -> usize {
+    if !favour.is_finite() {
+        core.status = "Breakdown favour must be a finite fraction between 0 and 1.".into();
+        return 0;
+    }
+    let cur = core.current;
+    let available = core.project.frames.len().saturating_sub(cur + 1);
+    if available == 0 {
+        core.status = "Breakdown chain needs a following frame.".into();
+        return 0;
+    }
+    let favour = favour.clamp(BREAKDOWN_FAVOUR_MIN, BREAKDOWN_FAVOUR_MAX);
+    let count = count.clamp(1, BREAKDOWN_CHAIN_COUNT_MAX);
+    let span = span.clamp(1, BREAKDOWN_CHAIN_SPAN_MAX).min(available);
+    let positions = breakdown_chain_positions(favour, count, span);
+    if positions.is_empty() {
+        core.status = "Breakdown chain lands only on existing frames — nothing to insert.".into();
+        return 0;
+    }
+    let node_counts: Vec<usize> = core
+        .project
+        .figures
+        .iter()
+        .map(|f| f.def.nodes.len())
+        .collect();
+    let project_easing = core.project.easing;
+    // Sample every new frame from the ORIGINAL segments
+    // before anything moves, bucketed by segment; the
+    // splice below runs the buckets in reverse so
+    // earlier segment indices stay valid throughout.
+    let originals: Vec<Frame> = core.project.frames[cur..=cur + span].to_vec();
+    let mut by_segment: Vec<Vec<Frame>> = vec![Vec::new(); span];
+    for (seg, u) in &positions {
+        let a = &originals[*seg];
+        let b = &originals[seg + 1];
+        let t = a.easing.unwrap_or(project_easing).apply(*u);
+        let poses = a
+            .poses
+            .iter()
+            .zip(b.poses.iter())
+            .map(|(pa, pb)| pa.lerp(pb, t))
+            .collect();
+        let bends = breakdown_bends(a, b, &node_counts, *u);
+        by_segment[*seg].push(Frame { poses, duration: 1.0, easing: None, bends });
+    }
+    let inserted = positions.len();
+    core.snapshot_labeled("Insert breakdown chain");
+    for (seg, frames) in by_segment.iter().enumerate().rev() {
+        if frames.is_empty() {
+            continue;
+        }
+        let at = cur + seg + 1;
+        let _removed: Vec<Frame> =
+            core.project.frames.splice(at..at, frames.iter().cloned()).collect();
+    }
+    core.current = cur + positions[0].0 + 1;
+    core.status = match (inserted, span) {
+        (1, 1) => format!("Breakdown inserted at frame {}.", core.current + 1),
+        (1, s) => format!("Inserted 1 breakdown across {s} segments after frame {}.", cur + 1),
+        (n, 1) => format!("Inserted {n} breakdowns after frame {}.", cur + 1),
+        (n, s) => format!("Inserted {n} breakdowns across {s} segments after frame {}.", cur + 1),
+    };
+    inserted
+}
+
+/// MCP handler for [`insert_breakdown_chain`] (Roadmap
+/// Wave 2, W2-38): the Frames panel's breakdown chain.
+/// Registered by the integrator as
+/// `insert_breakdown_chain` (see the TOOL ENTRY SPEC
+/// below — IA-W2-38-1).
+pub fn tool_insert_breakdown_chain(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let favour = match args.get("favour").filter(|v| !v.is_null()) {
+        Some(_) => {
+            let f = fs_arg_f32(args, "favour")?;
+            if f <= 0.0 || f >= 1.0 {
+                return Err("argument 'favour' must be between 0 and 1 (exclusive)".into());
+            }
+            f
+        }
+        None => 0.5,
+    };
+    let count = match args.get("count").filter(|v| !v.is_null()) {
+        Some(_) => {
+            let c = fs_arg_usize(args, "count")?;
+            if c == 0 {
+                return Err("argument 'count' must be at least 1".into());
+            }
+            c
+        }
+        None => 1,
+    };
+    let span = match args.get("span").filter(|v| !v.is_null()) {
+        Some(_) => {
+            let s = fs_arg_usize(args, "span")?;
+            if s == 0 {
+                return Err("argument 'span' must be at least 1".into());
+            }
+            s
+        }
+        None => BREAKDOWN_CHAIN_SPAN_DEFAULT,
+    };
+    let inserted = insert_breakdown_chain(core, favour, count, span);
+    if inserted == 0 {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "inserted": inserted,
+        "frame_count": core.project.frames.len(),
+        "current_frame": core.current,
+        "status": core.status,
+    }))
+}
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 11 domain-file block immediately AFTER
+// the insert_breakdown Tool entry (executed by the
+// integrator as IA-W2-38-1 — the registry and
+// docs/MCP.md are integrator surfaces; the census takes
+// the surface 396 -> 397 and check 9's doc sync needs
+// the catalogue row in the same push).
+//   Tool {
+//       name: "insert_breakdown_chain",
+//       description: "Insert a chain of 'count' breakdown frames across the 'span' segments from the current frame toward the target key 'span' frames later (the Frames panel's breakdown chain): one favour curve distributes the breakdowns over the whole span — 'favour' 0.5 spaces them evenly, below 0.5 crowds them toward the current key, above 0.5 toward the target — and each breakdown samples its own segment the way insert_breakdown does (poses at the segment's eased fraction, bends interpolated linearly). A distribution position landing exactly on an existing frame is skipped — that pose already exists as a frame. 'favour' is clamped to 0.1–0.9, 'count' to 32 and 'span' to 64 (and to the segments remaining) by the op. One undo step; frame pins are not remapped (the timeline-length rule).",
+//       schema: obj_schema(
+//           json!({
+//               "favour": { "type": "number", "description": "Breakdown spacing bias between 0 and 1 (exclusive), default 0.5" },
+//               "count": { "type": "integer", "description": "Breakdowns to insert across the span, at least 1 (default 1)" },
+//               "span": { "type": "integer", "description": "Segments from the current frame to the target key, at least 1 (default 3)" }
+//           }),
+//           &[],
+//       ),
+//       handler: crate::frame_swap::tool_insert_breakdown_chain,
+//   }
+// MCP.md row (beside the insert_breakdown row):
+//   | `insert_breakdown_chain` | Insert a chain of 'count' breakdown frames across the 'span' segments from the current frame toward the target key 'span' frames later (the Frames panel's breakdown chain): one favour curve distributes the breakdowns over the whole span — 'favour' 0.5 spaces them evenly, below 0.5 crowds them toward the current key, above 0.5 toward the target — and each breakdown samples its own segment the way insert_breakdown does (poses at the segment's eased fraction, bends interpolated linearly). A distribution position landing exactly on an existing frame is skipped — that pose already exists as a frame. 'favour' is clamped to 0.1–0.9, 'count' to 32 and 'span' to 64 (and to the segments remaining) by the op. One undo step; frame pins are not remapped (the timeline-length rule). | — | `count`, `favour`, `span` |
 
 // TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
 // in the Wave 11 domain-file block beside insert_frames.
@@ -878,9 +1128,9 @@ mod tests {
         ];
         core.current = 2;
         core.project.camera = vec![
-            CameraKey { frame: 0, x: 1.0, y: 0.0, zoom: 1.0, angle: 0.0 },
-            CameraKey { frame: A, x: 10.0, y: 0.0, zoom: 1.0, angle: 0.0 },
-            CameraKey { frame: B, x: 30.0, y: 0.0, zoom: 1.0, angle: 0.0 },
+            CameraKey { frame: 0, x: 1.0, y: 0.0, zoom: 1.0, angle: 0.0, easing: crate::model::CameraEase::Linear },
+            CameraKey { frame: A, x: 10.0, y: 0.0, zoom: 1.0, angle: 0.0, easing: crate::model::CameraEase::Linear },
+            CameraKey { frame: B, x: 30.0, y: 0.0, zoom: 1.0, angle: 0.0, easing: crate::model::CameraEase::Linear },
         ];
         core.project.particles = vec![
             ParticleEvent {
@@ -1207,7 +1457,7 @@ mod tests {
             clip: None,
             states: Vec::new(),
         }];
-        let pose = |x: f32| crate::model::Pose { root: [x, 0.0], angles: vec![0.0] };
+        let pose = |x: f32| crate::model::Pose { root: [x, 0.0], angles: vec![0.0], sx: 1.0, sy: 1.0 };
         core.project.frames = vec![
             Frame { poses: vec![pose(0.0)], duration: 1.0, easing: None, bends: Vec::new() },
             Frame { poses: vec![pose(0.0)], duration: 2.0, easing: None, bends: Vec::new() },
@@ -1490,15 +1740,15 @@ mod tests {
             name: "wave".into(),
             def: FigureDef::humanoid(),
             frames: vec![
-                Pose { root: [1.0, 2.0], angles: vec![0.0] },
-                Pose { root: [3.0, 4.0], angles: vec![0.5] },
+                Pose { root: [1.0, 2.0], angles: vec![0.0], sx: 1.0, sy: 1.0 },
+                Pose { root: [3.0, 4.0], angles: vec![0.5], sx: 1.0, sy: 1.0 },
             ],
             loop_mode: ClipLoop::Loop,
         }];
         let two_pose_frame = |r0: f32, r1: f32, b0: f32, b1: f32, duration: f32| Frame {
             poses: vec![
-                Pose { root: [r0, 0.0], angles: vec![0.0] },
-                Pose { root: [r1, 0.0], angles: vec![0.0] },
+                Pose { root: [r0, 0.0], angles: vec![0.0], sx: 1.0, sy: 1.0 },
+                Pose { root: [r1, 0.0], angles: vec![0.0], sx: 1.0, sy: 1.0 },
             ],
             duration,
             easing: None,
@@ -1831,9 +2081,9 @@ mod tests {
             core.project.frames.push(f);
         }
         core.project.camera = vec![
-            CameraKey { frame: 0, x: 1.0, y: 0.0, zoom: 1.0, angle: 0.0 },
-            CameraKey { frame: A, x: 10.0, y: 0.0, zoom: 1.0, angle: 0.0 },
-            CameraKey { frame: B, x: 30.0, y: 0.0, zoom: 1.0, angle: 0.0 },
+            CameraKey { frame: 0, x: 1.0, y: 0.0, zoom: 1.0, angle: 0.0, easing: crate::model::CameraEase::Linear },
+            CameraKey { frame: A, x: 10.0, y: 0.0, zoom: 1.0, angle: 0.0, easing: crate::model::CameraEase::Linear },
+            CameraKey { frame: B, x: 30.0, y: 0.0, zoom: 1.0, angle: 0.0, easing: crate::model::CameraEase::Linear },
         ];
         assert!(core.copy_range(0, 2));
         assert!(core.paste_range(1));
@@ -1848,7 +2098,7 @@ mod tests {
     }
 
     fn bd_pose(root: [f32; 2], angles: &[f32]) -> Pose {
-        Pose { root, angles: angles.to_vec() }
+        Pose { root, angles: angles.to_vec(), sx: 1.0, sy: 1.0 }
     }
 
     /// Two frames with distinct poses and bends, the
@@ -1925,6 +2175,24 @@ mod tests {
         assert!(legacy.project.frames[1].bends.is_empty());
         let bends = &core.project.frames[1].bends[0];
         assert!(approx(bends[0], 0.4) && approx(bends[1], -0.2), "bends: {bends:?}");
+    }
+
+    #[test]
+    fn breakdown_carries_the_log_lerped_pose_scale() {
+        // W2-31 (P-5b): breakdowns sample through Pose::lerp,
+        // so a breakdown between a squashed key (0.5, 0.25)
+        // and a stretched key (2.0, 4.0) authors the
+        // LOG-space midpoint scale (1.0, 1.0) with no
+        // breakdown-code change — the fields ride the pose.
+        let mut core = breakdown_core(Easing::Linear);
+        core.project.frames[0].poses[0].sx = 0.5;
+        core.project.frames[0].poses[0].sy = 0.25;
+        core.project.frames[1].poses[0].sx = 2.0;
+        core.project.frames[1].poses[0].sy = 4.0;
+        assert_eq!(insert_breakdowns(&mut core, 0.5, 1), 1);
+        let mid = &core.project.frames[1].poses[0];
+        assert!(approx(mid.sx, 1.0), "breakdown sx = {}", mid.sx);
+        assert!(approx(mid.sy, 1.0), "breakdown sy = {}", mid.sy);
     }
 
     #[test]
@@ -2045,5 +2313,264 @@ mod tests {
         core.current = core.project.frames.len() - 1;
         let err = tool_insert_breakdown(&mut core, &json!({})).unwrap_err();
         assert_eq!(err, "Breakdown needs a following frame.");
+    }
+
+    // ---- Roadmap Wave 2 (W2-38): breakdown chains ----
+
+    /// Four frames whose roots step 100 units apart on x
+    /// (0, 100, 200, 300), angles stepping 10 per frame,
+    /// bends stepping 0.4 per frame, Linear project
+    /// easing: the chain testbed — a span of three
+    /// segments with a known sample at every fraction.
+    fn chain_core() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.easing = Easing::Linear;
+        core.project.frames = (0..4)
+            .map(|k| Frame {
+                poses: vec![bd_pose([100.0 * k as f32, 200.0], &[10.0 * k as f32, 10.0])],
+                duration: 1.0,
+                easing: None,
+                bends: vec![vec![0.4 * k as f32, 0.0]],
+            })
+            .collect();
+        core.current = 0;
+        core
+    }
+
+    #[test]
+    fn breakdown_chain_positions_distribute_over_the_whole_span() {
+        // Even spacing over three segments: the global
+        // fractions 0.25 / 0.5 / 0.75 land at span
+        // positions 0.75 / 1.5 / 2.25 — the local
+        // fractions DESCEND (0.75, 0.5, 0.25) as the
+        // chain crosses segments, the signature of one
+        // curve over the span rather than one per
+        // segment.
+        let pos = breakdown_chain_positions(0.5, 3, 3);
+        assert_eq!(pos.len(), 3);
+        assert_eq!(pos[0].0, 0);
+        assert!(approx(pos[0].1, 0.75), "positions: {pos:?}");
+        assert_eq!(pos[1].0, 1);
+        assert!(approx(pos[1].1, 0.5), "positions: {pos:?}");
+        assert_eq!(pos[2].0, 2);
+        assert!(approx(pos[2].1, 0.25), "positions: {pos:?}");
+        // A single even breakdown over three segments
+        // lands inside the MIDDLE segment.
+        assert_eq!(breakdown_chain_positions(0.5, 1, 3), vec![(1, 0.5)]);
+        // Favouring the current key crowds the whole
+        // chain toward it, across segments too.
+        let toward_a = breakdown_chain_positions(0.25, 2, 4);
+        assert_eq!(toward_a.len(), 2);
+        assert!(toward_a.iter().all(|(seg, _)| *seg <= 1), "crowded early: {toward_a:?}");
+    }
+
+    #[test]
+    fn breakdown_chain_positions_skip_positions_on_existing_frames() {
+        // Even spacing over a commensurate span lands
+        // every position exactly on a frame: all skipped.
+        assert!(breakdown_chain_positions(0.5, 3, 4).is_empty());
+        assert!(breakdown_chain_positions(0.5, 1, 2).is_empty());
+        assert!(breakdown_chain_positions(0.5, 1, 4).is_empty());
+        // Mixed: over six segments the middle position
+        // (span position 3.0) is a frame; the other two
+        // land inside segments 1 and 4.
+        assert_eq!(
+            breakdown_chain_positions(0.5, 3, 6),
+            vec![(1, 0.5), (4, 0.5)]
+        );
+        // A non-finite favour yields no positions.
+        assert!(breakdown_chain_positions(f32::NAN, 3, 3).is_empty());
+    }
+
+    #[test]
+    fn breakdown_chain_positions_are_monotonic_and_clamped() {
+        let pos = breakdown_chain_positions(0.9, 99, 999);
+        assert!(pos.len() <= BREAKDOWN_CHAIN_COUNT_MAX, "count clamped: {}", pos.len());
+        assert!(
+            pos.iter().all(|(seg, u)| *seg < BREAKDOWN_CHAIN_SPAN_MAX && *u > 0.0 && *u < 1.0),
+            "inside the span: {pos:?}"
+        );
+        assert!(
+            pos.windows(2).all(|w| w[0].0 < w[1].0 || (w[0].0 == w[1].0 && w[0].1 < w[1].1)),
+            "strictly increasing: {pos:?}"
+        );
+        // A zero span clamps to one segment.
+        let one = breakdown_chain_positions(0.5, 2, 0);
+        assert_eq!(one.len(), 2);
+        assert!(one.iter().all(|(seg, _)| *seg == 0), "one segment: {one:?}");
+    }
+
+    #[test]
+    fn breakdown_chain_authors_the_span_distribution() {
+        let mut core = chain_core();
+        assert_eq!(insert_breakdown_chain(&mut core, 0.5, 3, 3), 3);
+        assert_eq!(core.project.frames.len(), 7);
+        // The roots read the whole distribution off the
+        // timeline: 75 (seg 0 @ 0.75), 150 (seg 1 @ 0.5),
+        // 225 (seg 2 @ 0.25) spliced between the keys.
+        let roots: Vec<f32> = core
+            .project
+            .frames
+            .iter()
+            .map(|f| f.poses[0].root[0])
+            .collect();
+        let want = [0.0, 75.0, 100.0, 150.0, 200.0, 225.0, 300.0];
+        assert_eq!(roots.len(), want.len());
+        assert!(
+            roots.iter().zip(want.iter()).all(|(g, w)| approx(*g, *w)),
+            "roots: {roots:?}"
+        );
+        // Bends sample at the RAW local fraction: seg 0
+        // @ 0.75 lerps 0.0 -> 0.4 to 0.3.
+        assert!(approx(core.project.frames[1].bends[0][0], 0.3));
+        assert_eq!(core.current, 1, "the playhead lands on the first breakdown");
+        assert_eq!(
+            core.status,
+            "Inserted 3 breakdowns across 3 segments after frame 1."
+        );
+    }
+
+    #[test]
+    fn breakdown_chain_samples_each_segment_with_its_own_easing() {
+        // An easing override on the span's FIRST frame
+        // shapes only its own segment's samples: seg 0
+        // @ 0.75 with EaseIn poses at 0.5625 (root
+        // 56.25), while seg 1 stays Linear (150).
+        let mut core = chain_core();
+        core.project.frames[0].easing = Some(Easing::EaseIn);
+        assert_eq!(insert_breakdown_chain(&mut core, 0.5, 3, 3), 3);
+        let roots: Vec<f32> = core
+            .project
+            .frames
+            .iter()
+            .map(|f| f.poses[0].root[0])
+            .collect();
+        assert!(approx(roots[1], 56.25), "roots: {roots:?}");
+        assert!(approx(roots[3], 150.0), "roots: {roots:?}");
+        assert!(approx(roots[5], 225.0), "roots: {roots:?}");
+    }
+
+    #[test]
+    fn breakdown_chain_with_span_one_matches_insert_breakdowns() {
+        let mut chained = breakdown_core(Easing::Linear);
+        assert_eq!(insert_breakdown_chain(&mut chained, 0.25, 2, 1), 2);
+        let mut single = breakdown_core(Easing::Linear);
+        assert_eq!(insert_breakdowns(&mut single, 0.25, 2), 2);
+        assert_eq!(chained.project.frames.len(), single.project.frames.len());
+        assert_eq!(chained.current, single.current);
+        assert_eq!(chained.status, single.status);
+        for (a, b) in chained.project.frames.iter().zip(single.project.frames.iter()) {
+            assert_eq!(a.poses.len(), b.poses.len());
+            for (pa, pb) in a.poses.iter().zip(b.poses.iter()) {
+                assert!(approx(pa.root[0], pb.root[0]) && approx(pa.root[1], pb.root[1]));
+                assert!(pa.angles.iter().zip(pb.angles.iter()).all(|(x, y)| approx(*x, *y)));
+            }
+            assert_eq!(a.bends, b.bends);
+        }
+    }
+
+    #[test]
+    fn breakdown_chain_is_one_undo_step_for_the_whole_chain() {
+        let mut core = chain_core();
+        let depth = core.undo_depth();
+        assert_eq!(insert_breakdown_chain(&mut core, 0.5, 3, 3), 3);
+        assert_eq!(core.undo_depth(), depth + 1, "exactly one snapshot");
+        core.undo();
+        assert_eq!(core.project.frames.len(), 4, "one undo removes the whole chain");
+    }
+
+    #[test]
+    fn breakdown_chain_refusals_spend_no_snapshot() {
+        // No following frame.
+        let mut core = chain_core();
+        core.current = 3;
+        let depth = core.undo_depth();
+        assert_eq!(insert_breakdown_chain(&mut core, 0.5, 3, 3), 0);
+        assert_eq!(core.status, "Breakdown chain needs a following frame.");
+        assert_eq!(core.undo_depth(), depth);
+        assert_eq!(core.project.frames.len(), 4);
+        // A non-finite favour refuses the same way.
+        core.current = 0;
+        assert_eq!(insert_breakdown_chain(&mut core, f32::NAN, 3, 3), 0);
+        assert_eq!(
+            core.status,
+            "Breakdown favour must be a finite fraction between 0 and 1."
+        );
+        assert_eq!(core.undo_depth(), depth);
+        // Every position on an existing frame: an even
+        // chain over a four-segment span of five frames.
+        let mut five = chain_core();
+        five.project.frames.push(Frame {
+            poses: vec![bd_pose([400.0, 200.0], &[40.0, 10.0])],
+            duration: 1.0,
+            easing: None,
+            bends: vec![vec![1.6, 0.0]],
+        });
+        let depth = five.undo_depth();
+        assert_eq!(insert_breakdown_chain(&mut five, 0.5, 3, 4), 0);
+        assert_eq!(
+            five.status,
+            "Breakdown chain lands only on existing frames — nothing to insert."
+        );
+        assert_eq!(five.undo_depth(), depth);
+        assert_eq!(five.project.frames.len(), 5);
+    }
+
+    #[test]
+    fn breakdown_chain_clamps_span_to_the_timeline_and_count_to_the_cap() {
+        // Span 64 asked of a three-segment timeline: the
+        // chain covers the three segments that exist and
+        // the status says so.
+        let mut core = chain_core();
+        assert_eq!(insert_breakdown_chain(&mut core, 0.25, 1, 64), 1);
+        assert_eq!(
+            core.status,
+            "Inserted 1 breakdown across 3 segments after frame 1."
+        );
+        assert!(approx(core.project.frames[1].poses[0].root[0], 75.0));
+        // Count 99 clamps to the chain cap (32): the op
+        // authors exactly the positions the public
+        // helper computes for the clamped parameters —
+        // never more than the cap. (Over three segments
+        // the even positions k/11 also land on frames at
+        // k = 11 and k = 22, so the helper's list is
+        // shorter than 32; the skip rule itself is
+        // pinned exactly in the positions tests above.)
+        let mut core = chain_core();
+        let expected = breakdown_chain_positions(0.5, 99, 3).len();
+        assert!(expected <= BREAKDOWN_CHAIN_COUNT_MAX);
+        assert_eq!(insert_breakdown_chain(&mut core, 0.5, 99, 3), expected);
+        assert_eq!(core.project.frames.len(), 4 + expected);
+    }
+
+    #[test]
+    fn breakdown_chain_leaves_frame_pins_absolute() {
+        // The module census rule, on the staged project:
+        // its playhead has exactly one segment after it,
+        // so a span-1 chain splices two breakdowns in —
+        // and no pin in any collection moves.
+        let mut core = staged_core();
+        let pins_before = all_pin_frames(&core);
+        assert_eq!(insert_breakdown_chain(&mut core, 0.5, 2, 1), 2);
+        assert_eq!(core.project.frames.len(), 6);
+        assert_eq!(all_pin_frames(&core), pins_before, "no pin moved");
+    }
+
+    #[test]
+    fn breakdown_chain_handler_validates_and_reports() {
+        let mut core = chain_core();
+        let out = tool_insert_breakdown_chain(&mut core, &json!({})).unwrap();
+        assert_eq!(out["inserted"], 1, "defaults: favour 0.5, count 1, span 3");
+        assert_eq!(out["frame_count"], 5);
+        let err = tool_insert_breakdown_chain(&mut core, &json!({ "favour": 1.5 })).unwrap_err();
+        assert!(err.contains("between 0 and 1"), "{err}");
+        let err = tool_insert_breakdown_chain(&mut core, &json!({ "count": 0 })).unwrap_err();
+        assert!(err.contains("at least 1"), "{err}");
+        let err = tool_insert_breakdown_chain(&mut core, &json!({ "span": 0 })).unwrap_err();
+        assert!(err.contains("at least 1"), "{err}");
+        // On the last frame the op's refusal surfaces.
+        core.current = core.project.frames.len() - 1;
+        let err = tool_insert_breakdown_chain(&mut core, &json!({})).unwrap_err();
+        assert_eq!(err, "Breakdown chain needs a following frame.");
     }
 }

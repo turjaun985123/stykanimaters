@@ -62,9 +62,10 @@
 //!   to its old target over `&mut s.core` (behaviour and
 //!   status lines byte-identical), and the two skipped
 //!   candidates landed as three commands:
-//!   `toggle-loop-playback` (the playback panel's
-//!   `pb-loop` flip of `State::loop_playback`, nothing
-//!   more) and `stroke-select-next` /
+//!   `toggle-loop-playback` (the wrap-flag flip of
+//!   `State::loop_playback`, nothing more — the panel's
+//!   `pb-loop` became the loop-mode cycle in W2-40;
+//!   IA-W2-40-1) and `stroke-select-next` /
 //!   `stroke-select-prev` (delegating to
 //!   `stroke_inspector::step_stroke_selection`). The
 //!   longer table (84 entries) needs no change to the recents /
@@ -260,6 +261,27 @@
 //!   (`keymap::BINDINGS`), which also generates the
 //!   help rows and the menu hints: one spelling, three
 //!   surfaces, no copies to drift.
+//! * Roadmap Wave 2 (W2-67) gave the parameterised
+//!   commands an inline argument STEP: three commands
+//!   appended (`goto-frame`, `set-fps`,
+//!   `set-camera-zoom` — the census in [`ARG_KINDS`])
+//!   whose `run` opens the step ([`begin_arg_prompt`])
+//!   instead of executing. The step is a page of this
+//!   panel, never a modal: the value field is prefilled
+//!   with the current value, Enter submits through
+//!   [`validate_arg`] (a refusal is shown under the
+//!   field in error ink and nothing executes), Escape
+//!   returns to the listing, and a successful submit
+//!   runs through the same [`run_argument`] the query
+//!   forms use and records the command in the recents
+//!   like any other run. The query grammar gained the
+//!   third head `zoom <percent>` to match. The recents
+//!   themselves needed no building — Phase F/L built
+//!   and persisted them through `LayoutPrefs`
+//!   (`shell::palette_recents`); this seat audited the
+//!   brief's five properties against the code and
+//!   pinned the one that was only implicit (recording
+//!   through the run paths) in the tests below.
 //! * [`fuzzy_score`] / [`filter_commands`] are pure and
 //!   thoroughly unit-tested below.
 //! * The view follows the Rune launcher example's field
@@ -624,6 +646,14 @@ fn cmd_go_effects(s: &mut State) {
 /// as [`cmd_go_animate`].
 fn cmd_go_audio(s: &mut State) {
     crate::rune_sec::workspaces::select_workspace(s, Workspace::Audio);
+}
+
+/// Phase I: go to the 3D workspace; same forwarding as
+/// [`cmd_go_animate`].
+/// Roadmap Wave 2 (W2-21): go to the Build workspace;
+/// same forwarding as [`cmd_go_animate`].
+fn cmd_go_build(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(s, Workspace::Build);
 }
 
 /// Phase I: go to the 3D workspace; same forwarding as
@@ -1597,6 +1627,7 @@ pub static COMMANDS: &[Command] = &[
     Command { key: "go-graph", title: "Go to Graph workspace", group: "Workspaces", run: cmd_go_graph },
     Command { key: "go-effects", title: "Go to Effects workspace", group: "Workspaces", run: cmd_go_effects },
     Command { key: "go-audio", title: "Go to Audio workspace", group: "Workspaces", run: cmd_go_audio },
+    Command { key: "go-build", title: "Go to Build workspace", group: "Workspaces", run: cmd_go_build },
     Command { key: "go-build3d", title: "Go to 3D workspace", group: "Workspaces", run: cmd_go_build3d },
     Command { key: "go-export", title: "Go to Export workspace", group: "Workspaces", run: cmd_go_export },
     Command { key: "go-home", title: "Go to Home workspace", group: "Workspaces", run: cmd_go_home },
@@ -1657,6 +1688,15 @@ pub static COMMANDS: &[Command] = &[
     // -- Wave Y (appended: every entry above keeps its
     // -- place) ------------------------------------------
     Command { key: "import-layered-set", title: "Import layered set", group: "Projects", run: cmd_import_layered_set },
+    // -- Roadmap Wave 2 (W2-67, appended: every entry
+    // -- above keeps its place) -------------------------
+    // The parameterised commands: each `run` opens the
+    // palette's argument step for its scalar (see
+    // ArgKind) instead of executing — the run paths
+    // notice the open step and keep the palette up.
+    Command { key: "goto-frame", title: "Go to frame…", group: "Transport", run: cmd_goto_frame_arg },
+    Command { key: "set-fps", title: "Set frame rate…", group: "Frames", run: cmd_set_fps_arg },
+    Command { key: "set-camera-zoom", title: "Set camera zoom…", group: "Camera", run: cmd_set_camera_zoom_arg },
 ];
 
 // ----------------------------------------------------------------
@@ -1764,6 +1804,9 @@ pub fn command_keywords(key: &str) -> &'static str {
         "theme-dark" => "theme dark mode appearance",
         "fps-up" => "fps frame rate faster",
         "fps-down" => "fps frame rate slower",
+        "goto-frame" => "go to frame jump seek frame number",
+        "set-fps" => "fps frame rate set frames per second",
+        "set-camera-zoom" => "zoom camera set percent scale view",
         _ => "",
     }
 }
@@ -2034,16 +2077,23 @@ fn seed_recents_cache(keys: &[&'static str]) {
 // Argument commands (Roadmap Wave 1, RM26 — PL-5's K10)
 // ----------------------------------------------------------------
 
-/// A command the user typed an argument for, parsed from
-/// the query: `frame 42` / `go 42` / `goto 42` jumps the
-/// playhead, `fps 30` sets the frame rate. The frame
+/// A command the user supplied an argument for: `frame
+/// 42` / `go 42` / `goto 42` jumps the playhead, `fps 30`
+/// sets the frame rate, `zoom 150` sets the camera zoom
+/// (Roadmap Wave 2, W2-67 — the percent the camera panel
+/// speaks, stored here as the zoom factor). The frame
 /// number is the one the UI shows (1-based — the graph
 /// readout's `frame {current + 1}` convention); it is
-/// stored zero-based here.
+/// stored zero-based here. Both doors produce this type
+/// — the query grammar ([`argument_command`]) and the
+/// argument step ([`validate_arg`]) — and both run it
+/// through [`run_argument`], so they can never disagree
+/// about what a value does.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum ArgCommand {
     GoToFrame(usize),
     SetFps(f32),
+    SetCameraZoom(f32),
 }
 
 /// Parse the query as an argument command. The shape is
@@ -2068,6 +2118,11 @@ pub fn argument_command(query: &str) -> Option<ArgCommand> {
             .ok()
             .filter(|v| v.is_finite())
             .map(ArgCommand::SetFps),
+        "zoom" => tail
+            .parse::<f32>()
+            .ok()
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .map(|pct| ArgCommand::SetCameraZoom(pct / 100.0)),
         _ => None,
     }
 }
@@ -2086,6 +2141,9 @@ pub fn arg_title(arg: ArgCommand) -> String {
                 format!("Set frame rate to {f:.1} fps")
             }
         }
+        ArgCommand::SetCameraZoom(z) => {
+            format!("Set camera zoom to {}%", (z * 100.0).round() as i64)
+        }
     }
 }
 
@@ -2096,6 +2154,7 @@ fn arg_group(arg: ArgCommand) -> &'static str {
     match arg {
         ArgCommand::GoToFrame(_) => "Transport",
         ArgCommand::SetFps(_) => "Frames",
+        ArgCommand::SetCameraZoom(_) => "Camera",
     }
 }
 
@@ -2103,7 +2162,12 @@ fn arg_group(arg: ArgCommand) -> &'static str {
 /// frame (and stands down on an empty timeline, like
 /// `cmd_first_frame`); the rate goes through the core's
 /// deliberate setter, which clamps to 1..=60 and takes
-/// its own undo step.
+/// its own undo step; the zoom rides the palette's own
+/// zoom op (`camera_zoom_by`, the `cam-zoom-in` /
+/// `cam-zoom-out` commands' target), factored from the
+/// zoom in effect so the run lands on the asked value —
+/// and spends no snapshot when already there (the
+/// camera panel's 1:1 discipline).
 fn run_argument(s: &mut State, arg: ArgCommand) {
     let c = &mut s.core;
     match arg {
@@ -2114,7 +2178,326 @@ fn run_argument(s: &mut State, arg: ArgCommand) {
             }
         }
         ArgCommand::SetFps(f) => c.set_project_fps(f),
+        ArgCommand::SetCameraZoom(z) => {
+            let cur = c.camera_here().2;
+            if cur > 0.0 && (cur - z).abs() > 0.001 {
+                c.camera_zoom_by(z / cur);
+            }
+        }
     }
+}
+
+// ----------------------------------------------------------------
+// Argument prompts (Roadmap Wave 2, W2-67 — PL-5 remainder)
+// ----------------------------------------------------------------
+
+/// Which parameterised command the argument step is
+/// collecting a value for. The census this type encodes
+/// was taken over the whole command table and the core
+/// ops behind it — a command qualifies only when its
+/// action honestly takes ONE scalar with a stated range:
+///
+/// * Go to frame — the frame number; existed only as a
+///   query form (`frame 42`) before this seat.
+/// * Set frame rate — the rate the `fps-up` / `fps-down`
+///   steppers step and the scene panel's field edits.
+/// * Set camera zoom — the percent the camera panel's
+///   zoom field edits (30–400, `camera_zoom_by`'s clamp).
+///
+/// Audited and deliberately NOT parameterised: export
+/// scale (the standing D-8 decision keeps an
+/// export-scale control unbuilt, palette included);
+/// brush size (a preset ladder, not a scalar — RM26's
+/// nearest-preset rule); add-frames-by-count (no
+/// count-taking op exists, and looping `add_frame`
+/// would spend one undo step per frame); onion depth
+/// (two scalars, prev and next — a one-value form would
+/// invent semantics); graph channel shift by N (its
+/// target is the graph panel's drawn channel, a
+/// selection the palette must not guess at); time /
+/// percent seeks (the transport's unit is the frame —
+/// a second unit for the same jump is a duplicate, not
+/// a parameter).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ArgKind {
+    GoToFrame,
+    SetFps,
+    SetCameraZoom,
+}
+
+/// The parameterised-command census: exactly the kinds
+/// the palette offers an argument step for, in table
+/// order. A test pins each kind to its table entry
+/// (key, title and group spelled once, here and in the
+/// table, and asserted equal), so the census and the
+/// table cannot drift apart silently.
+pub const ARG_KINDS: [ArgKind; 3] = [
+    ArgKind::GoToFrame,
+    ArgKind::SetFps,
+    ArgKind::SetCameraZoom,
+];
+
+impl ArgKind {
+    /// The command-table key of this kind's command.
+    pub fn command_key(self) -> &'static str {
+        match self {
+            ArgKind::GoToFrame => "goto-frame",
+            ArgKind::SetFps => "set-fps",
+            ArgKind::SetCameraZoom => "set-camera-zoom",
+        }
+    }
+
+    /// The command's table title (pinned equal to the
+    /// table's own spelling by the census test).
+    pub fn title(self) -> &'static str {
+        match self {
+            ArgKind::GoToFrame => "Go to frame…",
+            ArgKind::SetFps => "Set frame rate…",
+            ArgKind::SetCameraZoom => "Set camera zoom…",
+        }
+    }
+
+    /// The command's table group (same pin as title).
+    pub fn group(self) -> &'static str {
+        match self {
+            ArgKind::GoToFrame => "Transport",
+            ArgKind::SetFps => "Frames",
+            ArgKind::SetCameraZoom => "Camera",
+        }
+    }
+}
+
+/// The live values an argument is validated against and
+/// the step's copy is written from: the frame count and
+/// position, the project rate and the zoom in effect.
+/// A plain value so [`validate_arg`] and
+/// [`arg_prompt_label`] stay pure and pinnable without
+/// a shell state.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ArgContext {
+    pub frames: usize,
+    pub current: usize,
+    pub fps: f32,
+    pub zoom: f32,
+}
+
+/// Read the argument context out of the shell state.
+pub fn arg_context(s: &State) -> ArgContext {
+    let c = &s.core;
+    ArgContext {
+        frames: c.frame_count(),
+        current: c.current,
+        fps: c.project.fps,
+        zoom: c.camera_here().2,
+    }
+}
+
+/// A frame rate as the step spells it: whole rates
+/// without a fraction, others with one decimal (the
+/// argument row's own formatting, `arg_title`).
+fn fps_text(f: f32) -> String {
+    if f.fract() == 0.0 {
+        format!("{}", f as i64)
+    } else {
+        format!("{f:.1}")
+    }
+}
+
+/// The value the step's field opens with: the value in
+/// effect now, in the kind's own unit — the number
+/// fields' discipline (a field shows the current value;
+/// the user edits it, they do not retype it).
+pub fn arg_prefill(kind: ArgKind, ctx: ArgContext) -> String {
+    match kind {
+        ArgKind::GoToFrame => {
+            if ctx.frames > 0 {
+                format!("{}", ctx.current + 1)
+            } else {
+                String::new()
+            }
+        }
+        ArgKind::SetFps => fps_text(ctx.fps),
+        ArgKind::SetCameraZoom => format!("{}", (ctx.zoom * 100.0).round() as i64),
+    }
+}
+
+/// The step's label line: what to type, the honest
+/// range, and the value in effect — so a refusal never
+/// teaches anything the label did not already say.
+pub fn arg_prompt_label(kind: ArgKind, ctx: ArgContext) -> String {
+    match kind {
+        ArgKind::GoToFrame => {
+            if ctx.frames > 0 {
+                format!(
+                    "Frame number, 1 to {} (now {})",
+                    ctx.frames,
+                    ctx.current + 1
+                )
+            } else {
+                "Frame number".to_string()
+            }
+        }
+        ArgKind::SetFps => format!(
+            "Frames per second, 1 to 60 (now {})",
+            fps_text(ctx.fps)
+        ),
+        ArgKind::SetCameraZoom => format!(
+            "Zoom percent, 30 to 400 (now {}%)",
+            (ctx.zoom * 100.0).round() as i64
+        ),
+    }
+}
+
+/// Validate the step's text for `kind` against the live
+/// context: the parsed [`ArgCommand`] to run, or the
+/// refusal to show under the field. This is the step's
+/// only gate — a refusal means nothing executes, no
+/// undo step is spent and no recent is recorded.
+/// Ranges are the ops' own (the goto's timeline,
+/// `set_project_fps`'s 1..=60, `camera_zoom_by`'s
+/// 30–400 percent), refused here rather than silently
+/// clamped, because the step has the room to say so
+/// (the terse query forms keep their clamping — RM26).
+pub fn validate_arg(kind: ArgKind, text: &str, ctx: ArgContext) -> Result<ArgCommand, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("Enter a value first.".to_string());
+    }
+    match kind {
+        ArgKind::GoToFrame => {
+            let n: usize = text
+                .parse()
+                .map_err(|_| "Frame must be a whole number.".to_string())?;
+            if ctx.frames == 0 {
+                return Err("There are no frames to go to.".to_string());
+            }
+            if n == 0 || n > ctx.frames {
+                return Err(format!("Frame must be between 1 and {}.", ctx.frames));
+            }
+            Ok(ArgCommand::GoToFrame(n - 1))
+        }
+        ArgKind::SetFps => {
+            let f: f32 = text
+                .parse()
+                .ok()
+                .filter(|v: &f32| v.is_finite())
+                .ok_or_else(|| "Frame rate must be a number.".to_string())?;
+            if !(1.0..=60.0).contains(&f) {
+                return Err("Frame rate must be between 1 and 60 fps.".to_string());
+            }
+            Ok(ArgCommand::SetFps(f))
+        }
+        ArgKind::SetCameraZoom => {
+            let pct: f32 = text
+                .parse()
+                .ok()
+                .filter(|v: &f32| v.is_finite())
+                .ok_or_else(|| "Zoom must be a number (a percent).".to_string())?;
+            if !(30.0..=400.0).contains(&pct) {
+                return Err("Zoom must be between 30% and 400%.".to_string());
+            }
+            Ok(ArgCommand::SetCameraZoom(pct / 100.0))
+        }
+    }
+}
+
+/// Open the argument step for `kind` (the parameterised
+/// commands' `run`): the listing's field yields focus
+/// to the step's, prefilled with the current value, any
+/// earlier refusal forgotten. The run paths
+/// (`run_selected` / `run_command`) see the open step
+/// and keep the palette up instead of closing it.
+pub fn begin_arg_prompt(s: &mut State, kind: ArgKind) {
+    let ctx = arg_context(s);
+    s.palette.arg_edit = TextEdit::new(arg_prefill(kind, ctx));
+    s.palette.arg_edit.focused = true;
+    s.palette.query.focused = false;
+    s.palette.arg_error = None;
+    s.palette.arg_kind = Some(kind);
+}
+
+/// Leave the argument step without running anything
+/// (Escape in the step): back to the listing, its field
+/// focused again. The palette itself stays open — the
+/// step is a page of it, so Escape peels one page, and
+/// only the listing's Escape closes.
+pub fn cancel_arg_prompt(s: &mut State) {
+    s.palette.arg_kind = None;
+    s.palette.arg_error = None;
+    s.palette.arg_edit.focused = false;
+    s.palette.query.focused = true;
+}
+
+/// Submit the argument step (Enter, either routing):
+/// validate, and either run — through [`run_argument`],
+/// the query forms' own runner — recording the command
+/// in the recents like any other palette run before
+/// closing, or stand on the refusal: the step stays
+/// open, the error is pinned under the field, and
+/// nothing has executed.
+pub fn submit_arg_prompt(s: &mut State) {
+    let Some(kind) = s.palette.arg_kind else {
+        return;
+    };
+    let text = s.palette.arg_edit.text.clone();
+    match validate_arg(kind, &text, arg_context(s)) {
+        Ok(arg) => {
+            s.palette.arg_kind = None;
+            s.palette.arg_error = None;
+            s.palette.arg_edit.focused = false;
+            run_argument(s, arg);
+            record_recent(&mut s.palette.recent, kind.command_key());
+            close_palette(s);
+        }
+        Err(msg) => {
+            s.palette.arg_error = Some(msg);
+        }
+    }
+}
+
+/// Note an edit in the step's field: the refusal it was
+/// answering no longer describes the text, so it
+/// clears. The step view's `on_input_change` calls
+/// this — kept as a named fn so the discipline is
+/// pinnable without rendering the view.
+pub fn note_arg_edited(s: &mut State) {
+    s.palette.arg_error = None;
+}
+
+/// The argument step field's own key handler (the query
+/// field's pattern): Escape returns to the listing and
+/// the listing's navigation keys are claimed (consumed,
+/// doing nothing — the listing is frozen behind the
+/// step). Enter is not handled here: a single-line
+/// field's plain Return routes to `on_submit`, which
+/// submits the step.
+fn palette_arg_field_key(s: &mut State, ev: &KeyEvent) -> bool {
+    match ev.key {
+        Key::Escape => {
+            cancel_arg_prompt(s);
+            true
+        }
+        Key::Down | Key::Up | Key::PageDown | Key::PageUp => true,
+        _ => false,
+    }
+}
+
+/// W2-67: `goto-frame`'s run — opens the argument step
+/// for the frame number (see [`begin_arg_prompt`]).
+fn cmd_goto_frame_arg(s: &mut State) {
+    begin_arg_prompt(s, ArgKind::GoToFrame);
+}
+
+/// W2-67: `set-fps`'s run — opens the argument step
+/// for the frame rate.
+fn cmd_set_fps_arg(s: &mut State) {
+    begin_arg_prompt(s, ArgKind::SetFps);
+}
+
+/// W2-67: `set-camera-zoom`'s run — opens the argument
+/// step for the zoom percent.
+fn cmd_set_camera_zoom_arg(s: &mut State) {
+    begin_arg_prompt(s, ArgKind::SetCameraZoom);
 }
 
 /// How many rows the palette currently lists for `s`:
@@ -2195,6 +2578,25 @@ pub struct PaletteState {
     /// open/close cycles but not a restart — the field's
     /// docs say so rather than implying more.
     pub pins: Vec<&'static str>,
+    /// The argument step's command while the step is
+    /// showing (Roadmap Wave 2, W2-67), or None while
+    /// the listing shows. Set by [`begin_arg_prompt`],
+    /// cleared by the step's submit/cancel and by
+    /// [`close_palette`], so a step can never outlive
+    /// the palette it is a page of.
+    pub arg_kind: Option<ArgKind>,
+    /// The argument step's value field — always present
+    /// (the panel session-state discipline: the field
+    /// exists, its *step* is what opens and closes),
+    /// meaningful only while `arg_kind` is Some. It is
+    /// rebuilt with the prefilled value on every
+    /// [`begin_arg_prompt`].
+    pub arg_edit: TextEdit,
+    /// The argument step's standing validation refusal,
+    /// rendered under its field in error ink; cleared by
+    /// any edit ([`note_arg_edited`]), by opening the
+    /// step and by leaving it.
+    pub arg_error: Option<String>,
 }
 
 impl PaletteState {
@@ -2205,6 +2607,9 @@ impl PaletteState {
             selected: 0,
             recent: Vec::new(),
             pins: Vec::new(),
+            arg_kind: None,
+            arg_edit: TextEdit::new(""),
+            arg_error: None,
         }
     }
 }
@@ -2232,12 +2637,34 @@ pub fn open_palette(s: &mut State) {
     s.palette.query.clear();
     s.palette.selected = 0;
     s.palette.query.focused = true;
+    // A step never survives into a fresh open, whatever
+    // path closed the palette last time (W2-67).
+    s.palette.arg_kind = None;
+    s.palette.arg_error = None;
+    s.palette.arg_edit.focused = false;
 }
 
 /// Close the palette and release the field's focus flag.
+/// Closing also retires any argument step in flight
+/// (W2-67): the step is a page of the palette, so no
+/// close path can leave one standing behind it.
 pub fn close_palette(s: &mut State) {
     s.palette.open = false;
     s.palette.query.focused = false;
+    s.palette.arg_kind = None;
+    s.palette.arg_error = None;
+    s.palette.arg_edit.focused = false;
+}
+
+/// Clear the palette query (W2-57): the no-results
+/// empty state's remedy — the query empties (the
+/// field's own `clear`, the same write `open_palette`
+/// makes) and the selection returns to the top, the
+/// field's own on_input_change discipline, so the full
+/// listing stands again.
+pub fn clear_query(s: &mut State) {
+    s.palette.query.clear();
+    s.palette.selected = 0;
 }
 
 /// Run the currently highlighted row against the shell
@@ -2264,6 +2691,13 @@ pub fn run_selected(s: &mut State) {
         display_commands_full(&s.palette.query.text, &s.palette.recent, &s.palette.pins);
     if let Some(&ci) = results.get(sel - offset) {
         (COMMANDS[ci].run)(s);
+        if s.palette.arg_kind.is_some() {
+            // W2-67: the command opened its argument step
+            // instead of executing — the palette stays
+            // open on the step, and the run is recorded
+            // by the step's submit, not here.
+            return;
+        }
         record_recent(&mut s.palette.recent, COMMANDS[ci].key);
     }
     close_palette(s);
@@ -2275,6 +2709,12 @@ pub fn run_selected(s: &mut State) {
 fn run_command(s: &mut State, ci: usize) {
     if let Some(cmd) = COMMANDS.get(ci) {
         (cmd.run)(s);
+        if s.palette.arg_kind.is_some() {
+            // W2-67: the argument step opened — same
+            // contract as `run_selected`: stay open,
+            // record nothing yet.
+            return;
+        }
         record_recent(&mut s.palette.recent, cmd.key);
     }
     close_palette(s);
@@ -2296,6 +2736,30 @@ pub fn palette_handle_key(s: &mut State, ev: &KeyEvent) -> bool {
             return true;
         }
         return false;
+    }
+    if s.palette.arg_kind.is_some() {
+        // The argument step (W2-67) is modal to the
+        // palette, never to the app: Enter submits it,
+        // Escape returns to the listing, the listing's
+        // navigation and pin keys are claimed (frozen
+        // behind the step), and everything else falls
+        // through to the step's focused field, exactly
+        // as typing falls to the query field today.
+        if ev.is_command('p') {
+            return true;
+        }
+        return match ev.key {
+            Key::Enter => {
+                submit_arg_prompt(s);
+                true
+            }
+            Key::Escape => {
+                cancel_arg_prompt(s);
+                true
+            }
+            Key::Down | Key::Up | Key::PageDown | Key::PageUp => true,
+            _ => false,
+        };
     }
     if ev.is_command('p') {
         toggle_selected_pin(s);
@@ -2420,7 +2884,22 @@ fn heading_row(label: &'static str, t: &Theme) -> El {
 /// Self-contained — the integrator renders it while
 /// `state.palette.open`, typically as an overlay above
 /// the main column.
+///
+/// Reduced motion (Roadmap Wave 2, W2-53 — verified
+/// from the pinned Rune rev 87caf2a): the panel's
+/// SNAP entrance pair below is gated by the host
+/// Reduce Motion flag inside the runtime
+/// (`PropClass::reduce` in rune-motion's store) —
+/// the 4 pt rise lands at once and the fade becomes
+/// Rune's 0.18 s REDUCED_FADE, so no call-site gate
+/// is needed or wanted here.
 pub fn palette_view(s: &State, t: &Theme) -> El {
+    // The argument step (W2-67) replaces the listing
+    // while it is open — one page of the panel at a
+    // time, never both.
+    if s.palette.arg_kind.is_some() {
+        return palette_arg_view(s, t);
+    }
     let accent = tok::accent(0, true);
     // Roadmap Wave 1 (RM26): the listing is the full
     // composition (argument row + pins + recents + every
@@ -2471,10 +2950,17 @@ pub fn palette_view(s: &State, t: &Theme) -> El {
         );
 
     if total == 0 {
-        panel = panel.child(design::empty_state(
+        // W2-57 (PL-6 completion, IA-RM28-6): the state
+        // offers its remedy — clear the query that hid
+        // every command (the palette's own query state —
+        // [`clear_query`]).
+        panel = panel.child(design::empty_state_action(
             "magnifying-glass",
             "No commands match",
+            "palette-empty-clear",
+            "Clear search",
             t,
+            |s: &mut State| clear_query(s),
         ));
     } else {
         let mut list = col().padding(6.0).gap(2.0);
@@ -2615,6 +3101,96 @@ pub fn palette_view(s: &State, t: &Theme) -> El {
     panel.child(footer)
 }
 
+/// The argument step's panel (Roadmap Wave 2, W2-67):
+/// the parameterised command's title over its value
+/// field, the range-and-current label under it, the
+/// standing refusal in error ink when one stands, and
+/// the step's own footer. It wears the listing panel's
+/// own shell (`command-palette`, 540 pt, same card and
+/// entrance-free construction) because it is a page of
+/// that panel — the listing is not rendered behind it.
+/// The field is the kit's flagged form: while a refusal
+/// stands, the field carries the error-ink hairline
+/// (the number fields' invalid discipline).
+fn palette_arg_view(s: &State, t: &Theme) -> El {
+    let kind = s.palette.arg_kind.unwrap_or(ArgKind::GoToFrame);
+    let ctx = arg_context(s);
+    let invalid = s.palette.arg_error.is_some();
+    let field = design::text_field_flagged(
+        &s.palette.arg_edit,
+        type_::BODY.lh(26.0),
+        s.palette.arg_edit.focused,
+        invalid,
+        t,
+    )
+    .key("palette-arg")
+    .single_line()
+    .grow(1.0)
+    .color(t.text)
+    .placeholder(arg_prompt_label(kind, ctx), t.text_secondary)
+    .on_edit(|s: &mut State| &mut s.palette.arg_edit)
+    .on_input_change(|s: &mut State, _tx: &mut Tx| note_arg_edited(s))
+    .on_input_key(|s: &mut State, ev: &KeyEvent, _tx: &mut Tx| palette_arg_field_key(s, ev))
+    .on_submit(|s: &mut State, _tx: &mut Tx| submit_arg_prompt(s));
+
+    let mut body = col()
+        .padding(16.0)
+        .gap(6.0)
+        .child(field)
+        .child(
+            text(arg_prompt_label(kind, ctx))
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
+    if let Some(err) = &s.palette.arg_error {
+        body = body.child(
+            text(err.clone())
+                .font(type_::LABEL)
+                .color(crate::rune_sec::app_theme::error_on(t)),
+        );
+    }
+
+    col()
+        .key("command-palette")
+        .w(540.0)
+        .radius(12.0)
+        .clip_rounded(12.0)
+        .fill(t.card)
+        .border(1.0, t.card_border)
+        .child(
+            row()
+                .h(52.0)
+                .px(16.0)
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text(kind.title())
+                        .font(type_::BODY)
+                        .color(t.text)
+                        .grow(1.0),
+                )
+                .child(
+                    text(kind.group())
+                        .font(type_::LABEL)
+                        .color(t.text_secondary),
+                ),
+        )
+        .child(body)
+        .child(el().h(1.0).w_full().fill(t.separator))
+        .child(
+            row()
+                .h(26.0)
+                .px(16.0)
+                .gap(6.0)
+                .center_y()
+                .child(design::kbd("Enter", t))
+                .child(text("run").font(type_::LABEL).color(t.text_secondary))
+                .child(text("·").font(type_::LABEL).color(t.text_secondary))
+                .child(design::kbd("Esc", t))
+                .child(text("back").font(type_::LABEL).color(t.text_secondary)),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2710,8 +3286,12 @@ mod tests {
         // first-frame command's missing twin;
         // delete-key-here, the keyframe tools section's
         // own delete; brush-size-down / brush-size-up,
-        // the stroke inspector's size steppers).
-        assert_eq!(total, 139, "palette should cover 139 commands, has {total}");
+        // the stroke inspector's size steppers),
+        // +3 in Roadmap Wave 2 (W2-67 — goto-frame /
+        // set-fps / set-camera-zoom, the parameterised
+        // commands whose runs open the argument step;
+        // see ARG_KINDS).
+        assert_eq!(total, 142, "palette should cover 142 commands, has {total}");
         for c in COMMANDS {
             assert!(!c.title.is_empty() && !c.group.is_empty(), "empty field on {}", c.key);
         }
@@ -2887,10 +3467,15 @@ mod tests {
         for key in ["toggle-loop-playback", "stroke-select-next", "stroke-select-prev"] {
             idx_of(key);
         }
-        // Loop toggle: flips the shell flag and nothing
-        // else — the pb-loop handler's exact behaviour —
-        // and a second run flips it back. The status line
-        // is untouched (no toast spam).
+        // Loop toggle: flips the shell wrap flag and
+        // nothing else — the palette command's own
+        // behaviour (IA-W2-40-1's parity-of-meaning
+        // note: the panel's pb-loop is the loop-MODE
+        // cycle since W2-40; this command remains the
+        // wrap-flag flip, and check 10's parity row
+        // covers it via the shell setting tool) — and a
+        // second run flips it back. The status line is
+        // untouched (no toast spam).
         let mut s = crate::init();
         let before = s.loop_playback;
         let status = s.core.status.clone();
@@ -2924,6 +3509,7 @@ mod tests {
             "go-graph",
             "go-effects",
             "go-audio",
+            "go-build",
             "go-build3d",
             "go-export",
             "go-home",
@@ -2948,6 +3534,7 @@ mod tests {
             ("go-graph", Workspace::Graph),
             ("go-effects", Workspace::Effects),
             ("go-audio", Workspace::Audio),
+            ("go-build", Workspace::Build),
             ("go-build3d", Workspace::Build3D),
             ("go-export", Workspace::Export),
             ("go-home", Workspace::Home),
@@ -3512,9 +4099,10 @@ mod tests {
         ("go-graph", "Alt+3"),
         ("go-effects", "Alt+4"),
         ("go-audio", "Alt+5"),
-        ("go-build3d", "Alt+6"),
-        ("go-export", "Alt+7"),
-        ("go-home", "Alt+8"),
+        ("go-build", "Alt+6"),
+        ("go-build3d", "Alt+7"),
+        ("go-export", "Alt+8"),
+        ("go-home", "Alt+9"),
         ("first-frame", "Home"),
         ("last-frame", "End"),
         ("prev-keyframe", ","),
@@ -3912,6 +4500,26 @@ mod tests {
     }
 
     #[test]
+    fn w2_57_clear_query_restores_the_full_listing() {
+        // The no-results state's remedy: a query that
+        // matches nothing leaves the listing empty;
+        // clear_query empties it and resets the
+        // selection, and the full listing stands again.
+        let mut s = crate::init();
+        s.palette.query.text = "qqqqqq".to_string();
+        s.palette.selected = 3;
+        let (none, _, _) =
+            display_commands_full(&s.palette.query.text, &s.palette.recent, &s.palette.pins);
+        assert!(none.is_empty(), "the gibberish query matches nothing");
+        clear_query(&mut s);
+        assert!(s.palette.query.text.is_empty());
+        assert_eq!(s.palette.selected, 0);
+        let (all, _, _) =
+            display_commands_full(&s.palette.query.text, &s.palette.recent, &s.palette.pins);
+        assert!(!all.is_empty(), "the cleared query lists everything");
+    }
+
+    #[test]
     fn open_palette_seeds_recents_from_the_cache_once() {
         reset_recents_cache();
         seed_recents_cache(&["export-mp4", "undo"]);
@@ -4078,6 +4686,303 @@ mod tests {
         assert_eq!(COMMANDS[idx_of("last-frame")].group, "Transport");
         assert_eq!(COMMANDS[idx_of("delete-key-here")].group, "Graph");
         assert_eq!(COMMANDS[idx_of("brush-size-down")].group, "Draw");
+    }
+
+    // -- W2-67: argument prompts + recents audit --------
+
+    fn key_ev(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            mods: rune::Mods::default(),
+        }
+    }
+
+    #[test]
+    fn arg_census_matches_the_table_exactly() {
+        // The census and the table spell each command
+        // once each; this pin is what keeps the two
+        // spellings from drifting.
+        assert_eq!(ARG_KINDS.len(), 3);
+        let mut keys: Vec<&str> = Vec::new();
+        for kind in ARG_KINDS {
+            let cmd = &COMMANDS[idx_of(kind.command_key())];
+            assert_eq!(cmd.key, kind.command_key());
+            assert_eq!(cmd.title, kind.title(), "title drift on {}", cmd.key);
+            assert_eq!(cmd.group, kind.group(), "group drift on {}", cmd.key);
+            assert!(!keys.contains(&cmd.key), "duplicate census key {}", cmd.key);
+            keys.push(cmd.key);
+        }
+    }
+
+    #[test]
+    fn validate_arg_accepts_the_honest_ranges() {
+        let ctx = ArgContext {
+            frames: 120,
+            current: 0,
+            fps: 24.0,
+            zoom: 1.0,
+        };
+        assert_eq!(
+            validate_arg(ArgKind::GoToFrame, "42", ctx),
+            Ok(ArgCommand::GoToFrame(41))
+        );
+        assert_eq!(
+            validate_arg(ArgKind::GoToFrame, " 120 ", ctx),
+            Ok(ArgCommand::GoToFrame(119)),
+            "the last frame is in range, whitespace trims"
+        );
+        assert_eq!(
+            validate_arg(ArgKind::SetFps, "30", ctx),
+            Ok(ArgCommand::SetFps(30.0))
+        );
+        assert_eq!(
+            validate_arg(ArgKind::SetFps, "29.97", ctx),
+            Ok(ArgCommand::SetFps(29.97))
+        );
+        assert_eq!(
+            validate_arg(ArgKind::SetCameraZoom, "150", ctx),
+            Ok(ArgCommand::SetCameraZoom(1.5))
+        );
+        assert_eq!(
+            validate_arg(ArgKind::SetCameraZoom, "30", ctx),
+            Ok(ArgCommand::SetCameraZoom(0.3))
+        );
+        assert_eq!(
+            validate_arg(ArgKind::SetCameraZoom, "400", ctx),
+            Ok(ArgCommand::SetCameraZoom(4.0))
+        );
+        // Prefills and labels state the current value.
+        assert_eq!(arg_prefill(ArgKind::GoToFrame, ctx), "1");
+        assert_eq!(arg_prefill(ArgKind::SetFps, ctx), "24");
+        assert_eq!(arg_prefill(ArgKind::SetCameraZoom, ctx), "100");
+        assert_eq!(
+            arg_prompt_label(ArgKind::GoToFrame, ctx),
+            "Frame number, 1 to 120 (now 1)"
+        );
+        assert_eq!(
+            arg_prompt_label(ArgKind::SetCameraZoom, ctx),
+            "Zoom percent, 30 to 400 (now 100%)"
+        );
+    }
+
+    #[test]
+    fn validate_arg_refuses_out_of_range_and_non_numeric() {
+        let ctx = ArgContext {
+            frames: 120,
+            current: 0,
+            fps: 24.0,
+            zoom: 1.0,
+        };
+        for (kind, text) in [
+            (ArgKind::GoToFrame, ""),
+            (ArgKind::GoToFrame, "abc"),
+            (ArgKind::GoToFrame, "3.5"),
+            (ArgKind::GoToFrame, "-1"),
+            (ArgKind::GoToFrame, "0"),
+            (ArgKind::GoToFrame, "121"),
+            (ArgKind::SetFps, ""),
+            (ArgKind::SetFps, "abc"),
+            (ArgKind::SetFps, "inf"),
+            (ArgKind::SetFps, "0"),
+            (ArgKind::SetFps, "61"),
+            (ArgKind::SetCameraZoom, ""),
+            (ArgKind::SetCameraZoom, "abc"),
+            (ArgKind::SetCameraZoom, "29"),
+            (ArgKind::SetCameraZoom, "401"),
+        ] {
+            assert!(
+                validate_arg(kind, text, ctx).is_err(),
+                "{kind:?} must refuse {text:?}"
+            );
+        }
+        // An empty timeline refuses every frame number.
+        let empty = ArgContext { frames: 0, ..ctx };
+        assert!(validate_arg(ArgKind::GoToFrame, "1", empty).is_err());
+    }
+
+    #[test]
+    fn argument_step_opens_from_a_run_and_esc_returns_to_the_listing() {
+        let mut s = crate::init();
+        let current0 = s.core.current;
+        open_palette(&mut s);
+        run_command(&mut s, idx_of("goto-frame"));
+        // The run opened the step instead of executing:
+        // palette up, step active, focus handed over,
+        // the playhead untouched, nothing recorded.
+        assert!(s.palette.open);
+        assert_eq!(s.palette.arg_kind, Some(ArgKind::GoToFrame));
+        assert!(s.palette.arg_edit.focused);
+        assert!(!s.palette.query.focused);
+        assert_eq!(s.core.current, current0);
+        assert!(s.palette.recent.is_empty());
+        // Navigation is frozen behind the step.
+        let sel = s.palette.selected;
+        assert!(palette_handle_key(&mut s, &key_ev(Key::Down)));
+        assert_eq!(s.palette.selected, sel);
+        assert_eq!(s.palette.arg_kind, Some(ArgKind::GoToFrame));
+        // Escape peels the step, not the palette, and
+        // focus returns to the query field…
+        assert!(palette_handle_key(&mut s, &key_ev(Key::Escape)));
+        assert!(s.palette.open);
+        assert_eq!(s.palette.arg_kind, None);
+        assert!(s.palette.query.focused);
+        // …and only the listing's Escape closes.
+        assert!(palette_handle_key(&mut s, &key_ev(Key::Escape)));
+        assert!(!s.palette.open);
+    }
+
+    #[test]
+    fn argument_step_enter_runs_through_and_records_the_recent() {
+        let mut s = crate::init();
+        let frames = s.core.frame_count();
+        assert!(frames >= 2, "the demo project needs frames to jump in");
+        open_palette(&mut s);
+        run_selected_via_query(&mut s, "goto-frame");
+        s.palette.arg_edit.text = frames.to_string();
+        assert!(palette_handle_key(&mut s, &key_ev(Key::Enter)));
+        assert_eq!(s.core.current, frames - 1, "the jump landed on the last frame");
+        assert!(!s.palette.open, "a successful submit closes the palette");
+        assert_eq!(s.palette.arg_kind, None);
+        assert_eq!(s.palette.recent.first(), Some(&"goto-frame"));
+    }
+
+    /// Drive `run_selected` onto the named command: the
+    /// empty-query listing contains every command, so
+    /// select its row and run the selection.
+    fn run_selected_via_query(s: &mut State, key: &str) {
+        let (rows, _, _) = display_commands_full("", &s.palette.recent, &s.palette.pins);
+        let pos = rows
+            .iter()
+            .position(|&i| COMMANDS[i].key == key)
+            .expect("command listed");
+        s.palette.selected = pos;
+        run_selected(s);
+    }
+
+    #[test]
+    fn argument_step_refusals_never_execute() {
+        // One pass per kind: every refusal leaves the
+        // step open, the error standing, the core state
+        // exactly as it was, and the recents empty.
+        let mut s = crate::init();
+        let frames = s.core.frame_count();
+        let current0 = s.core.current;
+        let fps0 = s.core.project.fps;
+        let zoom0 = s.core.camera_here().2;
+        for (kind, bad) in [
+            (ArgKind::GoToFrame, "0"),
+            (ArgKind::GoToFrame, "abc"),
+            (ArgKind::SetFps, "61"),
+            (ArgKind::SetFps, "abc"),
+            (ArgKind::SetCameraZoom, "401"),
+            (ArgKind::SetCameraZoom, ""),
+        ] {
+            open_palette(&mut s);
+            begin_arg_prompt(&mut s, kind);
+            s.palette.arg_edit.text = bad.to_string();
+            submit_arg_prompt(&mut s);
+            assert!(s.palette.open, "{kind:?} refusal closed the palette");
+            assert_eq!(s.palette.arg_kind, Some(kind));
+            assert!(s.palette.arg_error.is_some(), "{kind:?} left no refusal");
+            assert_eq!(s.core.current, current0);
+            assert_eq!(s.core.project.fps, fps0);
+            assert_eq!(s.core.camera_here().2, zoom0);
+            assert!(s.palette.recent.is_empty(), "a refusal recorded a recent");
+            // An edit clears the standing refusal…
+            note_arg_edited(&mut s);
+            assert!(s.palette.arg_error.is_none());
+            // …and Escape still returns to the listing.
+            cancel_arg_prompt(&mut s);
+            close_palette(&mut s);
+        }
+        assert_eq!(s.core.frame_count(), frames, "no refusal touched the project");
+    }
+
+    #[test]
+    fn fps_and_zoom_steps_execute_and_record() {
+        let mut s = crate::init();
+        open_palette(&mut s);
+        begin_arg_prompt(&mut s, ArgKind::SetFps);
+        assert_eq!(s.palette.arg_edit.text, fps_text(s.core.project.fps));
+        let target = if s.core.project.fps == 30.0 { "24" } else { "30" };
+        s.palette.arg_edit.text = target.to_string();
+        submit_arg_prompt(&mut s);
+        assert_eq!(s.core.project.fps, target.parse::<f32>().unwrap());
+        assert_eq!(s.palette.recent.first(), Some(&"set-fps"));
+        assert!(!s.palette.open);
+
+        open_palette(&mut s);
+        begin_arg_prompt(&mut s, ArgKind::SetCameraZoom);
+        s.palette.arg_edit.text = "150".to_string();
+        submit_arg_prompt(&mut s);
+        let zoom = s.core.camera_here().2;
+        assert!((zoom - 1.5).abs() < 0.01, "zoom landed at {zoom}");
+        assert_eq!(s.palette.recent.first(), Some(&"set-camera-zoom"));
+        // Submitting again at the same value spends no
+        // second zoom step: the run is a no-op (the
+        // camera panel's already-there discipline) and
+        // the zoom stays exactly put.
+        open_palette(&mut s);
+        begin_arg_prompt(&mut s, ArgKind::SetCameraZoom);
+        assert_eq!(s.palette.arg_edit.text, "150");
+        submit_arg_prompt(&mut s);
+        assert_eq!(s.core.camera_here().2, zoom);
+    }
+
+    #[test]
+    fn query_zoom_form_parses_and_titles() {
+        assert_eq!(
+            argument_command("zoom 150"),
+            Some(ArgCommand::SetCameraZoom(1.5))
+        );
+        assert_eq!(
+            arg_title(ArgCommand::SetCameraZoom(1.5)),
+            "Set camera zoom to 150%"
+        );
+        assert_eq!(arg_group(ArgCommand::SetCameraZoom(1.5)), "Camera");
+        // A zero or junk percent is not an argument
+        // command (it falls back to the ranked list).
+        assert_eq!(argument_command("zoom 0"), None);
+        assert_eq!(argument_command("zoom x"), None);
+        assert_eq!(argument_command("zoom"), None);
+    }
+
+    #[test]
+    fn runs_record_recents_through_both_run_paths() {
+        // The recents audit pin (W2-67): recording was
+        // pinned at the `record_recent` fn, but the
+        // brief's property is about the run paths —
+        // executing a command refreshes its position.
+        reset_recents_cache();
+        seed_recents_cache(&[]);
+        let mut s = crate::init();
+        open_palette(&mut s);
+        run_command(&mut s, idx_of("undo"));
+        assert_eq!(s.palette.recent, vec!["undo"]);
+        assert!(!s.palette.open);
+        open_palette(&mut s);
+        run_command(&mut s, idx_of("redo"));
+        assert_eq!(s.palette.recent, vec!["redo", "undo"]);
+        // Re-running the older command refreshes it to
+        // the front — no duplicate, no append.
+        open_palette(&mut s);
+        run_selected_via_query(&mut s, "undo");
+        assert_eq!(s.palette.recent, vec!["undo", "redo"]);
+    }
+
+    #[test]
+    fn argument_step_view_constructs_with_and_without_a_refusal() {
+        for dark in [true, false] {
+            let t = tok::theme(dark);
+            let mut s = crate::init();
+            open_palette(&mut s);
+            begin_arg_prompt(&mut s, ArgKind::SetCameraZoom);
+            let _ = palette_view(&s, &t);
+            s.palette.arg_edit.text = "9".to_string();
+            submit_arg_prompt(&mut s);
+            assert!(s.palette.arg_error.is_some());
+            let _ = palette_view(&s, &t);
+        }
     }
 
     fn palette_view_rows_construct_in_both_selection_branches() {

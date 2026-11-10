@@ -169,6 +169,116 @@ fn sub_opt_str<'a>(args: &'a Value, key: &str) -> Result<Option<&'a str>, String
     }
 }
 
+/// An optional number argument: absent (or null) is
+/// `None`; a present non-number refuses in the
+/// required helper's voice.
+fn sub_opt_f32(args: &Value, key: &str) -> Result<Option<f32>, String> {
+    match sub_get(args, key) {
+        Some(v) => match v.as_f64() {
+            Some(f) => sub_finite_f32(f, key).map(Some),
+            None => Err(format!("argument '{key}' must be a number")),
+        },
+        None => Ok(None),
+    }
+}
+
+/// An optional index argument: absent (or null) is
+/// `None`; a present non-index refuses in the
+/// required helper's voice.
+fn sub_opt_usize(args: &Value, key: &str) -> Result<Option<usize>, String> {
+    match sub_get(args, key) {
+        Some(v) => sub_as_usize(v, key).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// The timing assistant's parameters from a call's
+/// optional arguments (W2-16): each falls back to the
+/// model's default when absent, and the engine's
+/// sanitising holds the ranges — an out-of-range pace
+/// clamps rather than refusing, and the replies report
+/// the parameters in force.
+fn timing_params_from_args(
+    args: &Value,
+) -> Result<stykanimate_rs::subtitle_timing::TimingParams, String> {
+    let d = stykanimate_rs::subtitle_timing::TimingParams::default();
+    Ok(stykanimate_rs::subtitle_timing::TimingParams {
+        target_cps: sub_opt_f32(args, "target_cps")?.unwrap_or(d.target_cps),
+        min_seconds: sub_opt_f32(args, "min_seconds")?.unwrap_or(d.min_seconds),
+    }
+    .sanitised())
+}
+
+fn tool_subtitle_timing_proposals(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    let params = timing_params_from_args(args)?;
+    // Read-only: the engine is pure — no snapshot, no
+    // status write (the subtitle_list discipline).
+    let report = stykanimate_rs::subtitle_timing::timing_report(
+        core.subtitle_cues(),
+        core.project.fps,
+        &params,
+    );
+    let proposals: Vec<Value> = report
+        .proposals
+        .iter()
+        .enumerate()
+        .map(|(k, p)| {
+            json!({
+                "proposal": k,
+                "cue_index": p.cue_index,
+                "kind": match p.kind {
+                    stykanimate_rs::subtitle_timing::ProposalKind::Extend => "extend",
+                    stykanimate_rs::subtitle_timing::ProposalKind::Split => "split",
+                },
+                "shift_following_by": p.shift_following_by,
+                "chars": p.chars,
+                "cps_before": p.cps_before,
+                "cps_after": p.cps_after,
+                "replacement": p
+                    .replacement
+                    .iter()
+                    .map(|c| {
+                        json!({
+                            "start_frame": c.start_frame,
+                            "end_frame": c.end_frame,
+                            "text": c.text,
+                            "speaker": c.speaker,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    Ok(json!({
+        "ok": true,
+        "target_cps": params.target_cps,
+        "min_seconds": params.min_seconds,
+        "proposals": proposals,
+        "stuck": report.stuck,
+        "count": core.subtitle_count(),
+        "project": sub_project_summary(core),
+    }))
+}
+
+fn tool_subtitle_timing_apply(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let params = timing_params_from_args(args)?;
+    let only = sub_opt_usize(args, "proposal")?;
+    // The op owns the whole discipline (recompute,
+    // swap, the one snapshot on a real change, the
+    // status line in both outcomes).
+    let applied = core.subtitle_timing_apply(&params, only);
+    Ok(json!({
+        "ok": true,
+        "applied": applied,
+        "count": core.subtitle_count(),
+        "status": core.status,
+        "project": sub_project_summary(core),
+    }))
+}
+
 /// Colours travel as `0xRRGGBB` integers.
 fn sub_opt_color(args: &Value, key: &str) -> Result<Option<u32>, String> {
     match sub_get(args, key) {
@@ -579,6 +689,33 @@ pub fn tools() -> Vec<Tool> {
             }),
             handler: tool_subtitle_retime,
         },
+        Tool {
+            name: "subtitle_timing_proposals",
+            description: "Measure every subtitle cue's reading speed and propose concrete timing fixes (the Subtitles panel's Timing assistant): a cue whose window is shorter than its text needs at the target pace is proposed an EXTEND into following dead air, a SPLIT at a word boundary (verbatim — the halves rejoin to the original text exactly, speaker kept on both), a split plus a shift of the following cues by 'shift_following_by' frames when the pair needs more room than the air offers, or a partial extend when only some air exists. Optional 'target_cps' (default 17) and 'min_seconds' (default 1) are the model's adjustable parameters — a target pace, not a warning threshold; out-of-range values clamp to the model's ranges and the reply reports the parameters in force. Each proposal names its cue_index in subtitle_list, its kind, the following-cue shift it would cost, its measured chars and CPS before/after, and the exact replacement cue(s) in the current frame domain. 'stuck' counts needy cues no fix can help. Read-only. (Roadmap Wave 2, W2-16)",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "target_cps": { "type": "number", "description": "Target reading speed in characters per second (default 17, clamped to 5-40)" },
+                    "min_seconds": { "type": "number", "description": "Minimum on-screen seconds for any cue (default 1, clamped to 0-3)" }
+                },
+                "required": []
+            }),
+            handler: tool_subtitle_timing_proposals,
+        },
+        Tool {
+            name: "subtitle_timing_apply",
+            description: "Apply the Timing assistant's proposed fixes (subtitle_timing_proposals): with no 'proposal' argument every proposal applies; with 'proposal' (a proposal index from subtitle_timing_proposals, recomputed at call time under the same parameters) only that fix applies. The whole batch is ONE undo step ('Fix subtitle timing'); a call with nothing to apply — or a proposal index the fresh report no longer holds — changes nothing and spends no undo step, and the status line says so. Splits never alter dialogue text (the halves rejoin verbatim) and keep the cue's speaker on both halves. The reply's 'applied' counts the proposals applied and 'count' the cue total after. (Roadmap Wave 2, W2-16)",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "target_cps": { "type": "number", "description": "Target reading speed in characters per second (default 17, clamped to 5-40)" },
+                    "min_seconds": { "type": "number", "description": "Minimum on-screen seconds for any cue (default 1, clamped to 0-3)" }
+                    "proposal": { "type": "integer", "minimum": 0, "description": "Optional: apply only this proposal index from subtitle_timing_proposals" }
+                },
+                "required": []
+            }),
+            handler: tool_subtitle_timing_apply,
+        },
     ]
 }
 
@@ -620,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_are_the_contracted_seven_in_order() {
+    fn tools_are_the_contracted_nine_in_order() {
         let names: Vec<&str> = tools().iter().map(|t| t.name).collect();
         assert_eq!(
             names,
@@ -632,6 +769,8 @@ mod tests {
                 "subtitle_set_style",
                 "subtitle_shift_all",
                 "subtitle_retime",
+                "subtitle_timing_proposals",
+                "subtitle_timing_apply",
             ]
         );
         for t in tools() {

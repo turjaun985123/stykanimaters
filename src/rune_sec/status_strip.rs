@@ -1972,7 +1972,7 @@ mod tests {
         assert_eq!(undo_text(&core), "আনডু 0");
         // One snapshot-counted edit, then an undo: the
         // redo half of the segment localises too.
-        core.snapshot();
+        core.snapshot_labeled("Test edit");
         core.undo();
         assert_eq!(undo_text(&core), "আনডু 0 · রিডু 1");
         // Chinese (Simplified): a second genuine table,

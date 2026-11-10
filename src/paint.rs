@@ -1385,7 +1385,7 @@ pub fn tool_draw_spray(core: &mut EditorCore, args: &Value) -> Result<Value, Str
     // promises (Wave 14 audit find: the push below spent
     // none — every validation above runs first, so a
     // refused call still spends nothing).
-    core.snapshot();
+    core.snapshot_labeled("Draw spray");
     core.project.strokes.push(Stroke {
         frame,
         points,

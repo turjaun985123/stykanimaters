@@ -184,6 +184,7 @@ fn full_fixture() -> Project {
             y: 300.0,
             zoom: 1.0,
             angle: 0.0,
+            easing: stykanimate_rs::model::CameraEase::Linear,
         },
         stykanimate_rs::model::CameraKey {
             frame: 3,
@@ -191,6 +192,7 @@ fn full_fixture() -> Project {
             y: 280.25,
             zoom: 1.75,
             angle: -12.5,
+            easing: stykanimate_rs::model::CameraEase::Linear,
         },
     ];
 
@@ -704,6 +706,7 @@ fn subsystem_fixtures_round_trip_losslessly() {
                         y: 300.0,
                         zoom: 1.0,
                         angle: 0.0,
+                        easing: stykanimate_rs::model::CameraEase::Linear,
                     },
                     stykanimate_rs::model::CameraKey {
                         frame: 3,
@@ -711,6 +714,7 @@ fn subsystem_fixtures_round_trip_losslessly() {
                         y: 280.25,
                         zoom: 1.75,
                         angle: -12.5,
+                        easing: stykanimate_rs::model::CameraEase::Linear,
                     },
                 ];
             }),

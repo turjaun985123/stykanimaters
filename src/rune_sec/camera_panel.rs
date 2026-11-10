@@ -48,6 +48,29 @@
 //!   values: exactly one `snapshot()` (editor.rs:202), then
 //!   `Project::set_camera_key`, then the angle fix-up the op
 //!   itself applies — one paste is exactly one undo step.
+//! * Easing cycle (Roadmap Wave 2, W2-32) →
+//!   [`cycle_easing_here`]: one button (`cam-key-easing`)
+//!   in the key list, rendered only while the playhead
+//!   sits on a key; its label is the readout
+//!   ([`easing_label`] — "Easing: smooth", the mode of the
+//!   segment FROM that key to the next) and a press
+//!   advances the mode under exactly one snapshot. The
+//!   evaluation half lives in the model (`CameraEase`,
+//!   log-space zoom — see model.rs).
+//! * Preset moves (Roadmap Wave 2, W2-39) → the "Moves"
+//!   section ([`moves_block`]): one-press camera moves
+//!   riding the core's preset ops (`camera_push_in` &
+//!   friends in editor.rs) — a start key pinned with the
+//!   camera as it stands (stamped Smooth, the preset
+//!   default) and an end key
+//!   [`EditorCore::CAMERA_PRESET_DEFAULT_FRAMES`] frames
+//!   later, exactly one undo step per press, refusals
+//!   status-only. Arc swings the centre around the
+//!   selected figure (the honest 2D orbit — see the core
+//!   op's docs for what it is NOT); Shake authors a
+//!   deterministic damped key burst. No panel state:
+//!   the moves are fire-and-forget ops, like the
+//!   framing row above them.
 //! * Hold camera (Phase J, section 32) → [`hold_camera`]:
 //!   stamps the camera in effect at the current frame as a
 //!   key on EVERY frame of a span ([`hold_span`]: the loop
@@ -393,6 +416,9 @@ pub struct CamKeyRow {
     pub zoom_pct: i64,
     /// The key's stored rotation, in degrees.
     pub angle: f32,
+    /// The timing of the move FROM this key to the next
+    /// (Roadmap Wave 2, W2-32).
+    pub easing: stykanimate_rs::model::CameraEase,
     /// Whether this key sits on the current frame (rendered
     /// highlighted; its row is the one the panel's own Clear
     /// key button would remove).
@@ -444,6 +470,7 @@ pub fn key_rows(core: &EditorCore) -> Vec<CamKeyRow> {
             frame: k.frame,
             zoom_pct: (k.zoom * 100.0).round() as i64,
             angle: k.angle,
+            easing: k.easing,
             is_current: k.frame == core.current,
             stale: k.frame >= frame_count,
         })
@@ -539,6 +566,10 @@ pub struct CamKeyClip {
     pub y: f32,
     pub zoom: f32,
     pub angle: f32,
+    /// The copied key's segment timing (Roadmap Wave 2,
+    /// W2-32) — a paste carries the key's easing with its
+    /// values, the way it carries the angle.
+    pub easing: stykanimate_rs::model::CameraEase,
 }
 
 thread_local! {
@@ -570,7 +601,7 @@ pub fn key_here(core: &EditorCore) -> Option<CamKeyClip> {
         .camera
         .iter()
         .find(|k| k.frame == core.current)
-        .map(|k| CamKeyClip { x: k.x, y: k.y, zoom: k.zoom, angle: k.angle })
+        .map(|k| CamKeyClip { x: k.x, y: k.y, zoom: k.zoom, angle: k.angle, easing: k.easing })
 }
 
 /// Copy-key button: store the key on the current frame in
@@ -602,7 +633,7 @@ pub fn paste_key_here(core: &mut EditorCore) {
         return;
     };
     let frame = core.current;
-    core.snapshot();
+    core.snapshot_labeled("Paste camera key");
     core.project.set_camera_key(frame, clip.x, clip.y, clip.zoom);
     if let Some(k) = core.project.camera.iter_mut().find(|k| k.frame == frame) {
         // The copied angle is stamped wrapped (the model's
@@ -611,6 +642,10 @@ pub fn paste_key_here(core: &mut EditorCore) {
         // unwrapped angle, and the paste should not
         // propagate it into a fresh key.
         k.angle = stykanimate_rs::model::norm_deg(clip.angle);
+        // The copied easing is stamped verbatim (W2-32):
+        // it is a closed vocabulary, no canonicalisation
+        // applies.
+        k.easing = clip.easing;
     }
     core.status = format!("Camera key pasted at frame {}.", frame + 1);
 }
@@ -700,10 +735,62 @@ pub fn delete_camera_key_at(core: &mut EditorCore, frame: usize) -> bool {
         core.status = format!("No camera key at frame {}.", frame + 1);
         return false;
     }
-    core.snapshot();
+    core.snapshot_labeled("Delete camera key");
     core.project.remove_camera_key(frame);
     core.status = format!("Camera key at frame {} deleted.", frame + 1);
     true
+}
+
+// ----------------------------------------------------------------
+// Easing cycle (Roadmap Wave 2, W2-32)
+// ----------------------------------------------------------------
+
+/// The easing cycle button's label — the readout naming
+/// the easing of the key on the CURRENT frame: the i18n
+/// prefix (`camera_easing`) plus the mode's vocabulary
+/// label, e.g. `"Easing: smooth"`. The easing belongs to
+/// the segment FROM that key to the next, so the readout
+/// names the mode where its key sits. `None` when the
+/// current frame has no key — the button (and so the
+/// readout) only exists then. Pure read.
+pub fn easing_label(core: &EditorCore) -> Option<String> {
+    let k = core.project.camera.iter().find(|k| k.frame == core.current)?;
+    Some(format!(
+        "{}: {}",
+        i18n_wire::tr(core, "camera_easing"),
+        k.easing.label()
+    ))
+}
+
+/// Easing-cycle button: advance the easing of the camera
+/// key on the current frame to the next mode (Linear →
+/// Smooth → EaseIn → EaseOut → Hold → Linear). Exactly
+/// one undo step: the key's existence is checked first,
+/// so the no-key case is status-only and takes NO
+/// snapshot (the button renders only when a key is here;
+/// that path is defensive). The status names the new
+/// mode in its vocabulary label.
+pub fn cycle_easing_here(core: &mut EditorCore) {
+    let Some(cur) = core
+        .project
+        .camera
+        .iter()
+        .find(|k| k.frame == core.current)
+        .map(|k| k.easing)
+    else {
+        core.status = "No camera key on this frame.".into();
+        return;
+    };
+    let next = cur.next();
+    core.snapshot_labeled("Camera key easing");
+    if let Some(k) = core.project.camera.iter_mut().find(|k| k.frame == core.current) {
+        k.easing = next;
+    }
+    core.status = format!(
+        "Camera key at frame {} easing: {}.",
+        core.current + 1,
+        next.label()
+    );
 }
 
 // ----------------------------------------------------------------
@@ -946,7 +1033,7 @@ fn dial_apply(core: &mut EditorCore, x: f32, w: f32, data: &mut f32) {
         return;
     }
     if data.is_nan() {
-        core.snapshot();
+        core.snapshot_labeled("Rotate camera");
         *data = 1.0;
     }
     write_angle_here(core, target);
@@ -1010,7 +1097,7 @@ fn scrub_write(
         if value == current {
             return;
         }
-        core.snapshot();
+        core.snapshot_labeled("Camera key");
         gesture.press = current;
         gesture.open = true;
     }
@@ -1035,7 +1122,7 @@ fn scrub_finish(
     if gesture.open {
         write(core, value);
     } else if value != current {
-        core.snapshot();
+        core.snapshot_labeled("Camera key");
         write(core, value);
     } else {
         return;
@@ -1183,7 +1270,7 @@ fn zoom_readout(s: &State, t: &Theme) -> El {
         design::NumWiring {
             access: |s: &mut State| &mut s.camera_panel.zoom_edit,
             commit: |s: &mut State, v: f32| {
-                s.core.snapshot();
+                s.core.snapshot_labeled("Camera zoom");
                 write_zoom_quiet(&mut s.core, v);
                 s.core.status = format!(
                     "Camera zoom {v:.2} at frame {}.",
@@ -1247,7 +1334,7 @@ fn angle_readout(s: &State, t: &Theme) -> El {
         design::NumWiring {
             access: |s: &mut State| &mut s.camera_panel.angle_edit,
             commit: |s: &mut State, v: f32| {
-                s.core.snapshot();
+                s.core.snapshot_labeled("Rotate camera");
                 write_angle_here(&mut s.core, stykanimate_rs::model::norm_deg(v));
             },
             reject: |s: &mut State| {
@@ -1317,7 +1404,10 @@ fn note_line(t: &Theme, label: &str) -> El {
 /// navigation row (Prev key / Next key — jumps to the
 /// nearest key either side of the playhead) and the
 /// clipboard row (Copy key / Paste key for the key on the
-/// current frame), then one row per key — a goto button
+/// current frame), the easing cycle row (W2-32: present
+/// only while the playhead sits on a key; the button's
+/// label reads that key's segment easing and a press
+/// cycles it — [`cycle_easing_here`]), then one row per key — a goto button
 /// labelled with the key's frame, zoom and angle on a kit
 /// list-row shell (selected-filled when the key is on the
 /// current frame; a key stranded past the timeline end is
@@ -1325,9 +1415,11 @@ fn note_line(t: &Theme, label: &str) -> El {
 /// moving — [`goto_key_frame`]), plus a per-row Delete
 /// button ([`delete_camera_key_at`] at the row's frame —
 /// undoable, and the playhead stays put). With no keys,
-/// the kit [`design::empty_state`] (key glyph) instead of
-/// rows; the nav/clipboard rows stay, since Paste is
-/// exactly how a first key can arrive.
+/// the kit [`design::empty_state_action`] (key glyph)
+/// instead of rows, offering Set key here — the panel's
+/// own upsert (W2-57, IA-RM28-6); the nav/clipboard rows
+/// stay, since Paste is exactly how a first key can
+/// arrive.
 fn key_list(core: &EditorCore, t: &Theme) -> El {
     let rows = key_rows(core);
     let delete_label = i18n_wire::tr(core, "camera_delete_key");
@@ -1356,11 +1448,32 @@ fn key_list(core: &EditorCore, t: &Theme) -> El {
                     paste_key_here(&mut s.core)
                 })),
         );
+    // The easing cycle (W2-32): one button, only while the
+    // playhead sits on a key — its label is the readout of
+    // that key's segment timing, a press advances it.
+    if let Some(label) = easing_label(core) {
+        list = list.child(
+            row().gap(6.0).center_y().child(btn(
+                "cam-key-easing",
+                &label,
+                false,
+                t,
+                |s: &mut State| cycle_easing_here(&mut s.core),
+            )),
+        );
+    }
     if rows.is_empty() {
-        list = list.child(design::empty_state(
+        // W2-57 (PL-6 completion, IA-RM28-6): the state
+        // offers its filling action — Set key here, the
+        // panel's own upsert, the same handler the Set
+        // key button in the controls above runs.
+        list = list.child(design::empty_state_action(
             "key",
             &i18n_wire::tr(core, "camera_no_keys_yet"),
+            "camera-empty-set-key",
+            &i18n_wire::tr(core, "camera_set_key"),
             t,
+            set_key_here,
         ));
     }
     for r in rows {
@@ -1394,6 +1507,133 @@ fn key_list(core: &EditorCore, t: &Theme) -> El {
         );
     }
     list
+}
+
+// ----------------------------------------------------------------
+// Preset moves (Roadmap Wave 2, W2-39)
+// ----------------------------------------------------------------
+
+/// Push-in press: `EditorCore::camera_push_in` over the
+/// standing preset length with the preset easing (Smooth).
+fn preset_push_in(s: &mut State) {
+    s.core.camera_push_in(
+        EditorCore::CAMERA_PRESET_DEFAULT_FRAMES,
+        stykanimate_rs::model::CameraEase::Smooth,
+    );
+}
+
+/// Pull-out press: `EditorCore::camera_pull_out`, as above.
+fn preset_pull_out(s: &mut State) {
+    s.core.camera_pull_out(
+        EditorCore::CAMERA_PRESET_DEFAULT_FRAMES,
+        stykanimate_rs::model::CameraEase::Smooth,
+    );
+}
+
+/// Pan-left press: `EditorCore::camera_pan` with dir −1.
+fn preset_pan_left(s: &mut State) {
+    s.core.camera_pan(
+        -1,
+        EditorCore::CAMERA_PRESET_DEFAULT_FRAMES,
+        stykanimate_rs::model::CameraEase::Smooth,
+    );
+}
+
+/// Pan-right press: `EditorCore::camera_pan` with dir +1.
+fn preset_pan_right(s: &mut State) {
+    s.core.camera_pan(
+        1,
+        EditorCore::CAMERA_PRESET_DEFAULT_FRAMES,
+        stykanimate_rs::model::CameraEase::Smooth,
+    );
+}
+
+/// Truck-up press: `EditorCore::camera_truck` with dir −1
+/// (the centre moves up-stage; the view travels down).
+fn preset_truck_up(s: &mut State) {
+    s.core.camera_truck(
+        -1,
+        EditorCore::CAMERA_PRESET_DEFAULT_FRAMES,
+        stykanimate_rs::model::CameraEase::Smooth,
+    );
+}
+
+/// Truck-down press: `EditorCore::camera_truck` with dir +1.
+fn preset_truck_down(s: &mut State) {
+    s.core.camera_truck(
+        1,
+        EditorCore::CAMERA_PRESET_DEFAULT_FRAMES,
+        stykanimate_rs::model::CameraEase::Smooth,
+    );
+}
+
+/// Arc-left press: `EditorCore::camera_arc` with dir −1 —
+/// the centre swings counter-clockwise around the
+/// selected figure (stage coordinates: y down).
+fn preset_arc_left(s: &mut State) {
+    s.core.camera_arc(
+        -1,
+        EditorCore::CAMERA_PRESET_DEFAULT_FRAMES,
+        stykanimate_rs::model::CameraEase::Smooth,
+    );
+}
+
+/// Arc-right press: `EditorCore::camera_arc` with dir +1.
+fn preset_arc_right(s: &mut State) {
+    s.core.camera_arc(
+        1,
+        EditorCore::CAMERA_PRESET_DEFAULT_FRAMES,
+        stykanimate_rs::model::CameraEase::Smooth,
+    );
+}
+
+/// Shake press: `EditorCore::camera_shake` at the panel's
+/// subtle amplitude (6 stage units) over the standing
+/// preset length.
+fn preset_shake(s: &mut State) {
+    s.core.camera_shake(EditorCore::CAMERA_PRESET_DEFAULT_FRAMES, 6.0);
+}
+
+/// The preset-moves section: a "Moves" header over three
+/// wrapped rows (dolly / pan+truck / arc+shake) of
+/// one-press preset buttons. Each press runs its core op
+/// at the standing length
+/// ([`EditorCore::CAMERA_PRESET_DEFAULT_FRAMES`] frames)
+/// with the preset easing (Smooth) — see the module docs.
+/// The rows wrap like the key row above: nine labelled
+/// buttons cannot share one 316 pt line.
+fn moves_block(core: &EditorCore, t: &Theme) -> El {
+    col()
+        .key("cam-moves")
+        .gap(4.0)
+        .child(design::section_label(&i18n_wire::tr(core, "camera_moves"), t))
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .flex_wrap()
+                .child(btn("cam-move-push-in", &i18n_wire::tr(core, "camera_move_push_in"), false, t, preset_push_in))
+                .child(btn("cam-move-pull-out", &i18n_wire::tr(core, "camera_move_pull_out"), false, t, preset_pull_out)),
+        )
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .flex_wrap()
+                .child(btn("cam-move-pan-left", &i18n_wire::tr(core, "camera_move_pan_left"), false, t, preset_pan_left))
+                .child(btn("cam-move-pan-right", &i18n_wire::tr(core, "camera_move_pan_right"), false, t, preset_pan_right))
+                .child(btn("cam-move-truck-up", &i18n_wire::tr(core, "camera_move_truck_up"), false, t, preset_truck_up))
+                .child(btn("cam-move-truck-down", &i18n_wire::tr(core, "camera_move_truck_down"), false, t, preset_truck_down)),
+        )
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .flex_wrap()
+                .child(btn("cam-move-arc-left", &i18n_wire::tr(core, "camera_move_arc_left"), false, t, preset_arc_left))
+                .child(btn("cam-move-arc-right", &i18n_wire::tr(core, "camera_move_arc_right"), false, t, preset_arc_right))
+                .child(btn("cam-move-shake", &i18n_wire::tr(core, "camera_move_shake"), false, t, preset_shake)),
+        )
 }
 
 /// The follow block at the foot of the panel: a "Follow"
@@ -1458,7 +1698,8 @@ fn follow_block(core: &EditorCore, t: &Theme) -> El {
 /// controls are the view-only ones), the zoom stepper
 /// row, the rotation stepper row, the rotation dial,
 /// the key row (Set key / Clear key), the camera-key
-/// list and the follow block.
+/// list, the preset-moves section (W2-39) and the
+/// follow block.
 pub fn panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     // Card root + header (Phase N): the kit's `panel_col`
@@ -1568,6 +1809,7 @@ pub fn panel(s: &State, t: &Theme) -> El {
                 })),
         )
         .child(key_list(core, t))
+        .child(moves_block(core, t))
         .child(follow_block(core, t))
 }
 
@@ -1817,6 +2059,7 @@ mod tests {
             ("camera_next_key", "Next key"),
             ("camera_copy_key", "Copy key"),
             ("camera_paste_key", "Paste key"),
+            ("camera_easing", "Easing"),
             ("camera_no_keys_yet", "No camera keys yet — Set key pins the camera in effect at this frame."),
             ("camera_key_past_end", "past end"),
             ("camera_follow", "Follow"),
@@ -2059,7 +2302,13 @@ mod tests {
         assert_eq!(core.status, "Camera key copied from frame 1.");
         assert_eq!(
             clipboard_key(),
-            Some(CamKeyClip { x: 111.0, y: 222.0, zoom: 1.5, angle: 30.0 })
+            Some(CamKeyClip {
+                x: 111.0,
+                y: 222.0,
+                zoom: 1.5,
+                angle: 30.0,
+                easing: stykanimate_rs::model::CameraEase::Linear
+            })
         );
         core.goto(3);
         let depth0 = core.undo_depth();
@@ -2235,6 +2484,7 @@ mod tests {
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
             sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            migration_panel: rune_sec::migration_prompt::initial_state(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
@@ -2253,12 +2503,15 @@ mod tests {
             toast_now: 0.0,
             last_dark: true,
             workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            setup_mode_before_build: false,
             guides: false,
             show_left: true,
             show_right: true,
+            stage_focus_restore: None,
             key_clipboard: None,
             key_follow_graph: false,
             key_sel: Default::default(),
+            keyframe_tools: Default::default(),
             help_panel: Default::default(),
             camera_panel: CameraPanelState::default(),
             segment_numbers: crate::rune_sec::inspector_segment::SegmentNumberState::default(),
@@ -2272,6 +2525,11 @@ stroke_selected: None,
 particle_selected: None,
 guides_frustum: true,
 guides_safe: true,
+guides_golden: false,
+guides_diagonals: false,
+guides_stored: true,
+rulers: false,
+limit_arcs: false,
 onion_ui: Default::default(),
 last_frame: 0,
 pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
@@ -2543,6 +2801,115 @@ playback_speed: 1.0,
         let frame = core.current;
         assert!(!delete_camera_key_at(&mut core, frame));
         assert_eq!(core.status, "No camera key at frame 3.");
+    }
+
+    // ---- Easing cycle (Roadmap Wave 2, W2-32) ----
+
+    #[test]
+    fn cycle_easing_here_advances_the_mode_with_one_snapshot() {
+        let mut core = EditorCore::new();
+        pin_key(&mut core, 0, 100.0, 200.0, 1.5, 30.0);
+        core.goto(0);
+        assert_eq!(easing_label(&core).as_deref(), Some("Easing: linear"));
+        let depth0 = core.undo_depth();
+        cycle_easing_here(&mut core);
+        assert_eq!(core.undo_depth(), depth0 + 1, "one cycle is one undo step");
+        assert_eq!(core.status, "Camera key at frame 1 easing: smooth.");
+        assert_eq!(easing_label(&core).as_deref(), Some("Easing: smooth"));
+        // The key's other values are untouched, the row
+        // model carries the mode, and undo restores it.
+        let row = &key_rows(&core)[0];
+        assert_eq!(row.easing, stykanimate_rs::model::CameraEase::Smooth);
+        core.undo();
+        assert_eq!(
+            core.project.camera[0].easing,
+            stykanimate_rs::model::CameraEase::Linear
+        );
+        // The full cycle wraps: four more presses return
+        // to Linear via EaseIn, EaseOut and Hold.
+        for _ in 0..4 {
+            cycle_easing_here(&mut core);
+        }
+        assert_eq!(
+            core.project.camera[0].easing,
+            stykanimate_rs::model::CameraEase::Linear
+        );
+    }
+
+    #[test]
+    fn cycle_easing_here_without_a_key_is_status_only() {
+        let mut core = EditorCore::new();
+        assert_eq!(easing_label(&core), None);
+        let depth0 = core.undo_depth();
+        cycle_easing_here(&mut core);
+        assert_eq!(core.status, "No camera key on this frame.");
+        assert_eq!(core.undo_depth(), depth0, "no snapshot on the refusal");
+    }
+
+    #[test]
+    fn copy_paste_carries_the_easing() {
+        let mut core = EditorCore::new();
+        pin_key(&mut core, 0, 111.0, 222.0, 1.5, 30.0);
+        if let Some(k) = core.project.camera.iter_mut().find(|k| k.frame == 0) {
+            k.easing = stykanimate_rs::model::CameraEase::Hold;
+        }
+        core.goto(0);
+        copy_key_here(&mut core);
+        core.goto(3);
+        paste_key_here(&mut core);
+        let pasted = core
+            .project
+            .camera
+            .iter()
+            .find(|k| k.frame == 3)
+            .expect("the pasted key exists");
+        assert_eq!(pasted.easing, stykanimate_rs::model::CameraEase::Hold);
+    }
+
+    // ---- Preset moves (Roadmap Wave 2, W2-39) ----
+
+    #[test]
+    fn moves_block_constructs_in_both_themes() {
+        // The nine preset buttons + the section build
+        // under both themes — construction is the panel
+        // tests' standing bar for a new section (a panic
+        // here is a builder bug, invisible until rendered).
+        for dark in [true, false] {
+            let t = tok::theme(dark);
+            let mut s = crate::init();
+            let _ = moves_block(&s.core, &t);
+            s.core.project.frames = (0..60)
+                .map(|_| s.core.project.frames[0].clone())
+                .collect();
+            let _ = panel(&s, &t);
+        }
+    }
+
+    #[test]
+    fn preset_handlers_author_the_move_at_the_standing_length() {
+        // The panel doors run the core ops at the standing
+        // length with Smooth: extend the demo timeline,
+        // press Push-in through its State handler, and the
+        // keys land at 0 and DEFAULT_FRAMES with the start
+        // key stamped Smooth.
+        let mut s = crate::init();
+        s.core.project.frames = (0..60)
+            .map(|_| s.core.project.frames[0].clone())
+            .collect();
+        preset_push_in(&mut s);
+        let d = EditorCore::CAMERA_PRESET_DEFAULT_FRAMES;
+        let keys: Vec<usize> = s.core.project.camera.iter().map(|k| k.frame).collect();
+        assert_eq!(keys, vec![0, d], "start + end keys at the standing length");
+        assert_eq!(
+            s.core.project.camera[0].easing,
+            stykanimate_rs::model::CameraEase::Smooth
+        );
+        // Shake through its handler authors its burst.
+        preset_shake(&mut s);
+        assert!(
+            s.core.project.camera.len() > 3,
+            "the shake burst replaced the span's keys"
+        );
     }
 
     // ---- Wave 10: note wording, wrapped angles, stale keys ----

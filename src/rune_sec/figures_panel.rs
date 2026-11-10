@@ -839,7 +839,10 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                                 .radius(design::ROW_RADIUS)
                                 .hover(t.hover)
                                 .press(t.press)
-                                .on_press(move |s: &mut State| s.core.select_figure(fi))
+                                .on_press(move |s: &mut State| {
+                                    s.core.select_figure(fi);
+                                    crate::stage_view::note_character_selected(fi);
+                                })
                                 .child(el().size(10.0, 10.0).radius(5.0).fill(dot))
                                 .child(
                                     text(r.name.clone())

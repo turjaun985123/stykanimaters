@@ -505,6 +505,108 @@
 //! undo step. Selection itself is session state, never
 //! snapshotted.
 //!
+//! ## Channel-range fields (Roadmap Wave 2, W2-35 —
+//! graph numeric entry completion)
+//!
+//! The F-3 audit's last un-fielded number on the graph
+//! surface was the channel RANGE: the stats block prints
+//! every channel's value span (`{min}..{max}`,
+//! [`stat_line`]) but no control could type it. A row
+//! under the key rows ([`channel_range_rows`]) now
+//! fields the DRAWN channel's two ends on the value spec
+//! ([`key_value_spec`] — the channel's own units, as the
+//! stat line prints them). The range is data, not view
+//! state: an end edit writes the key CARRYING that
+//! extreme (the first, when several share it) through
+//! the key fields' own write ([`key_write`]), under the
+//! key fields' undo discipline ([`range_commit`] = one
+//! snapshot; [`range_scrub_write`] /
+//! [`range_scrub_finish`] = one lazy snapshot per
+//! gesture). Three honest consequences, stated rather
+//! than smoothed over: a shared extreme advances one
+//! carrier at a time and the recap reports the range
+//! the write actually produced; an end dragged past the
+//! other keeps its written value and BECOMES the other
+//! end (the row re-reads min/max from the data, so the
+//! two fields swap roles rather than lying); and a key
+//! value edit that crosses an extreme moves the range
+//! too — the fields and the key row stay consistent
+//! because both read the same keys. The audit also
+//! closed the surface's other candidates as non-fields,
+//! recorded in the W2-35 findings: the header/value
+//! readouts duplicate the Value field's key; the fitted
+//! view ranges are derived (auto_fit) with no setter to
+//! commit to; the shift pair is a relative ±1 op the
+//! Frame field already covers absolutely; the ×2/÷2
+//! scale pair is a factor action, not a stored number.
+//!
+//! ## Tangent-mode presets (Roadmap Wave 2, W2-34 — P-7)
+//!
+//! Under the preset chips sits a narrower row: the
+//! per-key tangent MODES of audit A6 R7 — **Auto**,
+//! **Clamped** and **Free** — applied to the shared
+//! selection's keys on the DRAWN channel only
+//! ([`apply_tangent_mode_to_selected`] over the pure
+//! [`tangent_mode_slopes`]). They are the
+//! selection-scoped counterpart of the figure-scoped
+//! ease presets above them (Smooth / Ease in / …),
+//! which rewrite every key of every channel of the
+//! figure; these rewrite exactly the keys `key_sel`
+//! names, on exactly the channel the canvas draws.
+//!
+//! The three modes, as slope recipes over a key's
+//! neighbouring segments (angle channels take the
+//! shortest-path deltas, as everywhere in this panel):
+//!
+//! - **Auto** — the key's in and out slopes both become
+//!   the Catmull-Rom centred secant through its
+//!   neighbours — `graph::auto_tangents`' slope for
+//!   that one key, computed from the full channel so
+//!   an interior key's neighbours count even when they
+//!   are not selected (endpoints take their one
+//!   segment's secant, as `auto_tangents` does).
+//! - **Clamped** — Auto, with each side then pulled
+//!   back against its own segment Fritsch–Carlson
+//!   style: a side whose segment is flat becomes 0, a
+//!   side pointing against its segment's direction
+//!   becomes 0, and a side steeper than three times
+//!   its segment's secant is capped at that. A
+//!   segment whose BOTH ends are clamped this way
+//!   cannot overshoot either of its keys; clamping
+//!   one end protects that end — the other end's
+//!   tangent is the other key's business, and the
+//!   panel says so rather than claiming the whole
+//!   segment is safe.
+//! - **Free** — the broken-handle setup: the in slope
+//!   becomes the ARRIVING segment's own secant and
+//!   the out slope the LEAVING segment's, so each
+//!   side points at its own neighbour and the two
+//!   sides can be dragged and typed independently
+//!   from there (the panel's drags and slope fields
+//!   are already per-side). On straight, evenly
+//!   spaced data all three modes agree — correctly:
+//!   there is nothing to break, clamp or smooth.
+//!
+//! These are one-shot APPLICATIONS, not sticky
+//! modes: `graph::Key` stores no mode field, and
+//! this seat adds none — a later tangent drag or
+//! slope-field edit on an Auto'd key breaks its
+//! alignment per side, exactly as it always has,
+//! and no button lights up claiming a mode is
+//! "active". Applying a mode REPLACES the selected
+//! keys' hand-set tangents (that is what applying
+//! it means — the one labelled snapshot is the way
+//! back); unselected keys, on this channel and
+//! every other, are never touched. With no live
+//! selection on the drawn channel the press refuses
+//! through `core.status` and spends no snapshot —
+//! the `graph-delete-keys` discipline — and an
+//! application whose slopes already match spends
+//! none either. A landed application takes exactly
+//! ONE `snapshot_labeled` ("Tangent mode: Auto" /
+//! "Tangent mode: Clamped" / "Tangent mode: Free")
+//! for the whole batch, however many keys it names.
+//!
 //! ## State the shell must provide
 //!
 //! `State` needs one field (integrator wires it):
@@ -760,6 +862,20 @@ pub struct GraphPanelState {
     /// The in-flight key-field scrub's bookkeeping (one
     /// scrub at a time — the pointer has one drag).
     pub key_scrub: KeyScrub,
+    /// Number-field session for the channel range's low
+    /// end (Roadmap Wave 2, W2-35 — graph numeric entry
+    /// completion): the drawn channel's value-range
+    /// minimum, typed or scrubbed (see
+    /// [`channel_range_rows`]).
+    pub range_min_edit: design::NumberEdit,
+    /// Number-field session for the channel range's
+    /// high end (see [`Self::range_min_edit`]).
+    pub range_max_edit: design::NumberEdit,
+    /// The in-flight range-field scrub's bookkeeping —
+    /// the key fields' [`KeyScrub`] discipline (one lazy
+    /// snapshot per gesture, press-value cancel), over
+    /// the range ends (see [`RangeScrub`]).
+    pub range_scrub: RangeScrub,
 }
 
 /// The key fields' element keys, as consts: the kit
@@ -774,6 +890,45 @@ pub const KEY_VALUE_FIELD_KEY: &str = "graph-key-value";
 pub const KEY_IN_FIELD_KEY: &str = "graph-key-in";
 /// See [`KEY_FRAME_FIELD_KEY`].
 pub const KEY_OUT_FIELD_KEY: &str = "graph-key-out";
+
+/// Which end of the drawn channel's value range a
+/// range field edits (Roadmap Wave 2, W2-35 — see
+/// [`channel_range_rows`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RangeEnd {
+    /// The range's minimum (the channel's lowest key
+    /// value).
+    #[default]
+    Min,
+    /// The range's maximum (the channel's highest key
+    /// value).
+    Max,
+}
+
+/// One range-field scrub gesture's bookkeeping (Roadmap
+/// Wave 2, W2-35): [`KeyScrub`]'s discipline — ONE
+/// snapshot, lazily, at the first real change; the press
+/// value remembered so the kit's cancel path (a scrub
+/// write of exactly the press value) writes back and
+/// seals — over the drawn channel's value range. The
+/// scrub's key is the EXTREME key of its end, re-picked
+/// on every write by value (see [`range_scrub_write`]),
+/// so no index or anchor needs storing: the key it is
+/// moving is always the current extreme.
+#[derive(Clone, Debug, Default)]
+pub struct RangeScrub {
+    /// A snapshot has been taken for the in-flight scrub.
+    pub open: bool,
+    /// The channel the scrub is writing (index into
+    /// `Project::channels`), resolved at the first write.
+    pub channel: usize,
+    /// The field's value when the gesture began — the
+    /// kit's cancel path writes exactly this back, which
+    /// seals the gesture.
+    pub press: f32,
+    /// The end being scrubbed.
+    pub field: RangeEnd,
+}
 
 /// Which of the selected key's four numbers a number
 /// field edits (Roadmap Wave 1, F-3, audit A6 R5).
@@ -852,6 +1007,241 @@ pub fn handle_key_index(
         .or_else(|| nearest_key(ch, core.current as f32))
 }
 
+/// One of the three per-key tangent-mode presets
+/// (Roadmap Wave 2, W2-34 — P-7; audit A6 R7): a
+/// one-shot slope recipe applied to the shared
+/// selection's keys on the drawn channel through
+/// [`apply_tangent_mode_to_selected`]. Deliberately
+/// NOT `graph::TangentPreset`: those five (Smooth,
+/// Ease in, …) are figure-scoped easing flavours for
+/// whole channels; these three are tangent MODES for
+/// selected keys. The two families sit in adjacent
+/// rows of this panel and are never conflated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TangentModePreset {
+    /// Aligned Catmull-Rom: in slope = out slope =
+    /// the centred secant through the key's
+    /// neighbours (one-sided at the endpoints) —
+    /// `graph::auto_tangents`' slope for this key.
+    Auto,
+    /// Auto with each side Fritsch–Carlson-clamped
+    /// against its own segment (flat segment → 0,
+    /// against the segment's direction → 0, steeper
+    /// than 3× the segment's secant → capped), so a
+    /// clamped end cannot make its segment overshoot
+    /// this key.
+    Clamped,
+    /// Broken handles: the in slope takes the
+    /// arriving segment's secant, the out slope the
+    /// leaving segment's, so each side points at its
+    /// own neighbour and edits independently from
+    /// there.
+    Free,
+}
+
+impl TangentModePreset {
+    /// The mode's name, for buttons and status lines.
+    pub fn label(self) -> &'static str {
+        match self {
+            TangentModePreset::Auto => "Auto",
+            TangentModePreset::Clamped => "Clamped",
+            TangentModePreset::Free => "Free",
+        }
+    }
+
+    /// The undo label a landed application records —
+    /// one per application, however many keys it
+    /// rewrites (the RM24 labelled-snapshot rule).
+    fn snapshot_label(self) -> &'static str {
+        match self {
+            TangentModePreset::Auto => "Tangent mode: Auto",
+            TangentModePreset::Clamped => "Tangent mode: Clamped",
+            TangentModePreset::Free => "Tangent mode: Free",
+        }
+    }
+}
+
+/// The slope of the segment from key `a` to key `b`
+/// of `ch` (value units per frame): the plain secant,
+/// or the shortest-circular-path secant on an Angle
+/// channel — the delta rule `graph::auto_tangents`
+/// and this panel use everywhere. A degenerate span
+/// (frames not strictly increasing — impossible in
+/// channels built through `Channel::add_key`, but
+/// possible in hand-built data) yields 0.0 rather
+/// than a NaN, again as `auto_tangents` rules it.
+fn segment_secant(ch: &Channel, a: usize, b: usize) -> f32 {
+    let (ka, kb) = (&ch.keys[a], &ch.keys[b]);
+    let dt = kb.frame - ka.frame;
+    if dt <= 0.0 {
+        return 0.0;
+    }
+    let dv = if matches!(ch.target, ChannelTarget::Angle(_)) {
+        stykanimate_rs::model::norm_deg(kb.value - ka.value)
+    } else {
+        kb.value - ka.value
+    };
+    dv / dt
+}
+
+/// Clamp one side's Auto slope against its own
+/// segment's secant, Fritsch–Carlson style: a flat
+/// segment takes 0 (any non-zero tangent overshoots
+/// a segment whose ends are level); a slope pointing
+/// against the segment's direction takes 0 (it would
+/// leave the key the wrong way and have to climb
+/// back past the key's value); a slope steeper than
+/// three times the secant is capped at 3× — the
+/// monotonicity bound for a Hermite segment when the
+/// far end is clamped the same way.
+fn clamp_tangent_side(slope: f32, secant: f32) -> f32 {
+    if secant == 0.0 {
+        return 0.0;
+    }
+    if slope == 0.0 || (slope < 0.0) != (secant < 0.0) {
+        return 0.0;
+    }
+    slope.clamp(-3.0 * secant.abs(), 3.0 * secant.abs())
+}
+
+/// The `(in_tan, out_tan)` [`TangentModePreset`]
+/// prescribes for key `idx` of `ch`, derived from the
+/// channel's key FRAMES AND VALUES only (never from
+/// the stored tangents), so a batch application can
+/// compute every selected key's new slopes from the
+/// untouched channel before writing any of them.
+/// `None` when the channel holds fewer than two keys
+/// (no segment to derive a slope from) or `idx` names
+/// no key. Pure — the unit-testable heart of the
+/// three mode buttons.
+pub fn tangent_mode_slopes(
+    ch: &Channel,
+    idx: usize,
+    mode: TangentModePreset,
+) -> Option<(f32, f32)> {
+    let n = ch.keys.len();
+    if n < 2 || idx >= n {
+        return None;
+    }
+    // The two segment secants touching this key; an
+    // endpoint reuses its one segment on both sides,
+    // mirroring auto_tangents' one-sided endpoints.
+    let arriving = if idx == 0 {
+        segment_secant(ch, 0, 1)
+    } else {
+        segment_secant(ch, idx - 1, idx)
+    };
+    let leaving = if idx == n - 1 {
+        segment_secant(ch, n - 2, n - 1)
+    } else {
+        segment_secant(ch, idx, idx + 1)
+    };
+    let auto = if idx == 0 {
+        leaving
+    } else if idx == n - 1 {
+        arriving
+    } else {
+        segment_secant(ch, idx - 1, idx + 1)
+    };
+    Some(match mode {
+        TangentModePreset::Auto => (auto, auto),
+        TangentModePreset::Free => (arriving, leaving),
+        TangentModePreset::Clamped => (
+            clamp_tangent_side(auto, arriving),
+            clamp_tangent_side(auto, leaving),
+        ),
+    })
+}
+
+/// Apply a [`TangentModePreset`] to every key the
+/// shared selection names on the DRAWN channel
+/// (resolved through [`effective_channel_index`], so
+/// a picked duplicate row modes THAT twin's keys).
+/// Returns how many keys the mode was applied to.
+///
+/// Undo and refusal discipline, mirroring
+/// [`crate::rune_sec::key_selection::delete_selected_keys`]
+/// (the panel's other selection batch verb):
+///
+/// - No channel drawn, no live selection on the
+///   drawn channel (empty, stale, or naming another
+///   channel), or a drawn channel with fewer than
+///   two keys: refusal through `core.status`, NO
+///   snapshot, 0 returned.
+/// - The selected keys' slopes already match the
+///   mode exactly: a "nothing changed" status, NO
+///   snapshot, 0 returned — re-pressing a mode is
+///   free, never a phantom undo step.
+/// - Otherwise exactly ONE
+///   `snapshot_labeled(mode.snapshot_label())` for
+///   the whole batch, then every selected key's
+///   tangents are rewritten; unselected keys — their
+///   hand-set tangents included — are never touched.
+pub fn apply_tangent_mode_to_selected(
+    core: &mut EditorCore,
+    st: &GraphPanelState,
+    sel: &KeySel,
+    mode: TangentModePreset,
+) -> usize {
+    let Some(ci) = effective_channel_index(core, st) else {
+        core.status =
+            "No graph channel drawn — pick a channel, then apply a tangent mode.".into();
+        return 0;
+    };
+    let idxs = sel.indices(ci, &core.project.channels[ci]);
+    if idxs.is_empty() {
+        core.status = "No keys selected on the drawn channel — click a key or drag \
+                       a marquee on the canvas, then apply a tangent mode."
+            .into();
+        return 0;
+    }
+    if core.project.channels[ci].keys.len() < 2 {
+        core.status = "Tangent modes need a segment to derive slopes from — the \
+                       drawn channel has fewer than two keys."
+            .into();
+        return 0;
+    }
+    let ch = &core.project.channels[ci];
+    let (figure, label) = (ch.figure, channel_label(ch.target));
+    let updates: Vec<(usize, f32, f32)> = idxs
+        .iter()
+        .map(|&i| {
+            let (in_tan, out_tan) =
+                tangent_mode_slopes(ch, i, mode).expect("a live key on a 2+ key channel");
+            (i, in_tan, out_tan)
+        })
+        .collect();
+    let changed = updates.iter().any(|&(i, in_tan, out_tan)| {
+        let k = &ch.keys[i];
+        k.in_tan != in_tan || k.out_tan != out_tan
+    });
+    if !changed {
+        core.status = format!(
+            "Selected keys already match the {} tangent mode on figure {} {}.",
+            mode.label(),
+            figure + 1,
+            label
+        );
+        return 0;
+    }
+    core.snapshot_labeled(mode.snapshot_label());
+    let ch = &mut core.project.channels[ci];
+    for (i, in_tan, out_tan) in updates {
+        ch.keys[i].in_tan = in_tan;
+        ch.keys[i].out_tan = out_tan;
+    }
+    let n = idxs.len();
+    core.status = format!(
+        "Applied {} tangent mode to {} selected key{} on figure {} {}.",
+        mode.label(),
+        n,
+        if n == 1 { "" } else { "s" },
+        figure + 1,
+        label
+    );
+    n
+}
+
 /// One field's current value on key `idx` of channel
 /// `ci` — the read behind every key-field write path.
 fn key_field_value(core: &EditorCore, ci: usize, idx: usize, field: KeyField) -> Option<f32> {
@@ -904,6 +1294,26 @@ fn key_write(
 /// the canvas drag's own Up-phase wording
 /// ([`drag_up`]), so a typed edit and a dragged edit
 /// report identically.
+/// The undo label for a key-field edit (typed commit or
+/// scrub), naming the field being edited, in the History
+/// panel's voice (W2-70, IA-RM24-4 slice C).
+fn key_field_label(field: KeyField) -> &'static str {
+    match field {
+        KeyField::Frame => "Move graph key",
+        KeyField::Value => "Set key value",
+        KeyField::InTan | KeyField::OutTan => "Set key tangent",
+    }
+}
+
+/// The undo label for a channel-range edit (typed commit
+/// or scrub), naming the end being set (W2-70).
+fn range_field_label(field: RangeEnd) -> &'static str {
+    match field {
+        RangeEnd::Min => "Set channel minimum",
+        RangeEnd::Max => "Set channel maximum",
+    }
+}
+
 fn key_recap(core: &EditorCore, ci: usize, idx: usize, field: KeyField) -> Option<String> {
     let k = core.project.channels.get(ci)?.keys.get(idx)?;
     Some(match field {
@@ -935,7 +1345,7 @@ pub fn key_commit(core: &mut EditorCore, st: &GraphPanelState, field: KeyField, 
     let Some((ci, idx)) = key_pick(core, st) else {
         return;
     };
-    core.snapshot();
+    core.snapshot_labeled(key_field_label(field));
     if let Some(nidx) = key_write(core, ci, idx, field, v) {
         if let Some(recap) = key_recap(core, ci, nidx, field) {
             core.status = recap;
@@ -979,7 +1389,7 @@ pub fn key_scrub_write(core: &mut EditorCore, st: &mut GraphPanelState, field: K
         if v == cur {
             return;
         }
-        core.snapshot();
+        core.snapshot_labeled(key_field_label(field));
         let anchor = core.project.channels[ci].keys[idx].frame;
         st.key_scrub = KeyScrub {
             open: true,
@@ -1031,7 +1441,7 @@ pub fn key_scrub_finish(core: &mut EditorCore, st: &mut GraphPanelState, field: 
     if v == cur {
         return;
     }
-    core.snapshot();
+    core.snapshot_labeled(key_field_label(field));
     if let Some(nidx) = key_write(core, ci, idx, field, v) {
         if let Some(recap) = key_recap(core, ci, nidx, field) {
             core.status = recap;
@@ -1252,6 +1662,290 @@ pub fn key_number_rows(s: &State, t: &Theme) -> Option<El> {
     )
 }
 
+/// The range fields' element keys, as consts — the
+/// [`KEY_FRAME_FIELD_KEY`] carried-form discipline (the
+/// kit takes the key as an argument; the gate's key-diff
+/// reads `*_KEY` consts).
+pub const RANGE_MIN_FIELD_KEY: &str = "graph-range-min";
+/// See [`RANGE_MIN_FIELD_KEY`].
+pub const RANGE_MAX_FIELD_KEY: &str = "graph-range-max";
+
+/// The drawn channel's value range — (min, max) over
+/// its keys' values — or `None` when no channel is
+/// drawn or the channel is empty. The range the stats
+/// block prints per channel ([`stat_line`]); the range
+/// fields edit THESE numbers, so the field row and the
+/// stat line can never disagree about what the range
+/// is.
+pub fn channel_range(core: &EditorCore, st: &GraphPanelState) -> Option<(f32, f32)> {
+    let ci = effective_channel_index(core, st)?;
+    let ch = &core.project.channels[ci];
+    let mut it = ch.keys.iter();
+    let first = it.next()?;
+    let mut lo = first.value;
+    let mut hi = first.value;
+    for k in it {
+        lo = lo.min(k.value);
+        hi = hi.max(k.value);
+    }
+    Some((lo, hi))
+}
+
+/// Index of the key carrying the range end `field` of
+/// channel `ci`: the FIRST key at the extreme value —
+/// the deterministic pick when several keys share it
+/// (they all display the same range; the field moves
+/// one carrier and the range re-reads from the data, so
+/// a shared extreme advances one key at a time and
+/// never lies about the result).
+fn extreme_key_index(core: &EditorCore, ci: usize, field: RangeEnd) -> Option<usize> {
+    let ch = core.project.channels.get(ci)?;
+    let mut best: Option<usize> = None;
+    for (i, k) in ch.keys.iter().enumerate() {
+        let better = match best {
+            None => true,
+            Some(b) => match field {
+                RangeEnd::Min => k.value < ch.keys[b].value,
+                RangeEnd::Max => k.value > ch.keys[b].value,
+            },
+        };
+        if better {
+            best = Some(i);
+        }
+    }
+    best
+}
+
+/// One range end's current value on channel `ci`.
+fn range_field_value(core: &EditorCore, ci: usize, field: RangeEnd) -> Option<f32> {
+    let idx = extreme_key_index(core, ci, field)?;
+    Some(core.project.channels[ci].keys[idx].value)
+}
+
+/// Write one range end of channel `ci`: the extreme
+/// key's value becomes `v` through [`key_write`] (the
+/// key fields' own write — frame held, value set). No
+/// snapshot: the caller owns the gesture's undo
+/// bookkeeping.
+fn range_write(
+    core: &mut EditorCore,
+    ci: usize,
+    field: RangeEnd,
+    v: f32,
+) -> Option<usize> {
+    let idx = extreme_key_index(core, ci, field)?;
+    key_write(core, ci, idx, KeyField::Value, v)
+}
+
+/// The status recap for a committed range edit — the
+/// range as it stands AFTER the write, in the channel's
+/// own readout conventions ([`channel_value_text`]), so
+/// a shared extreme reports the range it actually
+/// produced rather than the number that was typed.
+fn range_recap(core: &EditorCore, ci: usize, field: RangeEnd) -> Option<String> {
+    let ch = core.project.channels.get(ci)?;
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    for k in &ch.keys {
+        lo = lo.min(k.value);
+        hi = hi.max(k.value);
+    }
+    if ch.keys.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Graph {} range: {}..{} on {}.",
+        match field {
+            RangeEnd::Min => "min",
+            RangeEnd::Max => "max",
+        },
+        channel_value_text(ch.target, lo),
+        channel_value_text(ch.target, hi),
+        channel_label(ch.target),
+    ))
+}
+
+/// A range field's typed commit: resolve the drawn
+/// channel, take exactly ONE snapshot (the key fields'
+/// per-edit undo contract), write the extreme key,
+/// recap with the range it produced. A write that
+/// changes nothing (the typed value equals the current
+/// extreme, or every key already sits on it) still
+/// costs the one snapshot a typed commit always costs —
+/// the [`key_commit`] precedent, no special case. An
+/// unresolvable channel writes nothing and spends
+/// nothing.
+pub fn range_commit(core: &mut EditorCore, st: &GraphPanelState, field: RangeEnd, v: f32) {
+    let Some(ci) = effective_channel_index(core, st) else {
+        return;
+    };
+    if core.project.channels[ci].keys.is_empty() {
+        return;
+    }
+    core.snapshot_labeled(range_field_label(field));
+    if range_write(core, ci, field, v).is_some() {
+        if let Some(recap) = range_recap(core, ci, field) {
+            core.status = recap;
+        }
+    }
+}
+
+/// A range field's silent mid-scrub write, under
+/// `st.range_scrub`'s bookkeeping — [`key_scrub_write`]
+/// transposed: the first write that actually changes
+/// the extreme takes the gesture's one snapshot; a
+/// write of exactly the press value while this end's
+/// gesture is open is the kit's cancel-restore (writes
+/// back, seals). The extreme key is re-picked per write
+/// by value, so a scrub that crosses the old extreme
+/// keeps hold of the range end it is moving.
+pub fn range_scrub_write(core: &mut EditorCore, st: &mut GraphPanelState, field: RangeEnd, v: f32) {
+    if st.range_scrub.open && st.range_scrub.field == field && v == st.range_scrub.press {
+        let ci = st.range_scrub.channel;
+        range_write(core, ci, field, v);
+        st.range_scrub.open = false;
+        return;
+    }
+    if !st.range_scrub.open {
+        let Some(ci) = effective_channel_index(core, st) else {
+            return;
+        };
+        let Some(cur) = range_field_value(core, ci, field) else {
+            return;
+        };
+        if v == cur {
+            return;
+        }
+        core.snapshot_labeled(range_field_label(field));
+        st.range_scrub = RangeScrub {
+            open: true,
+            channel: ci,
+            press: cur,
+            field,
+        };
+    }
+    let ci = st.range_scrub.channel;
+    range_write(core, ci, field, v);
+}
+
+/// A range field's scrub release: the final write and
+/// the one recap (the range it produced). A gesture
+/// that changed nothing leaves no trace — the
+/// [`key_scrub_finish`] discipline, including its
+/// no-gesture tail (the pointer moved between the last
+/// Move and the Up: one snapshot, one write, one
+/// recap).
+pub fn range_scrub_finish(core: &mut EditorCore, st: &mut GraphPanelState, field: RangeEnd, v: f32) {
+    if st.range_scrub.open && st.range_scrub.field == field {
+        let ci = st.range_scrub.channel;
+        if range_write(core, ci, field, v).is_some() {
+            if let Some(recap) = range_recap(core, ci, field) {
+                core.status = recap;
+            }
+        }
+        st.range_scrub.open = false;
+        return;
+    }
+    let Some(ci) = effective_channel_index(core, st) else {
+        return;
+    };
+    let Some(cur) = range_field_value(core, ci, field) else {
+        return;
+    };
+    if v == cur {
+        return;
+    }
+    core.snapshot_labeled(range_field_label(field));
+    if range_write(core, ci, field, v).is_some() {
+        if let Some(recap) = range_recap(core, ci, field) {
+            core.status = recap;
+        }
+    }
+}
+
+/// One range number field (see [`channel_range_rows`]):
+/// the kit field on the VALUE spec of the drawn
+/// channel's target ([`key_value_spec`] — the range is
+/// in the channel's own units, as its stat line prints
+/// them), wired to `field`'s commit / scrub paths.
+fn range_number_field(
+    s: &State,
+    field: RangeEnd,
+    spec: &design::NumSpec,
+    value: f32,
+    help: &str,
+    hint: &str,
+    t: &Theme,
+) -> El {
+    let (key, state): (&str, &design::NumberEdit) = match field {
+        RangeEnd::Min => (RANGE_MIN_FIELD_KEY, &s.graph_panel.range_min_edit),
+        RangeEnd::Max => (RANGE_MAX_FIELD_KEY, &s.graph_panel.range_max_edit),
+    };
+    design::number_field(
+        key,
+        state,
+        spec,
+        value,
+        &spec.format(value),
+        help,
+        Some(hint),
+        t,
+        design::NumWiring {
+            access: move |s: &mut State| -> &mut design::NumberEdit {
+                match field {
+                    RangeEnd::Min => &mut s.graph_panel.range_min_edit,
+                    RangeEnd::Max => &mut s.graph_panel.range_max_edit,
+                }
+            },
+            commit: move |s: &mut State, v: f32| {
+                range_commit(&mut s.core, &s.graph_panel, field, v)
+            },
+            reject: |s: &mut State| {
+                s.core.status = i18n_wire::tr(&s.core, "number_field_invalid");
+            },
+            scrub_write: move |s: &mut State, v: f32| {
+                range_scrub_write(&mut s.core, &mut s.graph_panel, field, v)
+            },
+            scrub_finish: move |s: &mut State, v: f32| {
+                range_scrub_finish(&mut s.core, &mut s.graph_panel, field, v)
+            },
+        },
+    )
+}
+
+/// The channel-range number row (Roadmap Wave 2,
+/// W2-35 — graph numeric entry completion): Min + Max
+/// fields for the DRAWN channel's value range, mounted
+/// directly under the selected-key rows so the panel's
+/// numbers read as one block — key, slopes, range.
+/// Each field edits the key carrying that extreme (the
+/// first, when several share it); the range is data,
+/// not view state, so there is no view-only range to
+/// store or drift. Absent exactly when
+/// [`channel_range`] fails (no channel drawn, or an
+/// empty channel).
+pub fn channel_range_rows(s: &State, t: &Theme) -> Option<El> {
+    let core = &s.core;
+    let (lo, hi) = channel_range(core, &s.graph_panel)?;
+    let ci = effective_channel_index(core, &s.graph_panel)?;
+    let target = core.project.channels[ci].target;
+    let spec = key_value_spec(target);
+    let help = i18n_wire::tr(core, "number_field_help");
+    let hint = i18n_wire::tr(core, "number_field_invalid");
+    let label = |name: &str| text(name).font(type_::LABEL).color(t.text_secondary);
+    Some(
+        row()
+            .key("graph-range-row")
+            .gap(4.0)
+            .center_y()
+            .child(design::section_label("Range", t))
+            .child(label("Min"))
+            .child(range_number_field(s, RangeEnd::Min, &spec, lo, &help, &hint, t))
+            .child(label("Max"))
+            .child(range_number_field(s, RangeEnd::Max, &spec, hi, &help, &hint, t)),
+    )
+}
+
 /// Poll sync (the `sync_name_edit` idiom, called from
 /// the shell's `poll` — IA-RM4-1): revert any key-field
 /// session the framework has blurred — Escape lands
@@ -1262,6 +1956,8 @@ pub fn sync_number_edits(s: &mut State) {
     s.graph_panel.key_value_edit.reconcile();
     s.graph_panel.key_in_edit.reconcile();
     s.graph_panel.key_out_edit.reconcile();
+    s.graph_panel.range_min_edit.reconcile();
+    s.graph_panel.range_max_edit.reconcile();
 }
 
 /// Human label for a channel target, in UI casing: "Root X",
@@ -1990,7 +2686,7 @@ pub fn key_bend(core: &mut EditorCore) {
             .copied()
             .unwrap_or(0.0),
     };
-    core.snapshot();
+    core.snapshot_labeled("Add graph key");
     let ch = stykanimate_rs::graph::channel_mut(&mut core.project.channels, fi, target);
     ch.add_key(frame, value);
     core.status = format!(
@@ -2031,7 +2727,7 @@ pub fn apply_mirror_at(core: &mut EditorCore, idx: usize) {
         return;
     }
     let centre = (core.project.frames.len().saturating_sub(1)) as f32 / 2.0;
-    core.snapshot();
+    core.snapshot_labeled("Mirror graph channel");
     let ch = &mut core.project.channels[idx];
     stykanimate_rs::graph::mirror_keys_time(&mut ch.keys, centre);
     // Mirroring reverses the key order; restore ascending
@@ -2066,7 +2762,7 @@ pub fn apply_scale_at(core: &mut EditorCore, idx: usize, factor: f32) {
         core.status = "No graph channel to scale.".to_string();
         return;
     }
-    core.snapshot();
+    core.snapshot_labeled("Scale graph channel");
     let ch = &mut core.project.channels[idx];
     stykanimate_rs::graph::scale_key_values(&mut ch.keys, factor, 0.0);
     core.status = format!("Scaled graph channel values by {factor} around 0.");
@@ -2102,7 +2798,7 @@ pub fn apply_reduce_at(core: &mut EditorCore, idx: usize) {
         core.status = "No graph channel to reduce.".to_string();
         return;
     };
-    core.snapshot();
+    core.snapshot_labeled("Reduce graph keys");
     let removed = stykanimate_rs::graph::reduce_keys(
         &mut core.project.channels[idx],
         reduce_tolerance(target),
@@ -2342,7 +3038,7 @@ pub fn drag_down(
         if let Some(side) =
             hit_tangent_handle(&view, &core.project.channels[ci], sel, px, GRAB_RADIUS)
         {
-            core.snapshot();
+            core.snapshot_labeled("Set key tangent");
             st.drag_handle = Some((sel, side));
             st.drag_key = None;
             st.marquee = None;
@@ -2354,7 +3050,7 @@ pub fn drag_down(
     let hit = view.hit_key(&core.project.channels[ci], px, GRAB_RADIUS);
     match hit {
         Some(i) => {
-            core.snapshot();
+            core.snapshot_labeled("Move graph key");
             st.drag_anchor = core.project.channels[ci].keys[i].frame;
             st.drag_key = Some(i);
             st.drag_handle = None;
@@ -2941,6 +3637,47 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
             |s: &mut State| s.core.apply_graph_ease_preset(TangentPreset::Linear),
         ));
 
+    // Tangent-mode presets (Roadmap Wave 2, W2-34 —
+    // P-7): the per-key modes over the shared selection
+    // (F-4) — Auto / Clamped / Free on the selected
+    // keys of the DRAWN channel, where the chips above
+    // ease every key of the figure. Actions, not
+    // state, so never active: the key model stores no
+    // mode for a button to truthfully light (see the
+    // module docs). The row mounts only while a
+    // channel is drawn (below, beside `presets`) —
+    // with nothing drawn there is no channel a
+    // selection could name on it.
+    let tangent_modes = row()
+        .key("graph-tangent-modes")
+        .gap(4.0)
+        .center_y()
+        .child(design::section_label("Tangent mode · selected keys", t))
+        .child(btn("graph-tmode-auto", "Auto", false, t, |s: &mut State| {
+            apply_tangent_mode_to_selected(
+                &mut s.core,
+                &s.graph_panel,
+                &s.key_sel,
+                TangentModePreset::Auto,
+            );
+        }))
+        .child(btn("graph-tmode-clamped", "Clamped", false, t, |s: &mut State| {
+            apply_tangent_mode_to_selected(
+                &mut s.core,
+                &s.graph_panel,
+                &s.key_sel,
+                TangentModePreset::Clamped,
+            );
+        }))
+        .child(btn("graph-tmode-free", "Free", false, t, |s: &mut State| {
+            apply_tangent_mode_to_selected(
+                &mut s.core,
+                &s.graph_panel,
+                &s.key_sel,
+                TangentModePreset::Free,
+            );
+        }));
+
     let actions = row()
         .key("graph-actions")
         .gap(4.0)
@@ -3177,6 +3914,15 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
     if let Some(rows) = key_number_rows(s, t) {
         panel = panel.child(rows);
     }
+    // Channel-range number fields (Roadmap Wave 2,
+    // W2-35): Min + Max for the drawn channel's value
+    // range, directly under the key rows — the stats
+    // block's printed range, editable. Absent exactly
+    // when `channel_range` fails (no channel drawn or
+    // an empty channel), as the key rows are.
+    if let Some(row) = channel_range_rows(s, t) {
+        panel = panel.child(row);
+    }
     if ch.is_none() {
         // The hint names the authoring action the TARGET
         // actually has (empty_channel_hint, Wave Z Z11):
@@ -3187,10 +3933,14 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
             t,
         ));
     }
-    panel
-        .child(interp_row)
-        .child(presets)
-        .child(actions)
+    panel = panel.child(interp_row).child(presets);
+    // Tangent-mode row (W2-34): mounts only while a
+    // channel is drawn — its whole scope is the drawn
+    // channel's selected keys.
+    if drawn_idx.is_some() {
+        panel = panel.child(tangent_modes);
+    }
+    panel.child(actions)
 }
 
 #[cfg(test)]
@@ -3302,6 +4052,406 @@ mod tests {
         assert_eq!(core.undo_depth(), depth + 1, "the whole scrub is one step");
         assert!(
             core.status.starts_with("Graph key moved: frame 14.0"),
+            "{}",
+            core.status
+        );
+    }
+
+    // ---- Channel-range fields (Roadmap Wave 2, W2-35) ----
+
+    #[test]
+    fn channel_range_reads_the_drawn_channels_extremes() {
+        let core = core_with_sloped_channel();
+        let st = GraphPanelState::default();
+        assert_eq!(channel_range(&core, &st), Some((0.0, 210.0)));
+        // No channel drawn: no range.
+        let bare = EditorCore::new();
+        assert_eq!(channel_range(&bare, &st), None);
+        // An empty channel: no range either.
+        let mut empty = EditorCore::new();
+        empty.project.channels = vec![channel(ChannelTarget::RootX, vec![])];
+        assert_eq!(channel_range(&empty, &st), None);
+    }
+
+    #[test]
+    fn range_commit_moves_the_extreme_key_in_one_undo_step() {
+        let mut core = core_with_sloped_channel();
+        let st = GraphPanelState::default();
+        let depth = core.undo_depth();
+        range_commit(&mut core, &st, RangeEnd::Min, -40.0);
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot per commit");
+        assert_eq!(channel_range(&core, &st), Some((-40.0, 210.0)));
+        // The carrier was key 0 — its FRAME is untouched,
+        // only the value moved (a value write, not a move).
+        assert_eq!(core.project.channels[0].keys[0].frame, 0.0);
+        assert!(
+            core.status.starts_with("Graph min range: -40..210"),
+            "{}",
+            core.status
+        );
+        range_commit(&mut core, &st, RangeEnd::Max, 180.0);
+        assert_eq!(core.undo_depth(), depth + 2);
+        assert_eq!(channel_range(&core, &st), Some((-40.0, 180.0)));
+        assert!(
+            core.status.starts_with("Graph max range: -40..180"),
+            "{}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn range_commit_on_a_shared_extreme_reports_the_range_it_produced() {
+        let mut core = EditorCore::new();
+        core.project.channels = vec![channel(
+            ChannelTarget::RootX,
+            vec![
+                Key::flat(0.0, 50.0),
+                Key::flat(10.0, 50.0),
+                Key::flat(20.0, 90.0),
+            ],
+        )];
+        let st = GraphPanelState::default();
+        // Two keys share the min: the FIRST carrier moves,
+        // the twin still pins the range at 50 — and the
+        // recap says so instead of echoing the typed 20.
+        range_commit(&mut core, &st, RangeEnd::Min, 20.0);
+        assert_eq!(channel_range(&core, &st), Some((50.0, 90.0)));
+        assert_eq!(core.project.channels[0].keys[0].value, 20.0);
+        assert!(
+            core.status.starts_with("Graph min range: 50..90"),
+            "{}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn range_scrub_is_one_undo_step_and_cancel_restores() {
+        let mut core = core_with_sloped_channel();
+        let mut st = GraphPanelState::default();
+        let depth = core.undo_depth();
+        // Scrub the max down in two writes: the first real
+        // change takes the gesture's one snapshot.
+        range_scrub_write(&mut core, &mut st, RangeEnd::Max, 150.0);
+        range_scrub_write(&mut core, &mut st, RangeEnd::Max, 120.0);
+        assert_eq!(channel_range(&core, &st), Some((0.0, 120.0)));
+        range_scrub_finish(&mut core, &mut st, RangeEnd::Max, 120.0);
+        assert!(!st.range_scrub.open);
+        assert_eq!(core.undo_depth(), depth + 1, "the whole scrub is one step");
+        assert!(
+            core.status.starts_with("Graph max range: 0..120"),
+            "{}",
+            core.status
+        );
+        // Cancel: a scrub write of exactly the press value
+        // restores it and seals — still the one snapshot
+        // the gesture opened with.
+        range_scrub_write(&mut core, &mut st, RangeEnd::Max, 90.0);
+        range_scrub_write(&mut core, &mut st, RangeEnd::Max, 120.0);
+        assert!(!st.range_scrub.open, "the press value seals the gesture");
+        assert_eq!(channel_range(&core, &st), Some((0.0, 120.0)));
+        assert_eq!(core.undo_depth(), depth + 2, "one snapshot for the cancelled gesture too");
+    }
+
+    #[test]
+    fn range_ops_spend_nothing_without_a_channel() {
+        let mut core = EditorCore::new();
+        let mut st = GraphPanelState::default();
+        let depth = core.undo_depth();
+        range_commit(&mut core, &st, RangeEnd::Min, 5.0);
+        range_scrub_write(&mut core, &mut st, RangeEnd::Min, 5.0);
+        range_scrub_finish(&mut core, &mut st, RangeEnd::Min, 5.0);
+        assert_eq!(core.undo_depth(), depth, "no channel, no snapshot");
+        assert!(!st.range_scrub.open);
+    }
+
+    // ---- Tangent-mode presets (Roadmap Wave 2, W2-34 — P-7) ----
+
+    /// A Root X channel whose segment secants all
+    /// differ — arriving 10, leaving 1 at key 1;
+    /// arriving 1, leaving 10 at key 2; centred secant
+    /// 5.5 at both — carrying loud custom tangents
+    /// (99 / −99) so a test can see exactly which keys
+    /// an application rewrote and which it left alone.
+    fn core_with_sloped_channel() -> EditorCore {
+        let mut core = EditorCore::new();
+        let key = |frame: f32, value: f32| Key {
+            frame,
+            value,
+            in_tan: 99.0,
+            out_tan: -99.0,
+            interp: Interp::Hermite,
+        };
+        core.project.channels = vec![channel(
+            ChannelTarget::RootX,
+            vec![
+                key(0.0, 0.0),
+                key(10.0, 100.0),
+                key(20.0, 110.0),
+                key(30.0, 210.0),
+            ],
+        )];
+        core
+    }
+
+    #[test]
+    fn tangent_mode_slopes_distinguish_auto_clamped_and_free() {
+        let core = core_with_sloped_channel();
+        let ch = &core.project.channels[0];
+        // Key 1 (frame 10): Auto aligns both sides on
+        // the centred secant; Free gives each side its
+        // own segment's secant; Clamped is Auto until
+        // the shallow leaving segment (secant 1) caps
+        // its side at 3×.
+        assert_eq!(
+            tangent_mode_slopes(ch, 1, TangentModePreset::Auto),
+            Some((5.5, 5.5))
+        );
+        assert_eq!(
+            tangent_mode_slopes(ch, 1, TangentModePreset::Free),
+            Some((10.0, 1.0))
+        );
+        assert_eq!(
+            tangent_mode_slopes(ch, 1, TangentModePreset::Clamped),
+            Some((5.5, 3.0))
+        );
+        // Key 2 mirrors key 1.
+        assert_eq!(
+            tangent_mode_slopes(ch, 2, TangentModePreset::Free),
+            Some((1.0, 10.0))
+        );
+        assert_eq!(
+            tangent_mode_slopes(ch, 2, TangentModePreset::Clamped),
+            Some((3.0, 5.5))
+        );
+        // Endpoints have one segment: every mode takes
+        // its secant on both sides.
+        for mode in [
+            TangentModePreset::Auto,
+            TangentModePreset::Clamped,
+            TangentModePreset::Free,
+        ] {
+            assert_eq!(tangent_mode_slopes(ch, 0, mode), Some((10.0, 10.0)));
+            assert_eq!(tangent_mode_slopes(ch, 3, mode), Some((10.0, 10.0)));
+        }
+        // No key there, or no segment to derive from:
+        // no slopes.
+        assert_eq!(tangent_mode_slopes(ch, 4, TangentModePreset::Auto), None);
+        let single = channel(ChannelTarget::RootX, vec![Key::flat(0.0, 0.0)]);
+        assert_eq!(
+            tangent_mode_slopes(&single, 0, TangentModePreset::Auto),
+            None
+        );
+    }
+
+    #[test]
+    fn clamped_zeroes_a_side_that_would_overshoot_its_segment() {
+        // A valley key: the centred Auto slope (−4.5)
+        // arrives down the steep side honestly, but
+        // leaving at −4.5 toward a shallow RISE would
+        // first dive below the valley — Clamped zeroes
+        // exactly that side.
+        let ch = channel(
+            ChannelTarget::RootX,
+            vec![
+                Key::flat(0.0, 100.0),
+                Key::flat(10.0, 0.0),
+                Key::flat(20.0, 10.0),
+            ],
+        );
+        assert_eq!(
+            tangent_mode_slopes(&ch, 1, TangentModePreset::Auto),
+            Some((-4.5, -4.5))
+        );
+        assert_eq!(
+            tangent_mode_slopes(&ch, 1, TangentModePreset::Clamped),
+            Some((-4.5, 0.0))
+        );
+        // A flat arriving segment: any non-zero
+        // in-tangent overshoots it, so the in side is
+        // 0 while the out side keeps its Auto slope.
+        let ch = channel(
+            ChannelTarget::RootX,
+            vec![
+                Key::flat(0.0, 50.0),
+                Key::flat(10.0, 50.0),
+                Key::flat(20.0, 100.0),
+            ],
+        );
+        assert_eq!(
+            tangent_mode_slopes(&ch, 1, TangentModePreset::Clamped),
+            Some((0.0, 2.5))
+        );
+    }
+
+    #[test]
+    fn tangent_mode_slopes_wrap_angle_channels_the_short_way() {
+        // 350° → 340° → 10°: the plain deltas would be
+        // −10 / −330 / −340; the shortest-path deltas
+        // are −10 / +30 / +20, and the modes must be
+        // built from those.
+        let ch = channel(
+            ChannelTarget::Angle(0),
+            vec![
+                Key::flat(0.0, 350.0),
+                Key::flat(10.0, 340.0),
+                Key::flat(20.0, 10.0),
+            ],
+        );
+        assert_eq!(
+            tangent_mode_slopes(&ch, 1, TangentModePreset::Free),
+            Some((-1.0, 3.0))
+        );
+        assert_eq!(
+            tangent_mode_slopes(&ch, 1, TangentModePreset::Auto),
+            Some((1.0, 1.0))
+        );
+    }
+
+    #[test]
+    fn apply_auto_rewrites_only_the_selected_keys_in_one_labelled_step() {
+        let mut core = core_with_sloped_channel();
+        let st = GraphPanelState::default();
+        let mut sel = KeySel::default();
+        sel.select_range(&core.project.channels[0], 0, 10.0, 20.0);
+        let depth = core.undo_depth();
+        assert_eq!(
+            apply_tangent_mode_to_selected(&mut core, &st, &sel, TangentModePreset::Auto),
+            2
+        );
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot for the batch");
+        assert_eq!(core.undo_label(), Some("Tangent mode: Auto"));
+        let keys = &core.project.channels[0].keys;
+        assert_eq!(
+            (keys[0].in_tan, keys[0].out_tan),
+            (99.0, -99.0),
+            "unselected keys keep their custom tangents"
+        );
+        assert_eq!((keys[1].in_tan, keys[1].out_tan), (5.5, 5.5));
+        assert_eq!((keys[2].in_tan, keys[2].out_tan), (5.5, 5.5));
+        assert_eq!((keys[3].in_tan, keys[3].out_tan), (99.0, -99.0));
+        assert!(
+            core.status
+                .contains("Applied Auto tangent mode to 2 selected keys"),
+            "{}",
+            core.status
+        );
+        core.undo();
+        assert_eq!(
+            core.project.channels[0].keys[1].in_tan, 99.0,
+            "one undo restores the custom tangents"
+        );
+    }
+
+    #[test]
+    fn apply_free_breaks_clamped_caps_and_a_repeat_spends_nothing() {
+        let mut core = core_with_sloped_channel();
+        let st = GraphPanelState::default();
+        let mut sel = KeySel::default();
+        sel.select_one(0, 10.0);
+        assert_eq!(
+            apply_tangent_mode_to_selected(&mut core, &st, &sel, TangentModePreset::Free),
+            1
+        );
+        let k = core.project.channels[0].keys[1];
+        assert_eq!(
+            (k.in_tan, k.out_tan),
+            (10.0, 1.0),
+            "free: each side takes its own segment's secant"
+        );
+        // Re-applying the mode the key already matches
+        // changes nothing and spends no snapshot.
+        let depth = core.undo_depth();
+        assert_eq!(
+            apply_tangent_mode_to_selected(&mut core, &st, &sel, TangentModePreset::Free),
+            0
+        );
+        assert_eq!(core.undo_depth(), depth);
+        assert!(
+            core.status.contains("already match the Free tangent mode"),
+            "{}",
+            core.status
+        );
+        // Clamped recomputes from the key VALUES (not
+        // from the Free slopes just written).
+        assert_eq!(
+            apply_tangent_mode_to_selected(&mut core, &st, &sel, TangentModePreset::Clamped),
+            1
+        );
+        let k = core.project.channels[0].keys[1];
+        assert_eq!((k.in_tan, k.out_tan), (5.5, 3.0));
+        assert_eq!(core.undo_label(), Some("Tangent mode: Clamped"));
+    }
+
+    #[test]
+    fn apply_tangent_mode_refusals_spend_no_snapshot() {
+        let mut core = core_with_sloped_channel();
+        let st = GraphPanelState::default();
+        let depth = core.undo_depth();
+        // Nothing selected at all.
+        let sel = KeySel::default();
+        assert_eq!(
+            apply_tangent_mode_to_selected(&mut core, &st, &sel, TangentModePreset::Auto),
+            0
+        );
+        assert!(
+            core.status.contains("No keys selected on the drawn channel"),
+            "{}",
+            core.status
+        );
+        // A live selection naming ANOTHER channel: the
+        // drawn channel's keys are not its business.
+        core.project.channels.push(channel(
+            ChannelTarget::RootY,
+            vec![Key::flat(0.0, 0.0), Key::flat(10.0, 5.0)],
+        ));
+        let mut sel = KeySel::default();
+        sel.select_one(1, 0.0);
+        assert_eq!(
+            apply_tangent_mode_to_selected(&mut core, &st, &sel, TangentModePreset::Auto),
+            0
+        );
+        assert!(core.status.contains("No keys selected on the drawn channel"));
+        // A stale selection: its key was deleted
+        // elsewhere, so it names nothing live.
+        let mut sel = KeySel::default();
+        sel.select_one(0, 10.0);
+        core.project.channels[0].keys.remove(1);
+        assert_eq!(
+            apply_tangent_mode_to_selected(&mut core, &st, &sel, TangentModePreset::Auto),
+            0
+        );
+        assert!(core.status.contains("No keys selected on the drawn channel"));
+        assert_eq!(core.undo_depth(), depth, "no refusal spent a snapshot");
+        // A one-key channel has no segment to derive
+        // slopes from.
+        let mut core = EditorCore::new();
+        core.project.channels = vec![channel(
+            ChannelTarget::RootX,
+            vec![Key::flat(0.0, 0.0)],
+        )];
+        let mut sel = KeySel::default();
+        sel.select_one(0, 0.0);
+        let depth = core.undo_depth();
+        assert_eq!(
+            apply_tangent_mode_to_selected(&mut core, &st, &sel, TangentModePreset::Auto),
+            0
+        );
+        assert!(
+            core.status.contains("fewer than two keys"),
+            "{}",
+            core.status
+        );
+        assert_eq!(core.undo_depth(), depth);
+        // No channel drawn at all.
+        let mut core = EditorCore::new();
+        core.project.channels.clear();
+        let sel = KeySel::default();
+        assert_eq!(
+            apply_tangent_mode_to_selected(&mut core, &st, &sel, TangentModePreset::Auto),
+            0
+        );
+        assert!(
+            core.status.contains("No graph channel drawn"),
             "{}",
             core.status
         );

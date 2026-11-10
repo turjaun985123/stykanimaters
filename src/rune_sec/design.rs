@@ -507,6 +507,14 @@ fn toggle_pill(on: bool, t: &Theme) -> El {
 /// item I-5), matching [`list_row`]'s state treatment
 /// — before this, the kit's one toggle form gave no
 /// interaction feedback at all.
+///
+/// AT (Roadmap Wave 2, W2-51 / audit A20-11): this is
+/// the kit's intrinsic toggle form, so the builder —
+/// not each call site — carries the AT semantics: the
+/// label as the accessible name (`El::label`, beside
+/// the wave-6 help text) and `checked(on)`, so the
+/// toggle's state is readable by assistive technology
+/// and not carried by the pill's position alone.
 pub fn toggle_row(
     key: &str,
     label: &str,
@@ -517,6 +525,8 @@ pub fn toggle_row(
     row()
         .key(key)
         .help(label)
+        .label(label)
+        .checked(on)
         .min_h(28.0)
         .center_y()
         .gap(PANEL_GAP)
@@ -716,6 +726,47 @@ pub fn text_field_flagged(
         .radius(CONTROL_RADIUS)
         .px(8.0)
         .py(3.0)
+}
+
+/// The kit's multi-line text area (Roadmap Wave 2,
+/// W2-99): [`text_field`]'s box, states and caret
+/// colours, but WITHOUT `.single_line()` — Rune's
+/// `text_input` is multi-line by default (pinned rev
+/// 87caf2a, `el.rs`: the constructor's `InputSpec`
+/// carries `single_line: false`), so omitting the
+/// builder call is the whole mechanism; nothing is
+/// faked. The editing keys are the engine's own for a
+/// plain (non-rich) field, verified in `edit/input.rs`:
+/// plain Enter still SUBMITS (the shell's committing-
+/// field convention is unchanged), Shift+Return and
+/// Option+Return insert a line break, Up/Down move by
+/// wrapped line, and pasted text keeps its line breaks
+/// (the engine normalises a pasted CRLF pair to LF —
+/// the sidecar domain's own storage form). The
+/// vertical padding grows from the field's 3 pt to
+/// 6 pt, rune-kit's own multi-line proportion, so a
+/// multi-line box breathes like the engine's reference
+/// construction.
+///
+/// Height is the CALLER's: wrap the returned field in
+/// `rune::auto_grow(field, min_lines, max_lines)` (key
+/// the field and attach its handlers first, per that
+/// constructor's doc) so a long value scrolls inside a
+/// bounded box instead of pushing the card open. No
+/// invalid form: like [`text_field`], an area's text
+/// is judged by its op at apply time, not live — a
+/// caller that needs the error border composes
+/// `field_border_state` itself.
+pub fn text_area(edit: &TextEdit, font: TextStyle, focused: bool, t: &Theme) -> El {
+    let (caret, selection) = field_caret();
+    text_input(edit, font)
+        .color(t.text)
+        .caret(caret, selection)
+        .fill(t.control_off)
+        .border(1.0, field_border(focused, t))
+        .radius(CONTROL_RADIUS)
+        .px(8.0)
+        .py(6.0)
 }
 
 /// Slider geometry — the shell's established drag
@@ -1239,7 +1290,12 @@ fn number_drag<A, C, R, W, F>(
 /// a click opens the type session, a horizontal drag
 /// scrubs (see [`number_drag`] for the exact contract).
 /// `label` wires as the element's help text (the wave
-/// 6 convention). Rune exposes no cursor control, so
+/// 6 convention) and — Roadmap Wave 2, W2-51 — as its
+/// accessibility name in BOTH forms (`El::label`): the
+/// key names the value across the form swap, and the
+/// name now survives it too, instead of the display
+/// form naming itself by its readout digits. Rune
+/// exposes no cursor control, so
 /// the text-entry / scrub affordance is carried by the
 /// overlays and that help text — the `v_splitter`
 /// situation, named rather than faked.
@@ -1293,6 +1349,7 @@ where
             t,
         )
         .key(key)
+        .label(label)
         .min_w(34.0)
         .on_edit(move |s: &mut State| &mut (access)(s).edit)
         .on_submit(move |s: &mut State, _tx: &mut Tx| {
@@ -1322,6 +1379,7 @@ where
         el()
             .key(key)
             .help(label)
+            .label(label)
             .min_w(34.0)
             .center()
             .hover(t.hover)
@@ -1354,6 +1412,15 @@ where
 ///   the spec's own fraction ([`NumSpec::frac_of`]), and
 ///   a caller maps a track position back with
 ///   [`NumSpec::value_at_frac`].
+/// * AT (Roadmap Wave 2, W2-51 / audit A20-11): the
+///   slider root declares the `slider` role, the row's
+///   label as its accessible name, and the value as a
+///   range (`El::range_value` + `range_step`) in the
+///   DISPLAY domain (stored × `display_scale`) — the
+///   numbers a sighted user reads off the field are the
+///   numbers assistive technology reports. Before this,
+///   the root was an unnamed drag surface that the AT
+///   tree could only present as a button with no value.
 /// * The steppers are [`step_btn`]s whose forms come
 ///   from the spec ([`NumSpec::step_form`]); `step`
 ///   receives the direction (−1/+1) — normally the op's
@@ -1402,6 +1469,14 @@ where
         .child(
             el()
                 .key(slider_key)
+                .role("slider")
+                .label(label)
+                .range_value(
+                    (value * spec.display_scale) as f64,
+                    (spec.min * spec.display_scale) as f64,
+                    (spec.max * spec.display_scale) as f64,
+                )
+                .range_step((spec.step * spec.display_scale) as f64)
                 .size(SLIDER_W, SLIDER_H)
                 .on_drag(slider_drag)
                 .child(slider_track(spec.frac_of(value), t)),
@@ -1530,6 +1605,14 @@ fn splitter_drag(s: &mut State, d: &mut Drag, tx: &mut Tx, f: &impl Fn(&mut Stat
 /// grip glyph, the state overlays and this text —
 /// pass a label that names the gesture, e.g.
 /// "Drag to resize the sidebar".
+///
+/// AT (Roadmap Wave 2, W2-51 / audit A20-11): the
+/// label also wires as the accessible name, and the
+/// root declares the `separator` role — with a drag
+/// handler the pinned Rune rev maps that to the AT
+/// splitter role, so the boundary reads as a resizer
+/// rather than as the unnamed button the role-less
+/// drag surface used to produce in the tree census.
 pub fn v_splitter(
     key: &str,
     label: &str,
@@ -1539,6 +1622,8 @@ pub fn v_splitter(
     let mut bar = col()
         .key(key)
         .help(label)
+        .label(label)
+        .role("separator")
         .w(SPLITTER_W)
         .h_full()
         .items_center()
@@ -1598,6 +1683,17 @@ fn splitter_grip_color(t: &Theme) -> Color {
 /// sites passing their palette names in (audit S18-10
 /// adoption); do not "fix" this from the kit side with
 /// a hex string.
+///
+/// AT NAME (Roadmap Wave 2, W2-51 / audit A20-11):
+/// the S18-10 adoption now has its kit path —
+/// [`swatch_named`], which takes the call site's own
+/// colour name and wires it as `El::label` (the
+/// accessible name) ONLY: `label` is not `help`, so
+/// the no-tooltip rule above stands untouched, and a
+/// hex string passed by a hex-only palette is a
+/// legitimate AT name even though it would be junk as
+/// a tooltip. This builder stays as it is; palettes
+/// adopt the named form call site by call site.
 pub fn swatch(
     key: &str,
     color: Color,
@@ -1618,6 +1714,28 @@ pub fn swatch(
     } else {
         base.border(1.0, t.card_border)
     }
+}
+
+/// [`swatch`] with an accessible name (Roadmap Wave 2,
+/// W2-51 / audit A20-11): the same 24×24 pressable,
+/// with the call site's colour name wired as
+/// `El::label`. The name is the CALL SITE's word for
+/// the colour — a palette entry's name where the
+/// palette has one, its `#RRGGBB` hex where the palette
+/// is hex-only (the shell's palettes are) — never
+/// derived inside the kit from the `Color`, whose
+/// float channels do not round-trip to the palette's
+/// authored hex. No help text is set: a swatch still
+/// shows no tooltip (see [`swatch`]'s doc).
+pub fn swatch_named(
+    key: &str,
+    color: Color,
+    name: &str,
+    selected: bool,
+    t: &Theme,
+    f: impl Fn(&mut State) + 'static,
+) -> El {
+    swatch(key, color, selected, t, f).label(name)
 }
 
 /// Width of a tangent-preset chip's preview box — the
@@ -1708,6 +1826,7 @@ pub fn tangent_preset_chip(
     let chip = col()
         .key(key)
         .help(label)
+        .label(label)
         .padding(4.0)
         .gap(2.0)
         .radius(CONTROL_RADIUS)
@@ -2122,6 +2241,8 @@ mod tests {
             let _ = v_splitter("vs", "Drag to resize", &t, |_, _| {});
             let _ = swatch("sw", Color::WHITE, true, &t, |_| {});
             let _ = swatch("sw", Color::BLACK, false, &t, |_| {});
+            let _ = swatch_named("swn", Color::WHITE, "#FFFFFF", true, &t, |_| {});
+            let _ = swatch_named("swn", Color::BLACK, "#000000", false, &t, |_| {});
             let _ = tangent_preset_chip(
                 "tp",
                 TangentPreset::EaseInOut,
@@ -2139,6 +2260,57 @@ mod tests {
                 |_| {},
             );
         }
+    }
+
+    #[test]
+    fn a11y_wiring_constructs_on_the_kit_controls() {
+        // Roadmap Wave 2 (W2-51, audit A20-11): the kit
+        // controls that gained AT wiring in this wave —
+        // the toggle row's name + checked state, the
+        // bounded row's slider role/name/range (percent
+        // spec included, so the display-domain scaling
+        // of the range is exercised), the number field's
+        // name in both forms, the splitter's separator
+        // role + name, the named swatch, the tangent
+        // chip's name. The wired values are not readable
+        // back from an element in a bin-crate unit test
+        // (the standing limit), so these pin
+        // construction; the presented-tree proof is the
+        // headless census re-run (IA-W2-51-9).
+        let t = tok::theme(true);
+        let _ = toggle_row("a11y-tog", "Loop", true, &t, |_| {});
+        let _ = toggle_row("a11y-tog", "Loop", false, &t, |_| {});
+        let spec = NumSpec::percent(0.05, 1.0, 0.05);
+        let closed = NumberEdit::new();
+        let _ = number_field(
+            "a11y-nf", &closed, &spec, 0.5, "50%", "Opacity", None, &t, test_wiring(),
+        );
+        let _ = bounded_value_row(
+            "a11y-slider",
+            "a11y-field",
+            "a11y-dn",
+            "a11y-up",
+            "Opacity",
+            &closed,
+            &spec,
+            0.5,
+            "50%",
+            None,
+            &t,
+            test_wiring(),
+            |_, _| {},
+            |_, _, _| {},
+        );
+        let _ = v_splitter("a11y-split", "Drag to resize the sidebar", &t, |_, _| {});
+        let _ = swatch_named("a11y-sw", Color::WHITE, "White", true, &t, |_| {});
+        let _ = tangent_preset_chip(
+            "a11y-tp",
+            TangentPreset::Linear,
+            "Linear",
+            false,
+            &t,
+            |_| {},
+        );
     }
 
     #[test]

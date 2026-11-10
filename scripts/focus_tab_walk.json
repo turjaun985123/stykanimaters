@@ -1,0 +1,7 @@
+[
+  {"t": 0.05, "focus": true},
+  {"t": 0.10, "type": "key", "name": "Tab"},
+  {"t": 0.20, "type": "key", "name": "Tab"},
+  {"t": 0.30, "type": "key", "name": "Tab"},
+  {"t": 0.40, "type": "key", "name": "Tab"}
+]

@@ -42,6 +42,26 @@
 //! file had to move with icon_btn.rs: that file's
 //! unknown-icon fallbacks delegate to `btn` / `danger_btn`
 //! here, and the tooltip must survive the degrade.
+//!
+//! Roadmap Wave 2 (W2-51, audit A20-11): the same label
+//! now ALSO wires as the element's accessibility name
+//! (`El::label`). The two are different channels in the
+//! pinned Rune rev (verified from its source): `help`
+//! feeds the tooltip and the AT *description*, never the
+//! AT *name*; the name comes from `El::label`, the
+//! element's own text, or — for button-role elements —
+//! AccessKit's derivation from descendant text. Wiring
+//! the label explicitly makes every family member named
+//! by construction in the tree dump as well as on the
+//! platform. The inert member additionally carries
+//! `El::disabled(true)`, so assistive technology reads
+//! it as dimmed/unavailable instead of as a live button
+//! that silently does nothing. `checked` is deliberately
+//! NOT wired here: `active` is a mixed action/state flag
+//! across the family's call sites, so toggle state is an
+//! opt-in the toggle call sites themselves add (the
+//! kit's intrinsic toggle, `design::toggle_row`, carries
+//! it in the builder).
 
 use rune::tok::{self, type_, Theme};
 use rune::{el, row, text, Color, El};
@@ -73,6 +93,7 @@ pub fn btn(
     el()
         .key(key)
         .help(label)
+        .label(label)
         .px(10.0)
         .py(5.0)
         .radius(6.0)
@@ -97,10 +118,18 @@ pub fn btn(
 /// element `icon_btn_inert`'s unknown-icon fallback always
 /// hand-rolled; naming it here gives the family one
 /// implementation of the inert text box.
+///
+/// Roadmap Wave 2 (W2-51): the element carries
+/// `disabled(true)` for assistive technology — the AT
+/// tree reads it as an unavailable control with the
+/// label as its name, matching what the muted styling
+/// already says visually.
 pub fn btn_inert(key: &str, label: &str, t: &Theme) -> El {
     el()
         .key(key)
         .help(label)
+        .label(label)
+        .disabled(true)
         .px(10.0)
         .py(5.0)
         .radius(6.0)
@@ -127,6 +156,13 @@ pub fn btn_inert(key: &str, label: &str, t: &Theme) -> El {
 /// active sites are the loop endpoints, whose mute
 /// condition is an empty timeline, which cannot carry a
 /// loop.
+///
+/// Roadmap Wave 2 (W2-51): deliberately NOT
+/// `disabled(true)` for assistive technology, unlike
+/// [`btn_inert`] — the handler is live and its refusal
+/// status is the designed feedback, so AT must still be
+/// able to activate it. It carries its label as the AT
+/// name, like the rest of the family.
 pub fn btn_muted_live(
     key: &str,
     label: &str,
@@ -140,6 +176,7 @@ pub fn btn_muted_live(
     el()
         .key(key)
         .help(label)
+        .label(label)
         .px(10.0)
         .py(5.0)
         .radius(6.0)
@@ -192,6 +229,7 @@ pub fn danger_btn(
     el()
         .key(key)
         .help(label)
+        .label(label)
         .px(10.0)
         .py(5.0)
         .radius(6.0)
@@ -679,7 +717,7 @@ mod tests {
             let t = app_theme::app_theme(dark);
             assert!(dirty_dot(&core, &t).is_none(), "a saved core reads clean");
         }
-        core.snapshot();
+        core.snapshot_labeled("Test edit");
         for dark in [true, false] {
             let t = app_theme::app_theme(dark);
             assert!(
@@ -721,7 +759,7 @@ mod tests {
         assert_eq!(s.core.undo_depth(), 0, "fresh core: nothing to undo");
         assert_eq!(s.core.redo_depth(), 0, "fresh core: nothing to redo");
         let _ = app_bar(&s, &t);
-        s.core.snapshot();
+        s.core.snapshot_labeled("Test edit");
         assert!(s.core.undo_depth() > 0, "one edit deepens the undo stack");
         assert_eq!(s.core.redo_depth(), 0, "redo stays empty until an undo");
         let _ = app_bar(&s, &t);
@@ -758,7 +796,7 @@ mod tests {
     #[test]
     fn load_pressed_arms_first_while_dirty_then_confirms() {
         let mut s = crate::init();
-        s.core.snapshot();
+        s.core.snapshot_labeled("Test edit");
         load_pressed(&mut s);
         assert_eq!(s.confirm_action, Some(ConfirmAction::OpenProject));
         assert!(
@@ -797,6 +835,31 @@ mod tests {
         assert!(s.core.frame_count() > 0, "the demo project has frames");
         let _ = timeline_row(&s, &tok::theme(true));
         let _ = timeline_row(&s, &tok::theme(false));
+    }
+
+    /// Roadmap Wave 2 (W2-51, audit A20-11): every family
+    /// member wires its label as the AT name and the
+    /// inert member carries the AT disabled state. The
+    /// wired values are not readable back from an element
+    /// in a bin-crate unit test (the standing limit), so
+    /// these pin construction across the family — both
+    /// themes, an empty label included (Rune maps an
+    /// empty label/help to no name/tooltip rather than
+    /// an empty announcement). The presented-tree proof
+    /// is the headless census re-run (IA-W2-51-9).
+    #[test]
+    fn a11y_wiring_constructs_across_the_family() {
+        let dark = tok::theme(true);
+        let light = tok::theme(false);
+        for t in [&dark, &light] {
+            let _ = btn("x-a11y-btn", "Save", false, t, |_| {});
+            let _ = btn("x-a11y-btn-on", "Onion", true, t, |_| {});
+            let _ = btn_inert("x-a11y-inert", "Delete frame", t);
+            let _ = btn_muted_live("x-a11y-muted", "Loop start", false, t, |_| {});
+            let _ = danger_btn("x-a11y-danger", "Delete", t, |_| {});
+            let _ = btn("x-a11y-empty", "", false, t, |_| {});
+            let _ = btn_inert("x-a11y-empty-inert", "", t);
+        }
     }
 
     #[test]

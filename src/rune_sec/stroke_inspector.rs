@@ -1236,7 +1236,7 @@ pub fn set_selected_stroke_width(
     };
     let old = core.project.strokes[i].width;
     let new = width_after(old, dir);
-    core.snapshot();
+    core.snapshot_labeled("Stroke width");
     let stroke = &mut core.project.strokes[i];
     stroke.width = new;
     if old.is_finite() && old > 0.0 && !stroke.widths.is_empty() {
@@ -1361,7 +1361,7 @@ pub fn set_selected_stroke_opacity(
         return false;
     }
     let new = opacity_after(core.project.strokes[i].opacity, dir);
-    core.snapshot();
+    core.snapshot_labeled("Stroke opacity");
     core.project.strokes[i].opacity = new;
     core.status = format!("Stroke {} opacity {}.", i + 1, opacity_label(new));
     true
@@ -1473,7 +1473,7 @@ pub fn set_selected_stroke_scatter(
         return false;
     }
     let new = scatter_after(core.project.strokes[i].scatter, dir);
-    core.snapshot();
+    core.snapshot_labeled("Stroke scatter");
     core.project.strokes[i].scatter = new;
     core.status = format!("Stroke {} scatter {}.", i + 1, scatter_text(core, new));
     true
@@ -1516,7 +1516,7 @@ pub fn simplify_selected(s: &mut State) {
         s.core.status = format!("Stroke {} is already simple.", i + 1);
         return;
     }
-    s.core.snapshot();
+    s.core.snapshot_labeled("Simplify stroke");
     if stykanimate_rs::draw_ops::simplify_stroke_at(
         &mut s.core.project,
         i,
@@ -1618,7 +1618,7 @@ pub fn recolor_all_strokes(core: &mut EditorCore) -> usize {
     // makes per stroke; composing it once here and
     // writing the field directly is what keeps the
     // bulk op to a single step.
-    core.snapshot();
+    core.snapshot_labeled("Recolour all strokes");
     for stroke in &mut core.project.strokes {
         stroke.color = color;
     }
@@ -1642,7 +1642,7 @@ pub fn delete_all_strokes(core: &mut EditorCore) -> usize {
         core.status = "No strokes to delete.".into();
         return 0;
     }
-    core.snapshot();
+    core.snapshot_labeled("Delete all strokes");
     core.project.strokes.clear();
     core.status = format!(
         "Deleted {n} stroke{}.",
@@ -1694,7 +1694,7 @@ pub fn recolor_frame_strokes(core: &mut EditorCore) -> usize {
         return 0;
     }
     let color = bulk_target_color(core);
-    core.snapshot();
+    core.snapshot_labeled("Recolour strokes");
     let n = targets.len();
     for i in targets {
         core.project.strokes[i].color = color;
@@ -1729,7 +1729,7 @@ pub fn delete_frame_strokes(core: &mut EditorCore) -> usize {
         core.status = format!("No strokes on frame {} to delete.", frame + 1);
         return 0;
     }
-    core.snapshot();
+    core.snapshot_labeled("Delete strokes");
     let n = targets.len();
     for i in targets.into_iter().rev() {
         core.project.strokes.remove(i);
@@ -3229,6 +3229,7 @@ mod tests {
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
             sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            migration_panel: rune_sec::migration_prompt::initial_state(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
@@ -3244,12 +3245,15 @@ mod tests {
             subtitle_selected: None,
             pose_clipboard: None,
             workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            setup_mode_before_build: false,
             guides: false,
             show_left: true,
             show_right: true,
+            stage_focus_restore: None,
             key_clipboard: None,
             key_follow_graph: false,
             key_sel: Default::default(),
+            keyframe_tools: Default::default(),
             help_panel: Default::default(),
             camera_panel: Default::default(),
             segment_numbers: Default::default(),
@@ -3263,6 +3267,11 @@ mod tests {
             particle_selected: None,
             guides_frustum: true,
             guides_safe: true,
+            guides_golden: false,
+            guides_diagonals: false,
+            guides_stored: true,
+            rulers: false,
+            limit_arcs: false,
             onion_ui: Default::default(),
             last_frame: 0,
             pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),

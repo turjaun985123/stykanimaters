@@ -895,7 +895,21 @@ def entry_field(chunk: str) -> str | None:
 # v2 and the seats' panel work over the AC close).
 # Floor raised 1020 -> 1092 so Roadmap Wave 1 closes
 # from the integrated truth.
-KEY_TOTAL_FLOOR = 1092
+#
+# Roadmap Wave 2 close (integrator, 2026-11-11): the
+# settled tree reads 1214 total unique keys (1066
+# static + 148 dynamic) under this counter — the
+# wave's additions itemised in
+# uiux-roadmap/INTEGRATION2.md (the new panels and
+# surfaces of the 100-seat wave, plus the integration
+# splices: delete-path-point, view-stage-focus /
+# menu-view-sep3, the Home harness keys). The fifth
+# tuple-carried job_lines key xc-progress-eta (W2-50's
+# ETA readout, F6's artefact class) rides outside
+# this counter beside xc-progress-bundle (IA-W2-50-2).
+# Floor raised 1092 -> 1214 so Roadmap Wave 2 closes
+# from the integrated truth.
+KEY_TOTAL_FLOOR = 1214
 
 
 def inventory_counts() -> tuple[int, int, int, int]:
@@ -1113,7 +1127,6 @@ PHASE_J_OPS = [
     "mirror_figure_all_frames",
     "normalise_all_clips",
     "particle_duplicate_event",
-    "export_sheet_range",
     "export_svg_range",
     "sync_playback_audio_on_drift",
 ]
@@ -1205,6 +1218,14 @@ PHASE_M_OPS = [
 SAME_FILE_OPS = [
     "delete_camera_key_at",
     "swap_frames",
+    # Roadmap Wave 2 (IA-W2-49-1/2/3): every production
+    # sheet surface switched to the *_pack variants, so
+    # `export_sheet_range`'s remaining production callers
+    # are its own file's wrappers (`export_spritesheet`,
+    # the scaled entry, the pack writer) — the swap_frames
+    # precedent: censused same-file, reached by users
+    # through those wrappers.
+    "export_sheet_range",
     # UI mission wave 4: internal step of the wired
     # clip_duration_frames (see PHASE_L_OPS note).
     "clip_duration_secs",
@@ -1750,6 +1771,7 @@ LITERAL_CONST_EXCEPTIONS = {
     ("fig3_preview.rs", "SELECTED_COLOR"): "Fig3Palette::LEGACY constant (pre-theme 3D palette)",
     ("fig3_preview.rs", "SHADOW_COLOR"): "Fig3Palette::LEGACY constant (pre-theme 3D palette)",
     ("onion_controls.rs", "FUTURE_ONION_RGB"): "stage content colour (future-frame onion tint; Wave 7 census class)",
+    ("onion_controls.rs", "ONION_TINT_PALETTE"): "palette DATA (onion ghost tint picker; Wave 2 W2-37)",
     ("stage_fx.rs", "GIZMO_COLOR"): "stage content colour (FX gizmo accent)",
     ("stage_text.rs", "BACKING_COLOR"): "stage content colour (text backing plate on the stage canvas)",
     ("timeline_marks.rs", "AUDIO_SPAN_RGB"): "stage/canvas content colour (timeline audio clip span)",
@@ -2358,7 +2380,7 @@ def _mcp_builtins() -> tuple[list[str], list[str]]:
 # insert_breakdown) + 9 io + 4 subtitle io + 7 subtitle
 # tools (5 + subtitle_shift_all + subtitle_retime),
 # doc sync exact. Floor raised 392 -> 396.
-MCP_SURFACE_FLOOR = 396
+MCP_SURFACE_FLOOR = 422
 
 
 def check_mcp_surface() -> tuple[bool, list[str]]:
@@ -2606,6 +2628,9 @@ PARITY_MAP: dict[str, list[str]] = {
     "prev": ["set_frame"],
     "next": ["set_frame"],
     "first-frame": ["set_frame"],
+    # Roadmap Wave 2 (W2-67, IA-W2-67-1): the palette's
+    # argument-step frame jump — the same tool covers it.
+    "goto-frame": ["set_frame"],
     # Roadmap Wave 1 (RM26, IA-RM26-5): the End-key
     # twin of first-frame — the same tool covers it.
     "last-frame": ["set_frame"],
@@ -2620,6 +2645,8 @@ PARITY_MAP: dict[str, list[str]] = {
     "copy-frame": ["copy_frame"],
     "paste-frame": ["paste_frame"],
     "fps-up": ["set_project_fps"],
+    # Roadmap Wave 2 (W2-67, IA-W2-67-1).
+    "set-fps": ["set_project_fps"],
     "fps-down": ["set_project_fps"],
     "swap-frame-prev": ["swap_frame_with_neighbour"],
     "swap-frame-next": ["swap_frame_with_neighbour"],
@@ -2668,6 +2695,10 @@ PARITY_MAP: dict[str, list[str]] = {
     # Camera (zoom-by is get + set at the current
     # frame; follow-clear is set_camera_follow null)
     "cam-zoom-in": ["get_camera", "set_camera"],
+    # Roadmap Wave 2 (W2-67, IA-W2-67-1; the preset
+    # leg per IA-W2-39-3 — the argument prompt drives
+    # camera_move_preset as well as the direct tools).
+    "set-camera-zoom": ["get_camera", "set_camera", "camera_move_preset"],
     "cam-zoom-out": ["get_camera", "set_camera"],
     "cam-frame-all": ["frame_all_figures"],
     "cam-centre": ["centre_on_selection"],
@@ -2764,6 +2795,10 @@ PARITY_MAP: dict[str, list[str]] = {
     "go-effects": ["shell_set_workspace"],
     "go-audio": ["shell_set_workspace"],
     "go-build3d": ["shell_set_workspace"],
+    # Roadmap Wave 2 (W2-21, IA-W2-21-4): the Build
+    # workspace joined the go-* family with the ninth
+    # workspace.
+    "go-build": ["shell_set_workspace"],
     "go-export": ["shell_set_workspace"],
     "go-home": ["shell_set_workspace"],
     # The command selects Animate and forces the right
@@ -3206,20 +3241,24 @@ def check_i18n_help_counts() -> tuple[bool, list[str]]:
     # The module-doc breakdown wraps across `//!` lines, so
     # flatten comment continuations before matching it.
     flat_help = re.sub(r"\n//!\s?", " ", help_src)
-    doc = re.search(
-        r"holds \*\*(\d+) rows\*\*: (\d+) Shortcuts \+ (\d+) "
-        r"Workspaces \+ (\d+) Posing \+ (\d+) Timeline \+ "
-        r"(\d+) Drawing \+ (\d+) Features", flat_help)
+    # Roadmap Wave 2 (IA-W2-22-1): the breakdown gained a
+    # seventh section (Build), so the claim is matched
+    # generically — the leading total, then every
+    # "N Section" pair in order — instead of a fixed
+    # six-section pattern.
+    doc = None
+    for cand in re.finditer(
+            r"holds \*\*(\d+) rows\*\*: ([^.]*?), pinned by",
+            flat_help):
+        doc = cand  # the LAST census is the standing claim
     if not doc:
         ok = False
         lines.append("  help: module-doc row breakdown claim not found")
     else:
-        want = {"Shortcuts": int(doc.group(2)),
-                "Workspaces": int(doc.group(3)),
-                "Posing": int(doc.group(4)),
-                "Timeline": int(doc.group(5)),
-                "Drawing": int(doc.group(6)),
-                "Features": int(doc.group(7))}
+        want = {}
+        for num, name in re.findall(
+                r"(\d+) ([A-Za-z]+)", doc.group(2)):
+            want[name] = int(num)
         if int(doc.group(1)) != total_rows or \
                 any(per_section.get(k) != v for k, v in want.items()):
             ok = False

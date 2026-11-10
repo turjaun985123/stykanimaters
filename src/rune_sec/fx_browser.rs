@@ -196,11 +196,12 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use rune::tok::{type_, Theme};
-use rune::{row, El, TextEdit};
+use rune::{row, text, El, TextEdit};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::vfx::ClipKind;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::app_theme;
 use crate::rune_sec::design;
 use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::icon_btn;
@@ -359,6 +360,79 @@ pub fn kind_button_label(core: &EditorCore, entry: &FxKindEntry) -> String {
         0 => label,
         n => format!("{label} · {n}"),
     }
+}
+
+// ----------------------------------------------------------------
+// Flashing-content caution (W2-54, A20-13). The engine's
+// measured table (`vfx::flash_caution`) names the kinds
+// whose alpha oscillates faster than the WCAG 2.3.1
+// guidance rate of 3 flashes/second; this panel surfaces
+// that measurement, it does not re-derive it. The caution
+// never blocks an add — users author this content
+// deliberately (A20-13: a caution, not a ban).
+// ----------------------------------------------------------------
+
+/// The WCAG 2.3.1 guidance rate the caution is measured
+/// against: no more than three flashes in any one-second
+/// period.
+pub const FLASH_GUIDANCE_HZ: f32 = 3.0;
+
+/// `kind`'s measured flash rate at `fps` (peak mote, per
+/// the engine table), or `None` when the engine measured
+/// no fast alpha oscillation for it.
+pub fn kind_flash_hz(kind: ClipKind, fps: f32) -> Option<f32> {
+    stykanimate_rs::vfx::flash_caution(kind).map(|c| c.hz(fps))
+}
+
+/// How a rate reads in the caution line: whole numbers
+/// from 10/s up ("≈12/s"), one decimal below ("≈6.5/s") —
+/// the table's precision does not justify more.
+fn flash_hz_text(hz: f32) -> String {
+    if hz >= 9.95 {
+        format!("{hz:.0}")
+    } else {
+        format!("{hz:.1}")
+    }
+}
+
+/// The caution line for a set of kind entries (the
+/// visible grid kinds plus the recents), or `None` when
+/// none of them flashes over the guidance rate AT THE
+/// PROJECT'S OWN FPS — the line is computed live, so at
+/// 12 fps Prism (≈2.1/s) and Aurora (≈1.7/s) honestly
+/// drop off it while Lightning (≈6/s) stays. Flagged
+/// kinds are named in FX_KINDS table order, each with
+/// its measured rate — a warning that names no numbers
+/// would not be the measured caution A20-13 asked for.
+pub fn flash_caution_line(core: &EditorCore, entries: &[&FxKindEntry]) -> Option<String> {
+    let fps = if core.project.fps > 0.0 {
+        core.project.fps
+    } else {
+        24.0
+    };
+    let mut parts: Vec<String> = Vec::new();
+    for entry in FX_KINDS
+        .iter()
+        .filter(|e| entries.iter().any(|v| v.kind == e.kind))
+    {
+        if let Some(hz) = kind_flash_hz(entry.kind, fps) {
+            if hz > FLASH_GUIDANCE_HZ {
+                parts.push(format!(
+                    "{} ≈{}/s",
+                    kind_label(core, entry.name),
+                    flash_hz_text(hz)
+                ));
+            }
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Flashing: {} — over the 3/s photosensitivity guidance at {} fps. Preview with care.",
+        parts.join(" · "),
+        flash_hz_text(fps)
+    ))
 }
 
 /// A muted section heading inside the panel (Phase N:
@@ -609,6 +683,96 @@ pub fn preset_names_cached(core: &EditorCore) -> Vec<String> {
     })
 }
 
+// ----------------------------------------------------------------
+// Preset-kind cache (W2-54): which saved presets hold a
+// flash-flagged kind, so their apply buttons can carry
+// the caution marker. Same contract as the name cache
+// above — keyed on the presets directory's mtime, so the
+// per-build cost is one `stat`; the preset FILES are
+// loaded once per mtime change, never per build. A preset
+// that fails to load maps to `None` (no marker): the
+// apply press itself reports load failures through the
+// core's own status, and an unreadable file must not
+// acquire a caution it may not deserve.
+// ----------------------------------------------------------------
+
+/// One preset-kind cache slot: the dir-mtime key plus,
+/// per preset name (in `fx_preset_names` order), the
+/// kind its file holds — `None` when the file did not
+/// load.
+type PresetKindCache = Option<(Option<SystemTime>, Vec<(String, Option<ClipKind>)>)>;
+
+thread_local! {
+    /// The preset-kind cache; thread-local for the same
+    /// reasons as [`PRESET_CACHE`].
+    static PRESET_KIND_CACHE: RefCell<PresetKindCache> = RefCell::new(None);
+}
+
+/// The kind cache's state machine — [`cached_names`]'s
+/// exact rule over the wider payload, pure so tests can
+/// drive it with a counting reader.
+fn cached_kinds(
+    cache: &mut PresetKindCache,
+    key: Option<SystemTime>,
+    read: impl FnOnce() -> Vec<(String, Option<ClipKind>)>,
+) -> Vec<(String, Option<ClipKind>)> {
+    if let Some((cached_key, kinds)) = cache.as_ref() {
+        if *cached_key == key {
+            return kinds.clone();
+        }
+    }
+    let kinds = read();
+    *cache = Some((key, kinds.clone()));
+    kinds
+}
+
+/// Every preset's kind, cached behind the presets
+/// directory's mtime (see the section docs). Falls back
+/// to a live read — caching nothing — when the directory
+/// cannot be statted, exactly like [`preset_names_cached`].
+pub fn preset_kinds_cached(core: &EditorCore) -> Vec<(String, Option<ClipKind>)> {
+    let read = || {
+        core.fx_preset_names()
+            .iter()
+            .map(|name| {
+                let kind = stykanimate_rs::fx_edit::load_clip_preset(name)
+                    .ok()
+                    .map(|clip| clip.kind);
+                (name.clone(), kind)
+            })
+            .collect()
+    };
+    let Some(key) = dir_mtime(&preset_dir()) else {
+        return read();
+    };
+    PRESET_KIND_CACHE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        cached_kinds(&mut slot, Some(key), read)
+    })
+}
+
+/// The flash-flagged kind of the preset `name` in a
+/// loaded kinds list, or `None` — the pure lookup half of
+/// [`preset_flash_kind`], so the rule (known preset +
+/// loadable file + flagged kind) is testable without a
+/// presets directory.
+pub fn flash_kind_in(
+    kinds: &[(String, Option<ClipKind>)],
+    name: &str,
+) -> Option<ClipKind> {
+    kinds
+        .iter()
+        .find(|(n, _)| n == name)
+        .and_then(|(_, kind)| *kind)
+        .filter(|kind| stykanimate_rs::vfx::flash_caution(*kind).is_some())
+}
+
+/// The preset `name`'s kind when it is flash-flagged —
+/// the marker condition for its apply button.
+pub fn preset_flash_kind(core: &EditorCore, name: &str) -> Option<ClipKind> {
+    flash_kind_in(&preset_kinds_cached(core), name)
+}
+
 /// Text-width budget for one preset apply button's label,
 /// in points: the panel's content width (316) minus the
 /// kit `btn`'s horizontal padding (10 + 10), with a small
@@ -843,6 +1007,36 @@ pub fn fx_browser(s: &State, t: &Theme) -> El {
         }
     }
 
+    // ---- Flashing-content caution (W2-54, A20-13):
+    // one row under the kind grid whenever a visible or
+    // recent kind flashes over the guidance rate at the
+    // project's fps, naming each kind and its measured
+    // rate. Non-blocking by design — it informs the
+    // preview, it never gates the add.
+    let mut caution_entries: Vec<&FxKindEntry> =
+        visible.iter().flat_map(|(_, es)| es.iter().copied()).collect();
+    caution_entries.extend(recent_entries(&s.fx_browser.recent));
+    if let Some(line) = flash_caution_line(core, &caution_entries) {
+        panel = panel.child(
+            row()
+                .key("fx-flash-caution")
+                .gap(6.0)
+                .w_full()
+                .child(icon_el(
+                    "triangle-exclamation",
+                    12.0,
+                    app_theme::warning_on(t),
+                ))
+                .child(
+                    text(&line)
+                        .font(type_::LABEL)
+                        .color(t.text_secondary)
+                        .wrap()
+                        .grow(1.0),
+                ),
+        );
+    }
+
     // ---- Presets from ./fx-presets/.
     panel = panel.child(section("Presets", t));
     let preset_names = preset_names_cached(core);
@@ -869,13 +1063,31 @@ pub fn fx_browser(s: &State, t: &Theme) -> El {
             let mut preset_row = row().gap(6.0).w_full().flex_wrap();
             for name in chunk {
                 let apply_name = name.clone();
-                preset_row = preset_row.child(btn(
-                    &format!("fx-preset-apply-{name}"),
-                    &preset_button_label(name),
-                    false,
-                    t,
-                    move |s| s.core.fx_apply_preset(&apply_name),
-                ));
+                let press = move |s: &mut State| s.core.fx_apply_preset(&apply_name);
+                // W2-54: a preset whose clip is a
+                // flash-flagged kind carries the caution
+                // glyph — same key, same label, same
+                // press; only the leading icon differs
+                // (icon_btn's documented job). Unflagged
+                // and unloadable presets keep the plain
+                // button they have always had.
+                preset_row = preset_row.child(match preset_flash_kind(core, name) {
+                    Some(_) => icon_btn(
+                        &format!("fx-preset-apply-{name}"),
+                        "triangle-exclamation",
+                        &preset_button_label(name),
+                        false,
+                        t,
+                        press,
+                    ),
+                    None => btn(
+                        &format!("fx-preset-apply-{name}"),
+                        &preset_button_label(name),
+                        false,
+                        t,
+                        press,
+                    ),
+                });
             }
             panel = panel.child(preset_row);
         }
@@ -1533,6 +1745,89 @@ mod tests {
         let state = FxBrowserState::default();
         assert!(state.query.text.is_empty());
         assert!(state.recent.is_empty());
+    }
+
+    // ---- Flashing-content caution (W2-54) ----
+
+    #[test]
+    fn kind_flash_hz_reads_the_engine_table() {
+        // Lightning's bound is fps/2 exactly; Sparkle's
+        // sine converts at 1.7 / TAU cycles per frame.
+        assert_eq!(kind_flash_hz(ClipKind::Lightning, 24.0), Some(12.0));
+        let sparkle = kind_flash_hz(ClipKind::Sparkle, 24.0).expect("sparkle is flagged");
+        assert!((sparkle - 6.49).abs() < 0.01, "sparkle at 24 fps: {sparkle}");
+        // Kinds the pass measured clear stay unflagged.
+        assert_eq!(kind_flash_hz(ClipKind::Burst, 24.0), None);
+        assert_eq!(kind_flash_hz(ClipKind::Smoke, 60.0), None);
+    }
+
+    #[test]
+    fn flash_caution_line_names_kinds_and_rates_at_the_project_fps() {
+        // EditorCore::new is a 12 fps project: at 12 fps
+        // exactly five kinds are over the line — Prism
+        // (≈2.1/s) and Aurora (≈1.7/s) honestly drop off.
+        let mut core = EditorCore::new();
+        let all: Vec<&FxKindEntry> = FX_KINDS.iter().collect();
+        let line = flash_caution_line(&core, &all).expect("some kinds flash at 12 fps");
+        assert!(line.contains("Lightning ≈6.0/s"), "{line}");
+        assert!(line.contains("Sparkle ≈3.2/s"), "{line}");
+        assert!(line.contains("Glitter ≈7.6/s"), "{line}");
+        assert!(line.contains("Fireworks ≈5.9/s"), "{line}");
+        assert!(line.contains("Ember ≈5.0/s"), "{line}");
+        assert!(!line.contains("Prism"), "{line}");
+        assert!(!line.contains("Aurora"), "{line}");
+        assert!(line.contains("at 12 fps"), "{line}");
+        // At 24 fps all seven are named, Lightning at 12/s.
+        core.project.fps = 24.0;
+        let line = flash_caution_line(&core, &all).expect("all seven flash at 24 fps");
+        assert!(line.contains("Lightning ≈12/s"), "{line}");
+        assert!(line.contains("Prism ≈4.2/s"), "{line}");
+        assert!(line.contains("Aurora ≈3.4/s"), "{line}");
+        // A set with no flagged kind yields no line.
+        let calm: Vec<&FxKindEntry> = FX_KINDS
+            .iter()
+            .filter(|e| matches!(e.kind, ClipKind::Burst | ClipKind::Smoke))
+            .collect();
+        assert_eq!(flash_caution_line(&core, &calm), None);
+    }
+
+    #[test]
+    fn flash_kind_in_requires_a_known_loadable_flagged_preset() {
+        let kinds = vec![
+            ("storm-bolt".to_string(), Some(ClipKind::Lightning)),
+            ("soft-smoke".to_string(), Some(ClipKind::Smoke)),
+            ("broken".to_string(), None),
+        ];
+        assert_eq!(
+            flash_kind_in(&kinds, "storm-bolt"),
+            Some(ClipKind::Lightning)
+        );
+        assert_eq!(flash_kind_in(&kinds, "soft-smoke"), None);
+        assert_eq!(flash_kind_in(&kinds, "broken"), None);
+        assert_eq!(flash_kind_in(&kinds, "never-saved"), None);
+    }
+
+    #[test]
+    fn kind_cache_hit_skips_the_reader_and_a_new_key_rereads() {
+        let mut cache: PresetKindCache = None;
+        let reads = std::cell::Cell::new(0usize);
+        let payload = vec![("alpha".to_string(), Some(ClipKind::Sparkle))];
+        let first = cached_kinds(&mut cache, key(10), || {
+            reads.set(reads.get() + 1);
+            payload.clone()
+        });
+        let second = cached_kinds(&mut cache, key(10), || {
+            reads.set(reads.get() + 1);
+            payload.clone()
+        });
+        assert_eq!(first, second);
+        assert_eq!(reads.get(), 1, "second call must be served from the cache");
+        let third = cached_kinds(&mut cache, key(11), || {
+            reads.set(reads.get() + 1);
+            payload.clone()
+        });
+        assert_eq!(third, payload);
+        assert_eq!(reads.get(), 2, "a new key must invalidate the cache");
     }
 
     // ---- Preset-name cache ----

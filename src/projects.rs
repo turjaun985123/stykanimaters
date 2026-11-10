@@ -1004,6 +1004,56 @@ mod tests {
     }
 
     #[test]
+    fn load_round_trips_a_captured_setup_pose_verbatim() {
+        // Wave 2 (W2-30, SpriteLoop GAP P-10): the setup
+        // (rest) pose is ordinary NodeDef data — a rest
+        // CAPTURED through Project::set_rest_from_pose
+        // rides the file in the figure's def and comes
+        // back bit-exact (assert_eq on the f32 vectors,
+        // no epsilon), and the def copy a ClipDef embeds
+        // carries its own rest angles just as verbatim.
+        // The shallow pins above never looked at
+        // rest_angle; this one proves the round trip the
+        // capture/restore pair depends on.
+        let dir = temp_dir("setup-pose");
+        let mut project = Project::new_demo();
+        project.name = "Setup Pose".into();
+        let rest_before = project.figures[0].def.rest_angles();
+        let mut pose = project.figures[0].def.rest_pose([480.0, 470.0]);
+        pose.angles[5] += 30.0;
+        pose.angles[2] -= 12.25;
+        project
+            .set_rest_from_pose(0, &pose, crate::model::SetRestMode::Absolute)
+            .expect("the capture applies");
+        let captured = project.figures[0].def.rest_angles();
+        assert_ne!(captured, rest_before, "the capture moved the rest");
+        let mut clip_def = project.figures[0].def.clone();
+        clip_def.nodes[3].rest_angle = 17.5;
+        project.clips.push(crate::model::ClipDef {
+            name: "Wave".into(),
+            frames: vec![project.figures[0].def.rest_pose([480.0, 470.0])],
+            def: clip_def,
+            loop_mode: crate::model::ClipLoop::Loop,
+        });
+        let path = save(&project, &dir).unwrap();
+        // The angles are IN the file, not defaulted back.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            value["figures"][0]["def"]["nodes"][5]["rest_angle"],
+            json!(captured[5])
+        );
+        let back = load(&path).unwrap();
+        assert_eq!(
+            back.figures[0].def.rest_angles(),
+            captured,
+            "the captured setup pose round-trips bit-exact"
+        );
+        assert_eq!(back.clips[0].def.nodes[3].rest_angle, 17.5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn thumbnail_writes_a_stage_sized_png() {
         let dir = temp_dir("thumb");
         let project = Project::new_demo();
@@ -1667,7 +1717,7 @@ mod tests {
         // snapshot every mutating op takes) keeps exactly
         // its count: the refresh neither manufactures a
         // second edit nor launders the first.
-        core.snapshot();
+        core.snapshot_labeled("Test edit");
         assert_eq!(core.edits_since_autosave(), 1);
         refresh_project_files_in(&mut core, &dir);
         assert_eq!(
@@ -1689,7 +1739,7 @@ mod tests {
     fn save_copy_leaves_the_sessions_dirty_state_untouched() {
         let dir = temp_dir("save-copy-dirty").join("projects");
         let mut core = EditorCore::new();
-        core.snapshot();
+        core.snapshot_labeled("Test edit");
         assert_eq!(core.edits_since_autosave(), 1);
 
         let path = save_copy_to(&core, "Session Copy", &dir).unwrap();

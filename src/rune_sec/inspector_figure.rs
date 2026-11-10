@@ -150,6 +150,15 @@
 //!   the rest stance and the animation's content is
 //!   preserved against the new rig) or absolute (pose
 //!   data untouched, re-read against the new rest).
+//!   Under them, the reset row (key
+//!   `fig-setup-reset-pose`, Wave 2 W2-30) restores the
+//!   selected figure's current-frame pose TO the setup
+//!   pose through [`reset_pose_to_setup`] — the restore
+//!   half of the round trip, riding the same core op
+//!   (`EditorCore::reset_pose_to_rest`) as the pose
+//!   panel's Reset pose and the MCP `reset_pose` tool;
+//!   its string resolves under the `setup_reset_pose`
+//!   key IA-W2-30-1 files for the catalogue.
 //!   While the mode is on, the stage draws every
 //!   figure at its rest pose and stage drags drive the
 //!   existing solvers (`apply_ik` / `aim_node`) against
@@ -254,7 +263,7 @@ use rune::{row, text, Color, El, TextEdit, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{norm_deg, NodeDef};
 
-use crate::chrome_view::{btn, danger_btn};
+use crate::chrome_view::{btn, btn_inert, danger_btn};
 use crate::rune_sec::design;
 use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::icon_btn;
@@ -314,6 +323,11 @@ pub struct InspectorFigureState {
     /// definition order. Read fresh from the definition
     /// in `figure_state`, like every other field here.
     pub rest_nodes: Vec<RestNodeState>,
+    /// The selected figure has a pose on the current
+    /// frame (Wave 2, W2-30): the Setup section's
+    /// reset-to-setup row is live exactly then and inert
+    /// otherwise — the pose panel Reset button's rule.
+    pub has_current_pose: bool,
 }
 
 /// One node's row in the Setup section's rest-angle
@@ -373,6 +387,12 @@ pub fn figure_state(core: &EditorCore) -> Option<InspectorFigureState> {
                 up_live: rest_angle_stepped(node, REST_STEP) != node.rest_angle,
             })
             .collect(),
+        has_current_pose: core
+            .project
+            .frames
+            .get(core.current)
+            .and_then(|f| f.poses.get(fi))
+            .is_some(),
     })
 }
 
@@ -1080,6 +1100,27 @@ pub fn set_rest_from_current_pose(core: &mut EditorCore, rebase: bool) -> bool {
     true
 }
 
+/// Restore the selected figure's current-frame pose to
+/// its rest (setup) pose — the Setup section's reset
+/// row (Wave 2, W2-30; SpriteLoop GAP P-10), the
+/// restore half of the round trip whose capture half is
+/// [`set_rest_from_current_pose`]. The core op
+/// (`EditorCore::reset_pose_to_rest`) owns the one
+/// labelled snapshot, the already-rest no-op and the
+/// status — the same op the pose panel's Reset pose
+/// and the MCP `reset_pose` tool ride, so all three
+/// doors restore identically; this helper is only the
+/// stale-selection guard in front of it, in the panel's
+/// usual wording.
+pub fn reset_pose_to_setup(core: &mut EditorCore) -> bool {
+    let fi = core.selected_figure;
+    if core.project.figures.get(fi).is_none() {
+        core.status = "No such figure.".into();
+        return false;
+    }
+    core.reset_pose_to_rest(fi, core.current)
+}
+
 /// Step size for the Setup section's rest-angle
 /// steppers, degrees — the segment inspector's
 /// joint-limit step (its `LIMIT_STEP`), so the shell
@@ -1147,7 +1188,7 @@ pub fn step_rest_angle(core: &mut EditorCore, ni: usize, delta: f32) -> bool {
     if next == cur {
         return false;
     }
-    core.snapshot();
+    core.snapshot_labeled("Step rest angle");
     // Validated above; the `if let` is unreachable
     // armour, not an expected path.
     if let Some(node) = core
@@ -1403,6 +1444,40 @@ fn setup_set_rest_row(s: &State, t: &Theme, absolute: bool) -> El {
     row().w_full().gap(8.0).center_y().child(button)
 }
 
+/// The Setup section's reset row (Wave 2, W2-30;
+/// SpriteLoop GAP P-10), mounted only while the mode is
+/// on, under the two set-rest actions: restore the
+/// selected figure's CURRENT-FRAME pose to the setup
+/// pose through [`reset_pose_to_setup`] — the restore
+/// half of the round trip, so the section that captures
+/// the setup pose can also return a frame pose to it
+/// without leaving for the pose panel. Live exactly
+/// when the figure has a pose on the current frame
+/// (the view-state's `has_current_pose`, the pose
+/// panel Reset button's rule), inert otherwise. The
+/// key stands as a plain literal in both forms, the
+/// form the element-key census extracts.
+fn setup_reset_pose_row(s: &State, st: &InspectorFigureState, t: &Theme) -> El {
+    let button = if st.has_current_pose {
+        btn(
+            "fig-setup-reset-pose",
+            &i18n_wire::tr(&s.core, "setup_reset_pose"),
+            false,
+            t,
+            |s: &mut State| {
+                reset_pose_to_setup(&mut s.core);
+            },
+        )
+    } else {
+        btn_inert(
+            "fig-setup-reset-pose",
+            &i18n_wire::tr(&s.core, "setup_reset_pose"),
+            t,
+        )
+    };
+    row().w_full().gap(8.0).center_y().child(button)
+}
+
 /// One colour swatch: the kit's single swatch
 /// construction ([`design::swatch`] — the Phase N
 /// adoption retired this panel's hand-rolled 22×22
@@ -1537,6 +1612,7 @@ pub fn inspector_figure(s: &State, t: &Theme) -> El {
         }
         panel = panel.child(setup_set_rest_row(s, t, false));
         panel = panel.child(setup_set_rest_row(s, t, true));
+        panel = panel.child(setup_reset_pose_row(s, &st, t));
     }
     panel.child(
         row()
@@ -1594,6 +1670,11 @@ mod tests {
                 "setup_set_rest_absolute",
                 "Set rest from current pose (absolute)",
             ),
+            // Wave 2 (W2-30): the reset row's label —
+            // resolves only once IA-W2-30-1 lands the
+            // key in the catalogue, the same owed-key
+            // pattern as the four above were under Y8.
+            ("setup_reset_pose", "Reset pose to setup pose"),
         ] {
             assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
             assert_eq!(i18n_wire::tr(&core, key), english);
@@ -2006,6 +2087,7 @@ mod tests {
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
             sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            migration_panel: rune_sec::migration_prompt::initial_state(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
@@ -2025,12 +2107,15 @@ mod tests {
             toast_now: 0.0,
             last_dark: true,
             workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            setup_mode_before_build: false,
             guides: false,
             show_left: true,
             show_right: true,
+            stage_focus_restore: None,
             key_clipboard: None,
             key_follow_graph: false,
             key_sel: Default::default(),
+            keyframe_tools: Default::default(),
             help_panel: Default::default(),
             camera_panel: Default::default(),
             segment_numbers: Default::default(),
@@ -2043,6 +2128,11 @@ stroke_selected: None,
 particle_selected: None,
 guides_frustum: true,
 guides_safe: true,
+guides_golden: false,
+guides_diagonals: false,
+guides_stored: true,
+rulers: false,
+limit_arcs: false,
 onion_ui: Default::default(),
 last_frame: 0,
 pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
@@ -2073,6 +2163,7 @@ playback_speed: 1.0,
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
             sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            migration_panel: rune_sec::migration_prompt::initial_state(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
@@ -2092,12 +2183,15 @@ playback_speed: 1.0,
             toast_now: 0.0,
             last_dark: true,
             workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            setup_mode_before_build: false,
             guides: false,
             show_left: true,
             show_right: true,
+            stage_focus_restore: None,
             key_clipboard: None,
             key_follow_graph: false,
             key_sel: Default::default(),
+            keyframe_tools: Default::default(),
             help_panel: Default::default(),
             camera_panel: Default::default(),
             segment_numbers: Default::default(),
@@ -2110,6 +2204,11 @@ stroke_selected: None,
 particle_selected: None,
 guides_frustum: true,
 guides_safe: true,
+guides_golden: false,
+guides_diagonals: false,
+guides_stored: true,
+rulers: false,
+limit_arcs: false,
 onion_ui: Default::default(),
 last_frame: 0,
 pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),

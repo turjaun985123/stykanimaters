@@ -197,7 +197,7 @@ pub fn set_node_taper(core: &mut EditorCore, taper: f32) -> bool {
         core.status = "Select a joint first.".into();
         return false;
     }
-    core.snapshot();
+    core.snapshot_labeled("Segment taper");
     let label = {
         let node = &mut core.project.figures[core.selected_figure].def.nodes[ni];
         node.style.taper = taper;

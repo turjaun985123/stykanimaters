@@ -103,12 +103,12 @@ pub static BINDINGS: &[Binding] = &[
     Binding { id: "palette-prev", keys: "Up", action: "Previous result in the command palette (palette open)", section: "Shortcuts", scope: P, menu_key: None, command_key: None },
     Binding { id: "palette-run", keys: "Enter", action: "Run the selected command (command palette open)", section: "Shortcuts", scope: P, menu_key: None, command_key: None },
     Binding { id: "close-scope", keys: "Escape", action: "Close the open menu or command palette", section: "Shortcuts", scope: G, menu_key: None, command_key: None },
-    Binding { id: "delete", keys: "Delete", action: "Delete the selected stroke, particle event or segment", section: "Shortcuts", scope: G, menu_key: None, command_key: None },
+    Binding { id: "delete", keys: "Delete", action: "Delete the selected stroke, particle event, segment or path point", section: "Shortcuts", scope: G, menu_key: None, command_key: None },
     // PL-4 (RM26): the Delete alias and the File/Edit
     // chord cluster (A21 K1/K2). The Delete row order in
     // the action prose IS the cascade priority — stroke,
     // then particle event, then segment (A21 K6).
-    Binding { id: "delete-alias", keys: "Backspace", action: "Delete the selected stroke, particle event or segment", section: "Shortcuts", scope: G, menu_key: None, command_key: None },
+    Binding { id: "delete-alias", keys: "Backspace", action: "Delete the selected stroke, particle event, segment or path point", section: "Shortcuts", scope: G, menu_key: None, command_key: None },
     Binding { id: "open-project", keys: "Ctrl+O", action: "Open the selected project file", section: "Shortcuts", scope: G, menu_key: None, command_key: Some("open-project") },
     Binding { id: "save-copy", keys: "Ctrl+Shift+S", action: "Save a copy of the project", section: "Shortcuts", scope: G, menu_key: None, command_key: Some("save-copy") },
     Binding { id: "duplicate-frame", keys: "Ctrl+D", action: "Duplicate the current frame", section: "Shortcuts", scope: G, menu_key: None, command_key: Some("dup-frame") },
@@ -120,9 +120,14 @@ pub static BINDINGS: &[Binding] = &[
     Binding { id: "workspace-graph", keys: "Alt+3", action: "Switch to the Graph workspace", section: "Workspaces", scope: G, menu_key: None, command_key: Some("go-graph") },
     Binding { id: "workspace-effects", keys: "Alt+4", action: "Switch to the Effects workspace", section: "Workspaces", scope: G, menu_key: None, command_key: Some("go-effects") },
     Binding { id: "workspace-audio", keys: "Alt+5", action: "Switch to the Audio workspace", section: "Workspaces", scope: G, menu_key: None, command_key: Some("go-audio") },
-    Binding { id: "workspace-3d", keys: "Alt+6", action: "Switch to the 3D workspace", section: "Workspaces", scope: G, menu_key: None, command_key: Some("go-build3d") },
-    Binding { id: "workspace-export", keys: "Alt+7", action: "Switch to the Export workspace", section: "Workspaces", scope: G, menu_key: None, command_key: Some("go-export") },
-    Binding { id: "workspace-home", keys: "Alt+8", action: "Switch to the Home workspace", section: "Workspaces", scope: G, menu_key: None, command_key: Some("go-home") },
+    Binding { id: "workspace-build", keys: "Alt+6", action: "Switch to the Build workspace", section: "Workspaces", scope: G, menu_key: None, command_key: Some("go-build") },
+    Binding { id: "rig-prev-node", keys: "Up", action: "Previous rig node", section: "Build", scope: G, menu_key: None, command_key: None },
+    Binding { id: "rig-next-node", keys: "Down", action: "Next rig node", section: "Build", scope: G, menu_key: None, command_key: None },
+    Binding { id: "rig-collapse-node", keys: "Left", action: "Collapse rig node or go to parent", section: "Build", scope: G, menu_key: None, command_key: None },
+    Binding { id: "rig-expand-node", keys: "Right", action: "Expand rig node or go to first child", section: "Build", scope: G, menu_key: None, command_key: None },
+    Binding { id: "workspace-3d", keys: "Alt+7", action: "Switch to the 3D workspace", section: "Workspaces", scope: G, menu_key: None, command_key: Some("go-build3d") },
+    Binding { id: "workspace-export", keys: "Alt+8", action: "Switch to the Export workspace", section: "Workspaces", scope: G, menu_key: None, command_key: Some("go-export") },
+    Binding { id: "workspace-home", keys: "Alt+9", action: "Switch to the Home workspace", section: "Workspaces", scope: G, menu_key: None, command_key: Some("go-home") },
     // -- Posing -------------------------------------------
     Binding { id: "camera-mode", keys: "C", action: "Toggle camera mode", section: "Posing", scope: G, menu_key: None, command_key: None },
     Binding { id: "onion-skin", keys: "O", action: "Toggle onion skin", section: "Posing", scope: G, menu_key: Some("onion"), command_key: Some("onion") },
@@ -132,7 +137,7 @@ pub static BINDINGS: &[Binding] = &[
     // forbids two rows sharing a key label, and because
     // it is one physical idiom with a selection gate
     // (IA-RM15-4's rule, composed into IA-RM26-1).
-    Binding { id: "nudge-joint", keys: "Arrows", action: "Nudge the selected joint by 1 (Shift 10, Alt 0.1); with no joint selected, step frames", section: "Posing", scope: G, menu_key: None, command_key: None },
+    Binding { id: "nudge-joint", keys: "Arrows", action: "Move the selected joint or character by 1 (Shift 10, Alt 0.1); with nothing selected, step frames", section: "Posing", scope: G, menu_key: None, command_key: None },
     // -- Timeline -----------------------------------------
     Binding { id: "play-pause", keys: "Space", action: "Play / pause", section: "Timeline", scope: G, menu_key: None, command_key: Some("play") },
     Binding { id: "prev-frame", keys: "Left", action: "Previous frame (wraps around)", section: "Timeline", scope: G, menu_key: None, command_key: Some("prev") },

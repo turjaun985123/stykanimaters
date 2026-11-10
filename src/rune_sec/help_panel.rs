@@ -418,13 +418,16 @@
 //! Shortcuts, the arrow-nudge row in Posing, the
 //! transport + keyframing clusters in Timeline, and
 //! Drawing's first four keys — its "no shortcuts yet"
-//! note is retired). The panel now holds **81 rows**:
-//! 17 Shortcuts + 8 Workspaces + 3 Posing + 13 Timeline
-//! + 4 Drawing + 36 Features, pinned by
-//! `shortcut_rows_has_exactly_81_rows` below. (As
+//! note is retired). The panel now holds **86 rows**:
+//! 17 Shortcuts + 9 Workspaces + 3 Posing + 13 Timeline
+//! + 4 Drawing + 4 Build + 36 Features, pinned by
+//! `shortcut_rows_has_exactly_86_rows` below. (As
 //! landed at integration: RM26's registry brought the
 //! census to 80; IA-RM28-5's F1 binding then added the
-//! 81st row, Shortcuts 16 → 17.)
+//! 81st row, Shortcuts 16 → 17; Roadmap Wave 2's
+//! IA-W2-21-4 added the 82nd, Workspaces 8 → 9 for the
+//! Build workspace binding, and IA-W2-22-1 added
+//! rows 83–86, the rig-tree keys' Build section.)
 //!
 //! Roadmap Wave 1 (RM28, PL-7 first steps), 2026-11-10:
 //! the panel becomes searchable and its rows act. A
@@ -463,6 +466,41 @@
 //! IA-RM28-4 — the Q7 pattern: wiring and keys land
 //! together at integration. The census stands at 80
 //! until IA-RM28-5 lands, at 81 with it.
+//!
+//! Roadmap Wave 2 (W2-58, PL-7 depth), 2026-11-10: the
+//! panel gains depth below the six sections. A Topics
+//! block (`help-section-topics`, NOT part of the
+//! [`group_rows`] census either — the 81 stands) pages
+//! the ten deepest systems one page each
+//! ([`topic_rows`]): a what-it-is written against the
+//! panel as it stands today — Wave-2 additions
+//! included (the rig tree, the dialogue lane's subtitle
+//! home, the Timing assistant, title cards) — then 2–4
+//! action rows whose presses DO the action: a palette
+//! command by key (the same registry the palette runs),
+//! the panel's own handler, or its core op, never a
+//! dead label. Search gains a synonym floor
+//! ([`search_synonyms`]): users' own words for a system
+//! ("captions", "bones", "curve") keep its rows and its
+//! topic when the canonical text never says them; a
+//! query that matches only topics no longer earns the
+//! no-results empty state. Two honest limits ride in
+//! the copy itself: title cards' section is built but
+//! not yet shell-mounted (IA-W2-15-3), so its single
+//! row runs the master switch op directly; and the
+//! camera page's Set key row runs a zoom step because
+//! that IS the panel's key-upsert press. The new
+//! strings wire through [`help_text_key`] (52 keys) and
+//! land via IA-W2-58-1 — the Q7 pattern again.
+//!
+//! The poster export (Roadmap Wave 2, W2-97 — E-9):
+//! an "Export shortcut poster" button under Getting
+//! Started writes a self-contained HTML poster of every
+//! binding into `./export/shortcut-poster.html`, built
+//! by [`shortcut_poster`] from the binding registry
+//! alone and rebuilt on every press, so the file cannot
+//! go stale. The label wires through [`help_text_key`];
+//! its key lands via IA-W2-97-1 (the Q7 pattern).
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El, TextEdit};
@@ -474,6 +512,7 @@ use crate::rune_sec::design;
 use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icons::icon_el;
 use crate::rune_sec::keymap;
+use crate::rune_sec::shortcut_poster;
 use crate::rune_sec::workspaces;
 use crate::State;
 
@@ -489,6 +528,426 @@ pub fn shortcut_rows() -> Vec<(&'static str, &'static str)> {
         rows.extend(section_rows(name));
     }
     rows
+}
+
+/// The 10 deepest systems, as topic PAGES in panel order
+/// (Roadmap Wave 2, W2-58 — PL-7 depth): each topic is
+/// (name, what-it-is, the panel's element-key stem, its
+/// 2–4 most important actions as (label, [`TopicAction`])
+/// rows). A topic page renders under its section heading
+/// (`help-section-topics`) at the foot of the panel,
+/// below the six shortcut sections.
+///
+/// Name discipline: seven topics name the panel the user
+/// opens — "Camera panel", "Graph panel", "Rig tree",
+/// "Subtitles", "Effects clips" (the FX clips panel),
+/// "Audio clips" (the Audio panel), "3D panel"; the
+/// other three name the system itself (Graph channels,
+/// Movieclips, Title cards). Action
+/// labels name the surface's own controls — "Set key",
+/// "Add clip", "Make clip" repeat the buttons' own words
+/// — and every label resolves through [`help_text_key`]
+/// like every other string this panel renders.
+///
+/// Coverage discipline: the ten were chosen by depth of
+/// system (state model + dedicated engine ops + more
+/// than one surface), censused in the seat's findings;
+/// the panels NOT here are covered by the shortcut and
+/// Features rows above and by their own one-line
+/// descriptions in the panel census (findings §1).
+pub fn topic_rows() -> Vec<(&'static str, &'static str, &'static str, Vec<(&'static str, TopicAction)>)> {
+    use TopicAction as TA;
+    vec![
+        (
+            "Camera panel",
+            "Keys the camera itself — pan, zoom and rotation keyed at frames and evaluated between them; the stage wheel only zooms the view, never the camera. Its Set key row runs a zoom step: that is the panel's own key-upsert path, the press that writes a camera key at the current frame",
+            "camera-panel",
+            vec![
+                ("Set key", TA::Command("cam-zoom-in")),
+                ("Frame all figures", TA::Command("cam-frame-all")),
+                ("Centre on selection", TA::Command("cam-centre")),
+                ("Follow the selection", TA::OpenPanel("Camera panel")),
+            ],
+        ),
+        (
+            "Graph panel",
+            "Edits the project's motion channels — one curve of keys per figure property, drawn through the same evaluation the renderer uses",
+            "graph-panel",
+            vec![
+                ("Key angle here", TA::Command("key-graph-angle")),
+                ("Key all channels here", TA::Command("key-all-channels")),
+                ("Delete key at playhead", TA::Command("delete-key-here")),
+                ("Clear graph curves", TA::Command("clear-graph")),
+            ],
+        ),
+        (
+            "Graph channels",
+            "A channel is the graph's unit: keys with Hermite tangents on one property of one figure — angle, root position, squash, bend or face; channels override the sampled pose wherever they reach",
+            "graph-channels",
+            vec![
+                ("Key all channels here", TA::Command("key-all-channels")),
+                ("Shift graph channel", TA::Command("shift-channel-right")),
+                ("Fill keys across the loop range", TA::Command("fill-keys-range")),
+                ("Open the Graph panel", TA::OpenPanel("Graph panel")),
+            ],
+        ),
+        (
+            "Rig tree",
+            "The Build workspace's home for the selected figure's node tree — rows in tree order with head, IK-end, joint-limit and media badges, sharing one selection with the stage and both inspectors",
+            "rig-tree",
+            vec![
+                ("Open the rig tree", TA::OpenPanel("Rig tree")),
+                ("Add segment", TA::Command("add-segment")),
+                ("Delete segment", TA::Command("del-segment")),
+            ],
+        ),
+        (
+            "Subtitles",
+            "The episode's subtitle cues: a timed, optionally speaker-credited text list that renders on the stage, burns into exports and round-trips through SRT and WebVTT files. Its editor rides at the foot of the Audio panel, beside the dialogue lane its cues draw",
+            "subtitle-section",
+            vec![
+                ("Add a cue", TA::AddCue),
+                ("Fix cue timing", TA::FixCueTiming),
+                ("Open the Subtitles section", TA::OpenPanel("Subtitles")),
+            ],
+        ),
+        (
+            "Effects clips",
+            "Particle-effect clips on the timeline: added from the Effects browser's 27 kinds or from presets, anchored to a joint, and edited — split, hidden, deleted — in the FX clips lane",
+            "fx-panel",
+            vec![
+                ("Add a particle burst", TA::Command("particle-burst")),
+                ("Split FX clip at playhead", TA::Command("split-fx-clip")),
+                ("Open the Effects clips panel", TA::OpenPanel("Effects clips")),
+            ],
+        ),
+        (
+            "Audio clips",
+            "The project's soundtrack as clips on frames: each carries a file, a start frame and a gain, and the panel's effects — fade, echo, pitch, compress — act on the selected clip",
+            "audio-panel",
+            vec![
+                ("Add audio clip", TA::Command("add-audio")),
+                ("Fade the selected clip", TA::OpenPanel("Audio clips")),
+                ("Normalise audio levels", TA::Command("normalise-audio")),
+                ("Mix down audio", TA::Command("mixdown")),
+            ],
+        ),
+        (
+            "3D panel",
+            "A 3D posing session over the selected figure: pose its joints in three dimensions with camera presets and IK solves, then bake the result back into the 2D timeline",
+            "panel-3d",
+            vec![
+                ("Enter 3D mode", TA::Command("enter-3d")),
+                ("Exit 3D mode", TA::Command("exit-3d")),
+                ("Open the 3D panel", TA::OpenPanel("3D panel")),
+            ],
+        ),
+        (
+            "Movieclips",
+            "Reusable clips built from a figure's pose across every frame: a movieclip figure plays its clip instead of posing frame by frame, and its segments can carry the clip definition's own media",
+            "clips-panel",
+            vec![
+                ("Make clip from figure", TA::MakeClip),
+                ("Insert clip figure", TA::InsertClip),
+                ("Open the Movieclips panel", TA::OpenPanel("Movieclips")),
+            ],
+        ),
+        (
+            "Title cards",
+            "A chapter's title burned into the export as an opening card — the chapter name over its first frames, drawn with the project's subtitle style; off until you switch it on. The section itself is built and unit-pinned but not yet mounted in the shell — see the findings' honest limit",
+            "title-card",
+            vec![
+                ("Enable title cards", TA::OpenPanel("Title cards")),
+            ],
+        ),
+    ]
+}
+
+/// What a topic action row's press does. `Command` runs
+/// a command-palette command by key — the palette is
+/// the app's own action registry, so the press runs the
+/// exact shim the palette runs (the [`key_row_press`]
+/// precedent: a Help press can never drift from the
+/// real action). `OpenPanel` takes the user to the
+/// panel's workspace and presses that panel's first
+/// matching real control there — see [`topic_press`]
+/// for the per-target table; it exists for the systems
+/// whose main verbs live on panel buttons with no
+/// palette twin (subtitle cues, movieclips, title
+/// cards, audio fade).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TopicAction {
+    Command(&'static str),
+    OpenPanel(&'static str),
+    /// The Movieclips panel's Make clip button: the
+    /// core op it runs (`EditorCore::make_clip_from_figure`).
+    MakeClip,
+    /// The Movieclips panel's Insert clip button: the
+    /// core op it runs (`EditorCore::insert_clip_figure`).
+    InsertClip,
+    /// The Subtitles section's Add button: its own
+    /// handler (`subtitle_panel::add_cue`).
+    AddCue,
+    /// The Subtitles Timing assistant's Apply-all press:
+    /// the core op it rides
+    /// (`EditorCore::subtitle_timing_apply`, all
+    /// proposals) — proposals only ever extend into
+    /// dead air, split at word boundaries or shift the
+    /// following chain; cue text is never rewritten.
+    FixCueTiming,
+}
+
+/// A topic action's press: run its command, or go to
+/// its panel and press the panel's own control. Every
+/// arm names the exact op the target panel's button
+/// runs (censused in the seat's findings §3) — no arm
+/// invents behaviour, and a target the table does not
+/// know does nothing rather than something wrong.
+fn topic_press(s: &mut State, action: TopicAction) {
+    use workspaces::Workspace as Ws;
+    match action {
+        TopicAction::MakeClip => {
+            workspaces::select_workspace(s, Ws::Animate);
+            s.core.make_clip_from_figure();
+        }
+        TopicAction::InsertClip => {
+            workspaces::select_workspace(s, Ws::Animate);
+            s.core.insert_clip_figure();
+        }
+        TopicAction::AddCue => {
+            workspaces::select_workspace(s, Ws::Audio);
+            crate::rune_sec::subtitle_panel::add_cue(s);
+        }
+        TopicAction::FixCueTiming => {
+            workspaces::select_workspace(s, Ws::Audio);
+            // The Timing assistant's Apply-all handler
+            // itself — every current proposal in one
+            // labelled undo step, with the panel's own
+            // selection stand-down; nothing proposed,
+            // nothing spent.
+            crate::rune_sec::subtitle_panel::apply_all_timing_proposals(s);
+        }
+        TopicAction::Command(key) => {
+            if let Some(c) = command_palette::COMMANDS.iter().find(|c| c.key == key) {
+                (c.run)(s);
+            }
+        }
+        TopicAction::OpenPanel(target) => match target {
+            "Camera panel" => {
+                workspaces::select_workspace(s, Ws::Build3D);
+                // The panel's Follow button verbatim:
+                // the core toggle op (one labelled undo
+                // step, the op's own status sentences).
+                s.core.toggle_camera_follow();
+            }
+            "Graph panel" => workspaces::select_workspace(s, Ws::Graph),
+            "Rig tree" => workspaces::select_workspace(s, Ws::Build),
+            "Subtitles" => {
+                workspaces::select_workspace(s, Ws::Audio);
+                crate::rune_sec::subtitle_panel::add_cue(s);
+            }
+            "Effects clips" => workspaces::select_workspace(s, Ws::Effects),
+            "Audio clips" => {
+                workspaces::select_workspace(s, Ws::Audio);
+                // The Audio panel's Fade button verbatim
+                // (`audio_panel::fade_target`): the
+                // parameterised op on the panel's
+                // effective target — the live selection,
+                // else the last clip — at the panel's
+                // current fade settings; with no clips,
+                // the fixed op's no-clips status line.
+                let fx = s.audio_panel.fx;
+                match crate::rune_sec::audio_panel::effective_target(
+                    s.audio_panel.selected,
+                    s.core.project.audio.len(),
+                ) {
+                    Some(i) => s.core.audio_fade_at_with(i, fx.fade_in, fx.fade_out),
+                    None => s.core.audio_fade_last(),
+                }
+            }
+            "3D panel" => workspaces::select_workspace(s, Ws::Build3D),
+            "Movieclips" => workspaces::select_workspace(s, Ws::Animate),
+            "Title cards" => {
+                // The section's master switch, the op
+                // its toggle runs — reachable today even
+                // though the section's shell mount is
+                // still IA-W2-15-3's (see topic_rows).
+                s.core.title_cards_set_enabled(!s.core.project.title_cards.enabled);
+            }
+            _ => {}
+        },
+    }
+}
+
+/// Extra words a search may use to find a row or a
+/// topic: the terms users actually type for a system
+/// whose rows never say them ("captions" for the
+/// subtitle rows, "undo" for Ctrl+Z's row is NOT here —
+/// that word is the row's own text). Matching only ever
+/// ADDS hits — the canonical and rendered text still
+/// match exactly as before — and both [`section_match`]
+/// and the topic filter consult this table, so a
+/// synonym hit behaves like a text hit (a row kept, a
+/// topic kept). Synonyms are lowercase substrings,
+/// matched against the query's words.
+fn search_synonyms(text: &str) -> &'static [&'static str] {
+    match text {
+        // Subtitle rows and the Subtitles topic.
+        "Subtitles" | "Subtitle" | "Add a cue" => &["captions", "caption", "subtitle"],
+        // The camera rows (the Set key upsert family and
+        // the follow toggle).
+        "Set key" | "Camera key delete" | "Follow the selection" => {
+            &["camera", "keyframe"]
+        }
+        "Graph channels" | "Graph panel" => &["curve", "curves", "channel"],
+        "Rig tree" | "Bend steppers" => &["skeleton", "bones", "nodes"],
+        "Effects clips" | "Particles panel" => &["fx", "effects", "particles"],
+        "Audio clips" => &["sound", "music", "audio"],
+        "3D panel" | "3D preview" | "3D figure on the stage" => &["three"],
+        "Movieclips" => &["movieclip", "clip"],
+        "Title cards" => &["title", "card", "chapter"],
+        "Loop playback" | "Loop range steppers" => &["repeat"],
+        "Onion skin" | "Toggle onion skin" => &["ghost", "ghosts"],
+        _ => &[],
+    }
+}
+
+/// True when any of `text`'s synonyms appears in the
+/// query (word-wise, case-insensitive): the synonym
+/// half of search matching, consulted alongside
+/// [`text_matches`] by the row and topic filters.
+fn synonym_matches(query: &str, text: &str) -> bool {
+    let syns = search_synonyms(text);
+    if syns.is_empty() {
+        return false;
+    }
+    let q = query.trim().to_lowercase();
+    q.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .any(|w| syns.contains(&w))
+}
+
+/// One topic's search result: the topic when it survives
+/// the query (by its own name, its what-is text, one of
+/// its action labels, or a synonym of any of those — in
+/// either language, the [`text_matches`] discipline),
+/// else `None`. With no active search every topic
+/// survives whole.
+fn topic_match(
+    core: &EditorCore,
+    topic: &(&'static str, &'static str, &'static str, Vec<(&'static str, TopicAction)>),
+    query: &str,
+) -> bool {
+    if !search_active(query) {
+        return true;
+    }
+    let (name, what, _, actions) = topic;
+    if text_matches(query, name, &help_text(core, name))
+        || text_matches(query, what, &help_text(core, what))
+        || synonym_matches(query, name)
+        || synonym_matches(query, what)
+    {
+        return true;
+    }
+    actions.iter().any(|(label, _)| {
+        text_matches(query, label, &help_text(core, label)) || synonym_matches(query, label)
+    })
+}
+
+/// One topic action row: the action's label as plain
+/// text on the kit's list-row shell — a topic row is a
+/// page entry, not a key, so it never wears a `kbd`
+/// chip (the Features rule, p14 §3). The press runs the
+/// action (see [`topic_press`]). The row's element key
+/// is the topic's own panel-root key with a `-t{k}`
+/// suffix — deliberately colliding with nothing the
+/// target panel mounts, and composed inline so the key
+/// census sees one dynamic pattern.
+fn topic_action_row(core: &EditorCore, stem: &'static str, k: usize, label: &'static str, action: TopicAction, t: &Theme) -> El {
+    design::row_shell(false, t)
+        .key(format!("{stem}-t{k}"))
+        .on_press(move |s: &mut State| topic_press(s, action))
+        .child(text(help_text(core, label)).font(type_::LABEL).color(t.text))
+}
+
+/// One topic page: its name as a section title, the
+/// what-is text, then its action rows. `None` when the
+/// search drops the topic (see [`topic_match`]).
+fn topic_section(
+    core: &EditorCore,
+    topic: &(&'static str, &'static str, &'static str, Vec<(&'static str, TopicAction)>),
+    query: &str,
+    t: &Theme,
+) -> Option<El> {
+    if !topic_match(core, topic, query) {
+        return None;
+    }
+    let (name, what, stem, actions) = topic;
+    let mut section = col()
+        .key(format!("help-topic-{}", row_slug("topic", name)))
+        .gap(4.0)
+        .child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(design::panel_title(
+                    Some("list"),
+                    &help_text(core, name),
+                    None,
+                    t,
+                )),
+        )
+        .child(
+            text(help_text(core, what))
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
+    for (k, (label, action)) in actions.iter().enumerate() {
+        section = section.child(topic_action_row(core, stem, k, label, *action, t));
+    }
+    Some(section)
+}
+
+/// The Topics block: the [`topic_rows`] pages under one
+/// section heading, filtered by the search like every
+/// other part of the panel. `None` when a search drops
+/// every topic (the block leaves no orphan heading).
+fn topics_block(core: &EditorCore, query: &str, t: &Theme) -> Option<El> {
+    let pages: Vec<El> = topic_rows()
+        .iter()
+        .filter_map(|topic| topic_section(core, topic, query, t))
+        .collect();
+    if pages.is_empty() {
+        return None;
+    }
+    let mut block = col()
+        .key("help-section-topics")
+        .gap(4.0)
+        .child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(design::panel_title(
+                    Some("list"),
+                    &help_text(core, "Topics"),
+                    None,
+                    t,
+                )),
+        )
+        .child(
+            text(help_text(
+                core,
+                "The deepest systems, one page each — what it is, then its main actions; pressing an action does it",
+            ))
+            .font(type_::LABEL)
+            .color(t.text_secondary),
+        );
+    for page in pages {
+        block = block.child(page);
+    }
+    Some(block)
 }
 
 /// The shortcut rows belonging to one help section, by the
@@ -696,6 +1155,10 @@ pub fn group_rows() -> Vec<(&'static str, &'static str)> {
         // through the same text-field guard as every other
         // binding — its description says so, like the rest.
         ("Drawing", "Freehand drawing keys — paused while typing in a text field"),
+        (
+            "Build",
+            "Rig tree keys in the Build workspace — paused while typing in a text field",
+        ),
         (
             "Features",
             "Features on buttons, panels and the stage — none of these is a keyboard shortcut",
@@ -960,6 +1423,94 @@ fn help_text_key(english: &str) -> Option<&'static str> {
         "Open the Export workspace to render a video" => "help_start_open_export",
         "Search help" => "help_search_placeholder",
         "Clear search" => "help_search_clear",
+        // The shortcut poster's export button (W2-97,
+        // E-9): the label wires here, its catalogue key
+        // lands via IA-W2-97-1 (the Q7 pattern).
+        "Export shortcut poster" => "help_poster_export",
+        // Topics (W2-58, PL-7 depth): the ten pages'
+        // names, what-is texts and action labels. Keys
+        // land via IA-W2-58-1 (the Q7 pattern: wiring
+        // here, splice at integration; the census pin
+        // fails by design until then).
+        "Topics" => "help_section_topics",
+        "The deepest systems, one page each — what it is, then its main actions; pressing an action does it" => {
+            "help_section_topics_desc"
+        }
+        "Camera panel" => "help_topic_camera_panel",
+        "Keys the camera itself — pan, zoom and rotation keyed at frames and evaluated between them; the stage wheel only zooms the view, never the camera. Its Set key row runs a zoom step: that is the panel's own key-upsert path, the press that writes a camera key at the current frame" => {
+            "help_topic_camera_panel_desc"
+        }
+        "Graph panel" => "help_topic_graph_panel",
+        "Edits the project's motion channels — one curve of keys per figure property, drawn through the same evaluation the renderer uses" => {
+            "help_topic_graph_panel_desc"
+        }
+        "Graph channels" => "help_topic_graph_channels",
+        "A channel is the graph's unit: keys with Hermite tangents on one property of one figure — angle, root position, squash, bend or face; channels override the sampled pose wherever they reach" => {
+            "help_topic_graph_channels_desc"
+        }
+        "Rig tree" => "help_topic_rig_tree",
+        "The Build workspace's home for the selected figure's node tree — rows in tree order with head, IK-end, joint-limit and media badges, sharing one selection with the stage and both inspectors" => {
+            "help_topic_rig_tree_desc"
+        }
+        "Subtitles" => "help_topic_subtitles",
+        "The episode's subtitle cues: a timed, optionally speaker-credited text list that renders on the stage, burns into exports and round-trips through SRT and WebVTT files. Its editor rides at the foot of the Audio panel, beside the dialogue lane its cues draw" => {
+            "help_topic_subtitles_desc"
+        }
+        "Effects clips" => "help_topic_fx_clips",
+        "Particle-effect clips on the timeline: added from the Effects browser's 27 kinds or from presets, anchored to a joint, and edited — split, hidden, deleted — in the FX clips lane" => {
+            "help_topic_fx_clips_desc"
+        }
+        "Audio clips" => "help_topic_audio_clips",
+        "The project's soundtrack as clips on frames: each carries a file, a start frame and a gain, and the panel's effects — fade, echo, pitch, compress — act on the selected clip" => {
+            "help_topic_audio_clips_desc"
+        }
+        "3D panel" => "help_topic_3d_panel",
+        "A 3D posing session over the selected figure: pose its joints in three dimensions with camera presets and IK solves, then bake the result back into the 2D timeline" => {
+            "help_topic_3d_panel_desc"
+        }
+        "Movieclips" => "help_topic_movieclips",
+        "Reusable clips built from a figure's pose across every frame: a movieclip figure plays its clip instead of posing frame by frame, and its segments can carry the clip definition's own media" => {
+            "help_topic_movieclips_desc"
+        }
+        "Title cards" => "help_topic_title_cards",
+        "A chapter's title burned into the export as an opening card — the chapter name over its first frames, drawn with the project's subtitle style; off until you switch it on. The section itself is built and unit-pinned but not yet mounted in the shell — see the findings' honest limit" => {
+            "help_topic_title_cards_desc"
+        }
+        "Set key" => "help_topic_act_set_key",
+        "Frame all figures" => "help_topic_act_frame_all",
+        "Centre on selection" => "help_topic_act_centre_selection",
+        "Follow the selection" => "help_topic_act_follow_selection",
+        "Key angle here" => "help_topic_act_key_angle_here",
+        "Key all channels here" => "help_topic_act_key_all_channels",
+        "Delete key at playhead" => "help_topic_act_delete_key_here",
+        "Clear graph curves" => "help_topic_act_clear_graph",
+        // ("Shift graph channel" is NOT re-armed here:
+        // the Features label of the same words already
+        // resolves to `help_feature_shift_graph_channel`
+        // above, and the topic row shares it — one
+        // spelling, one translation.)
+        "Fill keys across the loop range" => "help_topic_act_fill_keys_range",
+        "Open the Graph panel" => "help_topic_act_open_graph",
+        "Open the rig tree" => "help_topic_act_open_rig_tree",
+        "Add segment" => "help_topic_act_add_segment",
+        "Delete segment" => "help_topic_act_delete_segment",
+        "Add a cue" => "help_topic_act_add_cue",
+        "Fix cue timing" => "help_topic_act_fix_cue_timing",
+        "Open the Subtitles section" => "help_topic_act_open_subtitles",
+        "Add a particle burst" => "help_topic_act_add_burst",
+        "Split FX clip at playhead" => "help_topic_act_split_fx_clip",
+        "Open the Effects clips panel" => "help_topic_act_open_fx_clips",
+        "Add audio clip" => "help_topic_act_add_audio_clip",
+        "Fade the selected clip" => "help_topic_act_fade_clip",
+        "Normalise audio levels" => "help_topic_act_normalise_audio",
+        "Mix down audio" => "help_topic_act_mixdown",
+        "Enter 3D mode" => "help_topic_act_enter_3d",
+        "Exit 3D mode" => "help_topic_act_exit_3d",
+        "Open the 3D panel" => "help_topic_act_open_3d",
+        "Make clip from figure" => "help_topic_act_make_clip",
+        "Insert clip figure" => "help_topic_act_insert_clip",
+        "Open the Movieclips panel" => "help_topic_act_open_movieclips",
+        "Enable title cards" => "help_topic_act_enable_title_cards",
         _ => return None,
     })
 }
@@ -1073,6 +1624,12 @@ fn section_match(
         .filter(|(label, action)| {
             text_matches(query, label, &help_text(core, label))
                 || text_matches(query, action, &help_text(core, action))
+                // W2-58: the synonym floor — a row also
+                // survives when the query names one of its
+                // synonyms ("captions" keeps the Add cue
+                // row, "bones" keeps the rig rows).
+                || synonym_matches(query, label)
+                || synonym_matches(query, action)
         })
         .collect();
     let note_hit = note.map_or(false, |n| text_matches(query, n, &help_text(core, n)));
@@ -1191,6 +1748,26 @@ fn feature_press(s: &mut State, label: &str) {
         FeatureAction::OpenSettings => s.settings.open = true,
         FeatureAction::OpenPalette => command_palette::open_palette(s),
         FeatureAction::None => {}
+    }
+}
+
+/// The poster button's press (W2-97, E-9): write the
+/// registry-generated shortcut poster into `./export`
+/// and report the outcome on the status line, in the
+/// shell's literal-status idiom (a failure names its
+/// reason; nothing is claimed that did not happen).
+/// The shell has no file opener, so the status names
+/// the path and opening/printing is the user's, in
+/// their browser — the same honesty the export panel's
+/// Recent exports list records.
+fn poster_press(s: &mut State) {
+    match shortcut_poster::write_poster() {
+        Ok(path) => {
+            s.core.status = format!("Shortcut poster written to {}", path.display());
+        }
+        Err(e) => {
+            s.core.status = format!("Shortcut poster failed: {e}");
+        }
     }
 }
 
@@ -1475,6 +2052,21 @@ pub fn help_panel(core: &EditorCore, st: &HelpPanelState, t: &Theme) -> El {
     panel = panel.child(search_row);
     if !searching {
         panel = panel.child(getting_started(core, t));
+        // W2-97 (E-9): the shortcut poster export, beside
+        // Getting Started — while searching, the panel is
+        // a filter result, not a home for actions. One
+        // press rebuilds the poster from the binding
+        // registry and writes it into ./export (see
+        // `shortcut_poster` and `poster_press`).
+        panel = panel.child(
+            row().w_full().gap(8.0).center_y().child(btn(
+                "help-poster-export",
+                &help_text(core, "Export shortcut poster"),
+                false,
+                t,
+                |s: &mut State| poster_press(s),
+            )),
+        );
     }
     let mut any_section = false;
     for (name, description) in group_rows() {
@@ -1482,6 +2074,13 @@ pub fn help_panel(core: &EditorCore, st: &HelpPanelState, t: &Theme) -> El {
             panel = panel.child(section);
             any_section = true;
         }
+    }
+    // W2-58: the Topics pages close the panel (see
+    // `topic_rows`). They count toward "the search found
+    // something" exactly like a section does.
+    if let Some(topics) = topics_block(core, &query, t) {
+        panel = panel.child(topics);
+        any_section = true;
     }
     if searching && !any_section {
         // The search that found nothing offers its own
@@ -1505,12 +2104,12 @@ mod tests {
         command_palette, feature_action, group_rows, header_meta, help_text_key,
         i18n_wire, key_row_command, key_row_has_action, keymap, no_matches_line,
         search_active, section_match, section_note, section_rows, shortcut_rows,
-        start_steps, text_matches, workspaces, EditorCore, FeatureAction,
-        HelpPanelState,
+        start_steps, text_matches, topic_match, topic_rows, workspaces, EditorCore,
+        FeatureAction, HelpPanelState, TopicAction,
     };
 
     #[test]
-    fn shortcut_rows_has_exactly_81_rows() {
+    fn shortcut_rows_has_exactly_86_rows() {
         // 10 Shortcuts + 8 Workspaces + 2 Posing + 5 Timeline
         // + 36 Features; Drawing contributes none (see the
         // module docs for which GPUI-era rows were dropped
@@ -1538,7 +2137,7 @@ mod tests {
         // Drawing 0 → 4 (B, [, ], Shift+B).
         // IA-RM28-5 (RM28) then landed the F1 binding in
         // Shortcuts (16 → 17): the census is 81.
-        assert_eq!(shortcut_rows().len(), 81);
+        assert_eq!(shortcut_rows().len(), 86);
     }
 
     #[test]
@@ -2578,5 +3177,156 @@ mod tests {
         let st = HelpPanelState::default();
         assert!(st.search.text.is_empty());
         assert!(!st.search.focused);
+    }
+
+    // ---- W2-58 (PL-7 depth): topics and synonyms ----
+
+    #[test]
+    fn w2_58_ten_topics_with_two_to_four_actions_each() {
+        let topics = topic_rows();
+        assert_eq!(topics.len(), 10);
+        for (i, (name, what, stem, actions)) in topics.iter().enumerate() {
+            assert!(
+                !topics[..i].iter().any(|(n, _, _, _)| n == name),
+                "duplicate topic name {name}"
+            );
+            assert!(
+                !topics[..i].iter().any(|(_, _, st, _)| st == stem),
+                "duplicate topic stem {stem}"
+            );
+            assert!(!what.trim().is_empty(), "{name} needs a what-is text");
+            assert!(
+                (2..=4).contains(&actions.len()),
+                "{name} has {} actions, want 2..=4",
+                actions.len()
+            );
+            for (label, _) in actions {
+                assert!(!label.trim().is_empty(), "{name} has an empty action label");
+            }
+        }
+        // The Title cards page is the documented census
+        // exception: one action — its section is built
+        // but not yet shell-mounted (IA-W2-15-3), so the
+        // only honest press is the master switch itself.
+        let cards = topics.iter().find(|(n, _, _, _)| *n == "Title cards").unwrap();
+        assert_eq!(cards.3.len(), 1);
+    }
+
+    #[test]
+    fn w2_58_topic_commands_exist_in_the_palette() {
+        // Every Command key a topic row carries must be
+        // a real palette command — `topic_press` looks
+        // it up in COMMANDS and silently no-ops on a
+        // miss, so a typo'd key would be a dead row.
+        for (name, _, _, actions) in topic_rows() {
+            for (label, action) in &actions {
+                if let TopicAction::Command(key) = action {
+                    assert!(
+                        command_palette::COMMANDS.iter().any(|c| c.key == *key),
+                        "{name}/{label} names missing palette command {key}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn w2_58_open_panel_targets_are_handled() {
+        // Every OpenPanel target must appear in
+        // `topic_press`'s arm table — an unlisted target
+        // falls to the empty arm and the row does
+        // nothing. (The dispatch itself is shell state;
+        // the table's coverage is what text can pin.)
+        const HANDLED: &[&str] = &[
+            "Camera panel",
+            "Graph panel",
+            "Rig tree",
+            "Subtitles",
+            "Effects clips",
+            "Audio clips",
+            "3D panel",
+            "Movieclips",
+            "Title cards",
+        ];
+        for (name, _, _, actions) in topic_rows() {
+            for (label, action) in &actions {
+                match action {
+                    TopicAction::OpenPanel(target) => assert!(
+                        HANDLED.contains(target),
+                        "{name}/{label} targets unhandled panel {target}"
+                    ),
+                    TopicAction::Command(_) => {}
+                    other => assert!(
+                        matches!(
+                            other,
+                            TopicAction::MakeClip
+                                | TopicAction::InsertClip
+                                | TopicAction::AddCue
+                                | TopicAction::FixCueTiming
+                        ),
+                        "{name}/{label} has an unpinned action variant"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn w2_58_topic_strings_resolve_through_the_catalogue() {
+        // Every string the Topics block renders — the
+        // heading, each page's name, what-is text and
+        // action labels — resolves through
+        // `help_text_key` to a key whose catalogue
+        // English is byte-identical. Keys land via
+        // IA-W2-58-1, so this pin fails by design until
+        // that IA lands (the Q7 pattern).
+        let core = EditorCore::new();
+        let mut strings: Vec<&'static str> = vec![
+            "Topics",
+            "The deepest systems, one page each — what it is, then its main actions; pressing an action does it",
+        ];
+        for (name, what, _, actions) in topic_rows() {
+            strings.push(name);
+            strings.push(what);
+            for (label, _) in &actions {
+                strings.push(label);
+            }
+        }
+        for english in strings {
+            let key =
+                help_text_key(english).unwrap_or_else(|| panic!("{english} is not wired"));
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
+    }
+
+    #[test]
+    fn w2_58_synonyms_keep_their_systems() {
+        let core = EditorCore::new();
+        // "captions" keeps the Subtitles topic alive
+        // through the synonym floor (its name and
+        // what-is text never say the word). At ROW
+        // level, "bones" keeps the Features row the
+        // synonym table hangs it on ("Bend steppers" —
+        // the segment/skeleton surface whose own text
+        // never says the word either).
+        let features = section_match(&core, "Features", "", "bones")
+            .expect("bones must keep the Features section alive");
+        assert!(features
+            .rows
+            .iter()
+            .any(|(label, _)| *label == "Bend steppers"));
+        assert!(topic_match(&core, &topic_rows()[4], "captions"));
+        // "bones" keeps the rig rows and the Rig tree
+        // topic; "curve" keeps the Graph channels topic.
+        assert!(topic_match(&core, &topic_rows()[3], "bones"));
+        assert!(topic_match(&core, &topic_rows()[2], "curve"));
+        // No false hits: an unrelated word keeps nothing.
+        assert!(!topic_match(&core, &topic_rows()[4], "banana"));
+        assert!(section_match(&core, "Features", "", "banana").is_none());
+        // With no active search every topic survives.
+        for topic in topic_rows() {
+            assert!(topic_match(&core, &topic, ""));
+        }
     }
 }

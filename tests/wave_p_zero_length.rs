@@ -106,6 +106,8 @@ fn zero_length_segment_project() -> Project {
         poses: vec![Pose {
             root: [100.0, 100.0],
             angles: vec![0.0, 0.0],
+            sx: 1.0,
+            sy: 1.0,
         }],
         duration: 1.0,
         easing: None,

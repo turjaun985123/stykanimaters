@@ -1,0 +1,8 @@
+# Line-ending insurance for Windows checkouts: fixtures and
+# sources are LF in the repo and must stay LF on disk, so a
+# Windows runner's git configuration can never translate bytes
+# a test compares against.
+* text=auto eol=lf
+*.piv binary
+*.stk binary
+*.nodemc binary

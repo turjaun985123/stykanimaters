@@ -1,0 +1,91 @@
+name: Platform matrix (Windows / macOS)
+
+# PL-14 (Roadmap Wave 2, W2-75): compile + full test suite on the
+# two non-Linux platforms Rune supports, so portability breaks are
+# caught by CI instead of by the first user who builds there.
+#
+# Scope, deliberately: build + test ONLY. No packaging (the Linux
+# job's dist step uses GNU strip/sha256sum shapes that need their
+# own per-platform design), and no headless probe (headless.yml's
+# xvfb + lavapipe recipe is Linux-specific; whether the binary's
+# --tree/--snap modes run on Windows/macOS is a separate, unproven
+# question — findings2/w2-75.md §5).
+#
+# Triggers: manual + pull requests. A portability break is a
+# PR-time fact; master pushes already pay for the full Linux build
+# and the headless probe. To also gate master pushes, add
+# `push: branches: [master]` to the `on:` block — one line, a
+# deliberate cost choice, not an oversight.
+#
+# This workflow is NOT part of the binding verdict (F-7): the
+# Linux job in workflow.yml stays the required check. Promote
+# these jobs only after several green runs (branch protection is
+# a maintainer action — IA-RM8-1).
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+# Own workflow = own concurrency group: a matrix run can never
+# cancel the binding Linux workflow, nor be cancelled by it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Same cache-hygiene settings as the Linux job.
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  build-test:
+    name: Build + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Generous cap for cold first builds of the wgpu stack;
+    # tune from the first runs' actuals.
+    timeout-minutes: 120
+    strategy:
+      # One platform's failure must not cancel the other's run:
+      # the two verdicts are independent facts.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # The test suite shells out to ffmpeg/ffprobe, and several
+      # tests hard-fail without them (the fixture helpers'
+      # .expect("ffmpeg is installed in CI")). Neither runner
+      # image ships ffmpeg, so install a full build — the full
+      # build also carries ffplay, which the audio smoke test
+      # probes for (and politely skips without).
+      - name: Install ffmpeg (Windows — full build via Chocolatey)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y --no-progress
+
+      - name: Install ffmpeg (macOS — Homebrew)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # Per-OS cache keys: the Linux job's `linux-release` key
+      # must never be shared across operating systems.
+      - name: Cache Cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.os }}-release
+          cache-on-failure: true
+
+      # Identical flags to the Linux job, so a green run means
+      # the same tree built and tested the same way.
+      - name: Build (release, all binaries)
+        run: cargo build --release --locked --bins
+
+      # Release profile on purpose, matching the Linux job: the
+      # test run reuses the build step's artifacts.
+      - name: Test (release profile — reuses build artifacts)
+        run: cargo test --release --locked

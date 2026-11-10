@@ -1,12 +1,19 @@
 //! PNG sequence export: a small CPU rasterizer so projects can be
 //! rendered to images without a GPU or a display. Draws each figure's
 //! evaluated segments as round-capped thick lines and the head as a
-//! ring, with 2x supersampling for anti-aliasing.
+//! ring, with 2x supersampling for anti-aliasing by default
+//! (the factor is a render option since Roadmap Wave 2,
+//! W2-41 — see [`DEFAULT_SUPERSAMPLE`]). The encoder
+//! settings behind the lossy formats are an option on the
+//! same terms (W2-42 — see [`EncodeQuality`]). The 9:16
+//! Shorts reframe is an MP4 option on the same terms
+//! (W2-43 — see [`export_mp4_shorts_with_quality`]).
 
 use crate::model::{
     dist, evaluate, CapKind, ParticleKind, Project, Shape, V2,
 };
 use image::{ImageBuffer, Rgb};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 fn rgb(hex: u32) -> [u8; 3] {
@@ -328,7 +335,12 @@ pub fn render_frame_at_scaled(
     scale: f32,
 ) -> std::io::Result<ImageBuffer<Rgb<u8>, Vec<u8>>> {
     let scale = check_export_scale(scale)?;
-    Ok(render_frame_at_scaled_inner(project, frame_f, scale))
+    Ok(render_frame_at_scaled_inner(
+        project,
+        frame_f,
+        scale,
+        DEFAULT_SUPERSAMPLE,
+    ))
 }
 
 /// Render one frame index to an RGBA buffer at the project
@@ -352,7 +364,7 @@ pub fn render_frame_at_alpha(
     project: &Project,
     frame_f: f32,
 ) -> image::RgbaImage {
-    render_frame_at_scaled_inner_alpha(project, frame_f, 1.0)
+    render_frame_at_scaled_inner_alpha(project, frame_f, 1.0, DEFAULT_SUPERSAMPLE)
 }
 
 /// Render one frame index at `scale` times the stage size
@@ -377,7 +389,12 @@ pub fn render_frame_at_alpha_scaled(
     scale: f32,
 ) -> std::io::Result<image::RgbaImage> {
     let scale = check_export_scale(scale)?;
-    Ok(render_frame_at_scaled_inner_alpha(project, frame_f, scale))
+    Ok(render_frame_at_scaled_inner_alpha(
+        project,
+        frame_f,
+        scale,
+        DEFAULT_SUPERSAMPLE,
+    ))
 }
 
 /// Validate an export scale (Wave R, R10): the raster
@@ -394,6 +411,299 @@ fn check_export_scale(scale: f32) -> std::io::Result<f32> {
             format!("export scale must be a positive finite number, got {scale}"),
         ))
     }
+}
+
+/// The raster funnels' supersample factor at every
+/// historical entry point (Roadmap Wave 2, W2-41 — PL-3
+/// slice 1): 2× supersampling has been the rasterizer's
+/// only anti-aliasing since the first funnel, and it stays
+/// the default, so every render that does not explicitly
+/// choose a factor is byte-identical to the pre-option
+/// stream. The `_ss` entries below let a caller trade
+/// render time for edge quality: coverage is still binary
+/// per sub-pixel, so the factor sets the number of coverage
+/// levels per output pixel — `ss * ss + 1` of them (2 at
+/// ss=1, 5 at the default 2, 17 at 4) — and the pixel
+/// pass's cost grows with `ss * ss`.
+pub const DEFAULT_SUPERSAMPLE: u32 = 2;
+
+/// Validate a supersample factor (Roadmap Wave 2, W2-41):
+/// the raster funnel's rule, mirroring
+/// [`check_export_scale`]'s voice — the factor must lie in
+/// 1..=4. The floor is the hard-edged draft (one binary
+/// sample per output pixel); the ceiling is a cost guard,
+/// not a quality judgement: at 4 the pixel pass does four
+/// times the default's sub-pixel work, and coverage AA
+/// (roadmap R17-1) is the priced successor for quality
+/// beyond it. Refusals are `InvalidInput`, the funnel's
+/// voice for bad arguments.
+fn check_supersample(ss: u32) -> std::io::Result<u32> {
+    if (1..=4).contains(&ss) {
+        Ok(ss)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("supersample factor must be between 1 and 4, got {ss}"),
+        ))
+    }
+}
+
+/// The encoder-quality level of a lossy export (Roadmap
+/// Wave 2, W2-42 — IA-RM23-5): one vocabulary across the
+/// four lossy encoders this module drives, so a caller
+/// (the export panel's Delivery section, the MCP export
+/// surface) names a level once instead of learning each
+/// encoder's private knobs. What a level means per
+/// encoder — every value is pinned by the
+/// `*_video_args_are_pinned` / `*_knobs_are_pinned`
+/// tests:
+///
+/// - **MP4 (libx264):** a `-crf` + `-preset` pair.
+///   `Draft` = CRF 28 / `veryfast`, `Master` = CRF 16 /
+///   `slow`. `Standard` passes **neither** argument, so
+///   libx264's own defaults rule (CRF 23, preset
+///   `medium` — verified against this build's ffmpeg:
+///   the no-argument encode and the explicit
+///   `-crf 23 -preset medium` encode produce the
+///   identical video stream) — which is exactly the argv
+///   every MP4 export before this option produced, byte
+///   for byte.
+/// - **WebM (libvpx-vp9):** a target bitrate from the
+///   height ladder ([`webm_bitrate`]). `Draft` and
+///   `Master` scale with the output height;
+///   `Standard`'s rung is the historical flat `2M` at
+///   **every** height — a height-scaled Standard would
+///   change the bytes of tall exports by drive-by, so
+///   rescaling it is a deliberate byte-change decision,
+///   not part of this option (the IA-W2-41-4 ceremony
+///   rule). A consequence worth naming: at 2160 the
+///   Draft ladder (4M) passes the flat Standard (2M) —
+///   the flat rate starves tall frames, and even the
+///   lean ladder outgrows it there.
+/// - **GIF:** the `gif` crate's quantisation `speed`
+///   (NeuQuant sampling, 1..=30; higher runs faster at
+///   the cost of image quality — the crate's own words).
+///   `Draft` = 30, `Standard` = 10 (the value every GIF
+///   export before this option used), `Master` = 1.
+/// - **JPEG:** the encoder quality number. `Draft` =
+///   70, `Standard` = 90 (the historical value),
+///   `Master` = 95.
+///
+/// PNG, APNG and SVG expose no quality knob (lossless /
+/// vector); the level simply does not reach them.
+/// [`EncodeQuality::Standard`] is the default everywhere
+/// and every pre-existing entry delegates with it, so an
+/// export that does not choose a level is byte-identical
+/// to the pre-option stream — the same construction
+/// W2-41's [`DEFAULT_SUPERSAMPLE`] uses on the render
+/// side. The `_with_quality` entries are the terminal
+/// forms; the historical `*_with_progress` video entries
+/// delegate to them at Standard.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum EncodeQuality {
+    /// Fast and lean: for previews and quick shares.
+    Draft,
+    /// The historical encode, byte for byte (see above).
+    #[default]
+    Standard,
+    /// Slow and faithful: for masters and uploads.
+    Master,
+}
+
+/// The encoder-quality level every historical entry
+/// point delegates with (Roadmap Wave 2, W2-42):
+/// [`EncodeQuality::Standard`], the pre-option encode.
+pub const DEFAULT_ENCODE_QUALITY: EncodeQuality = EncodeQuality::Standard;
+
+impl EncodeQuality {
+    /// The level's stable lower-case name — the form the
+    /// panel and MCP surfaces pass around (and the form
+    /// [`EncodeQuality::from_name`] reads back).
+    pub fn name(&self) -> &'static str {
+        match self {
+            EncodeQuality::Draft => "draft",
+            EncodeQuality::Standard => "standard",
+            EncodeQuality::Master => "master",
+        }
+    }
+
+    /// Read a level back from its [`EncodeQuality::name`]
+    /// form; anything else is `None` (the caller's
+    /// invalid-argument refusal, in its own voice).
+    pub fn from_name(name: &str) -> Option<EncodeQuality> {
+        match name {
+            "draft" => Some(EncodeQuality::Draft),
+            "standard" => Some(EncodeQuality::Standard),
+            "master" => Some(EncodeQuality::Master),
+            _ => None,
+        }
+    }
+}
+
+/// The `-crf`/`-preset` arguments a quality level adds
+/// to an MP4 encode — the whole of the level's MP4
+/// meaning. `Standard` adds nothing at all: the argv
+/// stays the historical one and libx264's defaults
+/// (CRF 23, preset `medium`) rule, exactly as they did
+/// before the option existed.
+fn x264_quality_args(quality: EncodeQuality) -> &'static [&'static str] {
+    match quality {
+        EncodeQuality::Draft => &["-crf", "28", "-preset", "veryfast"],
+        EncodeQuality::Standard => &[],
+        EncodeQuality::Master => &["-crf", "16", "-preset", "slow"],
+    }
+}
+
+/// The full `video_args` of an MP4 encode at `quality`:
+/// the historical argument vector with the level's
+/// [`x264_quality_args`] spliced in after `-pix_fmt`
+/// (codec options together; `-movflags` keeps its
+/// historical tail position when `faststart` is set —
+/// the final file gets it, the silent pre-mux encode
+/// does not, exactly as before). At
+/// [`EncodeQuality::Standard`] the result equals the
+/// historical literal arrays element for element,
+/// pinned by `x264_video_args_are_pinned`.
+fn mp4_video_args(quality: EncodeQuality, faststart: bool) -> Vec<&'static str> {
+    let mut args = vec!["-c:v", "libx264", "-pix_fmt", "yuv420p"];
+    args.extend_from_slice(x264_quality_args(quality));
+    if faststart {
+        args.extend_from_slice(&["-movflags", "+faststart"]);
+    }
+    args
+}
+
+/// The VP9 target bitrate of a WebM encode at
+/// `quality` for an output `height` (pixels) — the
+/// ladder that replaces the historical flat `2M` as the
+/// only mechanism. `Standard` is the flat historical
+/// rate at every height by definition (see
+/// [`EncodeQuality`]); `Draft` stays under it through
+/// 1440 and `Master` clears it everywhere. Rungs are
+/// chosen so each level's rate is non-decreasing in
+/// height; the exact strings are pinned by
+/// `webm_video_args_are_pinned`.
+fn webm_bitrate(quality: EncodeQuality, height: u32) -> &'static str {
+    match quality {
+        EncodeQuality::Draft => match height {
+            0..=480 => "700k",
+            481..=720 => "1M",
+            721..=1080 => "1500k",
+            1081..=1440 => "2500k",
+            _ => "4M",
+        },
+        EncodeQuality::Standard => "2M",
+        EncodeQuality::Master => match height {
+            0..=480 => "2500k",
+            481..=720 => "4M",
+            721..=1080 => "8M",
+            1081..=1440 => "12M",
+            _ => "20M",
+        },
+    }
+}
+
+/// The full `video_args` of a WebM encode at `quality`
+/// for an output `height`: the historical argument
+/// vector with `-b:v` taken from [`webm_bitrate`]. At
+/// [`EncodeQuality::Standard`] the result equals the
+/// historical literal array at every height, pinned by
+/// `webm_video_args_are_pinned`.
+fn webm_video_args(quality: EncodeQuality, height: u32) -> Vec<&'static str> {
+    vec![
+        "-c:v",
+        "libvpx-vp9",
+        "-pix_fmt",
+        "yuva420p",
+        "-b:v",
+        webm_bitrate(quality, height),
+    ]
+}
+
+/// The `gif` crate quantisation speed of a quality
+/// level (see [`EncodeQuality`]): the encoder's one
+/// honest quality knob. All three values sit inside
+/// the crate's asserted 1..=30 range by construction.
+fn gif_speed(quality: EncodeQuality) -> i32 {
+    match quality {
+        EncodeQuality::Draft => 30,
+        EncodeQuality::Standard => 10,
+        EncodeQuality::Master => 1,
+    }
+}
+
+/// The JPEG encoder quality of a quality level (see
+/// [`EncodeQuality`]): 90 at `Standard` is the value
+/// every JPEG sequence before this option used.
+fn jpeg_quality(quality: EncodeQuality) -> u8 {
+    match quality {
+        EncodeQuality::Draft => 70,
+        EncodeQuality::Standard => 90,
+        EncodeQuality::Master => 95,
+    }
+}
+
+/// Render one frame at fractional time `frame_f` with an
+/// explicit supersample factor (Roadmap Wave 2, W2-41):
+/// the quality-option half of [`render_frame_at`]. At
+/// [`DEFAULT_SUPERSAMPLE`] the result is byte-identical to
+/// `render_frame_at`; 1 renders the hard-edged draft (¼ of
+/// the default's pixel work); 3–4 buy smoother diagonal
+/// edges at ⁹⁄₄–4× the work. The factor is validated and
+/// refused with an `InvalidInput` error outside 1..=4.
+pub fn render_frame_at_ss(
+    project: &Project,
+    frame_f: f32,
+    ss: u32,
+) -> std::io::Result<ImageBuffer<Rgb<u8>, Vec<u8>>> {
+    let ss = check_supersample(ss)?;
+    Ok(render_frame_at_scaled_inner(project, frame_f, 1.0, ss))
+}
+
+/// The scaled half of [`render_frame_at_ss`]: `scale`
+/// (validated as in [`render_frame_at_scaled`]) multiplies
+/// the output size and `ss` sets the supersampling within
+/// each output pixel — the two multiply in the funnel's
+/// `px`, so a 2×-scaled ss=4 render samples the stage at
+/// 8× per axis. At scale 1.0 and [`DEFAULT_SUPERSAMPLE`]
+/// the result is byte-identical to [`render_frame_at`].
+pub fn render_frame_at_scaled_ss(
+    project: &Project,
+    frame_f: f32,
+    scale: f32,
+    ss: u32,
+) -> std::io::Result<ImageBuffer<Rgb<u8>, Vec<u8>>> {
+    let scale = check_export_scale(scale)?;
+    let ss = check_supersample(ss)?;
+    Ok(render_frame_at_scaled_inner(project, frame_f, scale, ss))
+}
+
+/// The RGBA half of [`render_frame_at_ss`]: coverage alpha
+/// at an explicit supersample factor, byte-identical to
+/// [`render_frame_at_alpha`] at [`DEFAULT_SUPERSAMPLE`].
+/// Returns a `Result` (unlike the historical alpha
+/// entries) because the factor can be refused.
+pub fn render_frame_at_alpha_ss(
+    project: &Project,
+    frame_f: f32,
+    ss: u32,
+) -> std::io::Result<image::RgbaImage> {
+    let ss = check_supersample(ss)?;
+    Ok(render_frame_at_scaled_inner_alpha(project, frame_f, 1.0, ss))
+}
+
+/// The scaled half of [`render_frame_at_alpha_ss`],
+/// byte-identical to [`render_frame_at_alpha_scaled`] at
+/// scale 1.0 and [`DEFAULT_SUPERSAMPLE`].
+pub fn render_frame_at_alpha_scaled_ss(
+    project: &Project,
+    frame_f: f32,
+    scale: f32,
+    ss: u32,
+) -> std::io::Result<image::RgbaImage> {
+    let scale = check_export_scale(scale)?;
+    let ss = check_supersample(ss)?;
+    Ok(render_frame_at_scaled_inner_alpha(project, frame_f, scale, ss))
 }
 
 /// The output pixel size of a render at `scale` (Wave R,
@@ -414,6 +724,149 @@ fn scaled_output_size(project: &Project, scale: f32) -> (u32, u32) {
     }
 }
 
+/// The height a Shorts export targets (Roadmap Wave 2,
+/// W2-43 — IA-RM23-4): 1920, the vertical-video platform
+/// size, paired with the 9:16 width 1080. A project's
+/// Shorts export is a true re-render at 1920 tall — never
+/// an upscale of a smaller raster — so the crop window
+/// keeps the raster funnel's detail at any stage size.
+pub const SHORTS_TARGET_HEIGHT: u32 = 1920;
+
+/// Validate a Shorts output width (Roadmap Wave 2,
+/// W2-43): the width must be even (H.264 in yuv420p
+/// subsamples chroma 2×2, so an odd width cannot be
+/// encoded), positive, and no wider than the stage it
+/// crops — a wider request would pad or upscale, and
+/// this entry crops only. Refusals are `InvalidInput`,
+/// the funnel's voice for bad arguments (see
+/// [`check_export_scale`]).
+fn check_shorts_width(width: u32, stage_width: u32) -> std::io::Result<u32> {
+    if width == 0 {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "shorts width must be positive, got 0".to_string(),
+        ))
+    } else if width % 2 != 0 {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("shorts width must be even for yuv420p, got {width}"),
+        ))
+    } else if width > stage_width {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "shorts width {width} exceeds the stage width {stage_width}: \
+                 the shorts crop never pads or upscales"
+            ),
+        ))
+    } else {
+        Ok(width)
+    }
+}
+
+/// The Shorts reframe of one stage (Roadmap Wave 2,
+/// W2-43): the render scale that brings the stage to
+/// [`SHORTS_TARGET_HEIGHT`] tall, the resulting full
+/// frame, and the centred 9:16 crop window inside it.
+/// Pure geometry — the encode funnels and the panel's
+/// delivery line both read it, so the announced
+/// dimensions are the encoded ones by construction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShortsGeometry {
+    /// The render scale: [`SHORTS_TARGET_HEIGHT`] over
+    /// the stage height. A stage already 1920 tall
+    /// renders at 1.0, and the full-frame height is then
+    /// the stage height itself.
+    pub scale: f32,
+    /// The full frame's pixel size before the crop: the
+    /// stage at `scale`, through [`scaled_output_size`]'s
+    /// rounding — the exact buffer the encoder receives.
+    pub full: (u32, u32),
+    /// The crop window's pixel size: 9 wide to 16 tall
+    /// against the frame height, even widths only,
+    /// centred horizontally.
+    pub crop: (u32, u32),
+    /// The crop window's left edge within the full
+    /// frame.
+    pub crop_x: u32,
+}
+
+/// Compute the Shorts reframe for a stage (Roadmap
+/// Wave 2, W2-43). The crop width is the greatest even
+/// width no larger than 9/16 of the frame height and no
+/// wider than the frame: on a stage already 9:16 or
+/// narrower the odd-column rule can still shave two
+/// columns off a full-width window (1081 → 1080), so a
+/// narrow stage keeps essentially its whole picture.
+/// A stage with no usable size is refused with the
+/// funnel's `InvalidInput` voice — never a zero-size
+/// encode.
+pub fn shorts_geometry(project: &Project) -> std::io::Result<ShortsGeometry> {
+    let (sw, sh) = (project.stage[0], project.stage[1]);
+    if !sw.is_finite() || !sh.is_finite() || sw <= 0.0 || sh <= 0.0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("shorts export needs a positive finite stage size, got {sw}x{sh}"),
+        ));
+    }
+    let view = Project {
+        stage: project.stage,
+        ..Project::new_demo()
+    };
+    let scale = SHORTS_TARGET_HEIGHT as f32 / sh;
+    let full = scaled_output_size(&view, scale);
+    if full.0 == 0 || full.1 == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "shorts export needs a stage that renders to at least 1x1, got {sw}x{sh}"
+            ),
+        ));
+    }
+    let ideal = (full.1 as f64 * 9.0 / 16.0).floor() as u32;
+    let mut width = ideal.min(full.0);
+    if width % 2 == 1 {
+        width -= 1;
+    }
+    if width < 2 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "stage {sw}x{sh} is too small for a 9:16 shorts crop: \
+                 the window would be under 2 px wide"
+            ),
+        ));
+    }
+    let width = check_shorts_width(width, full.0)?;
+    Ok(ShortsGeometry {
+        scale,
+        full,
+        crop: (width, full.1),
+        crop_x: (full.0 - width) / 2,
+    })
+}
+
+/// The full `video_args` of a Shorts MP4 encode at
+/// `quality` (Roadmap Wave 2, W2-43): the standard MP4
+/// argument vector ([`mp4_video_args`]) with the crop
+/// spliced in as one `-vf` filter ahead of the codec
+/// options — the crop is the input's last word before
+/// the encode, and `-movflags` keeps its tail position
+/// exactly as in the uncropped vector. The filter
+/// string is pinned by `shorts_video_args_are_pinned`.
+fn shorts_video_args(
+    quality: EncodeQuality,
+    faststart: bool,
+    geo: &ShortsGeometry,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "-vf".to_string(),
+        format!("crop={}:{}:{}:0", geo.crop.0, geo.crop.1, geo.crop_x),
+    ];
+    args.extend(mp4_video_args(quality, faststart).iter().map(|a| a.to_string()));
+    args
+}
+
 /// Render at a fractional frame time (tween poses, camera and
 /// particles all evaluate at `f`). The camera (centre + zoom +
 /// rotation, interpolated between keys) is applied, as are
@@ -422,7 +875,7 @@ fn scaled_output_size(project: &Project, scale: f32) -> (u32, u32) {
 /// strokes, particles, weather and the media composite (which
 /// receives this same view) all inherit it.
 pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
-    render_frame_at_scaled_inner(project, frame_f, 1.0)
+    render_frame_at_scaled_inner(project, frame_f, 1.0, DEFAULT_SUPERSAMPLE)
 }
 
 /// One frame's drawables, collected once and shared by
@@ -1112,7 +1565,9 @@ fn burn_in_subtitles(
 /// its scaled variants (Wave R, R10). `scale` arrives
 /// pre-validated by the public entries (exactly 1.0 from
 /// `render_frame_at` itself). The supersample factor `ss`
-/// anti-aliases as always; `scale` multiplies the OUTPUT
+/// arrives pre-validated too (Roadmap Wave 2, W2-41):
+/// [`DEFAULT_SUPERSAMPLE`] from the historical entries, the
+/// caller's choice from the `_ss` entries; `scale` multiplies the OUTPUT
 /// size, and `px` — stage units to supersampled buffer
 /// pixels — is `ss * scale`, so the buffer, the transform
 /// and every derived size stay in step. At scale 1.0 `px`
@@ -1123,8 +1578,8 @@ fn render_frame_at_scaled_inner(
     project: &Project,
     frame_f: f32,
     scale: f32,
+    ss: u32,
 ) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
-    let ss = 2u32; // supersample factor
     let px = ss as f32 * scale;
     let (ow, oh) = scaled_output_size(project, scale);
     let (w, h) = (ow * ss, oh * ss);
@@ -1327,8 +1782,8 @@ fn render_frame_at_scaled_inner_alpha(
     project: &Project,
     frame_f: f32,
     scale: f32,
+    ss: u32,
 ) -> image::RgbaImage {
-    let ss = 2u32; // supersample factor, as in the RGB funnel
     let px = ss as f32 * scale;
     let (ow, oh) = scaled_output_size(project, scale);
     let (w, h) = (ow * ss, oh * ss);
@@ -1623,12 +2078,27 @@ fn sample_times_range(project: &Project, from: usize, to: usize) -> Vec<f32> {
 /// Encode the given frame times as a looping GIF at the project
 /// fps (the shared encoder behind the GIF exports).
 fn encode_gif(project: &Project, times: &[f32], path: &Path) -> std::io::Result<usize> {
+    encode_gif_with_speed(project, times, path, gif_speed(DEFAULT_ENCODE_QUALITY))
+}
+
+/// [`encode_gif`] at an explicit `gif` crate quantisation
+/// speed (Roadmap Wave 2, W2-42): the GIF half of
+/// [`EncodeQuality`] — `speed` is the encoder's sampling
+/// factor (1..=30; higher is faster at the cost of image
+/// quality). At [`gif_speed`]'s `Standard` value (10) this
+/// is `encode_gif` itself.
+fn encode_gif_with_speed(
+    project: &Project,
+    times: &[f32],
+    path: &Path,
+    speed: i32,
+) -> std::io::Result<usize> {
     use image::codecs::gif::{GifEncoder, Repeat};
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let file = std::fs::File::create(path)?;
-    let mut encoder = GifEncoder::new_with_speed(file, 10);
+    let mut encoder = GifEncoder::new_with_speed(file, speed);
     encoder
         .set_repeat(Repeat::Infinite)
         .map_err(std::io::Error::other)?;
@@ -1654,12 +2124,26 @@ fn encode_gif_scaled(
     path: &Path,
     scale: f32,
 ) -> std::io::Result<usize> {
+    encode_gif_scaled_with_speed(project, times, path, scale, gif_speed(DEFAULT_ENCODE_QUALITY))
+}
+
+/// [`encode_gif_scaled`] at an explicit quantisation speed
+/// (Roadmap Wave 2, W2-42) — the scaled GIF encoder behind
+/// [`export_gif_scaled_with_quality`]. At [`gif_speed`]'s
+/// `Standard` value (10) this is `encode_gif_scaled` itself.
+fn encode_gif_scaled_with_speed(
+    project: &Project,
+    times: &[f32],
+    path: &Path,
+    scale: f32,
+    speed: i32,
+) -> std::io::Result<usize> {
     use image::codecs::gif::{GifEncoder, Repeat};
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let file = std::fs::File::create(path)?;
-    let mut encoder = GifEncoder::new_with_speed(file, 10);
+    let mut encoder = GifEncoder::new_with_speed(file, speed);
     encoder
         .set_repeat(Repeat::Infinite)
         .map_err(std::io::Error::other)?;
@@ -1743,6 +2227,105 @@ pub fn export_gif_range_scaled(
     let (from, to) = clamp_frame_range(project, from, to)?;
     let times = sample_times_range(project, from, to);
     encode_gif_scaled(project, &times, path, scale)
+}
+
+/// Export the animation as a looping GIF at an explicit
+/// encoder-quality level (Roadmap Wave 2, W2-42): the
+/// quality counterpart of [`export_gif`]. The level sets
+/// the `gif` crate's quantisation speed ([`gif_speed`]) —
+/// `Draft` quantises fastest and coarsest, `Master`
+/// slowest and finest. At [`EncodeQuality::Standard`]
+/// this is `export_gif` itself, byte for byte.
+pub fn export_gif_with_quality(
+    project: &Project,
+    path: &Path,
+    quality: EncodeQuality,
+) -> std::io::Result<usize> {
+    if project.frames.is_empty() {
+        return encode_gif_with_speed(project, &[], path, gif_speed(quality));
+    }
+    export_gif_range_with_quality(project, 0, project.frames.len() - 1, path, quality)
+}
+
+/// Export the authored frames `from..=to` (inclusive,
+/// clamped to the timeline) as a looping GIF at an
+/// explicit encoder-quality level (Roadmap Wave 2,
+/// W2-42): the quality counterpart of
+/// [`export_gif_range`], with the same frame sampling
+/// and range rules. At [`EncodeQuality::Standard`] this
+/// is `export_gif_range` itself, byte for byte.
+pub fn export_gif_range_with_quality(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    quality: EncodeQuality,
+) -> std::io::Result<usize> {
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let times = sample_times_range(project, from, to);
+    encode_gif_with_speed(project, &times, path, gif_speed(quality))
+}
+
+/// Export the animation as a looping GIF at `scale`
+/// times the stage size and an explicit encoder-quality
+/// level (Roadmap Wave 2, W2-42): the quality counterpart
+/// of [`export_gif_scaled`], composing the two options —
+/// every frame is a true re-render at the scaled size via
+/// [`render_frame_at_scaled`], quantised at the level's
+/// speed. At exactly 1.0 this delegates to
+/// [`export_gif_with_quality`]; at
+/// [`EncodeQuality::Standard`] the output is
+/// byte-identical to `export_gif_scaled`'s. An invalid
+/// scale is refused before anything is written.
+pub fn export_gif_scaled_with_quality(
+    project: &Project,
+    path: &Path,
+    scale: f32,
+    quality: EncodeQuality,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    if scale == 1.0 {
+        return export_gif_with_quality(project, path, quality);
+    }
+    if project.frames.is_empty() {
+        return encode_gif_scaled_with_speed(project, &[], path, scale, gif_speed(quality));
+    }
+    export_gif_range_scaled_with_quality(
+        project,
+        0,
+        project.frames.len() - 1,
+        path,
+        scale,
+        quality,
+    )
+}
+
+/// Export the authored frames `from..=to` (inclusive,
+/// clamped to the timeline) as a looping GIF at `scale`
+/// times the stage size and an explicit encoder-quality
+/// level (Roadmap Wave 2, W2-42): the quality counterpart
+/// of [`export_gif_range_scaled`], with the same frame
+/// sampling and range rules. At exactly 1.0 this
+/// delegates to [`export_gif_range_with_quality`]; at
+/// [`EncodeQuality::Standard`] the output is
+/// byte-identical to `export_gif_range_scaled`'s. An
+/// invalid scale is refused before the range is even
+/// clamped, so a refused call writes nothing.
+pub fn export_gif_range_scaled_with_quality(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    scale: f32,
+    quality: EncodeQuality,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    if scale == 1.0 {
+        return export_gif_range_with_quality(project, from, to, path, quality);
+    }
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let times = sample_times_range(project, from, to);
+    encode_gif_scaled_with_speed(project, &times, path, scale, gif_speed(quality))
 }
 
 /// One progress update from the **encode phase** of an MP4 /
@@ -1943,6 +2526,245 @@ impl Mp4ExportOutcome {
     }
 }
 
+/// One chapter interval of an export, in milliseconds —
+/// the resolved form of a [`crate::model::Chapter`] (see
+/// [`chapter_spans`]): a contiguous span the MP4 chapter
+/// track can carry, with the chapter's title verbatim.
+#[derive(Clone, Debug, PartialEq)]
+struct ChapterSpan {
+    start_ms: u64,
+    end_ms: u64,
+    title: String,
+}
+
+/// The frame→millisecond conversion of the chapter
+/// maths: authored frames on the project's own clock
+/// (`frame * 1000 / fps`), rounded to the nearest
+/// millisecond — the same instant the frame shows at.
+/// Computed in `f64` so a long episode's late chapters
+/// do not accumulate `f32` error.
+fn frame_to_ms(frame: usize, fps: f32) -> u64 {
+    ((frame as f64 * 1000.0) / fps as f64).round() as u64
+}
+
+/// Resolve the project's chapters to the intervals an
+/// MP4 chapter track can carry (Roadmap Wave 2, W2-18).
+///
+/// The chapter MODEL allows overlaps and gaps (episode
+/// order is narrative; [`crate::model::Project::chapter_at`]
+/// answers first-match), but a chapter track is a
+/// partition: intervals in order, none overlapping. The
+/// resolution therefore rides `chapter_at`'s own rule —
+/// a frame belongs to the FIRST chapter in episode order
+/// covering it:
+///
+/// - Chapters the model's one validation rule refuses
+///   (empty range, blank title — hand-edited files only;
+///   every write path refuses them) carry no marker.
+/// - Each surviving chapter starts at the later of its
+///   authored start and the end of the last emitted
+///   interval (its shadowed head is the earlier
+///   chapter's, by first-match), and ends at the earlier
+///   of its authored end and the episode end (the frame
+///   count). A chapter fully shadowed by earlier ones,
+///   or lying wholly past the end, emits nothing.
+/// - Gaps stay gaps: no filler chapter is invented (a
+///   title would have to be fabricated, and titles are
+///   verbatim or absent).
+/// - The LAST emitted interval runs to the episode end
+///   even when its authored end stops short: a chapter
+///   track's final chapter is the episode's tail in
+///   every player, so the marker says so.
+///
+/// An empty result means no chapter markers — the
+/// caller then adds nothing at all.
+fn chapter_spans(project: &Project) -> Vec<ChapterSpan> {
+    let total = project.frames.len();
+    if total == 0 || project.chapters.is_empty() {
+        return Vec::new();
+    }
+    // The fps discipline of `ffmpeg_framerate`: a
+    // non-finite rate reads as 1, any rate floors at 1.
+    let fps = if project.fps.is_finite() {
+        project.fps.max(1.0)
+    } else {
+        1.0
+    };
+    let mut spans: Vec<(usize, usize, &str)> = Vec::new();
+    let mut cursor = 0usize;
+    for chapter in &project.chapters {
+        if crate::model::Chapter::validate(
+            chapter.start_frame,
+            chapter.end_frame,
+            &chapter.title,
+        )
+        .is_err()
+        {
+            continue;
+        }
+        let start = chapter.start_frame.max(cursor);
+        let end = chapter.end_frame.min(total);
+        if end <= start {
+            continue;
+        }
+        spans.push((start, end, chapter.title.as_str()));
+        cursor = end;
+    }
+    if let Some(last) = spans.last_mut() {
+        last.1 = total;
+    }
+    spans
+        .iter()
+        .map(|(start, end, title)| {
+            let start_ms = frame_to_ms(*start, fps);
+            let mut end_ms = frame_to_ms(*end, fps);
+            if end_ms <= start_ms {
+                // Only reachable above ~1000 fps, where
+                // adjacent frames share a millisecond:
+                // a chapter still spans a positive
+                // interval rather than inverting.
+                end_ms = start_ms + 1;
+            }
+            ChapterSpan {
+                start_ms,
+                end_ms,
+                title: (*title).to_string(),
+            }
+        })
+        .collect()
+}
+
+/// How many chapter markers a full MP4 export of
+/// `project` will embed (Roadmap Wave 2, W2-18): the
+/// resolved span count behind [`ffmetadata_chapters`],
+/// exposed so the export panel's Delivery section can
+/// name the count before the press from the same
+/// resolution the export itself will use.
+pub fn chapter_span_count(project: &Project) -> usize {
+    chapter_spans(project).len()
+}
+
+/// Escape one title for an FFMETADATA value: the
+/// format's specials (`=`, `;`, `#`, `\`, and the line
+/// feed) take a backslash prefix, per the ffmpeg
+/// metadata format's own escaping rule. Everything
+/// else passes through byte for byte — the title is
+/// verbatim in the file exactly as authored.
+fn ffmetadata_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '=' => out.push_str("\\="),
+            ';' => out.push_str("\\;"),
+            '#' => out.push_str("\\#"),
+            '\n' => out.push_str("\\\n"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// The FFMETADATA document carrying the project's
+/// chapter markers (Roadmap Wave 2, W2-18), or `None`
+/// when the project resolves to no markers — the
+/// caller then adds nothing to the export at all, so a
+/// chapterless project's file is the historical one,
+/// byte for byte. Times are whole milliseconds on a
+/// `1/1000` timebase; titles are the chapters' own,
+/// escaped by [`ffmetadata_escape`], never rewritten.
+pub fn ffmetadata_chapters(project: &Project) -> Option<String> {
+    let spans = chapter_spans(project);
+    if spans.is_empty() {
+        return None;
+    }
+    let mut doc = String::from(";FFMETADATA1\n");
+    for span in &spans {
+        doc.push_str("[CHAPTER]\nTIMEBASE=1/1000\nSTART=");
+        doc.push_str(&span.start_ms.to_string());
+        doc.push_str("\nEND=");
+        doc.push_str(&span.end_ms.to_string());
+        doc.push_str("\ntitle=");
+        doc.push_str(&ffmetadata_escape(&span.title));
+        doc.push('\n');
+    }
+    Some(doc)
+}
+
+/// Embed the project's chapter markers into the
+/// finished MP4 at `path` (Roadmap Wave 2, W2-18): a
+/// stream-copy remux (`-map 0 -map_chapters 1 -c copy`)
+/// with the [`ffmetadata_chapters`] document as the
+/// second input, so no frame is re-encoded and the
+/// decoded picture is bit-identical to the file the
+/// encode produced; `+faststart` is restated because a
+/// remux would otherwise move the moov atom back to
+/// the end of the file. The temporary output sits
+/// beside the destination so the final rename never
+/// crosses filesystems.
+///
+/// With no markers to embed this returns at once,
+/// having touched nothing. A failure to embed is an
+/// `Err` naming the destination — never a silent
+/// chapterless success: the full-export entries call
+/// this on the finished file (after any audio mux, so
+/// the markers survive whichever path produced it)
+/// and let the error fail the export, the stance
+/// [`mux_audio`] takes toward audio it cannot include.
+pub fn embed_mp4_chapters(project: &Project, path: &Path) -> std::io::Result<()> {
+    let Some(metadata) = ffmetadata_chapters(project) else {
+        return Ok(());
+    };
+    let meta = unique_temp("chapters").with_extension("txt");
+    std::fs::write(&meta, metadata)?;
+    let seq = ENCODE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_out = path.with_file_name(format!(
+        "styk-chaptered-{}-{seq}.mp4",
+        std::process::id()
+    ));
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-i",
+            path.to_str().unwrap_or(""),
+            "-i",
+            meta.to_str().unwrap_or(""),
+            "-map",
+            "0",
+            "-map_chapters",
+            "1",
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            tmp_out.to_str().unwrap_or(""),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let _ = std::fs::remove_file(&meta);
+    match status {
+        Ok(status) if status.success() => std::fs::rename(&tmp_out, path).map_err(|e| {
+            std::io::Error::other(format!(
+                "chapter markers were embedded but the finished file could not \
+                 replace {}: {e}",
+                path.display()
+            ))
+        }),
+        Ok(status) => {
+            let _ = std::fs::remove_file(&tmp_out);
+            Err(std::io::Error::other(format!(
+                "chapter markers could not be embedded into {}: ffmpeg exited with {status}",
+                path.display()
+            )))
+        }
+        Err(e) => Err(std::io::Error::other(format!(
+            "chapter markers could not be embedded into {}: could not run ffmpeg: {e}",
+            path.display()
+        ))),
+    }
+}
+
 /// Export an MP4 (H.264, yuv420p) via the system `ffmpeg`. When
 /// the project has an audio clip whose file exists, it is muxed in
 /// at its start frame. Errors if ffmpeg is missing. A clip whose
@@ -1974,9 +2796,45 @@ pub fn export_mp4_with_encode_progress(
 /// silent-video encode; the audio mux that may follow
 /// reports nothing. Each hook reports its own phase
 /// through its own event type — the two are never merged.
+/// This is [`export_mp4_with_quality`] at
+/// [`EncodeQuality::Standard`] — the historical encode,
+/// byte for byte.
 pub fn export_mp4_with_progress(
     project: &Project,
     path: &Path,
+    encode_progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<Mp4ExportOutcome> {
+    export_mp4_with_quality(
+        project,
+        path,
+        DEFAULT_ENCODE_QUALITY,
+        encode_progress,
+        render_progress,
+    )
+}
+
+/// [`export_mp4_with_progress`] at an explicit
+/// encoder-quality level (Roadmap Wave 2, W2-42): the
+/// level splices its `-crf`/`-preset` pair into the
+/// encode argv ([`mp4_video_args`]) for both the final
+/// encode and the silent pre-mux encode; the audio mux
+/// that may follow is untouched (audio does not encode
+/// at a video quality). Both hooks keep the contract
+/// above. At [`EncodeQuality::Standard`] the argv is
+/// the historical one, so the export is byte-identical
+/// to `export_mp4_with_progress`'s.
+///
+/// Chapter markers (Roadmap Wave 2, W2-18): when the
+/// project carries chapters, the finished file gains
+/// them via [`embed_mp4_chapters`] — after the mux, so
+/// they survive either production path; a failure to
+/// embed fails the export. A chapterless project's
+/// export is untouched by the step, byte for byte.
+pub fn export_mp4_with_quality(
+    project: &Project,
+    path: &Path,
+    quality: EncodeQuality,
     encode_progress: EncodeProgressCallback<'_>,
     render_progress: RenderProgressCallback<'_>,
 ) -> std::io::Result<Mp4ExportOutcome> {
@@ -1992,25 +2850,30 @@ pub fn export_mp4_with_progress(
         .iter()
         .any(|c| !c.muted && std::path::Path::new(&c.path).exists());
     let missing_audio = crate::audio::missing_audio_clips(&project.audio);
-    if !has_audio {
-        let frames = ffmpeg_encode(project, path, &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"], encode_progress, render_progress)?;
-        return Ok(Mp4ExportOutcome {
+    let outcome = if !has_audio {
+        let args = mp4_video_args(quality, true);
+        let frames = ffmpeg_encode(project, path, &args, encode_progress, render_progress)?;
+        Mp4ExportOutcome {
             frames,
             missing_audio,
-        });
-    }
-    let silent = unique_temp("silent").with_extension("mp4");
-    let n = ffmpeg_encode(project, &silent, &["-c:v", "libx264", "-pix_fmt", "yuv420p"], encode_progress, render_progress)?;
-    let muxed = mux_audio(project, &silent, path)?;
-    let _ = std::fs::remove_file(&silent);
-    if muxed {
-        Ok(Mp4ExportOutcome {
-            frames: n,
-            missing_audio,
-        })
+        }
     } else {
-        Err(std::io::Error::other("audio mux failed"))
-    }
+        let silent = unique_temp("silent").with_extension("mp4");
+        let args = mp4_video_args(quality, false);
+        let n = ffmpeg_encode(project, &silent, &args, encode_progress, render_progress)?;
+        let muxed = mux_audio(project, &silent, path)?;
+        let _ = std::fs::remove_file(&silent);
+        if muxed {
+            Mp4ExportOutcome {
+                frames: n,
+                missing_audio,
+            }
+        } else {
+            return Err(std::io::Error::other("audio mux failed"));
+        }
+    };
+    embed_mp4_chapters(project, path)?;
+    Ok(outcome)
 }
 
 /// Export an MP4 (H.264, yuv420p) via the system `ffmpeg` at
@@ -2053,6 +2916,9 @@ pub fn export_mp4_scaled_with_encode_progress(
 /// encode; the audio mux that may follow reports nothing.
 /// At exactly 1.0 the call routes through
 /// [`export_mp4_with_progress`], both hooks included.
+/// This is [`export_mp4_scaled_with_quality`] at
+/// [`EncodeQuality::Standard`] — the historical encode,
+/// byte for byte.
 pub fn export_mp4_scaled_with_progress(
     project: &Project,
     path: &Path,
@@ -2060,48 +2926,85 @@ pub fn export_mp4_scaled_with_progress(
     encode_progress: EncodeProgressCallback<'_>,
     render_progress: RenderProgressCallback<'_>,
 ) -> std::io::Result<Mp4ExportOutcome> {
+    export_mp4_scaled_with_quality(
+        project,
+        path,
+        scale,
+        DEFAULT_ENCODE_QUALITY,
+        encode_progress,
+        render_progress,
+    )
+}
+
+/// [`export_mp4_scaled_with_progress`] at an explicit
+/// encoder-quality level (Roadmap Wave 2, W2-42): the
+/// quality counterpart of [`export_mp4_scaled`],
+/// composing the scale and quality options — the level
+/// splices its `-crf`/`-preset` pair into the encode
+/// argv ([`mp4_video_args`]) and the scale re-renders
+/// every frame, exactly as the two options do apart. At
+/// exactly 1.0 the call routes through
+/// [`export_mp4_with_quality`]; at
+/// [`EncodeQuality::Standard`] the export is
+/// byte-identical to `export_mp4_scaled_with_progress`'s
+/// at every scale. Chapter markers ride it exactly as
+/// they ride the unscaled entry (W2-18, see
+/// [`export_mp4_with_quality`]).
+pub fn export_mp4_scaled_with_quality(
+    project: &Project,
+    path: &Path,
+    scale: f32,
+    quality: EncodeQuality,
+    encode_progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<Mp4ExportOutcome> {
     let scale = check_export_scale(scale)?;
     if scale == 1.0 {
-        return export_mp4_with_progress(project, path, encode_progress, render_progress);
+        return export_mp4_with_quality(project, path, quality, encode_progress, render_progress);
     }
     let has_audio = project
         .audio
         .iter()
         .any(|c| !c.muted && std::path::Path::new(&c.path).exists());
     let missing_audio = crate::audio::missing_audio_clips(&project.audio);
-    if !has_audio {
+    let outcome = if !has_audio {
+        let args = mp4_video_args(quality, true);
         let frames = ffmpeg_encode_scaled(
             project,
             path,
-            &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+            &args,
             scale,
             encode_progress,
             render_progress,
         )?;
-        return Ok(Mp4ExportOutcome {
+        Mp4ExportOutcome {
             frames,
             missing_audio,
-        });
-    }
-    let silent = unique_temp("silent").with_extension("mp4");
-    let n = ffmpeg_encode_scaled(
-        project,
-        &silent,
-        &["-c:v", "libx264", "-pix_fmt", "yuv420p"],
-        scale,
-        encode_progress,
-        render_progress,
-    )?;
-    let muxed = mux_audio(project, &silent, path)?;
-    let _ = std::fs::remove_file(&silent);
-    if muxed {
-        Ok(Mp4ExportOutcome {
-            frames: n,
-            missing_audio,
-        })
+        }
     } else {
-        Err(std::io::Error::other("audio mux failed"))
-    }
+        let silent = unique_temp("silent").with_extension("mp4");
+        let args = mp4_video_args(quality, false);
+        let n = ffmpeg_encode_scaled(
+            project,
+            &silent,
+            &args,
+            scale,
+            encode_progress,
+            render_progress,
+        )?;
+        let muxed = mux_audio(project, &silent, path)?;
+        let _ = std::fs::remove_file(&silent);
+        if muxed {
+            Mp4ExportOutcome {
+                frames: n,
+                missing_audio,
+            }
+        } else {
+            return Err(std::io::Error::other("audio mux failed"));
+        }
+    };
+    embed_mp4_chapters(project, path)?;
+    Ok(outcome)
 }
 
 /// Export the authored frames `from..=to` (inclusive, clamped to
@@ -2165,12 +3068,44 @@ pub fn export_mp4_range_with_encode_progress(
 /// nothing. Neither hook is invoked at all when the
 /// range's audio plan refuses the export before the
 /// encode (the unprobeable-clip error above) — a refusal
-/// happens before any frame is rendered.
+/// happens before any frame is rendered. This is
+/// [`export_mp4_range_with_quality`] at
+/// [`EncodeQuality::Standard`] — the historical encode,
+/// byte for byte.
 pub fn export_mp4_range_with_progress(
     project: &Project,
     from: usize,
     to: usize,
     path: &Path,
+    encode_progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<Mp4ExportOutcome> {
+    export_mp4_range_with_quality(
+        project,
+        from,
+        to,
+        path,
+        DEFAULT_ENCODE_QUALITY,
+        encode_progress,
+        render_progress,
+    )
+}
+
+/// [`export_mp4_range_with_progress`] at an explicit
+/// encoder-quality level (Roadmap Wave 2, W2-42): the
+/// quality counterpart of [`export_mp4_range`] — the
+/// level splices its `-crf`/`-preset` pair into the
+/// encode argv ([`mp4_video_args`]); the range rules,
+/// the unprobeable/missing-audio treatment and the
+/// range mux plan are [`export_mp4_range`]'s own. At
+/// [`EncodeQuality::Standard`] the export is
+/// byte-identical to `export_mp4_range_with_progress`'s.
+pub fn export_mp4_range_with_quality(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    quality: EncodeQuality,
     encode_progress: EncodeProgressCallback<'_>,
     render_progress: RenderProgressCallback<'_>,
 ) -> std::io::Result<Mp4ExportOutcome> {
@@ -2192,11 +3127,12 @@ pub fn export_mp4_range_with_progress(
     let missing_audio = outcome.missing;
     let plan = outcome.plan;
     if matches!(plan, RangeMuxPlan::None) {
+        let args = mp4_video_args(quality, true);
         ffmpeg_encode_times(
             project,
             &times,
             path,
-            &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+            &args,
             encode_progress,
             render_progress,
         )?;
@@ -2206,11 +3142,12 @@ pub fn export_mp4_range_with_progress(
         });
     }
     let silent = unique_temp("silent").with_extension("mp4");
+    let args = mp4_video_args(quality, false);
     ffmpeg_encode_times(
         project,
         &times,
         &silent,
-        &["-c:v", "libx264", "-pix_fmt", "yuv420p"],
+        &args,
         encode_progress,
         render_progress,
     )?;
@@ -2271,7 +3208,10 @@ pub fn export_mp4_range_scaled_with_encode_progress(
 /// encode; the range audio mux that may follow reports
 /// nothing. At exactly 1.0 the call routes through
 /// [`export_mp4_range_with_progress`], both hooks
-/// included.
+/// included. This is
+/// [`export_mp4_range_scaled_with_quality`] at
+/// [`EncodeQuality::Standard`] — the historical encode,
+/// byte for byte.
 pub fn export_mp4_range_scaled_with_progress(
     project: &Project,
     from: usize,
@@ -2281,13 +3221,49 @@ pub fn export_mp4_range_scaled_with_progress(
     encode_progress: EncodeProgressCallback<'_>,
     render_progress: RenderProgressCallback<'_>,
 ) -> std::io::Result<Mp4ExportOutcome> {
+    export_mp4_range_scaled_with_quality(
+        project,
+        from,
+        to,
+        path,
+        scale,
+        DEFAULT_ENCODE_QUALITY,
+        encode_progress,
+        render_progress,
+    )
+}
+
+/// [`export_mp4_range_scaled_with_progress`] at an
+/// explicit encoder-quality level (Roadmap Wave 2,
+/// W2-42): the quality counterpart of
+/// [`export_mp4_range_scaled`], composing the range,
+/// scale and quality options — the level splices its
+/// `-crf`/`-preset` pair into the encode argv
+/// ([`mp4_video_args`]); the range rules and mux plan
+/// are the range entries' own. At exactly 1.0 the call
+/// routes through [`export_mp4_range_with_quality`]; at
+/// [`EncodeQuality::Standard`] the export is
+/// byte-identical to
+/// `export_mp4_range_scaled_with_progress`'s at every
+/// scale.
+pub fn export_mp4_range_scaled_with_quality(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    scale: f32,
+    quality: EncodeQuality,
+    encode_progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<Mp4ExportOutcome> {
     let scale = check_export_scale(scale)?;
     if scale == 1.0 {
-        return export_mp4_range_with_progress(
+        return export_mp4_range_with_quality(
             project,
             from,
             to,
             path,
+            quality,
             encode_progress,
             render_progress,
         );
@@ -2310,11 +3286,12 @@ pub fn export_mp4_range_scaled_with_progress(
     let missing_audio = outcome.missing;
     let plan = outcome.plan;
     if matches!(plan, RangeMuxPlan::None) {
+        let args = mp4_video_args(quality, true);
         ffmpeg_encode_times_scaled(
             project,
             &times,
             path,
-            &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+            &args,
             scale,
             encode_progress,
             render_progress,
@@ -2325,12 +3302,221 @@ pub fn export_mp4_range_scaled_with_progress(
         });
     }
     let silent = unique_temp("silent").with_extension("mp4");
+    let args = mp4_video_args(quality, false);
     ffmpeg_encode_times_scaled(
         project,
         &times,
         &silent,
-        &["-c:v", "libx264", "-pix_fmt", "yuv420p"],
+        &args,
         scale,
+        encode_progress,
+        render_progress,
+    )?;
+    let muxed = mux_audio_range(&plan, &silent, path)?;
+    let _ = std::fs::remove_file(&silent);
+    if muxed {
+        Ok(Mp4ExportOutcome {
+            frames,
+            missing_audio,
+        })
+    } else {
+        Err(std::io::Error::other("audio mux failed"))
+    }
+}
+
+/// Export an MP4 reframed for vertical-video platforms
+/// (Roadmap Wave 2, W2-43 — IA-RM23-4): the Shorts entry.
+/// Every frame is a true re-render at
+/// [`SHORTS_TARGET_HEIGHT`] tall through the scaled
+/// funnel, and ffmpeg's crop filter cuts the centred
+/// 9:16 window out of it as it encodes
+/// ([`shorts_geometry`] is the whole geometry: scale,
+/// full frame, window, offset). The crop is CENTRED and
+/// fixed: there is no subject or face tracking, so
+/// action staged outside the middle 9:16 of the stage
+/// is cut — reframing a scene for Shorts is an
+/// authoring decision this entry does not make.
+///
+/// Subtitles: the burn-in is part of the render, laid
+/// out in the full frame's stage space before the crop
+/// (the shared layout helpers at the render scale), so
+/// the frame-centred text survives the centred crop
+/// whole; only a caption wider than the crop window
+/// loses its ends to it. An SRT/VTT sidecar (the
+/// publish package's members) is the untruncated text.
+///
+/// AUDIO: untouched — the mux plan, the missing-audio
+/// reporting and the unprobeable treatment are
+/// [`export_mp4`]'s own; audio does not crop. The
+/// progress hooks keep the family contract: the render
+/// hook observes the funnel's temporary-frame loop, the
+/// encode hook the silent-video encode, and the mux
+/// reports nothing. This is
+/// [`export_mp4_shorts_with_quality`] at
+/// [`EncodeQuality::Standard`].
+pub fn export_mp4_shorts(
+    project: &Project,
+    path: &Path,
+) -> std::io::Result<Mp4ExportOutcome> {
+    export_mp4_shorts_with_progress(project, path, None, None)
+}
+
+/// [`export_mp4_shorts`] with both phase progress hooks
+/// (the family contract — see [`export_mp4_with_progress`]).
+pub fn export_mp4_shorts_with_progress(
+    project: &Project,
+    path: &Path,
+    encode_progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<Mp4ExportOutcome> {
+    export_mp4_shorts_with_quality(
+        project,
+        path,
+        DEFAULT_ENCODE_QUALITY,
+        encode_progress,
+        render_progress,
+    )
+}
+
+/// [`export_mp4_shorts_with_progress`] at an explicit
+/// encoder-quality level (Roadmap Wave 2, W2-43,
+/// composing W2-42): the level splices its
+/// `-crf`/`-preset` pair into the encode argv behind
+/// the crop filter ([`shorts_video_args`]), for both
+/// the final encode and the silent pre-mux encode; the
+/// audio mux that may follow is untouched.
+pub fn export_mp4_shorts_with_quality(
+    project: &Project,
+    path: &Path,
+    quality: EncodeQuality,
+    encode_progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<Mp4ExportOutcome> {
+    // Refuse an unusable stage before anything renders
+    // or writes (the encode helper recomputes the same
+    // geometry for the encode itself).
+    shorts_geometry(project)?;
+    let has_audio = project
+        .audio
+        .iter()
+        .any(|c| !c.muted && std::path::Path::new(&c.path).exists());
+    let missing_audio = crate::audio::missing_audio_clips(&project.audio);
+    if !has_audio {
+        let frames = ffmpeg_encode_shorts(
+            project,
+            path,
+            quality,
+            true,
+            encode_progress,
+            render_progress,
+        )?;
+        return Ok(Mp4ExportOutcome {
+            frames,
+            missing_audio,
+        });
+    }
+    let silent = unique_temp("silent").with_extension("mp4");
+    let n = ffmpeg_encode_shorts(
+        project,
+        &silent,
+        quality,
+        false,
+        encode_progress,
+        render_progress,
+    )?;
+    let muxed = mux_audio(project, &silent, path)?;
+    let _ = std::fs::remove_file(&silent);
+    if muxed {
+        Ok(Mp4ExportOutcome {
+            frames: n,
+            missing_audio,
+        })
+    } else {
+        Err(std::io::Error::other("audio mux failed"))
+    }
+}
+
+/// Export the authored frames `from..=to` (inclusive,
+/// clamped to the timeline) reframed for vertical video
+/// (Roadmap Wave 2, W2-43): the Shorts counterpart of
+/// [`export_mp4_range`], with the same centred 9:16 crop
+/// (see [`export_mp4_shorts`]), the same range rules,
+/// the same unprobeable/missing-audio treatment and the
+/// same range mux plan. This is
+/// [`export_mp4_shorts_range_with_quality`] at
+/// [`EncodeQuality::Standard`].
+pub fn export_mp4_shorts_range(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+) -> std::io::Result<Mp4ExportOutcome> {
+    export_mp4_shorts_range_with_quality(
+        project,
+        from,
+        to,
+        path,
+        DEFAULT_ENCODE_QUALITY,
+        None,
+        None,
+    )
+}
+
+/// [`export_mp4_shorts_range`] at an explicit
+/// encoder-quality level (Roadmap Wave 2, W2-43,
+/// composing W2-42): the level splices its
+/// `-crf`/`-preset` pair behind the crop filter
+/// ([`shorts_video_args`]); the range rules and mux
+/// plan are the range entries' own.
+pub fn export_mp4_shorts_range_with_quality(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    quality: EncodeQuality,
+    encode_progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<Mp4ExportOutcome> {
+    shorts_geometry(project)?;
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let times = sample_times_range(project, from, to);
+    let frames = times.len();
+    let (win_start, win_len) = range_window(project, from, times.len());
+    let outcome = range_plan_outcome(project, win_start, win_len, &probe_duration_secs);
+    if !outcome.unprobeable.is_empty() {
+        return Err(std::io::Error::other(format!(
+            "audio could not be included in the range export: the length of {} \
+             clip(s) could not be probed (not readable as WAV, and ffprobe \
+             failed or is not installed), so whether they intersect the range \
+             is unknown: {}",
+            outcome.unprobeable.len(),
+            outcome.unprobeable.join(", ")
+        )));
+    }
+    let missing_audio = outcome.missing;
+    let plan = outcome.plan;
+    if matches!(plan, RangeMuxPlan::None) {
+        ffmpeg_encode_shorts_times(
+            project,
+            &times,
+            path,
+            quality,
+            true,
+            encode_progress,
+            render_progress,
+        )?;
+        return Ok(Mp4ExportOutcome {
+            frames,
+            missing_audio,
+        });
+    }
+    let silent = unique_temp("silent").with_extension("mp4");
+    ffmpeg_encode_shorts_times(
+        project,
+        &times,
+        &silent,
+        quality,
+        false,
         encode_progress,
         render_progress,
     )?;
@@ -2895,6 +4081,47 @@ fn ffmpeg_encode(
     ffmpeg_encode_times(project, &times, path, video_args, progress, render_progress)
 }
 
+/// Encode the whole timeline as a Shorts frame (Roadmap
+/// Wave 2, W2-43): the frames render at the geometry's
+/// scale through the scaled funnel, and `video_args`
+/// carries the crop filter ([`shorts_video_args`]) that
+/// cuts the centred 9:16 window out of each frame as
+/// ffmpeg reads it — one filter in the one existing
+/// encode path, never a second encoder. The geometry is
+/// computed (and the stage refused, if unusable) before
+/// anything renders.
+fn ffmpeg_encode_shorts(
+    project: &Project,
+    path: &Path,
+    quality: EncodeQuality,
+    faststart: bool,
+    progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
+    let geo = shorts_geometry(project)?;
+    let args = shorts_video_args(quality, faststart, &geo);
+    let refs: Vec<&str> = args.iter().map(|a| a.as_str()).collect();
+    ffmpeg_encode_scaled(project, path, &refs, geo.scale, progress, render_progress)
+}
+
+/// Encode the given frame times as a Shorts frame
+/// (Roadmap Wave 2, W2-43): [`ffmpeg_encode_shorts`] over
+/// an explicit time list — the range entries' half.
+fn ffmpeg_encode_shorts_times(
+    project: &Project,
+    times: &[f32],
+    path: &Path,
+    quality: EncodeQuality,
+    faststart: bool,
+    progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
+    let geo = shorts_geometry(project)?;
+    let args = shorts_video_args(quality, faststart, &geo);
+    let refs: Vec<&str> = args.iter().map(|a| a.as_str()).collect();
+    ffmpeg_encode_times_scaled(project, times, path, &refs, geo.scale, progress, render_progress)
+}
+
 /// Encode the given frame times with ffmpeg using the given
 /// video args: render each time to a PNG in a temp dir, then run
 /// ffmpeg over the sequence at the project fps. Returns the
@@ -3068,20 +4295,41 @@ pub fn export_webm_with_encode_progress(
 /// observes the funnel's temporary-frame render loop, the
 /// encode hook ([`EncodeProgressCallback`]) observes the
 /// encode. Each hook reports its own phase through its
-/// own event type — the two are never merged.
+/// own event type — the two are never merged. This is
+/// [`export_webm_with_quality`] at
+/// [`EncodeQuality::Standard`] — the historical flat-`2M`
+/// encode, byte for byte.
 pub fn export_webm_with_progress(
     project: &Project,
     path: &Path,
     encode_progress: EncodeProgressCallback<'_>,
     render_progress: RenderProgressCallback<'_>,
 ) -> std::io::Result<usize> {
-    ffmpeg_encode(
+    export_webm_with_quality(
         project,
         path,
-        &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"],
+        DEFAULT_ENCODE_QUALITY,
         encode_progress,
         render_progress,
     )
+}
+
+/// [`export_webm_with_progress`] at an explicit
+/// encoder-quality level (Roadmap Wave 2, W2-42): the
+/// level sets the VP9 target bitrate from the height
+/// ladder ([`webm_video_args`]) at the stage height.
+/// At [`EncodeQuality::Standard`] the ladder returns
+/// the historical flat `2M`, so the export is
+/// byte-identical to `export_webm_with_progress`'s.
+pub fn export_webm_with_quality(
+    project: &Project,
+    path: &Path,
+    quality: EncodeQuality,
+    encode_progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
+    let args = webm_video_args(quality, scaled_output_size(project, 1.0).1);
+    ffmpeg_encode(project, path, &args, encode_progress, render_progress)
 }
 
 /// Export the authored frames `from..=to` (inclusive, clamped to
@@ -3138,12 +4386,45 @@ pub fn export_webm_range_with_encode_progress(
 /// nothing. Neither hook is invoked at all when the
 /// range's audio plan refuses the export before the
 /// encode (the unprobeable-clip error above) — a refusal
-/// happens before any frame is rendered.
+/// happens before any frame is rendered. This is
+/// [`export_webm_range_with_quality`] at
+/// [`EncodeQuality::Standard`] — the historical
+/// flat-`2M` encode, byte for byte.
 pub fn export_webm_range_with_progress(
     project: &Project,
     from: usize,
     to: usize,
     path: &Path,
+    encode_progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<Mp4ExportOutcome> {
+    export_webm_range_with_quality(
+        project,
+        from,
+        to,
+        path,
+        DEFAULT_ENCODE_QUALITY,
+        encode_progress,
+        render_progress,
+    )
+}
+
+/// [`export_webm_range_with_progress`] at an explicit
+/// encoder-quality level (Roadmap Wave 2, W2-42): the
+/// quality counterpart of [`export_webm_range`] — the
+/// level sets the VP9 target bitrate from the height
+/// ladder ([`webm_video_args`]) at the stage height,
+/// for both the final encode and the silent pre-mux
+/// encode; the range rules and the Opus range mux plan
+/// are [`export_webm_range`]'s own. At
+/// [`EncodeQuality::Standard`] the export is
+/// byte-identical to `export_webm_range_with_progress`'s.
+pub fn export_webm_range_with_quality(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    quality: EncodeQuality,
     encode_progress: EncodeProgressCallback<'_>,
     render_progress: RenderProgressCallback<'_>,
 ) -> std::io::Result<Mp4ExportOutcome> {
@@ -3164,12 +4445,13 @@ pub fn export_webm_range_with_progress(
     }
     let missing_audio = outcome.missing;
     let plan = outcome.plan;
+    let args = webm_video_args(quality, scaled_output_size(project, 1.0).1);
     if matches!(plan, RangeMuxPlan::None) {
         ffmpeg_encode_times(
             project,
             &times,
             path,
-            &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"],
+            &args,
             encode_progress,
             render_progress,
         )?;
@@ -3183,7 +4465,7 @@ pub fn export_webm_range_with_progress(
         project,
         &times,
         &silent,
-        &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"],
+        &args,
         encode_progress,
         render_progress,
     );
@@ -3237,6 +4519,9 @@ pub fn export_webm_scaled_with_encode_progress(
 /// ([`EncodeProgressCallback`]) observes the encode. At
 /// exactly 1.0 the call routes through
 /// [`export_webm_with_progress`], both hooks included.
+/// This is [`export_webm_scaled_with_quality`] at
+/// [`EncodeQuality::Standard`] — the historical
+/// flat-`2M` encode, byte for byte.
 pub fn export_webm_scaled_with_progress(
     project: &Project,
     path: &Path,
@@ -3244,18 +4529,41 @@ pub fn export_webm_scaled_with_progress(
     encode_progress: EncodeProgressCallback<'_>,
     render_progress: RenderProgressCallback<'_>,
 ) -> std::io::Result<usize> {
-    let scale = check_export_scale(scale)?;
-    if scale == 1.0 {
-        return export_webm_with_progress(project, path, encode_progress, render_progress);
-    }
-    ffmpeg_encode_scaled(
+    export_webm_scaled_with_quality(
         project,
         path,
-        &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"],
         scale,
+        DEFAULT_ENCODE_QUALITY,
         encode_progress,
         render_progress,
     )
+}
+
+/// [`export_webm_scaled_with_progress`] at an explicit
+/// encoder-quality level (Roadmap Wave 2, W2-42): the
+/// quality counterpart of [`export_webm_scaled`],
+/// composing the scale and quality options — the level
+/// sets the VP9 target bitrate from the height ladder
+/// ([`webm_video_args`]) at the *scaled* output height.
+/// At exactly 1.0 the call routes through
+/// [`export_webm_with_quality`]; at
+/// [`EncodeQuality::Standard`] the export is
+/// byte-identical to `export_webm_scaled_with_progress`'s
+/// at every scale.
+pub fn export_webm_scaled_with_quality(
+    project: &Project,
+    path: &Path,
+    scale: f32,
+    quality: EncodeQuality,
+    encode_progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    if scale == 1.0 {
+        return export_webm_with_quality(project, path, quality, encode_progress, render_progress);
+    }
+    let args = webm_video_args(quality, scaled_output_size(project, scale).1);
+    ffmpeg_encode_scaled(project, path, &args, scale, encode_progress, render_progress)
 }
 
 /// Export the authored frames `from..=to` (inclusive, clamped
@@ -3305,7 +4613,10 @@ pub fn export_webm_range_scaled_with_encode_progress(
 /// [`export_webm_range_with_progress`], both hooks
 /// included. An invalid scale is refused before the
 /// range is even clamped, so a refused call fires no
-/// event on either hook and writes nothing.
+/// event on either hook and writes nothing. This is
+/// [`export_webm_range_scaled_with_quality`] at
+/// [`EncodeQuality::Standard`] — the historical
+/// flat-`2M` encode, byte for byte.
 pub fn export_webm_range_scaled_with_progress(
     project: &Project,
     from: usize,
@@ -3315,13 +4626,51 @@ pub fn export_webm_range_scaled_with_progress(
     encode_progress: EncodeProgressCallback<'_>,
     render_progress: RenderProgressCallback<'_>,
 ) -> std::io::Result<Mp4ExportOutcome> {
+    export_webm_range_scaled_with_quality(
+        project,
+        from,
+        to,
+        path,
+        scale,
+        DEFAULT_ENCODE_QUALITY,
+        encode_progress,
+        render_progress,
+    )
+}
+
+/// [`export_webm_range_scaled_with_progress`] at an
+/// explicit encoder-quality level (Roadmap Wave 2,
+/// W2-42): the quality counterpart of
+/// [`export_webm_range_scaled`], composing the range,
+/// scale and quality options — the level sets the VP9
+/// target bitrate from the height ladder
+/// ([`webm_video_args`]) at the *scaled* output height,
+/// for both the final encode and the silent pre-mux
+/// encode; the range rules and mux plan are the range
+/// entries' own. At exactly 1.0 the call routes through
+/// [`export_webm_range_with_quality`]; at
+/// [`EncodeQuality::Standard`] the export is
+/// byte-identical to
+/// `export_webm_range_scaled_with_progress`'s at every
+/// scale.
+pub fn export_webm_range_scaled_with_quality(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    scale: f32,
+    quality: EncodeQuality,
+    encode_progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<Mp4ExportOutcome> {
     let scale = check_export_scale(scale)?;
     if scale == 1.0 {
-        return export_webm_range_with_progress(
+        return export_webm_range_with_quality(
             project,
             from,
             to,
             path,
+            quality,
             encode_progress,
             render_progress,
         );
@@ -3343,12 +4692,13 @@ pub fn export_webm_range_scaled_with_progress(
     }
     let missing_audio = outcome.missing;
     let plan = outcome.plan;
+    let args = webm_video_args(quality, scaled_output_size(project, scale).1);
     if matches!(plan, RangeMuxPlan::None) {
         ffmpeg_encode_times_scaled(
             project,
             &times,
             path,
-            &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"],
+            &args,
             scale,
             encode_progress,
             render_progress,
@@ -3363,7 +4713,7 @@ pub fn export_webm_range_scaled_with_progress(
         project,
         &times,
         &silent,
-        &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"],
+        &args,
         scale,
         encode_progress,
         render_progress,
@@ -5914,6 +7264,547 @@ pub fn export_sheet_alpha_range_scaled(
     write_spritesheet_alpha_scaled(project, &indices, path, scale)
 }
 
+// ---------------------------------------------------------------------
+// Spritesheet slicing metadata — the round-trip contract
+// (Roadmap Wave 2, W2-49).
+//
+// A sheet PNG on its own does not say where its tiles are: the
+// writers above lay full-size frames on a square-root grid, but
+// nothing on disk records the tile size, the grid, the order or
+// which timeline frames the tiles are, so a sheet could never be
+// sliced back into its frames — here or in another tool. The
+// "pack" exports below write the same sheet PNG (the same
+// writers, byte for byte) PLUS a JSON sidecar that records the
+// layout explicitly, and [`slice_spritesheet`] reads a sheet
+// back through its sidecar. The sidecar lives next to the sheet
+// as `<sheet stem>.spritesheet.json` (for `ep-spritesheet.png`:
+// `ep-spritesheet.spritesheet.json`) — a sibling file rather
+// than a PNG chunk because the app's sidecars are siblings
+// everywhere else (SRT/VTT next to the MP4), because a sibling
+// survives other tools re-encoding the PNG, and because a
+// human — or another tool — can read and write it without a
+// PNG library. A sheet WITHOUT a sidecar is not an error: it
+// imports as one still image, exactly as sheets always have;
+// the layout is never guessed from the pixels.
+// ---------------------------------------------------------------------
+
+/// The `format` tag every spritesheet sidecar carries.
+pub const SPRITESHEET_FORMAT: &str = "stykanimate-spritesheet";
+
+/// The sidecar format version this build writes and reads.
+/// Version 1 is a fixed-cell layout: every frame occupies one
+/// full tile of the grid.
+pub const SPRITESHEET_FORMAT_VERSION: u32 = 1;
+
+/// One frame's entry in a [`SpritesheetMeta`]: the timeline
+/// frame the tile was rendered from, the name the frame is
+/// restored under on import (data, carried verbatim — an
+/// importer never renames), and the tile's rectangle in the
+/// sheet, in pixels.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SheetFrameMeta {
+    /// Timeline frame index the tile renders.
+    pub index: usize,
+    /// Name the frame is restored under on import.
+    pub name: String,
+    /// Tile rectangle inside the sheet, in pixels.
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The spritesheet sidecar: everything needed to slice a sheet
+/// written by the pack exports back into its frames. `frames`
+/// is in sheet reading order (left to right, top to bottom),
+/// which is also the order the recovered assets are appended
+/// in on import.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SpritesheetMeta {
+    /// Always [`SPRITESHEET_FORMAT`].
+    pub format: String,
+    /// Always [`SPRITESHEET_FORMAT_VERSION`] in this build.
+    pub version: u32,
+    /// File name (not path) of the sheet PNG this describes.
+    pub sheet: String,
+    /// The sheet's pixel size; always
+    /// `columns * tile_width` by `rows * tile_height`.
+    pub sheet_width: u32,
+    pub sheet_height: u32,
+    /// Every tile's pixel size (full-size frames: the stage
+    /// size, or the stage size at `scale`).
+    pub tile_width: u32,
+    pub tile_height: u32,
+    /// The grid the tiles were laid out on.
+    pub columns: u32,
+    pub rows: u32,
+    /// True when the tiles carry per-pixel coverage alpha
+    /// (the alpha sheet family).
+    pub alpha: bool,
+    /// The export scale the tiles were rendered at (1.0 = the
+    /// stage size).
+    pub scale: f32,
+    /// One entry per tile, in reading order.
+    pub frames: Vec<SheetFrameMeta>,
+}
+
+/// The sidecar path for a sheet PNG at `sheet_path`: the
+/// sheet's file stem plus `.spritesheet.json`, in the same
+/// directory.
+pub fn spritesheet_sidecar_path(sheet_path: &Path) -> std::path::PathBuf {
+    let stem = sheet_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "spritesheet".to_string());
+    sheet_path.with_file_name(format!("{stem}.spritesheet.json"))
+}
+
+/// The square-root grid the sheet writers lay `count` tiles
+/// out on, computed exactly as they compute it.
+fn sheet_grid(count: usize) -> (u32, u32) {
+    let cols = (count as f32).sqrt().ceil() as u32;
+    let rows = (count as u32 + cols - 1) / cols;
+    (cols, rows)
+}
+
+/// The name a sheet tile for timeline frame `index` is
+/// restored under: the bundle's own per-frame naming
+/// (`frame-0001.png`, 1-based by authored index — the PNG
+/// sequence and SVG members name their files the same way),
+/// so a sliced sheet and a PNG sequence of the same timeline
+/// agree name for name.
+fn sheet_frame_name(index: usize) -> String {
+    format!("frame-{:04}.png", index + 1)
+}
+
+/// Build the sidecar for a sheet of `indices` (in reading
+/// order) with `tile_width`x`tile_height` tiles written to
+/// `sheet_path`.
+fn spritesheet_meta(
+    sheet_path: &Path,
+    indices: &[usize],
+    tile_width: u32,
+    tile_height: u32,
+    alpha: bool,
+    scale: f32,
+) -> SpritesheetMeta {
+    let (columns, rows) = sheet_grid(indices.len());
+    let frames = indices
+        .iter()
+        .enumerate()
+        .map(|(k, &index)| SheetFrameMeta {
+            index,
+            name: sheet_frame_name(index),
+            x: (k as u32 % columns) * tile_width,
+            y: (k as u32 / columns) * tile_height,
+            width: tile_width,
+            height: tile_height,
+        })
+        .collect();
+    SpritesheetMeta {
+        format: SPRITESHEET_FORMAT.to_string(),
+        version: SPRITESHEET_FORMAT_VERSION,
+        sheet: sheet_path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        sheet_width: columns * tile_width,
+        sheet_height: rows * tile_height,
+        tile_width,
+        tile_height,
+        columns,
+        rows,
+        alpha,
+        scale,
+        frames,
+    }
+}
+
+/// Write `meta` as the sidecar for the sheet at `sheet_path`;
+/// returns the sidecar's path. The sheet itself must already
+/// be written — a sidecar whose sheet is missing or has
+/// different dimensions is refused by the reader, so writing
+/// the PNG first keeps a failed pack export from leaving a
+/// sidecar that describes nothing.
+pub fn write_spritesheet_sidecar(
+    sheet_path: &Path,
+    meta: &SpritesheetMeta,
+) -> std::io::Result<std::path::PathBuf> {
+    let path = spritesheet_sidecar_path(sheet_path);
+    let mut json =
+        serde_json::to_string_pretty(meta).map_err(std::io::Error::other)?;
+    json.push('\n');
+    std::fs::write(&path, json)?;
+    Ok(path)
+}
+
+/// The shared tail of the pack exports: the sheet is already
+/// written (`n` tiles); write its sidecar. An empty sheet
+/// (`n` == 0, the 1x1 blank the writers produce for an empty
+/// index list) gets NO sidecar — there are no frames to
+/// recover, and the blank sheet imports as a still image.
+fn finish_sheet_pack(
+    sheet_path: &Path,
+    indices: &[usize],
+    tile_width: u32,
+    tile_height: u32,
+    alpha: bool,
+    scale: f32,
+    n: usize,
+) -> std::io::Result<usize> {
+    if n == 0 {
+        return Ok(0);
+    }
+    let meta = spritesheet_meta(sheet_path, indices, tile_width, tile_height, alpha, scale);
+    write_spritesheet_sidecar(sheet_path, &meta)?;
+    Ok(n)
+}
+
+/// A tile's pixel rectangle cut out of a decoded sheet and
+/// re-encoded as a PNG — the one slicing primitive both
+/// readers below share. PNG is lossless, so a frame recovered
+/// this way is pixel-for-pixel the tile that was written.
+fn encode_sheet_crop(
+    sheet: &image::DynamicImage,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, String> {
+    let crop = image::imageops::crop_imm(sheet, x, y, width, height).to_image();
+    let mut buf = std::io::Cursor::new(Vec::new());
+    crop.write_to(&mut buf, image::ImageFormat::Png)
+        .map_err(|e| format!("a spritesheet frame does not re-encode as PNG: {e}"))?;
+    Ok(buf.into_inner())
+}
+
+/// Check a parsed sidecar against the format contract. Every
+/// refusal names what is wrong; a sidecar that fails here is
+/// never sliced from, because slicing on a layout the data
+/// does not actually follow would silently produce wrong
+/// frames.
+fn validate_spritesheet_meta(meta: &SpritesheetMeta) -> Result<(), String> {
+    if meta.format != SPRITESHEET_FORMAT {
+        return Err(format!(
+            "spritesheet metadata format is '{}', not '{SPRITESHEET_FORMAT}'",
+            meta.format
+        ));
+    }
+    if meta.version != SPRITESHEET_FORMAT_VERSION {
+        return Err(format!(
+            "spritesheet metadata version {} is not supported (this build reads version {SPRITESHEET_FORMAT_VERSION})",
+            meta.version
+        ));
+    }
+    if meta.columns == 0 || meta.rows == 0 || meta.tile_width == 0 || meta.tile_height == 0 {
+        return Err("spritesheet metadata describes an empty grid or tile".into());
+    }
+    let (Some(w), Some(h)) = (
+        meta.columns.checked_mul(meta.tile_width),
+        meta.rows.checked_mul(meta.tile_height),
+    ) else {
+        return Err("spritesheet metadata grid overflows the sheet size".into());
+    };
+    if w != meta.sheet_width || h != meta.sheet_height {
+        return Err(format!(
+            "spritesheet metadata is inconsistent: a {}x{} grid of {}x{} tiles is {}x{}, not the stated {}x{} sheet",
+            meta.columns, meta.rows, meta.tile_width, meta.tile_height, w, h,
+            meta.sheet_width, meta.sheet_height
+        ));
+    }
+    let cells = (meta.columns as usize) * (meta.rows as usize);
+    if meta.frames.len() > cells {
+        return Err(format!(
+            "spritesheet metadata lists {} frames for a {}x{} grid",
+            meta.frames.len(),
+            meta.columns,
+            meta.rows
+        ));
+    }
+    for frame in &meta.frames {
+        if frame.width != meta.tile_width || frame.height != meta.tile_height {
+            return Err(format!(
+                "spritesheet frame '{}' is {}x{}, not the {}x{} tile size (version {SPRITESHEET_FORMAT_VERSION} sheets are fixed-cell)",
+                frame.name, frame.width, frame.height, meta.tile_width, meta.tile_height
+            ));
+        }
+        if frame.x.checked_add(frame.width).is_none_or(|r| r > meta.sheet_width)
+            || frame.y.checked_add(frame.height).is_none_or(|b| b > meta.sheet_height)
+        {
+            return Err(format!(
+                "spritesheet frame '{}' at ({}, {}) sized {}x{} falls outside the {}x{} sheet",
+                frame.name, frame.x, frame.y, frame.width, frame.height,
+                meta.sheet_width, meta.sheet_height
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Read and validate the sidecar for the sheet at
+/// `sheet_path`. `Ok(None)` when no sidecar exists — the
+/// degraded case, not an error: the sheet is then just a
+/// still image. A sidecar that exists but does not parse or
+/// does not satisfy the contract IS an error: the file claims
+/// a layout, and slicing on a false claim would be worse than
+/// refusing.
+pub fn read_spritesheet_sidecar(
+    sheet_path: &Path,
+) -> Result<Option<SpritesheetMeta>, String> {
+    let path = spritesheet_sidecar_path(sheet_path);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read spritesheet metadata '{}': {e}", path.display()))?;
+    let meta: SpritesheetMeta = serde_json::from_str(&text).map_err(|e| {
+        format!(
+            "spritesheet metadata '{}' does not parse: {e}",
+            path.display()
+        )
+    })?;
+    validate_spritesheet_meta(&meta)?;
+    Ok(Some(meta))
+}
+
+/// One frame recovered from a spritesheet: the timeline index
+/// and name its sidecar entry carries (verbatim), and the
+/// tile re-encoded as a standalone PNG.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SlicedSheetFrame {
+    /// Timeline frame index from the sidecar entry.
+    pub index: usize,
+    /// Asset name from the sidecar entry, carried verbatim.
+    pub name: String,
+    /// The tile as a standalone PNG file's bytes.
+    pub png: Vec<u8>,
+    /// The tile's pixel dimensions.
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Slice a decoded sheet by a validated sidecar: one
+/// [`SlicedSheetFrame`] per entry, in the sidecar's order.
+/// The sheet's real dimensions must match the sidecar's
+/// stated sheet size — the pairing check that keeps a
+/// sidecar from slicing a different sheet that happens to
+/// share its file name.
+pub fn slice_sheet_with_meta(
+    sheet_bytes: &[u8],
+    meta: &SpritesheetMeta,
+) -> Result<Vec<SlicedSheetFrame>, String> {
+    validate_spritesheet_meta(meta)?;
+    let sheet = image::load_from_memory(sheet_bytes)
+        .map_err(|e| format!("spritesheet does not decode as an image: {e}"))?;
+    if sheet.width() != meta.sheet_width || sheet.height() != meta.sheet_height {
+        return Err(format!(
+            "spritesheet is {}x{} but its metadata describes a {}x{} sheet",
+            sheet.width(),
+            sheet.height(),
+            meta.sheet_width,
+            meta.sheet_height
+        ));
+    }
+    meta.frames
+        .iter()
+        .map(|frame| {
+            Ok(SlicedSheetFrame {
+                index: frame.index,
+                name: frame.name.clone(),
+                png: encode_sheet_crop(&sheet, frame.x, frame.y, frame.width, frame.height)?,
+                width: frame.width,
+                height: frame.height,
+            })
+        })
+        .collect()
+}
+
+/// Slice the sheet at `sheet_path` through its sidecar:
+/// `Ok(None)` when the sheet has no sidecar (the caller
+/// treats it as one still image), `Ok(Some(frames))` with one
+/// frame per sidecar entry in order, and an error when the
+/// sidecar or the sheet fails validation.
+pub fn slice_spritesheet(
+    sheet_path: &Path,
+) -> Result<Option<Vec<SlicedSheetFrame>>, String> {
+    let Some(meta) = read_spritesheet_sidecar(sheet_path)? else {
+        return Ok(None);
+    };
+    let bytes = std::fs::read(sheet_path).map_err(|e| {
+        format!("cannot read spritesheet '{}': {e}", sheet_path.display())
+    })?;
+    Ok(Some(slice_sheet_with_meta(&bytes, &meta)?))
+}
+
+/// Slice a sheet image on an EXPLICIT grid — the manual path
+/// for a foreign sheet that carries no metadata. The grid is
+/// the caller's input, never a guess: the sheet must divide
+/// into `columns`x`rows` exactly (anything else refuses,
+/// rather than silently cropping a ragged edge), and at most
+/// `count` tiles are taken in reading order. Recovered frames
+/// are named `{name_stem}-0001.png`, ... in order, with
+/// sequential indices.
+pub fn slice_sheet_grid(
+    sheet_bytes: &[u8],
+    columns: u32,
+    rows: u32,
+    count: usize,
+    name_stem: &str,
+) -> Result<Vec<SlicedSheetFrame>, String> {
+    if columns == 0 || rows == 0 {
+        return Err("a spritesheet grid needs at least one column and one row".into());
+    }
+    let cells = (columns as usize) * (rows as usize);
+    if count == 0 || count > cells {
+        return Err(format!(
+            "a {columns}x{rows} grid holds {cells} frame(s), not {count}"
+        ));
+    }
+    let sheet = image::load_from_memory(sheet_bytes)
+        .map_err(|e| format!("spritesheet does not decode as an image: {e}"))?;
+    let (w, h) = (sheet.width(), sheet.height());
+    if w % columns != 0 || h % rows != 0 {
+        return Err(format!(
+            "spritesheet is {w}x{h}, which does not divide into a {columns}x{rows} grid"
+        ));
+    }
+    let (tile_w, tile_h) = (w / columns, h / rows);
+    (0..count)
+        .map(|k| {
+            let (x, y) = ((k as u32 % columns) * tile_w, (k as u32 / columns) * tile_h);
+            Ok(SlicedSheetFrame {
+                index: k,
+                name: format!("{name_stem}-{:04}.png", k + 1),
+                png: encode_sheet_crop(&sheet, x, y, tile_w, tile_h)?,
+                width: tile_w,
+                height: tile_h,
+            })
+        })
+        .collect()
+}
+
+/// Export all authored frames as one spritesheet PNG PLUS its
+/// slicing sidecar (W2-49): the round-trip form of
+/// [`export_spritesheet`] — the same writer, so the PNG is
+/// byte-identical, with a `<stem>.spritesheet.json` next to it
+/// recording the grid, the tile size and the frame order, so
+/// the sheet can be sliced back into its frames. An empty
+/// project writes the blank sheet and no sidecar.
+pub fn export_spritesheet_pack(project: &Project, path: &Path) -> std::io::Result<usize> {
+    let indices: Vec<usize> = (0..project.frames.len()).collect();
+    let n = export_spritesheet(project, path)?;
+    let (w, h) = (project.stage[0] as u32, project.stage[1] as u32);
+    finish_sheet_pack(path, &indices, w, h, false, 1.0, n)
+}
+
+/// The round-trip form of [`export_sheet_range`]: the same
+/// sheet PNG plus its slicing sidecar, the sidecar's frame
+/// entries carrying the authored indices in the range.
+pub fn export_sheet_range_pack(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+) -> std::io::Result<usize> {
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let indices: Vec<usize> = (from..=to).collect();
+    let n = export_sheet_range(project, from, to, path)?;
+    let (w, h) = (project.stage[0] as u32, project.stage[1] as u32);
+    finish_sheet_pack(path, &indices, w, h, false, 1.0, n)
+}
+
+/// The round-trip form of [`export_sheet_scaled`]: the same
+/// scaled sheet PNG plus its slicing sidecar (tile size and
+/// scale recorded at the export scale).
+pub fn export_sheet_scaled_pack(
+    project: &Project,
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    let indices: Vec<usize> = (0..project.frames.len()).collect();
+    let n = export_sheet_scaled(project, path, scale)?;
+    let (w, h) = scaled_output_size(project, scale);
+    finish_sheet_pack(path, &indices, w, h, false, scale, n)
+}
+
+/// The round-trip form of [`export_sheet_range_scaled`]: the
+/// same scaled range sheet PNG plus its slicing sidecar.
+pub fn export_sheet_range_scaled_pack(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let indices: Vec<usize> = (from..=to).collect();
+    let n = export_sheet_range_scaled(project, from, to, path, scale)?;
+    let (w, h) = scaled_output_size(project, scale);
+    finish_sheet_pack(path, &indices, w, h, false, scale, n)
+}
+
+/// The round-trip form of [`export_spritesheet_alpha`]: the
+/// same alpha sheet PNG plus its slicing sidecar (`alpha`
+/// recorded, so the recovered frames keep their coverage).
+pub fn export_spritesheet_alpha_pack(
+    project: &Project,
+    path: &Path,
+) -> std::io::Result<usize> {
+    let indices: Vec<usize> = (0..project.frames.len()).collect();
+    let n = export_spritesheet_alpha(project, path)?;
+    let (w, h) = (project.stage[0] as u32, project.stage[1] as u32);
+    finish_sheet_pack(path, &indices, w, h, true, 1.0, n)
+}
+
+/// The round-trip form of [`export_sheet_alpha_range`]: the
+/// same alpha range sheet PNG plus its slicing sidecar.
+pub fn export_sheet_alpha_range_pack(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+) -> std::io::Result<usize> {
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let indices: Vec<usize> = (from..=to).collect();
+    let n = export_sheet_alpha_range(project, from, to, path)?;
+    let (w, h) = (project.stage[0] as u32, project.stage[1] as u32);
+    finish_sheet_pack(path, &indices, w, h, true, 1.0, n)
+}
+
+/// The round-trip form of [`export_sheet_alpha_scaled`]: the
+/// same scaled alpha sheet PNG plus its slicing sidecar.
+pub fn export_sheet_alpha_scaled_pack(
+    project: &Project,
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    let indices: Vec<usize> = (0..project.frames.len()).collect();
+    let n = export_sheet_alpha_scaled(project, path, scale)?;
+    let (w, h) = scaled_output_size(project, scale);
+    finish_sheet_pack(path, &indices, w, h, true, scale, n)
+}
+
+/// The round-trip form of [`export_sheet_alpha_range_scaled`]:
+/// the same scaled alpha range sheet PNG plus its slicing
+/// sidecar.
+pub fn export_sheet_alpha_range_scaled_pack(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let indices: Vec<usize> = (from..=to).collect();
+    let n = export_sheet_alpha_range_scaled(project, from, to, path, scale)?;
+    let (w, h) = scaled_output_size(project, scale);
+    finish_sheet_pack(path, &indices, w, h, true, scale, n)
+}
+
 /// Export every frame as `frame-0001.png`, `frame-0002.png`, ... in `dir`.
 pub fn export_png_sequence(project: &Project, dir: &Path) -> std::io::Result<usize> {
     export_png_sequence_with_render_progress(project, dir, None)
@@ -6357,12 +8248,42 @@ pub fn export_jpeg_sequence_range(
 }
 
 /// [`export_jpeg_sequence_range`] with a render-phase
-/// progress hook ([`RenderProgressCallback`]).
+/// progress hook ([`RenderProgressCallback`]). This is
+/// [`export_jpeg_sequence_range_with_quality`] at
+/// [`EncodeQuality::Standard`] — the historical quality
+/// 90, byte for byte.
 pub fn export_jpeg_sequence_range_with_render_progress(
     project: &Project,
     from: usize,
     to: usize,
     dir: &Path,
+    progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
+    export_jpeg_sequence_range_with_quality(
+        project,
+        from,
+        to,
+        dir,
+        DEFAULT_ENCODE_QUALITY,
+        progress,
+    )
+}
+
+/// [`export_jpeg_sequence_range_with_render_progress`]
+/// at an explicit encoder-quality level (Roadmap Wave
+/// 2, W2-42): the quality counterpart of
+/// [`export_jpeg_sequence_range`] — the level sets the
+/// JPEG encoder quality ([`jpeg_quality`]); the render
+/// loop, file naming and progress contract are the
+/// range entry's own. At [`EncodeQuality::Standard`]
+/// the files are byte-identical to
+/// `export_jpeg_sequence_range_with_render_progress`'s.
+pub fn export_jpeg_sequence_range_with_quality(
+    project: &Project,
+    from: usize,
+    to: usize,
+    dir: &Path,
+    quality: EncodeQuality,
     progress: RenderProgressCallback<'_>,
 ) -> std::io::Result<usize> {
     let (from, to) = clamp_frame_range(project, from, to)?;
@@ -6372,7 +8293,10 @@ pub fn export_jpeg_sequence_range_with_render_progress(
         let img = render_frame(project, i);
         let path = dir.join(format!("frame-{:04}.jpg", i + 1));
         let mut file = std::fs::File::create(&path)?;
-        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, 90);
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+            &mut file,
+            jpeg_quality(quality),
+        );
         encoder.encode_image(&img).map_err(std::io::Error::other)?;
         let done = written + 1;
         if done < total {
@@ -6478,7 +8402,10 @@ pub fn export_jpeg_sequence_range_scaled(
 /// ([`RenderProgressCallback`]). At exactly 1.0 the call
 /// routes through
 /// [`export_jpeg_sequence_range_with_render_progress`],
-/// hook included.
+/// hook included. This is
+/// [`export_jpeg_sequence_range_scaled_with_quality`]
+/// at [`EncodeQuality::Standard`] — the historical
+/// quality 90, byte for byte.
 pub fn export_jpeg_sequence_range_scaled_with_render_progress(
     project: &Project,
     from: usize,
@@ -6487,10 +8414,42 @@ pub fn export_jpeg_sequence_range_scaled_with_render_progress(
     scale: f32,
     progress: RenderProgressCallback<'_>,
 ) -> std::io::Result<usize> {
+    export_jpeg_sequence_range_scaled_with_quality(
+        project,
+        from,
+        to,
+        dir,
+        scale,
+        DEFAULT_ENCODE_QUALITY,
+        progress,
+    )
+}
+
+/// [`export_jpeg_sequence_range_scaled_with_render_progress`]
+/// at an explicit encoder-quality level (Roadmap Wave
+/// 2, W2-42): the quality counterpart of
+/// [`export_jpeg_sequence_range_scaled`], composing
+/// the range, scale and quality options — the level
+/// sets the JPEG encoder quality ([`jpeg_quality`]).
+/// At exactly 1.0 the call routes through
+/// [`export_jpeg_sequence_range_with_quality`]; at
+/// [`EncodeQuality::Standard`] the files are
+/// byte-identical to
+/// `export_jpeg_sequence_range_scaled_with_render_progress`'s
+/// at every scale.
+pub fn export_jpeg_sequence_range_scaled_with_quality(
+    project: &Project,
+    from: usize,
+    to: usize,
+    dir: &Path,
+    scale: f32,
+    quality: EncodeQuality,
+    progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
     let scale = check_export_scale(scale)?;
     if scale == 1.0 {
-        return export_jpeg_sequence_range_with_render_progress(
-            project, from, to, dir, progress,
+        return export_jpeg_sequence_range_with_quality(
+            project, from, to, dir, quality, progress,
         );
     }
     let (from, to) = clamp_frame_range(project, from, to)?;
@@ -6500,7 +8459,10 @@ pub fn export_jpeg_sequence_range_scaled_with_render_progress(
         let img = render_frame_scaled(project, i, scale)?;
         let path = dir.join(format!("frame-{:04}.jpg", i + 1));
         let mut file = std::fs::File::create(&path)?;
-        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, 90);
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+            &mut file,
+            jpeg_quality(quality),
+        );
         encoder.encode_image(&img).map_err(std::io::Error::other)?;
         let done = written + 1;
         if done < total {
@@ -6523,6 +8485,91 @@ pub fn export_jpeg_sequence_range_scaled_with_render_progress(
         },
     );
     Ok(total)
+}
+
+/// Export every authored frame as `frame-0001.jpg`,
+/// `frame-0002.jpg`, ... in `dir` at an explicit
+/// encoder-quality level (Roadmap Wave 2, W2-42): the
+/// quality counterpart of [`export_jpeg_sequence`], with
+/// a render-phase progress hook
+/// ([`RenderProgressCallback`]) under the
+/// [`export_jpeg_sequence_with_render_progress`]
+/// contract. An empty project creates the directory,
+/// fires only the terminal event at `(0, 0)` and returns
+/// `Ok(0)`. At [`EncodeQuality::Standard`] this is
+/// `export_jpeg_sequence_with_render_progress` itself,
+/// byte for byte.
+pub fn export_jpeg_sequence_with_quality(
+    project: &Project,
+    dir: &Path,
+    quality: EncodeQuality,
+    progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
+    if project.frames.is_empty() {
+        std::fs::create_dir_all(dir)?;
+        report_render_progress(
+            progress,
+            RenderProgressEvent {
+                rendered_frames: 0,
+                total_frames: 0,
+                finished: true,
+            },
+        );
+        return Ok(0);
+    }
+    export_jpeg_sequence_range_with_quality(
+        project,
+        0,
+        project.frames.len() - 1,
+        dir,
+        quality,
+        progress,
+    )
+}
+
+/// Export every authored frame as JPEG files in `dir`
+/// at `scale` times the stage size and an explicit
+/// encoder-quality level (Roadmap Wave 2, W2-42): the
+/// quality counterpart of [`export_jpeg_sequence_scaled`],
+/// composing the scale and quality options. At exactly
+/// 1.0 the call routes through
+/// [`export_jpeg_sequence_with_quality`]; an empty
+/// project at any other scale creates the directory,
+/// fires only the terminal event at `(0, 0)` and returns
+/// `Ok(0)`. An invalid scale is refused before anything
+/// is written.
+pub fn export_jpeg_sequence_scaled_with_quality(
+    project: &Project,
+    dir: &Path,
+    scale: f32,
+    quality: EncodeQuality,
+    progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    if scale == 1.0 {
+        return export_jpeg_sequence_with_quality(project, dir, quality, progress);
+    }
+    if project.frames.is_empty() {
+        std::fs::create_dir_all(dir)?;
+        report_render_progress(
+            progress,
+            RenderProgressEvent {
+                rendered_frames: 0,
+                total_frames: 0,
+                finished: true,
+            },
+        );
+        return Ok(0);
+    }
+    export_jpeg_sequence_range_scaled_with_quality(
+        project,
+        0,
+        project.frames.len() - 1,
+        dir,
+        scale,
+        quality,
+        progress,
+    )
 }
 
 /// Encode the given frame times as an APNG (animated PNG) at the
@@ -7031,6 +9078,1052 @@ mod tests {
         let rotated = render_frame_at(&project, 0.0);
         assert_eq!(rotated.get_pixel(100, 35), &white, "+90 must move the bar to the top");
         assert_eq!(rotated.get_pixel(165, 100), &black, "+90 must vacate the right side");
+    }
+
+    /// A thin diagonal white stroke on a black 200x200
+    /// stage (Roadmap Wave 2, W2-41), no figures, camera
+    /// cleared — stage units map 1:1 onto output pixels.
+    /// The slope is 3/4, not 1, so the edge's sub-pixel
+    /// phase drifts along its length: every supersample
+    /// factor shows its true spread of coverage levels
+    /// instead of a repeating 45° pattern. The stroke is
+    /// the only drawable, so the frame's distinct pixel
+    /// values are exactly the coverage levels the chosen
+    /// factor can express over the black background.
+    fn aa_diagonal_project() -> Project {
+        let mut project = Project::new_demo();
+        project.stage = [200.0, 200.0];
+        project.background = 0x000000;
+        project.figures.clear();
+        project.frames = vec![crate::model::Frame {
+            poses: Vec::new(),
+            duration: 1.0,
+            easing: None,
+            bends: Vec::new(),
+        }];
+        project.strokes = vec![crate::model::Stroke {
+            frame: 0,
+            points: vec![[20.0, 30.0], [180.0, 150.0]],
+            color: 0xFFFFFF,
+            width: 2.5,
+            widths: Vec::new(),
+            fill: None,
+            spray: None,
+            opacity: 1.0,
+            scatter: 0.0,
+        }];
+        project.camera.clear();
+        project
+    }
+
+    /// How many distinct pixel values a render holds —
+    /// the coverage-level count the supersample factor
+    /// delivered, measured on the frame itself.
+    fn distinct_pixel_values(img: &ImageBuffer<Rgb<u8>, Vec<u8>>) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        for p in img.pixels() {
+            seen.insert(p.0);
+        }
+        seen.len()
+    }
+
+    #[test]
+    fn supersample_default_is_byte_identical_to_legacy_entries() {
+        let project = aa_diagonal_project();
+        // RGB, unscaled and scaled: the `_ss` entries at
+        // DEFAULT_SUPERSAMPLE must reproduce the historical
+        // entries byte for byte — the default stream is
+        // untouched by the option's existence.
+        let legacy = render_frame_at(&project, 0.0);
+        let at_default = render_frame_at_ss(&project, 0.0, DEFAULT_SUPERSAMPLE).unwrap();
+        assert_eq!(legacy.as_raw(), at_default.as_raw());
+        let legacy_scaled = render_frame_at_scaled(&project, 0.0, 1.5).unwrap();
+        let scaled_default =
+            render_frame_at_scaled_ss(&project, 0.0, 1.5, DEFAULT_SUPERSAMPLE).unwrap();
+        assert_eq!(legacy_scaled.as_raw(), scaled_default.as_raw());
+        // Alpha funnel, same discipline.
+        let legacy_alpha = render_frame_at_alpha(&project, 0.0);
+        let alpha_default =
+            render_frame_at_alpha_ss(&project, 0.0, DEFAULT_SUPERSAMPLE).unwrap();
+        assert_eq!(legacy_alpha.as_raw(), alpha_default.as_raw());
+        let legacy_alpha_scaled = render_frame_at_alpha_scaled(&project, 0, 1.5).unwrap();
+        let alpha_scaled_default =
+            render_frame_at_alpha_scaled_ss(&project, 0.0, 1.5, DEFAULT_SUPERSAMPLE).unwrap();
+        assert_eq!(legacy_alpha_scaled.as_raw(), alpha_scaled_default.as_raw());
+    }
+
+    #[test]
+    fn supersample_out_of_range_is_refused() {
+        let project = aa_diagonal_project();
+        for bad in [0u32, 5, 64] {
+            let err = render_frame_at_ss(&project, 0.0, bad)
+                .err()
+                .expect("an out-of-range factor must be refused");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+            let err = render_frame_at_alpha_ss(&project, 0.0, bad)
+                .err()
+                .expect("an out-of-range factor must be refused");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        }
+        // The range ends are accepted.
+        assert!(render_frame_at_ss(&project, 0.0, 1).is_ok());
+        assert!(render_frame_at_ss(&project, 0.0, 4).is_ok());
+    }
+
+    #[test]
+    fn supersample_levels_measure_the_edge_quality() {
+        let project = aa_diagonal_project();
+        let d1 = distinct_pixel_values(&render_frame_at_ss(&project, 0.0, 1).unwrap());
+        let d2 = distinct_pixel_values(&render_frame_at_ss(&project, 0.0, 2).unwrap());
+        let d4 = distinct_pixel_values(&render_frame_at_ss(&project, 0.0, 4).unwrap());
+        // ss=1: every output pixel is ONE binary coverage
+        // test, so the frame holds exactly the background
+        // and the stroke colour — no intermediate level can
+        // exist. This is the hard-edged draft, measured.
+        assert_eq!(d1, 2, "ss=1 distinct values: {d1}");
+        // ss=2 (the default): box coverage over 4 sub-pixels
+        // expresses the five levels k*255/4 truncated
+        // (0, 63, 127, 191, 255) — the diagonal realises at
+        // least one intermediate level, and cannot exceed
+        // five.
+        assert!(
+            (3..=5).contains(&d2),
+            "ss=2 distinct values out of its level set: {d2}"
+        );
+        // ss=4: 16 sub-pixels express up to 17 levels; the
+        // drifting phase realises strictly more distinct
+        // values than ss=2's ceiling of five.
+        assert!(
+            d4 > d2,
+            "ss=4 distinct {d4} must exceed ss=2 distinct {d2}"
+        );
+        // And the non-default renders genuinely differ from
+        // the default stream — the option is not a no-op.
+        let legacy = render_frame_at(&project, 0.0);
+        let draft = render_frame_at_ss(&project, 0.0, 1).unwrap();
+        let fine = render_frame_at_ss(&project, 0.0, 4).unwrap();
+        assert_ne!(legacy.as_raw(), draft.as_raw());
+        assert_ne!(legacy.as_raw(), fine.as_raw());
+    }
+
+    #[test]
+    fn encode_quality_names_round_trip() {
+        // Roadmap Wave 2, W2-42: the level vocabulary the
+        // panel / MCP surfaces pass around — every level
+        // reads back from its own name, nothing else does,
+        // and the default is Standard (the historical
+        // encode) in both spellings of "default".
+        assert_eq!(DEFAULT_ENCODE_QUALITY, EncodeQuality::Standard);
+        assert_eq!(EncodeQuality::default(), EncodeQuality::Standard);
+        for q in [
+            EncodeQuality::Draft,
+            EncodeQuality::Standard,
+            EncodeQuality::Master,
+        ] {
+            assert_eq!(EncodeQuality::from_name(q.name()), Some(q), "{}", q.name());
+        }
+        assert_eq!(EncodeQuality::from_name("lossless"), None);
+        assert_eq!(EncodeQuality::from_name(""), None);
+    }
+
+    #[test]
+    fn x264_video_args_are_pinned() {
+        // Roadmap Wave 2, W2-42: Standard splices NOTHING
+        // into the historical MP4 argv — the two literal
+        // arrays every MP4 encode before the option used,
+        // with and without the faststart tail.
+        assert_eq!(
+            mp4_video_args(EncodeQuality::Standard, true),
+            vec!["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+        );
+        assert_eq!(
+            mp4_video_args(EncodeQuality::Standard, false),
+            vec!["-c:v", "libx264", "-pix_fmt", "yuv420p"]
+        );
+        // Draft / Master: the level's -crf/-preset pair
+        // sits after -pix_fmt, ahead of any -movflags.
+        assert_eq!(
+            mp4_video_args(EncodeQuality::Draft, true),
+            vec![
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "28", "-preset", "veryfast",
+                "-movflags", "+faststart"
+            ]
+        );
+        assert_eq!(
+            mp4_video_args(EncodeQuality::Master, false),
+            vec!["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "16", "-preset", "slow"]
+        );
+        assert!(x264_quality_args(EncodeQuality::Standard).is_empty());
+    }
+
+    #[test]
+    fn webm_video_args_are_pinned() {
+        // Roadmap Wave 2, W2-42: Standard is the
+        // historical flat 2M at EVERY height — that is
+        // what "default is byte-identical" means for a
+        // ladder whose other levels scale.
+        let historical = |rate: &str| {
+            vec!["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", rate]
+        };
+        for h in [72, 480, 720, 1080, 1440, 2160, 4320] {
+            assert_eq!(
+                webm_video_args(EncodeQuality::Standard, h),
+                historical("2M"),
+                "standard at height {h}"
+            );
+        }
+        // The ladder's rungs, band edge by band edge.
+        let draft = [
+            (480, "700k"),
+            (481, "1M"),
+            (720, "1M"),
+            (721, "1500k"),
+            (1080, "1500k"),
+            (1081, "2500k"),
+            (1440, "2500k"),
+            (1441, "4M"),
+        ];
+        let master = [
+            (480, "2500k"),
+            (481, "4M"),
+            (720, "4M"),
+            (721, "8M"),
+            (1080, "8M"),
+            (1081, "12M"),
+            (1440, "12M"),
+            (1441, "20M"),
+        ];
+        for (h, rate) in draft {
+            assert_eq!(
+                webm_video_args(EncodeQuality::Draft, h),
+                historical(rate),
+                "draft at height {h}"
+            );
+        }
+        for (h, rate) in master {
+            assert_eq!(
+                webm_video_args(EncodeQuality::Master, h),
+                historical(rate),
+                "master at height {h}"
+            );
+        }
+    }
+
+    /// A tiny project carrying chapters (Roadmap Wave 2,
+    /// W2-18): the 5-frame demo at 24 fps with two
+    /// chapters partitioning it — the fixture every
+    /// chapter pin below starts from.
+    fn chaptered_project() -> Project {
+        let mut project = tiny_project();
+        project.fps = 24.0;
+        project.chapters = vec![
+            crate::model::Chapter {
+                title: "Opening".to_string(),
+                start_frame: 0,
+                end_frame: 2,
+            },
+            crate::model::Chapter {
+                title: "Arrival".to_string(),
+                start_frame: 2,
+                end_frame: 5,
+            },
+        ];
+        project
+    }
+
+    #[test]
+    fn ffmetadata_chapters_none_without_chapters() {
+        // Roadmap Wave 2, W2-18: no chapters, no document
+        // — the embed step then adds nothing to the
+        // export at all (the byte-identity premise).
+        let project = tiny_project();
+        assert_eq!(ffmetadata_chapters(&project), None);
+        assert_eq!(chapter_span_count(&project), 0);
+    }
+
+    #[test]
+    fn ffmetadata_chapters_render_the_model_verbatim() {
+        // 24 fps: frame 2 lands at 83 ms, frame 5 — the
+        // episode end — at 208 ms. Titles byte for byte.
+        let project = chaptered_project();
+        assert_eq!(chapter_span_count(&project), 2);
+        assert_eq!(
+            ffmetadata_chapters(&project).unwrap(),
+            ";FFMETADATA1\n\
+             [CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=83\ntitle=Opening\n\
+             [CHAPTER]\nTIMEBASE=1/1000\nSTART=83\nEND=208\ntitle=Arrival\n"
+        );
+    }
+
+    #[test]
+    fn ffmetadata_chapters_first_match_wins_overlaps() {
+        // At 10 fps a frame is 100 ms, so the frame maths
+        // reads directly. A [0,4) shadows B [2,3) whole —
+        // first match owns those frames, exactly as
+        // `Project::chapter_at` answers — and C [3,10)
+        // starts inside A, so its marker starts where A
+        // ends and clamps to the 5-frame episode end.
+        let mut project = tiny_project();
+        project.fps = 10.0;
+        project.chapters = vec![
+            crate::model::Chapter {
+                title: "A".to_string(),
+                start_frame: 0,
+                end_frame: 4,
+            },
+            crate::model::Chapter {
+                title: "B".to_string(),
+                start_frame: 2,
+                end_frame: 3,
+            },
+            crate::model::Chapter {
+                title: "C".to_string(),
+                start_frame: 3,
+                end_frame: 10,
+            },
+        ];
+        let doc = ffmetadata_chapters(&project).unwrap();
+        assert!(doc.contains("START=0\nEND=400\ntitle=A\n"), "{doc}");
+        assert!(doc.contains("START=400\nEND=500\ntitle=C\n"), "{doc}");
+        assert!(!doc.contains("title=B"), "{doc}");
+        assert_eq!(chapter_span_count(&project), 2);
+    }
+
+    #[test]
+    fn ffmetadata_chapters_last_marker_runs_to_the_episode_end() {
+        // The only chapter stops at frame 2 of 5: its
+        // marker still closes at the episode end (frame
+        // 5 at 10 fps = 500 ms).
+        let mut project = tiny_project();
+        project.fps = 10.0;
+        project.chapters = vec![crate::model::Chapter {
+            title: "Only".to_string(),
+            start_frame: 0,
+            end_frame: 2,
+        }];
+        let doc = ffmetadata_chapters(&project).unwrap();
+        assert!(doc.contains("START=0\nEND=500\ntitle=Only\n"), "{doc}");
+    }
+
+    #[test]
+    fn ffmetadata_chapters_skip_what_the_model_refuses() {
+        // A blank title is refused by the model's own
+        // validation, and a chapter lying wholly past
+        // the end emits nothing; the valid chapter
+        // between them survives untouched.
+        let mut project = tiny_project();
+        project.fps = 10.0;
+        project.chapters = vec![
+            crate::model::Chapter {
+                title: "  ".to_string(),
+                start_frame: 0,
+                end_frame: 2,
+            },
+            crate::model::Chapter {
+                title: "Late".to_string(),
+                start_frame: 4,
+                end_frame: 5,
+            },
+            crate::model::Chapter {
+                title: "Gone".to_string(),
+                start_frame: 9,
+                end_frame: 12,
+            },
+        ];
+        let doc = ffmetadata_chapters(&project).unwrap();
+        assert!(doc.contains("START=400\nEND=500\ntitle=Late\n"), "{doc}");
+        assert_eq!(chapter_span_count(&project), 1);
+    }
+
+    #[test]
+    fn ffmetadata_titles_escape_the_format_specials() {
+        // The title is verbatim in the model; in the
+        // document its format specials take the
+        // backslash prefix and nothing else changes.
+        let mut project = tiny_project();
+        project.chapters = vec![crate::model::Chapter {
+            title: "A = B; C # D \\ E".to_string(),
+            start_frame: 0,
+            end_frame: 2,
+        }];
+        let doc = ffmetadata_chapters(&project).unwrap();
+        assert!(doc.contains("title=A \\= B\\; C \\# D \\\\ E\n"), "{doc}");
+    }
+
+    /// ffprobe's chapter listing of a file, as
+    /// `(start_ms, end_ms, title)` triples in file
+    /// order — the delivered file's own testimony, read
+    /// back by the tool every player effectively uses.
+    fn probed_chapters(path: &Path) -> Vec<(u64, u64, String)> {
+        let out = std::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_chapters",
+                path.to_str().unwrap_or(""),
+            ])
+            .output()
+            .expect("ffprobe runs (CI installs ffmpeg)");
+        assert!(out.status.success(), "ffprobe of {} failed", path.display());
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut chapters = Vec::new();
+        let mut start = 0u64;
+        let mut end = 0u64;
+        for line in text.lines() {
+            if let Some(v) = line.strip_prefix("start=") {
+                start = v.parse().unwrap_or(0);
+            } else if let Some(v) = line.strip_prefix("end=") {
+                end = v.parse().unwrap_or(0);
+            } else if let Some(v) = line.strip_prefix("TAG:title=") {
+                chapters.push((start, end, v.to_string()));
+            }
+        }
+        chapters
+    }
+
+    #[test]
+    fn mp4_full_export_embeds_chapter_markers() {
+        // Roadmap Wave 2, W2-18, end to end: the plain
+        // full entry delivers both markers at the
+        // model's own instants, and the stream-copy
+        // remux leaves the decoded picture identical to
+        // the same project's chapterless export.
+        let project = chaptered_project();
+        let path = temp_file("chapters-full", "mp4");
+        export_mp4(&project, &path).unwrap();
+        assert_eq!(
+            probed_chapters(&path),
+            vec![
+                (0, 83, "Opening".to_string()),
+                (83, 208, "Arrival".to_string()),
+            ]
+        );
+        let plain = temp_file("chapters-plain", "mp4");
+        let mut chapterless = project.clone();
+        chapterless.chapters.clear();
+        export_mp4(&chapterless, &plain).unwrap();
+        assert!(probed_chapters(&plain).is_empty());
+        assert_eq!(
+            decoded_frame_hashes(&path),
+            decoded_frame_hashes(&plain),
+            "chaptered and chapterless exports must decode identically"
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&plain);
+    }
+
+    #[test]
+    fn mp4_scaled_export_embeds_chapter_markers() {
+        // The delivery presets ride the scaled entry —
+        // it embeds through the same tail.
+        let project = chaptered_project();
+        let path = temp_file("chapters-scaled", "mp4");
+        export_mp4_scaled(&project, &path, 2.0).unwrap();
+        assert_eq!(
+            probed_chapters(&path),
+            vec![
+                (0, 83, "Opening".to_string()),
+                (83, 208, "Arrival".to_string()),
+            ]
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mp4_range_export_carries_no_chapter_markers() {
+        // Chapters are episode structure on the FULL
+        // timeline; a range file's clock starts at the
+        // range, so the markers would name the wrong
+        // instants. The range entries embed none.
+        let project = chaptered_project();
+        let path = temp_file("chapters-range", "mp4");
+        export_mp4_range(&project, 0, 4, &path).unwrap();
+        assert!(probed_chapters(&path).is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn embed_mp4_chapters_without_chapters_changes_no_byte() {
+        // The byte-identity pin at the embed step
+        // itself: a chapterless project returns without
+        // touching the finished file.
+        let project = tiny_project();
+        let path = temp_file("chapters-none", "mp4");
+        export_mp4(&project, &path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        embed_mp4_chapters(&project, &path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn gif_and_jpeg_knobs_are_pinned() {
+        // Roadmap Wave 2, W2-42: the two still-image
+        // knobs. Standard is the historical value in both
+        // (GIF speed 10 since the first GIF encoder, JPEG
+        // quality 90 since the first JPEG sequence); the
+        // GIF speeds stay inside the crate's asserted
+        // 1..=30 range at every level.
+        assert_eq!(gif_speed(EncodeQuality::Draft), 30);
+        assert_eq!(gif_speed(EncodeQuality::Standard), 10);
+        assert_eq!(gif_speed(EncodeQuality::Master), 1);
+        assert_eq!(jpeg_quality(EncodeQuality::Draft), 70);
+        assert_eq!(jpeg_quality(EncodeQuality::Standard), 90);
+        assert_eq!(jpeg_quality(EncodeQuality::Master), 95);
+    }
+
+    /// The decoded-frame hash list of a video file: one
+    /// `framemd5` line per decoded frame, `#` headers
+    /// dropped. Two encodes of the same frames under the
+    /// same encoder settings hash identically; a quality
+    /// change that reaches the picture changes the list.
+    /// Comparing decoded frames (not container bytes)
+    /// keeps the quality pins indifferent to muxer
+    /// bookkeeping (Roadmap Wave 2, W2-42).
+    fn decoded_frame_hashes(path: &Path) -> String {
+        let out = std::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-i",
+                path.to_str().unwrap_or(""),
+                "-map",
+                "0:v:0",
+                "-f",
+                "framemd5",
+                "-",
+            ])
+            .output()
+            .expect("ffmpeg runs (CI installs it)");
+        assert!(out.status.success(), "framemd5 of {} failed", path.display());
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn mp4_standard_quality_matches_the_legacy_entry() {
+        // Roadmap Wave 2, W2-42: the byte-identity claim,
+        // end to end — the legacy entry and the quality
+        // entry at Standard decode to the identical
+        // frames, full, ranged and scaled, and report the
+        // identical outcome.
+        let project = tiny_project();
+        let legacy = temp_file("q-mp4-legacy", "mp4");
+        let standard = temp_file("q-mp4-standard", "mp4");
+        let a = export_mp4(&project, &legacy).unwrap();
+        let b = export_mp4_with_quality(
+            &project,
+            &standard,
+            EncodeQuality::Standard,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(a, b);
+        assert_eq!(
+            decoded_frame_hashes(&legacy),
+            decoded_frame_hashes(&standard),
+            "full MP4: standard quality must decode identically"
+        );
+        let legacy_r = temp_file("q-mp4r-legacy", "mp4");
+        let standard_r = temp_file("q-mp4r-standard", "mp4");
+        export_mp4_range(&project, 0, 4, &legacy_r).unwrap();
+        export_mp4_range_with_quality(
+            &project,
+            0,
+            4,
+            &standard_r,
+            EncodeQuality::Standard,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            decoded_frame_hashes(&legacy_r),
+            decoded_frame_hashes(&standard_r),
+            "range MP4: standard quality must decode identically"
+        );
+        let legacy_s = temp_file("q-mp4s-legacy", "mp4");
+        let standard_s = temp_file("q-mp4s-standard", "mp4");
+        export_mp4_scaled(&project, &legacy_s, 2.0).unwrap();
+        export_mp4_scaled_with_quality(
+            &project,
+            &standard_s,
+            2.0,
+            EncodeQuality::Standard,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            decoded_frame_hashes(&legacy_s),
+            decoded_frame_hashes(&standard_s),
+            "scaled MP4: standard quality must decode identically"
+        );
+        for p in [
+            &legacy,
+            &standard,
+            &legacy_r,
+            &standard_r,
+            &legacy_s,
+            &standard_s,
+        ] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn mp4_draft_and_master_change_the_picture() {
+        // Roadmap Wave 2, W2-42: the option is not a
+        // no-op — on the tiny demo's anti-aliased strokes,
+        // CRF 28/veryfast and CRF 16/slow reconstruct
+        // different pixels than the default encode.
+        let project = tiny_project();
+        let standard = temp_file("q-mp4-std", "mp4");
+        let draft = temp_file("q-mp4-draft", "mp4");
+        let master = temp_file("q-mp4-master", "mp4");
+        export_mp4_with_quality(&project, &standard, EncodeQuality::Standard, None, None)
+            .unwrap();
+        export_mp4_with_quality(&project, &draft, EncodeQuality::Draft, None, None).unwrap();
+        export_mp4_with_quality(&project, &master, EncodeQuality::Master, None, None).unwrap();
+        let std_hashes = decoded_frame_hashes(&standard);
+        assert_ne!(std_hashes, decoded_frame_hashes(&draft), "draft MP4");
+        assert_ne!(std_hashes, decoded_frame_hashes(&master), "master MP4");
+        for p in [&standard, &draft, &master] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// A demo project on a stage of the given size, for
+    /// the Shorts geometry pins (Roadmap Wave 2, W2-43).
+    fn stage_project(w: f32, h: f32) -> Project {
+        let mut project = Project::new_demo();
+        project.stage = [w, h];
+        project
+    }
+
+    #[test]
+    fn shorts_geometry_is_pinned() {
+        // Roadmap Wave 2, W2-43: the whole reframe is
+        // this table — render scale to 1920 tall, the
+        // full frame through the scaled-size rounding,
+        // the greatest even 9:16 width inside it,
+        // centred. Every row computed by hand from the
+        // rules in `shorts_geometry`'s docs.
+        let cases: [((f32, f32), f32, (u32, u32), (u32, u32), u32); 7] = [
+            // The tiny demo stage, 4:3.
+            ((96.0, 72.0), 1920.0 / 72.0, (2560, 1920), (1080, 1920), 740),
+            // 16:9 landscape: the crop keeps 1080 of 3413.
+            ((1600.0, 900.0), 1920.0 / 900.0, (3413, 1920), (1080, 1920), 1166),
+            // Already exactly 9:16 at platform size.
+            ((900.0, 1600.0), 1.2, (1080, 1920), (1080, 1920), 0),
+            // Portrait 3:4: narrower than the window is
+            // wide relative to its height — full width.
+            ((72.0, 96.0), 20.0, (1440, 1920), (1080, 1920), 180),
+            // One column past 9:16 at scale 1.0: the
+            // odd-column rule owns the extra column.
+            ((1081.0, 1920.0), 1.0, (1081, 1920), (1080, 1920), 0),
+            // Square.
+            ((100.0, 100.0), 19.2, (1920, 1920), (1080, 1920), 420),
+            // Small stage, big render.
+            ((30.0, 40.0), 48.0, (1440, 1920), (1080, 1920), 180),
+        ];
+        for ((w, h), scale, full, crop, crop_x) in cases {
+            let geo = shorts_geometry(&stage_project(w, h)).unwrap();
+            assert_eq!(geo.scale, scale, "scale for stage {w}x{h}");
+            assert_eq!(geo.full, full, "full frame for stage {w}x{h}");
+            assert_eq!(geo.crop, crop, "crop window for stage {w}x{h}");
+            assert_eq!(geo.crop_x, crop_x, "crop offset for stage {w}x{h}");
+            assert_eq!(geo.crop.0 % 2, 0, "crop width is even for {w}x{h}");
+            assert!(geo.crop_x + geo.crop.0 <= geo.full.0);
+        }
+    }
+
+    #[test]
+    fn shorts_width_validation_is_pinned() {
+        // Roadmap Wave 2, W2-43: the encoder's rules as
+        // refusals — zero, odd (yuv420p chroma), and
+        // wider than the stage (no padding, no upscale).
+        assert_eq!(
+            check_shorts_width(0, 2560).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            check_shorts_width(1081, 2560).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            check_shorts_width(3000, 2560).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(check_shorts_width(1080, 2560).unwrap(), 1080);
+        assert_eq!(check_shorts_width(2560, 2560).unwrap(), 2560);
+    }
+
+    #[test]
+    fn shorts_video_args_are_pinned() {
+        // Roadmap Wave 2, W2-43: one `-vf` crop filter
+        // ahead of the standard MP4 vector; the quality
+        // pair splices behind `-pix_fmt` and `-movflags`
+        // keeps the tail, exactly as in `mp4_video_args`.
+        let geo = shorts_geometry(&stage_project(900.0, 1600.0)).unwrap();
+        let strings = |v: Vec<String>| v.join(" ");
+        assert_eq!(
+            strings(shorts_video_args(EncodeQuality::Standard, true, &geo)),
+            "-vf crop=1080:1920:0:0 -c:v libx264 -pix_fmt yuv420p -movflags +faststart"
+        );
+        assert_eq!(
+            strings(shorts_video_args(EncodeQuality::Standard, false, &geo)),
+            "-vf crop=1080:1920:0:0 -c:v libx264 -pix_fmt yuv420p"
+        );
+        assert_eq!(
+            strings(shorts_video_args(EncodeQuality::Draft, true, &geo)),
+            "-vf crop=1080:1920:0:0 -c:v libx264 -pix_fmt yuv420p \
+             -crf 28 -preset veryfast -movflags +faststart"
+        );
+        assert_eq!(
+            strings(shorts_video_args(EncodeQuality::Master, false, &geo)),
+            "-vf crop=1080:1920:0:0 -c:v libx264 -pix_fmt yuv420p -crf 16 -preset slow"
+        );
+    }
+
+    /// Decode a video's first frame to a PNG file and
+    /// open it (Roadmap Wave 2, W2-43 — the dimension
+    /// and pixel pins below read real encoder output).
+    fn first_frame_png(video: &Path, tag: &str) -> std::path::PathBuf {
+        let out = temp_file(tag, "png");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                video.to_str().unwrap_or(""),
+                "-frames:v",
+                "1",
+                out.to_str().unwrap_or(""),
+            ])
+            .status()
+            .expect("ffmpeg runs (CI installs it)");
+        assert!(status.success(), "first frame of {} failed", video.display());
+        out
+    }
+
+    /// Mean absolute per-channel difference between two
+    /// same-sized RGB buffers (Roadmap Wave 2, W2-43).
+    fn mean_abs_diff(
+        a: &ImageBuffer<Rgb<u8>, Vec<u8>>,
+        b: &ImageBuffer<Rgb<u8>, Vec<u8>>,
+    ) -> f64 {
+        assert_eq!(a.dimensions(), b.dimensions());
+        let sum: u64 = a
+            .as_raw()
+            .iter()
+            .zip(b.as_raw().iter())
+            .map(|(x, y)| (*x as i32 - *y as i32).unsigned_abs() as u64)
+            .sum();
+        sum as f64 / a.as_raw().len() as f64
+    }
+
+    #[test]
+    fn shorts_mp4_is_a_centred_916_crop() {
+        // Roadmap Wave 2, W2-43, end to end: the Shorts
+        // export of the 96x72 demo is a 1080x1920 file
+        // whose picture is the centre window of the
+        // full 1920-tall render — the decoded first
+        // frame matches the centred crop of the true
+        // re-render closely (lossy encode tolerance) and
+        // a window shifted to the left edge much worse,
+        // which is what makes "centred" a measurement
+        // and not a hope.
+        let project = tiny_project();
+        let geo = shorts_geometry(&project).unwrap();
+        let video = temp_file("shorts-e2e", "mp4");
+        let outcome = export_mp4_shorts(&project, &video).unwrap();
+        assert_eq!(outcome.frames, 5);
+        assert!(outcome.missing_audio.is_empty());
+        let frame_path = first_frame_png(&video, "shorts-e2e-f0");
+        let frame = image::open(&frame_path).unwrap().to_rgb8();
+        assert_eq!(frame.dimensions(), (1080, 1920), "shorts output size");
+        let full = render_frame_at_scaled(&project, 0.0, geo.scale).unwrap();
+        assert_eq!(full.dimensions(), geo.full);
+        let centred = image::imageops::crop_imm(
+            &full,
+            geo.crop_x,
+            0,
+            geo.crop.0,
+            geo.crop.1,
+        )
+        .to_image();
+        let shifted = image::imageops::crop_imm(&full, 0, 0, geo.crop.0, geo.crop.1).to_image();
+        let centre_diff = mean_abs_diff(&frame, &centred);
+        let shift_diff = mean_abs_diff(&frame, &shifted);
+        assert!(
+            centre_diff < 20.0,
+            "decoded shorts frame vs the centred window: mean abs diff {centre_diff}"
+        );
+        assert!(
+            shift_diff > centre_diff + 5.0,
+            "the left-edge window must differ more ({shift_diff}) than the centred one ({centre_diff})"
+        );
+        let _ = std::fs::remove_file(&video);
+        let _ = std::fs::remove_file(&frame_path);
+    }
+
+    #[test]
+    fn shorts_range_matches_the_full_export_frames() {
+        // Roadmap Wave 2, W2-43: the range entry over
+        // the whole timeline encodes the identical
+        // frames as the full entry (same sampled times,
+        // same render scale, same crop argv).
+        let project = tiny_project();
+        let full = temp_file("shorts-full", "mp4");
+        let range = temp_file("shorts-range", "mp4");
+        export_mp4_shorts(&project, &full).unwrap();
+        export_mp4_shorts_range(&project, 0, 4, &range).unwrap();
+        assert_eq!(
+            decoded_frame_hashes(&full),
+            decoded_frame_hashes(&range),
+            "shorts range over all frames must decode identically"
+        );
+        let _ = std::fs::remove_file(&full);
+        let _ = std::fs::remove_file(&range);
+    }
+
+    #[test]
+    fn shorts_export_refuses_an_unusable_stage() {
+        // Roadmap Wave 2, W2-43: refusals happen before
+        // anything is written — a zero-size stage and a
+        // stage too short for its width (a 2 px window
+        // at most) are InvalidInput, and no file appears.
+        let path = temp_file("shorts-refused", "mp4");
+        let zero = stage_project(0.0, 72.0);
+        let err = export_mp4_shorts(&zero, &path).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!path.exists(), "a refused export writes nothing");
+        let sliver = stage_project(10000.0, 10.0);
+        assert!(shorts_geometry(&sliver).is_err());
+        let err = export_mp4_shorts(&sliver, &path).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!path.exists(), "a refused export writes nothing");
+        let nan = stage_project(f32::NAN, 72.0);
+        assert!(shorts_geometry(&nan).is_err());
+    }
+
+    #[test]
+    fn webm_standard_quality_matches_the_legacy_entry() {
+        // Roadmap Wave 2, W2-42: the WebM byte-identity
+        // claim, end to end — full and ranged legacy
+        // entries decode identically to the quality entry
+        // at Standard (the ladder's flat 2M rung).
+        let project = tiny_project();
+        let legacy = temp_file("q-webm-legacy", "webm");
+        let standard = temp_file("q-webm-standard", "webm");
+        let a = export_webm(&project, &legacy).unwrap();
+        let b = export_webm_with_quality(
+            &project,
+            &standard,
+            EncodeQuality::Standard,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(a, b);
+        assert_eq!(
+            decoded_frame_hashes(&legacy),
+            decoded_frame_hashes(&standard),
+            "full WebM: standard quality must decode identically"
+        );
+        let legacy_r = temp_file("q-webmr-legacy", "webm");
+        let standard_r = temp_file("q-webmr-standard", "webm");
+        export_webm_range(&project, 0, 4, &legacy_r).unwrap();
+        export_webm_range_with_quality(
+            &project,
+            0,
+            4,
+            &standard_r,
+            EncodeQuality::Standard,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            decoded_frame_hashes(&legacy_r),
+            decoded_frame_hashes(&standard_r),
+            "range WebM: standard quality must decode identically"
+        );
+        for p in [&legacy, &standard, &legacy_r, &standard_r] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// A busy, colour-rich project for the encoder-quality
+    /// difference pins (Roadmap Wave 2, W2-42): a 420x300
+    /// stage, 12 authored frames, no figures — every frame
+    /// is a 28x20 grid of colour cells (560 distinct-ish
+    /// colours per frame, rotating with the frame index)
+    /// drawn as short thick strokes. The entropy is the
+    /// point: on near-flat content a VP9 bitrate target or
+    /// a GIF palette can coincide across quality levels,
+    /// and a "not a no-op" pin would measure nothing.
+    /// Deterministic — colours are a closed-form function
+    /// of (frame, cell).
+    fn busy_project() -> Project {
+        let mut project = Project::new_demo();
+        project.stage = [420.0, 300.0];
+        project.background = 0x101418;
+        project.figures.clear();
+        project.camera.clear();
+        project.frames = (0..12)
+            .map(|_| crate::model::Frame {
+                poses: Vec::new(),
+                duration: 1.0,
+                easing: None,
+                bends: Vec::new(),
+            })
+            .collect();
+        let mut strokes = Vec::new();
+        for f in 0..12u32 {
+            for cell in 0..560u32 {
+                let x = (cell % 28) as f32 * 15.0;
+                let y = (cell / 28) as f32 * 15.0;
+                let r = (cell * 37 + f * 11) % 256;
+                let g = (cell * 91 + f * 7) % 256;
+                let b = (cell * 53 + f * 29) % 256;
+                strokes.push(crate::model::Stroke {
+                    frame: f as usize,
+                    points: vec![[x + 1.0, y + 7.0], [x + 13.0, y + 7.0]],
+                    color: (r << 16) | (g << 8) | b,
+                    width: 13.0,
+                    widths: Vec::new(),
+                    fill: None,
+                    spray: None,
+                    opacity: 1.0,
+                    scatter: 0.0,
+                });
+            }
+        }
+        project.strokes = strokes;
+        project
+    }
+
+    #[test]
+    fn webm_draft_and_master_change_the_picture_on_busy_content() {
+        // Roadmap Wave 2, W2-42: on content rich enough to
+        // spend the bits, the ladder's Draft (700k at this
+        // height) and Master (2500k) targets reconstruct
+        // different frames than Standard's flat 2M.
+        let project = busy_project();
+        let standard = temp_file("q-webm-std", "webm");
+        let draft = temp_file("q-webm-draft", "webm");
+        let master = temp_file("q-webm-master", "webm");
+        export_webm_with_quality(&project, &standard, EncodeQuality::Standard, None, None)
+            .unwrap();
+        export_webm_with_quality(&project, &draft, EncodeQuality::Draft, None, None).unwrap();
+        export_webm_with_quality(&project, &master, EncodeQuality::Master, None, None).unwrap();
+        let std_hashes = decoded_frame_hashes(&standard);
+        assert_ne!(std_hashes, decoded_frame_hashes(&draft), "draft WebM");
+        assert_ne!(std_hashes, decoded_frame_hashes(&master), "master WebM");
+        for p in [&standard, &draft, &master] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn gif_standard_quality_is_byte_identical_draft_and_master_differ() {
+        // Roadmap Wave 2, W2-42: the GIF claim in both
+        // directions, on the busy project (560 colours a
+        // frame — NeuQuant must reduce, so the sampling
+        // speed has something to change). Legacy ==
+        // Standard byte for byte; Draft (speed 30) and
+        // Master (speed 1) quantise to different files.
+        let project = busy_project();
+        let legacy = temp_file("q-gif-legacy", "gif");
+        let standard = temp_file("q-gif-standard", "gif");
+        let draft = temp_file("q-gif-draft", "gif");
+        let master = temp_file("q-gif-master", "gif");
+        let n = export_gif(&project, &legacy).unwrap();
+        assert_eq!(
+            n,
+            export_gif_with_quality(&project, &standard, EncodeQuality::Standard).unwrap()
+        );
+        assert_eq!(
+            n,
+            export_gif_with_quality(&project, &draft, EncodeQuality::Draft).unwrap()
+        );
+        assert_eq!(
+            n,
+            export_gif_with_quality(&project, &master, EncodeQuality::Master).unwrap()
+        );
+        let legacy_bytes = std::fs::read(&legacy).unwrap();
+        assert_eq!(
+            legacy_bytes,
+            std::fs::read(&standard).unwrap(),
+            "GIF: standard quality must be byte-identical"
+        );
+        assert_ne!(
+            legacy_bytes,
+            std::fs::read(&draft).unwrap(),
+            "GIF: draft speed must change the quantisation"
+        );
+        assert_ne!(
+            legacy_bytes,
+            std::fs::read(&master).unwrap(),
+            "GIF: master speed must change the quantisation"
+        );
+        for p in [&legacy, &standard, &draft, &master] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn jpeg_standard_quality_is_byte_identical_draft_differs() {
+        // Roadmap Wave 2, W2-42: the JPEG claim in both
+        // directions. The encoder writes quality-scaled
+        // quantisation tables into every file, so the
+        // levels differ in bytes on any content; Standard
+        // (90) must equal the legacy sequence byte for
+        // byte, frame by frame.
+        let project = tiny_project();
+        let base = std::env::temp_dir().join(format!("styk-qjpeg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let legacy_dir = base.join("legacy");
+        let standard_dir = base.join("standard");
+        let draft_dir = base.join("draft");
+        let n = export_jpeg_sequence(&project, &legacy_dir).unwrap();
+        assert_eq!(
+            n,
+            export_jpeg_sequence_with_quality(
+                &project,
+                &standard_dir,
+                EncodeQuality::Standard,
+                None
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            n,
+            export_jpeg_sequence_with_quality(&project, &draft_dir, EncodeQuality::Draft, None)
+                .unwrap()
+        );
+        for i in 1..=n {
+            let name = format!("frame-{i:04}.jpg");
+            let legacy_bytes = std::fs::read(legacy_dir.join(&name)).unwrap();
+            assert_eq!(
+                legacy_bytes,
+                std::fs::read(standard_dir.join(&name)).unwrap(),
+                "{name}: standard quality must be byte-identical"
+            );
+            assert_ne!(
+                legacy_bytes,
+                std::fs::read(draft_dir.join(&name)).unwrap(),
+                "{name}: draft quality must change the encoding"
+            );
+        }
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// One horizontal red stroke at the given opacity on a
@@ -7986,6 +11079,8 @@ mod tests {
                 poses: vec![Pose {
                     root: [50.0, 100.0],
                     angles: vec![0.0, 90.0],
+                    sx: 1.0,
+                    sy: 1.0,
                 }],
                 duration: 1.0,
                 easing: None,
@@ -8009,6 +11104,10 @@ mod tests {
             subtitles: Vec::new(),
             subtitle_style: Default::default(),
             format_version: crate::model::FORMAT_VERSION_CURRENT,
+            chapters: Vec::new(),
+            stored_guides: Vec::new(),
+            title_cards: Default::default(),
+            beat_markers: Vec::new(),
         }
     }
 
@@ -8210,6 +11309,8 @@ mod tests {
         let pose = |root: [f32; 2]| Pose {
             root,
             angles: vec![0.0, 90.0],
+            sx: 1.0,
+            sy: 1.0,
         };
         Project {
             name: "s10-test".into(),
@@ -8245,6 +11346,10 @@ mod tests {
             subtitles: Vec::new(),
             subtitle_style: Default::default(),
             format_version: crate::model::FORMAT_VERSION_CURRENT,
+            chapters: Vec::new(),
+            stored_guides: Vec::new(),
+            title_cards: Default::default(),
+            beat_markers: Vec::new(),
         }
     }
 
@@ -8380,10 +11485,14 @@ mod tests {
                     Pose {
                         root: [20.0, 100.0],
                         angles: vec![0.0, 90.0],
+                        sx: 1.0,
+                        sy: 1.0,
                     },
                     Pose {
                         root: [100.0, 60.0],
                         angles: vec![0.0, 0.0],
+                        sx: 1.0,
+                        sy: 1.0,
                     },
                 ],
                 duration: 1.0,
@@ -8408,6 +11517,10 @@ mod tests {
             subtitles: Vec::new(),
             subtitle_style: Default::default(),
             format_version: crate::model::FORMAT_VERSION_CURRENT,
+            chapters: Vec::new(),
+            stored_guides: Vec::new(),
+            title_cards: Default::default(),
+            beat_markers: Vec::new(),
         };
         let img = render_frame(&project, 0);
         let px = img.get_pixel(117, 100).0;
@@ -10431,6 +13544,214 @@ progress=end
         let _ = std::fs::remove_file(&path);
     }
 
+    // -----------------------------------------------------------------
+    // Roadmap Wave 2 (W2-49): the spritesheet round trip — a
+    // pack export's sidecar slices the sheet back into its
+    // frames, pixel for pixel, names verbatim.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn sheet_pack_round_trips_every_frame_pixel_for_pixel() {
+        let project = tiny_project(); // 96x72 stage, 5 frames
+        let path = temp_file("sheet-pack-rt", "png");
+        let n = export_spritesheet_pack(&project, &path).unwrap();
+        assert_eq!(n, 5);
+        // The pack PNG is the plain export's PNG, byte for byte.
+        let plain = temp_file("sheet-pack-plain", "png");
+        export_spritesheet(&project, &plain).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), std::fs::read(&plain).unwrap());
+        // The sidecar records the layout: 5 tiles of 96x72 on
+        // the square-root grid (3 columns x 2 rows).
+        let sidecar = spritesheet_sidecar_path(&path);
+        assert!(sidecar.exists(), "the pack export writes a sidecar");
+        let meta = read_spritesheet_sidecar(&path)
+            .unwrap()
+            .expect("sidecar parses");
+        assert_eq!(meta.format, SPRITESHEET_FORMAT);
+        assert_eq!(meta.version, SPRITESHEET_FORMAT_VERSION);
+        assert_eq!((meta.sheet_width, meta.sheet_height), (288, 144));
+        assert_eq!((meta.tile_width, meta.tile_height), (96, 72));
+        assert_eq!((meta.columns, meta.rows), (3, 2));
+        assert!(!meta.alpha);
+        assert_eq!(meta.scale, 1.0);
+        assert_eq!(meta.frames.len(), 5);
+        for (k, frame) in meta.frames.iter().enumerate() {
+            assert_eq!(frame.index, k);
+            assert_eq!(frame.name, format!("frame-{:04}.png", k + 1));
+            assert_eq!(
+                (frame.x, frame.y),
+                ((k as u32 % 3) * 96, (k as u32 / 3) * 72)
+            );
+        }
+        // And slicing the sheet recovers each authored frame
+        // pixel for pixel, in order, under its recorded name.
+        let frames = slice_spritesheet(&path)
+            .unwrap()
+            .expect("the pack sheet slices");
+        assert_eq!(frames.len(), 5);
+        for (k, frame) in frames.iter().enumerate() {
+            assert_eq!(frame.index, k);
+            assert_eq!(frame.name, format!("frame-{:04}.png", k + 1));
+            assert_eq!((frame.width, frame.height), (96, 72));
+            let decoded = image::load_from_memory(&frame.png).unwrap().to_rgb8();
+            assert_eq!(
+                decoded.into_raw(),
+                render_frame(&project, k).into_raw(),
+                "recovered frame {k} must be authored frame {k}"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&plain);
+        let _ = std::fs::remove_file(&sidecar);
+    }
+
+    #[test]
+    fn sheet_range_pack_round_trips_the_authored_indices() {
+        let project = tiny_project();
+        let path = temp_file("sheet-pack-range", "png");
+        let n = export_sheet_range_pack(&project, 1, 3, &path).unwrap();
+        assert_eq!(n, 3);
+        let frames = slice_spritesheet(&path)
+            .unwrap()
+            .expect("the range pack slices");
+        assert_eq!(frames.len(), 3);
+        // Names keep the authored indices, as the PNG sequence
+        // member names its files.
+        let names: Vec<&str> = frames.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["frame-0002.png", "frame-0003.png", "frame-0004.png"]);
+        for (k, frame) in frames.iter().enumerate() {
+            assert_eq!(frame.index, k + 1);
+            let decoded = image::load_from_memory(&frame.png).unwrap().to_rgb8();
+            assert_eq!(
+                decoded.into_raw(),
+                render_frame(&project, k + 1).into_raw(),
+                "recovered tile {k} must be authored frame {}",
+                k + 1
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(spritesheet_sidecar_path(&path));
+    }
+
+    #[test]
+    fn sheet_scaled_pack_round_trips_at_the_export_scale() {
+        let project = tiny_project();
+        let path = temp_file("sheet-pack-scaled", "png");
+        let n = export_sheet_scaled_pack(&project, &path, 2.0).unwrap();
+        assert_eq!(n, 5);
+        let meta = read_spritesheet_sidecar(&path)
+            .unwrap()
+            .expect("sidecar parses");
+        assert_eq!((meta.tile_width, meta.tile_height), (192, 144));
+        assert_eq!(meta.scale, 2.0);
+        let frames = slice_spritesheet(&path)
+            .unwrap()
+            .expect("the scaled pack slices");
+        assert_eq!(frames.len(), 5);
+        for (k, frame) in frames.iter().enumerate() {
+            let decoded = image::load_from_memory(&frame.png).unwrap().to_rgb8();
+            assert_eq!(
+                decoded.into_raw(),
+                render_frame_scaled(&project, k, 2.0).unwrap().into_raw(),
+                "recovered scaled tile {k} must be the 2x render of frame {k}"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(spritesheet_sidecar_path(&path));
+    }
+
+    #[test]
+    fn sheet_pack_of_empty_project_writes_no_sidecar() {
+        let mut project = tiny_project();
+        project.frames.clear();
+        let path = temp_file("sheet-pack-blank", "png");
+        let n = export_spritesheet_pack(&project, &path).unwrap();
+        assert_eq!(n, 0);
+        assert!(
+            !spritesheet_sidecar_path(&path).exists(),
+            "an empty sheet has no frames to recover and gets no sidecar"
+        );
+        assert_eq!(read_spritesheet_sidecar(&path).unwrap(), None);
+        assert_eq!(slice_spritesheet(&path).unwrap(), None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sheet_without_sidecar_slices_to_none_not_a_guess() {
+        // The degraded case: a plain sheet export (no pack)
+        // carries no layout, and the reader says so instead of
+        // guessing a grid — the caller imports it as one still.
+        let project = tiny_project();
+        let path = temp_file("sheet-pack-none", "png");
+        export_spritesheet(&project, &path).unwrap();
+        assert_eq!(slice_spritesheet(&path).unwrap(), None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sheet_sidecar_validation_refuses_bad_pairings() {
+        let project = tiny_project();
+        let path = temp_file("sheet-pack-bad", "png");
+        export_spritesheet_pack(&project, &path).unwrap();
+        let sidecar = spritesheet_sidecar_path(&path);
+        let good = std::fs::read_to_string(&sidecar).unwrap();
+        // A foreign format tag refuses.
+        let foreign = good.replace(SPRITESHEET_FORMAT, "someone-elses-sheet");
+        std::fs::write(&sidecar, &foreign).unwrap();
+        let err = read_spritesheet_sidecar(&path).expect_err("foreign format");
+        assert!(err.contains("format"), "err: {err}");
+        // A grid that contradicts the stated sheet size refuses.
+        let broken = good.replace("\"columns\": 3", "\"columns\": 4");
+        assert_ne!(broken, good, "the fixture must actually change the grid");
+        std::fs::write(&sidecar, &broken).unwrap();
+        let err = read_spritesheet_sidecar(&path).expect_err("inconsistent grid");
+        assert!(err.contains("inconsistent"), "err: {err}");
+        // A sidecar paired with a different-sized sheet refuses.
+        std::fs::write(&sidecar, &good).unwrap();
+        let small = temp_file("sheet-pack-small", "png");
+        image::RgbImage::from_pixel(96, 72, image::Rgb([1, 2, 3]))
+            .save(&small)
+            .unwrap();
+        let meta = read_spritesheet_sidecar(&path).unwrap().unwrap();
+        let err = slice_sheet_with_meta(&std::fs::read(&small).unwrap(), &meta)
+            .expect_err("mismatched sheet");
+        assert!(err.contains("metadata describes"), "err: {err}");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&small);
+        let _ = std::fs::remove_file(&sidecar);
+    }
+
+    #[test]
+    fn sheet_grid_slice_is_explicit_and_exact() {
+        // Three distinct encoder-made tiles side by side: the
+        // manual path slices exactly the grid it is given.
+        let mut sheet = image::RgbImage::new(6, 2);
+        for (x, px) in [(0, [255, 0, 0]), (2, [0, 255, 0]), (4, [0, 0, 255])] {
+            for dx in 0..2 {
+                for dy in 0..2 {
+                    sheet.put_pixel(x + dx, dy, image::Rgb(px));
+                }
+            }
+        }
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(sheet)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = bytes.into_inner();
+        let frames = slice_sheet_grid(&bytes, 3, 1, 3, "pose").unwrap();
+        assert_eq!(frames.len(), 3);
+        for (k, frame) in frames.iter().enumerate() {
+            assert_eq!(frame.name, format!("pose-{:04}.png", k + 1));
+            let decoded = image::load_from_memory(&frame.png).unwrap().to_rgb8();
+            assert!(decoded.pixels().all(|p| p.0 == [[255, 0, 0], [0, 255, 0], [0, 0, 255]][k]));
+        }
+        // A count past the grid refuses; a grid the sheet does
+        // not divide into refuses — neither is silently cropped.
+        assert!(slice_sheet_grid(&bytes, 3, 1, 4, "pose").is_err());
+        assert!(slice_sheet_grid(&bytes, 4, 1, 2, "pose").is_err());
+        assert!(slice_sheet_grid(&bytes, 0, 1, 1, "pose").is_err());
+    }
+
     #[test]
     fn svg_range_writes_exactly_the_sub_range_files() {
         let project = tiny_project();
@@ -10492,8 +13813,9 @@ mod alpha_export_tests {
     use super::{
         export_png_alpha_sequence_range_scaled_with_render_progress,
         export_png_alpha_sequence_with_render_progress, export_sheet_alpha_scaled,
-        export_spritesheet_alpha, render_frame_alpha, render_frame_alpha_scaled,
-        RenderProgressEvent,
+        export_spritesheet_alpha, export_spritesheet_alpha_pack, read_spritesheet_sidecar,
+        render_frame_alpha, render_frame_alpha_scaled, slice_spritesheet,
+        spritesheet_sidecar_path, RenderProgressEvent,
     };
     use crate::model::Project;
     use std::path::PathBuf;
@@ -10747,6 +14069,36 @@ mod alpha_export_tests {
         let sheet = image::open(&path).unwrap().to_rgba8();
         assert_eq!(sheet.dimensions(), (576, 288));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sheet_alpha_pack_round_trips_coverage_pixel_for_pixel() {
+        // Roadmap Wave 2 (W2-49): the alpha pack's sidecar
+        // records the layout, and slicing recovers each tile
+        // with its per-pixel coverage intact.
+        let project = tiny_project();
+        let path = temp_file("sheet-pack", "png");
+        let tiled = export_spritesheet_alpha_pack(&project, &path).unwrap();
+        assert_eq!(tiled, 5);
+        let meta = read_spritesheet_sidecar(&path)
+            .unwrap()
+            .expect("sidecar parses");
+        assert!(meta.alpha, "the alpha family records alpha");
+        let frames = slice_spritesheet(&path)
+            .unwrap()
+            .expect("the alpha pack slices");
+        assert_eq!(frames.len(), 5);
+        for (k, frame) in frames.iter().enumerate() {
+            assert_eq!(frame.name, format!("frame-{:04}.png", k + 1));
+            let decoded = image::load_from_memory(&frame.png).unwrap().to_rgba8();
+            assert_eq!(
+                decoded.into_raw(),
+                render_frame_alpha(&project, k).into_raw(),
+                "recovered alpha tile {k} must be authored frame {k}, coverage included"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(spritesheet_sidecar_path(&path));
     }
 }
 
@@ -11098,6 +14450,8 @@ mod wave_p_subtitle_burn_in_tests {
         media.frames[0].poses = vec![Pose {
             root: [60.0, 60.0],
             angles: vec![0.0, 0.0],
+            sx: 1.0,
+            sy: 1.0,
         }];
         media.sprites.push(SpriteInstance {
             asset: 0,

@@ -1003,6 +1003,86 @@ pub fn clip_particles(
     out
 }
 
+/// Photosensitivity measurement for one clip kind (Wave 2,
+/// W2-54 — the A20-13 measured pass). Returned by
+/// [`flash_caution`] for the kinds whose per-particle alpha
+/// oscillates faster than the WCAG 2.3.1 guidance rate of
+/// 3 flashes per second at ordinary project frame rates,
+/// with a material swing. Kinds absent from the table were
+/// measured too — their alpha is monotonic, envelope-bound
+/// or positional only; the full table lives in the seat's
+/// findings (uiux-roadmap/findings2/w2-54.md).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FlashCaution {
+    /// Oscillation rate of the alpha factor, in cycles per
+    /// FRAME (this module's time unit): multiply by the
+    /// project fps for flashes per second. For kinds whose
+    /// motes oscillate at seeded per-mote rates (Glitter)
+    /// this is the FASTEST mote's rate — a caution names
+    /// the peak. For Lightning, whose flicker is re-drawn
+    /// uncorrelated every frame, it is 0.5: one opposing
+    /// transition pair per two frames, the frame-rate bound.
+    pub cycles_per_frame: f32,
+    /// Lowest value of the oscillating alpha factor.
+    pub factor_min: f32,
+    /// Highest value of the oscillating alpha factor.
+    pub factor_max: f32,
+}
+
+impl FlashCaution {
+    /// Flash pairs per second at project rate `fps`.
+    pub fn hz(&self, fps: f32) -> f32 {
+        self.cycles_per_frame * fps.max(0.0)
+    }
+}
+
+/// The measured flash caution for `kind`, or `None` when
+/// the kind's alpha does not oscillate above the 3/s
+/// guidance rate at the reference 24 fps (W2-54). Every
+/// figure below is the constant in this module's own code
+/// for the kind, converted: a sine term
+/// `a + b * sin(w * local + ..)` has rate `w / TAU` cycles
+/// per frame and factor range `[a - b, a + b]`.
+///
+/// The flagged motes are small (the largest flagged total,
+/// Aurora's 39 discs of radius 4.2, covers ≈0.3% of a
+/// 960×720 stage at 1× zoom), so no flagged kind meets the
+/// WCAG general-flash AREA condition — this is a caution,
+/// not a ban (A20-13). The one large-area luminance event
+/// in the system, Storm weather's lightning disc, is NOT
+/// flagged: it fires once per 47 frames (0.51/s at 24 fps)
+/// at alpha ≤ 0.05.
+pub fn flash_caution(kind: ClipKind) -> Option<FlashCaution> {
+    let c = |cycles_per_frame: f32, factor_min: f32, factor_max: f32| FlashCaution {
+        cycles_per_frame,
+        factor_min,
+        factor_max,
+    };
+    let tau = std::f32::consts::TAU;
+    Some(match kind {
+        // flicker = 0.6 + 0.4 * prand(seed, strike, 77),
+        // re-drawn every frame (strike = floor(local)).
+        ClipKind::Lightning => c(0.5, 0.60, 1.00),
+        // twinkle = 0.55 + 0.45 * sin(1.7 * local + ..).
+        ClipKind::Sparkle => c(1.7 / tau, 0.10, 1.00),
+        // Per-mote twinkle speed = 1.6 + prand * 2.4; the
+        // table carries the fastest mote (4.0). Even the
+        // slowest (1.6) runs at 3.1/s at the 12 fps default.
+        ClipKind::Glitter => c(4.0 / tau, 0.12, 1.00),
+        // twinkle = 0.7 + 0.3 * sin(3.1 * local + ..).
+        ClipKind::Fireworks => c(3.1 / tau, 0.40, 1.00),
+        // flicker = 0.8 + 0.2 * sin(2.6 * local + ..).
+        ClipKind::Ember => c(2.6 / tau, 0.60, 1.00),
+        // shimmer = 0.7 + 0.3 * sin(1.1 * local + ..).
+        ClipKind::Prism => c(1.1 / tau, 0.40, 1.00),
+        // shimmer = 0.65 + 0.35 * sin(0.9 * local + ..);
+        // crosses 3/s only at 24 fps and above, and its
+        // alpha is capped at 0.5 * envelope besides.
+        ClipKind::Aurora => c(0.9 / tau, 0.30, 1.00),
+        _ => return None,
+    })
+}
+
 
 /// Continuous weather over the whole timeline (wave-5 prep;
 /// emission lives in vfx.rs, rendering in export.rs).
@@ -2544,5 +2624,103 @@ mod tests {
         let text = serde_json::to_string(&solid).unwrap();
         let back: ParticleClip = serde_json::from_str(&text).unwrap();
         assert_eq!(back.color2, None);
+    }
+
+    /// Count full oscillation cycles in `series` with a
+    /// hysteresis band of 15% of the series' range: a peak
+    /// counts once the value afterwards falls a band below
+    /// it, a trough symmetrically; cycles are the smaller
+    /// of the two counts, so a lone hump is not a cycle.
+    fn alpha_cycles(series: &[f32]) -> u32 {
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for v in series {
+            lo = lo.min(*v);
+            hi = hi.max(*v);
+        }
+        let band = 0.15 * (hi - lo);
+        if band <= 0.0 {
+            return 0;
+        }
+        let (mut peaks, mut troughs) = (0u32, 0u32);
+        // Start by seeking whichever extreme comes first.
+        let mut seeking_peak = series[0] < (lo + hi) / 2.0;
+        let mut extreme = series[0];
+        for &v in &series[1..] {
+            if seeking_peak {
+                extreme = extreme.max(v);
+                if v < extreme - band {
+                    peaks += 1;
+                    seeking_peak = false;
+                    extreme = v;
+                }
+            } else {
+                extreme = extreme.min(v);
+                if v > extreme + band {
+                    troughs += 1;
+                    seeking_peak = true;
+                    extreme = v;
+                }
+            }
+        }
+        peaks.min(troughs)
+    }
+
+    /// W2-54 (A20-13): the flash table is pinned against
+    /// this module's own output. For every kind, a long
+    /// clip is sampled frame by frame through the middle
+    /// of its life (t in [0.25, 0.75], where the shared
+    /// envelope is high) and the first particle's alpha
+    /// series is cycle-counted at the reference 24 fps. A
+    /// kind is in [`flash_caution`]'s table if and only if
+    /// its measured rate exceeds 3/s — so retuning a
+    /// twinkle constant in either direction fails here
+    /// until the table (and the FX panel caution riding
+    /// on it) is updated to match.
+    #[test]
+    fn flash_caution_table_matches_measured_alpha_rates() {
+        let anchor = [300.0, 280.0];
+        let mut flagged = 0;
+        for kind in KINDS {
+            let c = ParticleClip {
+                start: 0.0,
+                duration: 960.0,
+                kind,
+                color: 0xFFC65D,
+                color2: None,
+                seed: 777,
+                angle: 90.0,
+                length: 160.0,
+            };
+            let series: Vec<f32> = (240..720)
+                .map(|f| {
+                    clip_particles(&c, f as f32, anchor)
+                        .first()
+                        .map(|p| p.3)
+                        .unwrap_or(0.0)
+                })
+                .collect();
+            let hz = alpha_cycles(&series) as f32 / (series.len() as f32 / 24.0);
+            let table = flash_caution(kind);
+            assert_eq!(
+                table.is_some(),
+                hz > 3.0,
+                "{kind:?}: table rate {:?} vs measured {hz:.2} Hz at 24 fps",
+                table.map(|t| t.hz(24.0))
+            );
+            if let Some(t) = table {
+                flagged += 1;
+                assert!(
+                    t.hz(24.0) > 3.0,
+                    "{kind:?}: table rate under the guidance line"
+                );
+                assert!(
+                    0.0 <= t.factor_min && t.factor_min < t.factor_max && t.factor_max <= 1.0,
+                    "{kind:?}: factor range {}..{} is not a real swing",
+                    t.factor_min,
+                    t.factor_max
+                );
+            }
+        }
+        assert_eq!(flagged, 7, "exactly the seven measured kinds are flagged");
     }
 }

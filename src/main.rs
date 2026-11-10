@@ -43,6 +43,7 @@ mod shell_tools_style;
 mod shell_tools_view;
 mod stage_sprites;
 mod stage_view;
+mod stage_gizmo;
 
 #[cfg(test)]
 #[path = "rune_sec/snap_tests.rs"]
@@ -217,6 +218,22 @@ pub enum ConfirmAction {
     /// Replace the session with the recovery snapshot
     /// (project-tools Recover, Home's recovery banner).
     RecoverSnapshot,
+    /// Copy the legacy working-directory stores into the
+    /// per-user app data folder (Home's migration banner,
+    /// Roadmap Wave 2 W2-65 — the GUI half of IA-RM9-2).
+    /// A unit variant like its siblings: the plan itself
+    /// lives in `State::migration_panel`, captured at
+    /// startup; the arm only records that the banner's
+    /// first press happened.
+    MigrateLegacyData,
+    /// Replace the session with starter template
+    /// `templates::TEMPLATES[i]` (Home's template
+    /// section, Roadmap Wave 2 W2-91).
+    NewFromTemplate(usize),
+    /// Replace the session with bundled sample
+    /// `samples::SAMPLES[i]` (Home's sample row,
+    /// Roadmap Wave 2 W2-92).
+    OpenSample(usize),
 }
 
 pub struct State {
@@ -239,6 +256,11 @@ pub struct State {
     /// Sprite instances panel (Wave 13; Animate workspace).
     pub sprites_panel: rune_sec::sprites_panel::SpritesPanelState,
     pub home_panel: rune_sec::home_panel::HomePanelState,
+    /// Legacy-store migration offer (migration_prompt
+    /// section, Roadmap Wave 2 W2-65): the plan captured
+    /// at startup, before any store write, by
+    /// `migration_prompt::initial_state`.
+    pub migration_panel: rune_sec::migration_prompt::MigrationPanelState,
     pub frame_ops: rune_sec::frame_ops::FrameOpsState,
     pub graph_panel: rune_sec::graph_panel::GraphPanelState,
     /// Camera panel number-field sessions (camera_panel
@@ -275,6 +297,9 @@ pub struct State {
     /// through LayoutPrefs.workspace and gates which panels
     /// mount).
     pub workspace: rune_sec::workspaces::Workspace,
+    /// Setup-mode value saved on entering the Build
+    /// workspace (workspaces section, Wave 2).
+    pub setup_mode_before_build: bool,
     /// Stage guides overlay on/off (settings section).
     pub guides: bool,
     /// Left/right column visibility (View menu toggles).
@@ -285,6 +310,14 @@ pub struct State {
     /// sidebar) has no persisted mirror and never did.
     pub show_left: bool,
     pub show_right: bool,
+    /// The layout stage focus restores on exit
+    /// (Roadmap Wave 2, W2-10): `Some(live layout)`
+    /// while stage focus is active, `None` otherwise.
+    /// Session-only by A1 R4's rule — never persisted,
+    /// so a restart can never restore a focused stage.
+    /// Owned by
+    /// `rune_sec::workspaces::toggle_stage_focus`.
+    pub stage_focus_restore: Option<rune_sec::workspaces::LiveLayout>,
     /// Graph-key clipboard (keyframe_tools section):
     /// the copied keys tagged with their source channel
     /// (Wave AC, AC1 — see `KeyClipboard` there).
@@ -301,6 +334,10 @@ pub struct State {
     /// (see `rune_sec::key_selection`). Session-only,
     /// never serialised or snapshotted.
     pub key_sel: rune_sec::key_selection::KeySel,
+    /// Keyframe-tools panel state (keyframe_tools section,
+    /// Roadmap Wave 2 W2-35): the Copy key offset field's
+    /// session + value.
+    pub keyframe_tools: rune_sec::keyframe_tools::KeyframeToolsState,
     /// Help panel session state (help_panel section,
     /// Roadmap Wave 1, PL-7): the Help search field.
     pub help_panel: rune_sec::help_panel::HelpPanelState,
@@ -335,6 +372,27 @@ pub struct State {
     /// Safe-frame guide overlay on/off (Phase G guide split;
     /// drawn only when `guides` is also on).
     pub guides_safe: bool,
+    /// Golden-ratio guide overlay on/off (Roadmap Wave 2,
+    /// W2-33; drawn only when `guides` and `guides_frustum`
+    /// are also on). Default OFF — opt-in variant.
+    pub guides_golden: bool,
+    /// Diagonal guide overlay on/off (W2-33; same gates
+    /// and default-off footing as `guides_golden`).
+    pub guides_diagonals: bool,
+    /// Stored-guides overlay on/off (Roadmap Wave 2,
+    /// W2-05; the project's user-placed guide lines —
+    /// authored content, drawn whenever this is on,
+    /// NOT gated by `guides`).
+    pub guides_stored: bool,
+    /// Rulers overlay on/off (W2-05; graduated stage
+    /// rulers along the stage's top/left edges — the
+    /// stored guides' source chrome).
+    pub rulers: bool,
+    /// Joint-limit arcs on the stage (Roadmap Wave 2,
+    /// W2-27): the selected node's limit partition drawn
+    /// at its joint. Default OFF — opt-in annotation,
+    /// toggled from the segment inspector's limit rows.
+    pub limit_arcs: bool,
     /// Onion-skin depths (onion_controls section, Phase G).
     pub onion_ui: rune_sec::onion_controls::OnionControlsState,
     /// Loop-playback toggle (playback_controls section,
@@ -385,7 +443,15 @@ fn init() -> State {
     // Theme comes from the persisted layout prefs (dark is
     // the default); the settings section flips `light_theme`
     // and `poll` writes changes back.
-    let layout = stykanimate_rs::shell::load_layout();
+    let mut layout = stykanimate_rs::shell::load_layout();
+    // Roadmap Wave 2 (W2-61 — PL-10): seed any missing
+    // per-workspace layout records and mirror the
+    // STARTING workspace's remembered layout into the
+    // globals, so every seed below (the poll shadow,
+    // the timeline flag, the sidebar) reads this
+    // workspace's own shape. In-memory only — the
+    // records reach disk on the first layout save.
+    let startup = rune_sec::workspaces::startup_layout(&mut layout);
     core.light_theme = !layout.dark;
     // Language likewise (Roadmap F-9): the persisted
     // `LayoutPrefs.lang` seeds the core's UI language —
@@ -446,6 +512,13 @@ fn init() -> State {
     });
     if let Some(msg) = rune_sec::home_panel::startup_status() {
         core.status = msg;
+    } else if let Some(msg) = rune_sec::migration_prompt::startup_status() {
+        // Roadmap Wave 2 (W2-65): the migration offer
+        // speaks only when the recovery offer did not —
+        // unsaved work outranks housekeeping on the one
+        // boot status line; both banners still render
+        // in Home.
+        core.status = msg;
     }
     let name = core.project.name.clone();
     let status = core.status.clone();
@@ -458,11 +531,12 @@ fn init() -> State {
         library_panel: Default::default(),
         sprites_panel: Default::default(),
         home_panel: rune_sec::home_panel::initial_state(),
+        migration_panel: rune_sec::migration_prompt::initial_state(),
         frame_ops: rune_sec::frame_ops::FrameOpsState {
             // Focused Wave (D1): seeded from the
             // persisted prefs; `poll` writes changes
             // back (see LAYOUT_PREFS_SHADOW).
-            timeline_collapsed: layout.timeline_collapsed,
+            timeline_collapsed: startup.timeline_collapsed,
             timeline_zoom: zoom_seed,
             timeline_follow: layout.timeline_follow,
             ..Default::default()
@@ -483,15 +557,18 @@ fn init() -> State {
         subtitle_selected: None,
         pose_clipboard: None,
         workspace: rune_sec::workspaces::from_prefs(&layout),
+        setup_mode_before_build: false,
         guides: false,
         // Focused Wave (D1): the figures sidebar starts
         // where the persisted prefs left it; `poll`
         // writes View-menu / palette flips back.
-        show_left: layout.sidebar_visible,
-        show_right: true,
+        show_left: startup.show_left,
+        show_right: startup.show_right,
+        stage_focus_restore: None,
         key_clipboard: None,
         key_follow_graph: false,
         key_sel: Default::default(),
+        keyframe_tools: Default::default(),
         help_panel: Default::default(),
         export_recap: String::new(),
         export_job: None,
@@ -503,6 +580,11 @@ fn init() -> State {
         particle_selected: None,
         guides_frustum: true,
         guides_safe: true,
+        guides_golden: false,
+        guides_diagonals: false,
+        guides_stored: true,
+        limit_arcs: false,
+        rulers: false,
         onion_ui: Default::default(),
         loop_playback: true,
         playback_speed: 1.0,
@@ -545,10 +627,36 @@ fn stage_drag(s: &mut State, d: &mut Drag) {
     }));
     match d.phase {
         Phase::Down => {
+            if stage_view::navigator::nav_down(core, [d.x, d.y], [d.w, d.h]) {
+                // Roadmap Wave 2 (W2-04): the press
+                // landed on the navigator minimap
+                // (chrome over the canvas's top-left
+                // corner): it jumps the view and owns
+                // the gesture — never a pose, marquee
+                // or draw press, in any mode.
+                return;
+            }
             if core.draw_mode {
                 core.begin_draw(p);
             } else if core.camera_mode {
                 core.begin_camera_drag(p);
+            } else if stage_view::path_insert_down(core, p, d.clicks >= 2) {
+                // Roadmap Wave 2 (W2-36): a double-press on
+                // a motion-path segment splits it — one new
+                // frame, one undo step, complete on the
+                // press. No session follows, so the Move/Up
+                // arms need no new term (the path session
+                // finds no record). Single presses return
+                // false at once and fall through untouched.
+                // Precedence: within the path family, before
+                // `path_drag_down` (a double-press ON a point
+                // is excluded by the segment test's end-2%
+                // rule, so point grabs keep their meaning),
+                // and before the pending gizmo (IA-W2-03-3)
+                // and marquee (IA-W2-01-2) arms — those are
+                // single-press drags; a double-press is
+                // unambiguous, and its first press already
+                // ran (and settled) as an ordinary click.
             } else if stage_view::path_drag_down(core, p) {
                 // Roadmap Wave 1 (RM16 - P-4): the press
                 // grabbed a motion-path point (overlay on,
@@ -560,6 +668,32 @@ fn stage_drag(s: &mut State, d: &mut Drag) {
                 // frame's point is never among them (the
                 // pose drag owns the current root), and
                 // with the overlay off this is a cheap miss.
+            } else if stage_gizmo::gizmo_down(core, p, rt.vt.scale) {
+                // Roadmap Wave 2 (W2-03): the press
+                // grabbed the transform gizmo's move
+                // grip or rotate knob — the handles are
+                // drawn over the figures precisely so
+                // they win their own hit discs. Moves
+                // preview only; the release lands one
+                // labelled undo step inside `gizmo_up`.
+                // (IA-W2-01-2's group arm, when present,
+                // goes AFTER this arm: the grip is the
+                // deliberate target when a press hits
+                // both a grip and a set member's joint;
+                // its marquee arm stays in the
+                // begin-drag miss chain, untouched.)
+            } else if stage_view::group_drag_down(
+                core,
+                p,
+                stage_view::pick_radius(rt.vt.scale),
+            ) {
+                // Roadmap Wave 2 (W2-01): the press
+                // landed on a joint of a figure in a
+                // multi-figure marquee set: the SET is
+                // grabbed, not the figure. Moves
+                // preview only; the release lands one
+                // "Move figures" undo step (see
+                // stage_view's marquee section).
             } else if !core.begin_drag_with_radius(p, stage_view::pick_radius(rt.vt.scale)) {
                 // The press hit no joint (begin_drag only
                 // starts on a joint and reports the miss).
@@ -590,6 +724,19 @@ fn stage_drag(s: &mut State, d: &mut Drag) {
                     // the sprite drag machinery it armed.
                     s.sprites_panel.selected = Some(sprite);
                     stage_sprites::sprite_handle_drag_down(core, sprite, handle, p);
+                    return;
+                }
+                if stage_view::bend_drag_down(
+                    core,
+                    p,
+                    stage_view::pick_radius(rt.vt.scale),
+                ) {
+                    // Roadmap Wave 2 (W2-08): the press
+                    // landed on a segment's middle (or its
+                    // arc midpoint) — a bend drag: the
+                    // session previews write-free and its
+                    // release settles as one "Bend segment"
+                    // step (see stage_view's bend section).
                     return;
                 }
                 if let Some((fi, ni, _)) = stage_view::segment_hit(
@@ -623,17 +770,45 @@ fn stage_drag(s: &mut State, d: &mut Drag) {
                     // inside sprite_drag_down; the pick
                     // above stands either way.
                     stage_sprites::sprite_drag_down(core, sprite, p);
-                } else {
-                    // Pick the nearest stroke instead —
-                    // the selection the stage highlight
-                    // draws and the stroke panel steps
-                    // (Phase G). A clean miss clears the
-                    // selection.
-                    s.stroke_selected = rune_sec::stage_layers::stroke_at_point(
+                } else if s.guides_stored
+                    && stage_view::guide_down(
                         core,
                         p,
-                        stage_view::pick_radius(rt.vt.scale),
-                    );
+                        rt.vt.scale,
+                        if s.rulers {
+                            stage_view::RULER_THICKNESS_PX
+                        } else {
+                            0.0
+                        },
+                    )
+                {
+                    // Roadmap Wave 2 (W2-05): the press hit
+                    // no content; it landed in a ruler band
+                    // or on a stored guide's line, and the
+                    // guide session owns the gesture. It
+                    // writes nothing until its release
+                    // settles through one core stored-guide
+                    // op. The `guides_stored` gate keeps a
+                    // hidden guide family fully inert.
+                } else if let Some(stroke) = rune_sec::stage_layers::stroke_at_point(
+                    core,
+                    p,
+                    stage_view::pick_radius(rt.vt.scale),
+                ) {
+                    // The press hit a stroke: the
+                    // standing pick, unchanged (Phase G).
+                    s.stroke_selected = Some(stroke);
+                } else {
+                    // The press hit NOTHING (Roadmap
+                    // Wave 2, W2-01): it clears the
+                    // stroke pick — the empty press's
+                    // standing write — and starts a
+                    // marquee: hold and drag a square
+                    // to select every character inside
+                    // it; a plain click just clears
+                    // the figure set at release.
+                    s.stroke_selected = None;
+                    stage_view::marquee_down(core, p);
                 }
             }
         }
@@ -651,10 +826,52 @@ fn stage_drag(s: &mut State, d: &mut Drag) {
             let (p, _marks) = stage_view::snap_drag_point(core, p, rt.vt.scale);
             if core.draw_mode {
                 core.draw_to(p);
+            } else if stage_view::navigator::nav_move(core, [d.x, d.y], [d.w, d.h]) {
+                // Roadmap Wave 2 (W2-04): a navigator
+                // drag owns the gesture; its moves only
+                // re-centre the view. (The snap call
+                // above passes navigator points
+                // through: `snap_drag_point` only
+                // rewrites pose-drag points, and the
+                // session sets no pose dragging kind.)
             } else if stage_view::path_drag_move(core, p) {
                 // Roadmap Wave 1 (RM16 - P-4): a path-point
                 // drag owns the gesture; its moves only move
                 // the overlay's preview.
+            } else if stage_view::guide_move(p) {
+                // Roadmap Wave 2 (W2-05): a guide drag
+                // owns the gesture; its moves only move
+                // the preview. (The snap call above passes
+                // guide points through: `snap_drag_point`
+                // only rewrites pose-drag points, and the
+                // session sets no pose dragging kind.)
+            } else if stage_view::marquee_move(p) {
+                // Roadmap Wave 2 (W2-01): a marquee
+                // drag owns the gesture; its moves
+                // only move the rubber band. (The
+                // snap call above passes marquee
+                // points through: `snap_drag_point`
+                // only rewrites pose-drag points, and
+                // the sessions set no pose dragging
+                // kind.)
+            } else if stage_view::group_drag_move(core, p) {
+                // Roadmap Wave 2 (W2-01): a group
+                // drag owns the gesture; its moves
+                // only move the previewed outlines.
+            } else if stage_view::bend_drag_move(core, p) {
+                // Roadmap Wave 2 (W2-08): a bend drag owns
+                // the gesture; its moves only move the
+                // preview bend (the settle is the Up's).
+            } else if stage_gizmo::gizmo_move(core, p) {
+                // Roadmap Wave 2 (W2-03): a gizmo drag
+                // owns the gesture; its moves only move
+                // the previewed frame. (The snap call
+                // above passes gizmo points through:
+                // `snap_drag_point` rewrites only
+                // pose-drag points, and the gizmo sets
+                // no pose dragging kind; rotation snap
+                // is the gizmo's own, on the accumulated
+                // angle, inside its session.)
             } else if !stage_sprites::sprite_drag_move(core, p) {
                 core.drag_to(p);
             }
@@ -679,6 +896,62 @@ fn stage_drag(s: &mut State, d: &mut Drag) {
             // `nudge_path_point` (one undo step) here,
             // before `end_drag`'s recap runs.
             stage_view::path_drag_up(core, p, d.cancelled());
+            // Roadmap Wave 2 (W2-04): settle a
+            // navigator drag beside the path settle.
+            // It never set `core.dragging` or draw
+            // mode, so the cancel guard below neither
+            // sees it nor undoes for it — and needs
+            // none: its moves wrote only view state,
+            // and a cancelled navigator drag simply
+            // stops (see the module's docs for why
+            // the view is not restored here, unlike
+            // the pan's own cancel in IA-W2-04-1's
+            // wrapper).
+            stage_view::navigator::nav_up(d.cancelled());
+            // Roadmap Wave 2 (W2-01): settle the
+            // marquee and group sessions beside the
+            // path settle. Neither set `core.dragging`
+            // or draw mode, so the cancel guard below
+            // neither sees them nor undoes for them —
+            // and needs none: their moves never
+            // wrote, a cancelled gesture drops its
+            // record, and a moved group release has
+            // already landed its one snapshot inside
+            // `group_drag_up` when this runs (its
+            // `gesture_live` read stays false for
+            // both, exactly as for the path session).
+            stage_view::marquee_up(core, p, d.cancelled());
+            stage_view::group_drag_up(core, p, d.cancelled());
+            // Roadmap Wave 2 (W2-03): settle a gizmo
+            // drag beside the path settle. It never set
+            // `core.dragging` or draw mode, so the
+            // cancel guard below neither sees it nor
+            // undoes for it — and needs none: its moves
+            // never wrote, a cancelled gesture drops
+            // its record, and a settled release has
+            // already landed its one snapshot inside
+            // `gizmo_up` when this runs (its
+            // `gesture_live` read stays false for it,
+            // exactly as for the path session).
+            stage_gizmo::gizmo_up(core, p, d.cancelled());
+            // Roadmap Wave 2 (W2-05): settle a guide
+            // drag beside the path settle. It never set
+            // `core.dragging` or draw mode, so the cancel
+            // guard below neither sees it nor undoes for
+            // it — and needs none: its moves never wrote,
+            // its cancel just drops the record, and a
+            // real settle lands exactly one stored-guide
+            // op (add/move/delete, one undo step) here,
+            // before `end_drag`'s recap runs.
+            stage_view::guide_up(core, p, d.cancelled());
+            // Roadmap Wave 2 (W2-08): settle a bend drag
+            // beside the path settle. It never set
+            // `core.dragging`, so the cancel guard below
+            // neither sees it nor owes it an undo — its
+            // moves never wrote and its Down took no
+            // snapshot; a cancelled bend just drops its
+            // record inside `bend_drag_up`.
+            stage_view::bend_drag_up(core, p, d.cancelled());
             // Wave Q (Q2; P6's filed observation): a
             // cancelled gesture — Escape, focus loss, the
             // pointer taken away (`Drag::cancelled`, whose
@@ -709,6 +982,48 @@ fn stage_drag(s: &mut State, d: &mut Drag) {
             }
         }
     }
+}
+
+/// Canvas drag entry with the driving button
+/// (Roadmap Wave 2, W2-04): Rune's `Drag` carries no
+/// button, so the mount opted into the middle button
+/// (`El::pointer_buttons`) and hands `Tx::button()`
+/// here. A middle-button drag — or a left drag while
+/// Space is held (the shell's key state, IA-W2-04-3)
+/// — is a VIEW PAN and never reaches the content
+/// chain: it writes only the shell view navigation.
+/// Everything else is the standing `stage_drag`.
+fn stage_drag_button(s: &mut State, d: &mut Drag, button: rune::PointerButton) {
+    let pan = button == rune::PointerButton::Middle
+        || (button == rune::PointerButton::Primary && stage_view::space_pan_held());
+    if pan {
+        let local = [d.x, d.y];
+        match d.phase {
+            Phase::Down => {
+                let source = if button == rune::PointerButton::Middle {
+                    stage_view::PanSource::Middle
+                } else {
+                    stage_view::PanSource::Space
+                };
+                stage_view::view_pan_down(local, source);
+            }
+            Phase::Move => {
+                stage_view::view_pan_move(local);
+            }
+            Phase::Up => {
+                stage_view::view_pan_up(d.cancelled());
+            }
+        }
+        // Keep the pointer probe fed, as `stage_drag`
+        // does, so hover/HUD resume correctly when the
+        // pan ends under the pointer.
+        stage_view::set_stage_pointer(Some(stage_view::StagePointer {
+            local,
+            size: [d.w, d.h],
+        }));
+        return;
+    }
+    stage_drag(s, d);
 }
 
 /// Canvas right-press → selection only (Phase K
@@ -855,6 +1170,12 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
     rune_sec::camera_panel::sync_number_edits(s);
     rune_sec::inspector_segment::sync_number_edits(s);
     rune_sec::audio_panel::sync_number_edits(s);
+    rune_sec::keyframe_tools::sync_number_edits(s);
+    // Roadmap Wave 2 (W2-02, IA-W2-02-2): keep the
+    // arrow-move character arm in step with the core's
+    // selection — the watcher the row presses cannot
+    // cover (stage picks, MCP, undo) ride through here.
+    stage_view::sync_arrow_selection(&s.core);
     // Autosave cadence (Phase G wiring): the core counts
     // snapshot edits and writes the recovery snapshot every
     // 25; nothing called the check before, so the counter
@@ -995,7 +1316,9 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
     }
     if !s.toasts.is_empty() {
         s.toasts.expire(now);
-        tx.wake_after(Duration::from_millis(500));
+        if s.toasts.tick_needed(now) {
+            tx.wake_after(Duration::from_millis(500));
+        }
         redraw = true;
     }
     let dark = !s.core.light_theme;
@@ -1035,6 +1358,7 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
         prefs.sidebar_visible = layout_pair.1;
         prefs.timeline_zoom = layout_pair.2;
         prefs.timeline_follow = layout_pair.3;
+        rune_sec::workspaces::sync_active_record(&mut prefs, s);
         stykanimate_rs::shell::save_layout(&prefs);
     }
     // Roadmap F-9: the UI language rides the same
@@ -1076,9 +1400,14 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
     // of letting `advance_play` wrap. The sound is stopped
     // here, not left to the flip hook's next tick — after
     // a stop, nothing schedules another prompt wake.
+    // Roadmap Wave 2 (W2-40): the loop MODE decides — both
+    // looping flavours (wrap and ping-pong) suppress the
+    // stop; ping-pong never reaches an "end" at all, it
+    // bounces inside `advance_ping_pong`.
+    let ping_pong = rune_sec::playback_controls::ping_pong_enabled();
     if rune_sec::playback_controls::should_stop_at_end(
         s.core.playing,
-        s.loop_playback,
+        s.loop_playback || ping_pong,
         s.core.loop_range,
         s.core.current,
         s.core.frame_count(),
@@ -1100,7 +1429,34 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
         // The playhead advances by the speed-scaled elapsed
         // time: at 2.0 a tick moves the playhead twice as
         // far, at 0.5 half as far.
-        s.core.advance_play(dt * s.playback_speed);
+        if ping_pong {
+            // Roadmap Wave 2 (W2-40): ping-pong travel —
+            // the advance reflects at the window's ends
+            // instead of wrapping, flipping the core's
+            // direction. Sound cannot play in reverse: at
+            // the end bounce the pass's audio stops (the
+            // wrap/seek/drift syncs below all stand down
+            // while no audio is active, so the reverse leg
+            // stays silent on its own), and at the start
+            // bounce a fresh pass starts, so the audio
+            // restarts from the window's start exactly as
+            // it does after a wrap. A single tick crossing
+            // both bounds of a tiny range flips twice and
+            // reads as no flip here — the picture stays
+            // exact; only the audio restart is skipped.
+            let was_reverse = s.core.play_reverse;
+            s.core.advance_ping_pong(dt * s.playback_speed);
+            if s.core.play_reverse != was_reverse {
+                if s.core.play_reverse {
+                    s.core.stop_playback_audio();
+                } else {
+                    s.core.stop_playback_audio();
+                    s.core.start_playback_audio();
+                }
+            }
+        } else {
+            s.core.advance_play(dt * s.playback_speed);
+        }
     }
     // A wrapped playhead restarts the audio pass from the
     // top (Phase G); a no-op while audio is inactive.
@@ -1278,7 +1634,7 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     if ev.mods.alt {
         if let Key::Text(text) = &ev.key {
             if let Some(n) = text.chars().next().and_then(|c| c.to_digit(10)) {
-                if (1..=8).contains(&n) {
+                if (1..=9).contains(&n) {
                     let ws = rune_sec::workspaces::Workspace::all()[(n - 1) as usize];
                     rune_sec::workspaces::select_workspace(s, ws);
                     return true;
@@ -1336,33 +1692,65 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         s.core.duplicate_frame();
         return true;
     }
+    // Rig tree navigation (Wave 2, W2-22): while the Build
+    // workspace is active, the arrows walk the rig tree of
+    // the selected figure instead of stepping frames or
+    // nudging — Build is rigging mode, and the tree is its
+    // primary list. Up/Down are unclaimed in Build today;
+    // Left/Right yield to the tree only here.
+    if s.workspace == rune_sec::workspaces::Workspace::Build {
+        let rig_key = match &ev.key {
+            Key::Up => Some(rune_sec::rig_tree::RigKey::Up),
+            Key::Down => Some(rune_sec::rig_tree::RigKey::Down),
+            Key::Left => Some(rune_sec::rig_tree::RigKey::Left),
+            Key::Right => Some(rune_sec::rig_tree::RigKey::Right),
+            _ => None,
+        };
+        if let Some(k) = rig_key {
+            if rune_sec::rig_tree::rig_tree_key(&mut s.core, k) {
+                return true;
+            }
+        }
+    }
     match &ev.key {
         // No Escape arm here: the tier block at the top of
         // this function owns Escape (Wave P, P9).
         Key::Text(text) if text == " " && !ev.mods.cmd && !ev.mods.ctrl && !ev.mods.alt => {
-            chrome_view::toggle_play(s);
+            // Roadmap Wave 2 (W2-04): Space is a
+            // hold-to-pan key now. The press only arms
+            // the pan state (repeats land on the armed
+            // state and do nothing — holding Space used
+            // to strobe playback on every OS repeat);
+            // play/pause fires on the RELEASE, and
+            // only when no pan gesture consumed the
+            // hold — a tap. See the root's on_key_up
+            // below and stage_view's Space section.
+            stage_view::space_pan_press();
             true
         }
         Key::Left => {
             // Roadmap Wave 1 (RM26 - PL-4, subsuming
-            // IA-RM15-4): with a joint selected the
-            // arrows nudge it (RM15's steps: 1 pt,
-            // Shift 10, Alt 0.1); otherwise they step
-            // frames, Shift stepping ten. The
-            // text-field bail above is RM15's
-            // no-text-edit gate by construction.
-            if s.core.selected_node.is_some() {
+            // IA-RM15-4) + Wave 2 (W2-02, IA-W2-02-1):
+            // the arrows move the selection — a joint
+            // nudges (RM15's steps: 1 pt, Shift 10, Alt
+            // 0.1), a selected character or marquee set
+            // moves whole (stage_view::nudge_arrows
+            // resolves which); they step frames, Shift
+            // stepping ten, ONLY when nothing is
+            // selected. The text-field bail above is
+            // RM15's no-text-edit gate by construction.
+            if stage_view::arrows_move_selection(&s.core) {
                 let st = stage_view::nudge_step(ev.mods.shift, ev.mods.alt);
-                stage_view::nudge_selected(&mut s.core, -st, 0.0);
+                stage_view::nudge_arrows(&mut s.core, -st, 0.0);
             } else {
                 step_frame(s, if ev.mods.shift { -10 } else { -1 });
             }
             true
         }
         Key::Right => {
-            if s.core.selected_node.is_some() {
+            if stage_view::arrows_move_selection(&s.core) {
                 let st = stage_view::nudge_step(ev.mods.shift, ev.mods.alt);
-                stage_view::nudge_selected(&mut s.core, st, 0.0);
+                stage_view::nudge_arrows(&mut s.core, st, 0.0);
             } else {
                 step_frame(s, if ev.mods.shift { 10 } else { 1 });
             }
@@ -1372,18 +1760,18 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
             // Nudge only (RM26 - PL-4): with no
             // selection Up/Down stay unclaimed,
             // exactly today's behaviour.
-            if s.core.selected_node.is_some() {
+            if stage_view::arrows_move_selection(&s.core) {
                 let st = stage_view::nudge_step(ev.mods.shift, ev.mods.alt);
-                stage_view::nudge_selected(&mut s.core, 0.0, -st);
+                stage_view::nudge_arrows(&mut s.core, 0.0, -st);
                 true
             } else {
                 false
             }
         }
         Key::Down => {
-            if s.core.selected_node.is_some() {
+            if stage_view::arrows_move_selection(&s.core) {
                 let st = stage_view::nudge_step(ev.mods.shift, ev.mods.alt);
-                stage_view::nudge_selected(&mut s.core, 0.0, st);
+                stage_view::nudge_arrows(&mut s.core, 0.0, st);
                 true
             } else {
                 false
@@ -1415,6 +1803,15 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
             } else if let Some(i) = s.particle_selected {
                 s.core.particle_delete_event(i);
                 s.particle_selected = None;
+            } else if stage_view::selected_path_point_deletable(&s.core) {
+                // Roadmap Wave 2 (W2-36): the motion path's
+                // selected point (the current frame's point,
+                // overlay on) — claimed only when the guard
+                // says the delete will land, so with the
+                // overlay off or the point already straight
+                // the key keeps its standing behaviour
+                // untouched.
+                stage_view::delete_selected_path_point(&mut s.core);
             } else if s.core.selected_node.is_none() {
                 // Roadmap Wave 1 (RM26 - PL-4, K6): with
                 // nothing selected the key names what it
@@ -1422,7 +1819,7 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
                 // the segment op's refusal; when a node
                 // IS selected the op's own refusal
                 // sentences stand.
-                s.core.status = "Delete: nothing selected \u{2014} the key removes a selected stroke, particle event or segment.".into();
+                s.core.status = "Delete: nothing selected \u{2014} the key removes a selected stroke, particle event, segment or path point.".into();
             } else {
                 s.core.delete_segment();
             }
@@ -1568,6 +1965,9 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     if vis(Sec::Library) {
         left = left.child(rune_sec::library_panel::library_panel(s, &t));
     }
+    if vis(Sec::RigTree) {
+        left = left.child(rune_sec::rig_tree::rig_tree_panel(s, &t));
+    }
     if vis(Sec::Layers) {
         left = left.child(rune_sec::layers_panel::panel(s, &t));
     }
@@ -1578,6 +1978,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     let mut right = col().key("side-right").gap(12.0);
     if s.menus.help_open {
         right = right.child(rune_sec::help_panel::help_panel(core, &s.help_panel, &t));
+        right = right.child(rune_sec::diagnostics_panel::diagnostics_section(&s, &t));
     }
     right = right.child(rune_sec::settings_popover::settings_popover(s, &t));
     if vis(Sec::InspectorSegment) {
@@ -1699,6 +2100,12 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     // bottom. It now mounts at the root as an anchored
     // overlay (see the root column below), so opening it
     // cannot change the stage's size in any workspace.
+    // Per-figure onion overrides (Roadmap Wave 2, W2-37):
+    // feed the stage's store from the shell state the Onion
+    // panel writes, every frame, before the stage is built
+    // below — the VIEW_NAV feed pattern. An empty vec (the
+    // default state) renders the global-only onion pass.
+    crate::stage_view::set_onion_figure_overrides(s.onion_ui.per_figure.clone());
     let mut centre = col().key("centre").gap(12.0).grow(1.0).min_w(0.0);
     centre = centre
         .child(
@@ -1737,7 +2144,12 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                             guides: s.guides,
                             guides_frustum: s.guides_frustum,
                             guides_safe: s.guides_safe,
-                            stroke_selected: s.stroke_selected,
+                            guides_golden: s.guides_golden,
+                            guides_diagonals: s.guides_diagonals,
+                            guides_stored: s.guides_stored,
+                            limit_arcs: s.limit_arcs,
+                               rulers: s.rulers,
+                                  stroke_selected: s.stroke_selected,
                             particle_selected: s.particle_selected,
                             fx_selected: s.fx_selected,
                             sprite_selected: s.sprites_panel.selected,
@@ -1754,7 +2166,10 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                     .min_h(0.0)
                     .fill(stage_fill)
                     .radius(12.0)
-                    .on_drag(|s: &mut State, d: &mut Drag, _tx: &mut Tx| stage_drag(s, d))
+                    .pointer_buttons([rune::PointerButton::Middle])
+                    .on_drag(|s: &mut State, d: &mut Drag, tx: &mut Tx| {
+                        stage_drag_button(s, d, tx.button())
+                    })
                     .on_secondary_press_local(
                         |s: &mut State, e: PointerEvent, _tx: &mut Tx| {
                             stage_secondary(s, e)
@@ -1878,7 +2293,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
             &t,
             |_s, dx| {
                 let mut prefs = stykanimate_rs::shell::load_layout();
-                prefs.col_right_w = (prefs.col_right_w - dx).clamp(260.0, 480.0);
+                prefs.col_right_w = (prefs.col_right_w - dx).clamp(240.0, 480.0);
                 stykanimate_rs::shell::save_layout(&prefs);
             },
         ));
@@ -1950,7 +2365,21 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
             ),
         );
     }
-    root
+    root.on_key_up(|s: &mut State, ev: &KeyEvent, _tx: &mut Tx| {
+        // Roadmap Wave 2 (W2-04): the Space tap.
+        // A release whose hold no pan consumed is
+        // the play/pause press users know, one
+        // phase later; a consumed hold (a pan) and
+        // a release with no armed press (typed
+        // into a field) both do nothing.
+        if matches!(&ev.key, Key::Text(text) if text == " ")
+            && stage_view::space_pan_release()
+        {
+            chrome_view::toggle_play(s);
+            return true;
+        }
+        false
+    })
 }
 
 /// Wave P (P19): the window-exit flush. The Rune framework
@@ -2280,11 +2709,29 @@ mod key_routing_tests {
         let named = s.core.status.clone();
         assert_eq!(
             named,
-            "Delete: nothing selected \u{2014} the key removes a selected stroke, particle event or segment."
+            "Delete: nothing selected \u{2014} the key removes a selected stroke, particle event, segment or path point."
         );
         let mut s2 = init();
         assert!(press(&mut s2, &plain(Key::Backspace)));
         assert_eq!(s2.core.status, named, "Backspace is the same key");
+    }
+
+    #[test]
+    fn arrows_move_an_armed_character_not_the_frame() {
+        let mut s = init();
+        s.core.selected_node = None;
+        // Arm figure 0 as its row press does (IA-W2-02-2).
+        stage_view::note_character_selected(0);
+        let frame = s.core.current;
+        let before = s.core.project.frames[frame].poses[0].root;
+        assert!(press(&mut s, &plain(Key::Right)));
+        assert_eq!(s.core.current, frame, "an armed character captures the arrow");
+        let after = s.core.project.frames[frame].poses[0].root;
+        assert_eq!(after[0], before[0] + 1.0, "one plain step moves the character");
+        assert!(press(&mut s, &plain(Key::Up)));
+        let after = s.core.project.frames[frame].poses[0].root;
+        assert_eq!(after[1], before[1] - 1.0, "Up moves the character up (stage y is down)");
+        stage_view::release_character_arm();
     }
 
     #[test]

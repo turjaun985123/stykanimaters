@@ -438,7 +438,7 @@ pub fn move_selected_keys(core: &mut EditorCore, sel: &mut KeySel, delta: i32) -
         let ch = &core.project.channels[ci];
         (ch.figure, channel_label(ch.target))
     };
-    core.snapshot();
+    core.snapshot_labeled("Move selected keys");
     let n = move_selected_keys_by(core, sel, delta);
     core.status = format!(
         "Moved {} selected key{} by {:+} frame{} on figure {} {}.",
@@ -492,7 +492,7 @@ pub fn delete_selected_keys(core: &mut EditorCore, sel: &mut KeySel) -> usize {
     }
     let figure = ch.figure;
     let label = channel_label(ch.target);
-    core.snapshot();
+    core.snapshot_labeled("Delete selected keys");
     let ch = &mut core.project.channels[ci];
     for &i in idxs.iter().rev() {
         ch.keys.remove(i);

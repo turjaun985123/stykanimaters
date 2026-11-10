@@ -3555,10 +3555,11 @@ fn workspace_scenes_mount_their_signature_panels() {
     // `frames` (FrameOps, Animate-only) instead, and
     // the loop below additionally asserts figures-panel
     // is PRESENT in them.
-    let rows: [(&str, Workspace, &str, &str); 7] = [
+    let rows: [(&str, Workspace, &str, &str); 8] = [
         ("home", Workspace::Home, "home-panel", "figures-panel"),
         ("draw-open", Workspace::Draw, "stroke-inspector", "frames"),
         ("build-open", Workspace::Build3D, "panel-3d", "frames"),
+        ("build-workspace", Workspace::Build, "rig-tree", "frames"),
         ("graph-open", Workspace::Graph, "graph-panel", "frames"),
         (
             "effects-open",

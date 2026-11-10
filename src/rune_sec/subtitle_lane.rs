@@ -516,7 +516,11 @@ pub fn drag_apply(s: &mut State, drag: &mut Option<CueDrag>, dx: f32) {
         return;
     }
     if !snapshot_taken {
-        s.core.snapshot();
+        s.core.snapshot_labeled(match mode {
+            DragMode::Body => "Move subtitle cue",
+            DragMode::Start => "Trim subtitle start",
+            DragMode::End => "Trim subtitle end",
+        });
         if let Some(g) = drag.as_mut() {
             g.snapshot_taken = true;
         }
@@ -895,6 +899,38 @@ mod tests {
         assert_eq!(
             block_label(&credited_cue(0, 10, "one\ntwo", "Narrator")),
             "Narrator: one\ntwo"
+        );
+    }
+
+    #[test]
+    fn block_label_agrees_with_the_renderers_display_lines() {
+        // Roadmap Wave 2 (W2-17) consistency pin: the
+        // lane's label and the renderers' composition
+        // (`subtitles::subtitle_display_lines` — what the
+        // stage, the raster burn-in and the SVG writer
+        // draw) are the same reading of a cue. The two
+        // are separate `format!` copies of the `Name: `
+        // prefix, kept in agreement by this pin rather
+        // than by discipline alone: for a single-line
+        // cue the label IS the first (only) display
+        // line; for a multi-line cue it is the display
+        // lines joined by the stored line breaks — the
+        // prefix lands on the first line in both, and
+        // no line's text differs either way.
+        let single = credited_cue(0, 24, "The gate is open.", "Mary Jane");
+        assert_eq!(
+            block_label(&single),
+            stykanimate_rs::subtitles::subtitle_display_lines(&single)[0]
+        );
+        let multi = credited_cue(0, 24, "First line\nSecond line", "John");
+        assert_eq!(
+            block_label(&multi),
+            stykanimate_rs::subtitles::subtitle_display_lines(&multi).join("\n")
+        );
+        let plain = cue(0, 24, "First line\nSecond line");
+        assert_eq!(
+            block_label(&plain),
+            stykanimate_rs::subtitles::subtitle_display_lines(&plain).join("\n")
         );
     }
 

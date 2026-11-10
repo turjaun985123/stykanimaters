@@ -152,6 +152,34 @@ fn opt_root(args: &Value, key: &str) -> Result<Option<[f32; 2]>, String> {
     }
 }
 
+/// Optional squash & stretch argument (W2-31, P-5b): an
+/// [sx, sy] array of two finite numbers. The write door
+/// clamps into the model's one scale range through
+/// `sanitise_pose_scale`, so a set_pose call never stores
+/// an out-of-range factor; a non-pair or non-finite value
+/// is a structured Err, never a panic.
+fn opt_scale(args: &Value, key: &str) -> Result<Option<[f32; 2]>, String> {
+    let v = match get(args, key) {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    let arr = v
+        .as_array()
+        .ok_or_else(|| format!("argument '{key}' must be an [sx, sy] array"))?;
+    if arr.len() != 2 {
+        return Err(format!("argument '{key}' must have exactly 2 elements"));
+    }
+    let mut out = [0.0; 2];
+    for (i, item) in arr.iter().enumerate() {
+        let f = match item.as_f64() {
+            Some(f) => finite_f32(f, key)?,
+            None => return Err(format!("argument '{key}[{i}]' must be a number")),
+        };
+        out[i] = crate::model::sanitise_pose_scale(f);
+    }
+    Ok(Some(out))
+}
+
 // ---------------------------------------------------------------------
 // Shared validation / summaries
 // ---------------------------------------------------------------------
@@ -200,7 +228,11 @@ fn project_summary(core: &EditorCore) -> Value {
 }
 
 fn pose_json(pose: &Pose) -> Value {
-    json!({ "root": pose.root, "angles": pose.angles })
+    // Squash & stretch (W2-31, P-5b): the stored factors
+    // ride the pose's one JSON home, verbatim like the
+    // angles — sanitising is evaluation's job, this surface
+    // reports what is stored.
+    json!({ "root": pose.root, "angles": pose.angles, "scale": [pose.sx, pose.sy] })
 }
 
 /// The pose of `figure` in `frame`, synthesising the figure's rest
@@ -312,6 +344,10 @@ fn tool_new_project(core: &mut EditorCore, args: &Value) -> Result<Value, String
         subtitles: Vec::new(),
         subtitle_style: Default::default(),
         format_version: crate::model::FORMAT_VERSION_CURRENT,
+        chapters: Vec::new(),
+        stored_guides: Vec::new(),
+        title_cards: Default::default(),
+        beat_markers: Vec::new(),
     };
     core.current = 0;
     core.selected_figure = 0;
@@ -509,10 +545,17 @@ fn tool_set_frame_durations(core: &mut EditorCore, args: &Value) -> Result<Value
     // so a bad entry never leaves a half-updated timeline.
     let mut durations: Vec<f32> = Vec::with_capacity(raw.len());
     for (i, v) in raw.iter().enumerate() {
-        let d = v
-            .as_f64()
-            .map(|f| f as f32)
-            .ok_or_else(|| format!("argument 'durations[{i}]' must be a number"))?;
+        // Roadmap Wave 2 (W2-80, IA-W2-80-1): per-entry
+        // finiteness via the family accessor — a raw cast
+        // let +1e39 through as an infinite duration.
+        let d = match v.as_f64() {
+            Some(f) => finite_f32(f, &format!("durations[{i}]"))?,
+            None => {
+                return Err(format!(
+                    "argument 'durations[{i}]' must be a number"
+                ));
+            }
+        };
         if d <= 0.0 {
             return Err(format!("argument 'durations[{i}]' must be positive"));
         }
@@ -572,6 +615,11 @@ fn tool_set_pose(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     check_frame(core, frame)?;
     let node_count = core.project.figures[fi].def.nodes.len();
     let root = opt_root(args, "root")?;
+    // Squash & stretch (W2-31, P-5b): an absent 'scale'
+    // keeps the stored factors (the subtitle-font
+    // precedent — an absent optional never resets); a
+    // present one is clamped by opt_scale's door.
+    let scale = opt_scale(args, "scale")?;
     // Parse the angles argument up front: either a full array (one
     // angle per node) or an object mapping node index -> degrees.
     let mut angle_updates: Vec<(usize, f32)> = Vec::new();
@@ -612,18 +660,22 @@ fn tool_set_pose(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
             );
         }
     }
-    if root.is_none() && angle_updates.is_empty() {
-        return Err("set_pose needs at least one of 'root' or 'angles'".into());
+    if root.is_none() && angle_updates.is_empty() && scale.is_none() {
+        return Err("set_pose needs at least one of 'root', 'angles' or 'scale'".into());
     }
     // Wave 11 undo discipline: one call = one undo step
     // (previously pose authoring was invisible to history —
     // D9's gap). Snapshot after all validation, before the write.
-    core.snapshot();
+    core.snapshot_labeled("Set pose");
     let changed = angle_updates.len();
     {
         let pose = pose_mut(core, fi, frame);
         if let Some(r) = root {
             pose.root = r;
+        }
+        if let Some([sx, sy]) = scale {
+            pose.sx = sx;
+            pose.sy = sy;
         }
         for (ni, deg) in angle_updates {
             pose.angles[ni] = deg;
@@ -696,7 +748,7 @@ fn tool_set_node(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
         None => None,
     };
     // One call = one undo step (Wave 11 undo discipline).
-    core.snapshot();
+    core.snapshot_labeled("Set node");
     let node = &mut core.project.figures[fi].def.nodes[ni];
     if let Some(l) = length {
         node.length = l;
@@ -855,17 +907,36 @@ fn tool_set_camera(core: &mut EditorCore, args: &Value) -> Result<Value, String>
         return Err("argument 'zoom' must be positive".into());
     }
     let angle = opt_f32(args, "angle")?;
+    // Roadmap Wave 2 (W2-32): the optional segment easing,
+    // in its vocabulary labels (data, like the fx kinds) —
+    // parsed BEFORE the snapshot so a bad label refuses
+    // with no undo step and no write.
+    let easing = match opt_str(args, "easing")? {
+        None => None,
+        Some(s) => Some(crate::model::CameraEase::from_label(s).ok_or_else(|| {
+            "argument 'easing' must be one of: linear, smooth, ease-in, ease-out, hold"
+                .to_string()
+        })?),
+    };
     // Wave 11 (C2 GAP-4): snapshot like every other camera
     // write (previously invisible to undo and the autosave
     // counter), and store the angle WRAPPED to -180..180 —
     // the convention every panel write uses (rotate_camera's
     // norm_deg); evaluation is wrap-safe, so this changes
     // storage only, never the picture.
-    core.snapshot();
+    core.snapshot_labeled("Camera key");
     core.project.set_camera_key(frame, x, y, zoom);
     if let Some(a) = angle {
         if let Some(k) = core.project.camera.iter_mut().find(|k| k.frame == frame) {
             k.angle = crate::model::norm_deg(a);
+        }
+    }
+    // Absent 'easing' = keep the key's stored easing (the
+    // subtitle_set_style font precedent): the field rides
+    // the upsert like the angle does.
+    if let Some(e) = easing {
+        if let Some(k) = core.project.camera.iter_mut().find(|k| k.frame == frame) {
+            k.easing = e;
         }
     }
     let key: &CameraKey = core
@@ -877,7 +948,7 @@ fn tool_set_camera(core: &mut EditorCore, args: &Value) -> Result<Value, String>
     Ok(json!({
         "ok": true,
         "frame": frame,
-        "camera": { "x": key.x, "y": key.y, "zoom": key.zoom, "angle": key.angle },
+        "camera": { "x": key.x, "y": key.y, "zoom": key.zoom, "angle": key.angle, "easing": key.easing.label() },
     }))
 }
 
@@ -943,7 +1014,7 @@ fn tool_add_fx_clip(core: &mut EditorCore, args: &Value) -> Result<Value, String
     let length = opt_f32(args, "length")?.unwrap_or(130.0);
     // One call = one undo step (Wave 11 undo discipline;
     // previously the push was invisible to history — D9).
-    core.snapshot();
+    core.snapshot_labeled("Add FX clip");
     // Same construction as the editor's own add_fx_clip op.
     let seed = 11 + core.project.fx_clips.len() as u32 * 7;
     core.project.fx_clips.push(crate::model::FxClipEntry {
@@ -1014,7 +1085,7 @@ fn tool_fx_move(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     // whole frames without a fraction, fractional with one
     // decimal). No project-end clamp: past-end parking is
     // deliberate (the panel allows it via drag).
-    core.snapshot();
+    core.snapshot_labeled("Move FX clip");
     crate::fx_edit::move_clip(&mut core.project, idx, start);
     let landed = core.project.fx_clips[idx].clip.start;
     let label = if landed.fract() == 0.0 {
@@ -1183,7 +1254,7 @@ fn tool_fx_preset_add(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
     };
     let kind = format!("{:?}", clip.kind);
     // One call = one undo step (Wave 11 undo discipline).
-    core.snapshot();
+    core.snapshot_labeled("Add FX preset");
     core.project.fx_clips.push(crate::model::FxClipEntry { clip, figure, node: 0, hidden: false });
     Ok(json!({
         "ok": true,
@@ -1272,7 +1343,7 @@ fn tool_add_audio_clip(core: &mut EditorCore, args: &Value) -> Result<Value, Str
     }
     // One call = one undo step, and the status speaks in the
     // core add op's voice (editor.rs add_audio_clip).
-    core.snapshot();
+    core.snapshot_labeled("Add audio clip");
     core.project.audio.push(AudioClip { path: path.to_string(), start_frame, gain: 1.0 , muted: false});
     core.status = format!("Audio clip added at frame {}: {}", start_frame + 1, path);
     Ok(json!({
@@ -1334,9 +1405,22 @@ fn audio_op_reply(core: &EditorCore, idx: usize) -> Result<Value, String> {
     }))
 }
 
-fn tool_audio_fade(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+fn tool_audio_fade(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    // W2-98 (RM20 parity): the panel's fade lengths are
+    // optional arguments, riding `audio_fade_at_with`; a
+    // call with neither keeps the exact pre-parity path
+    // (`audio_fade_last` at the fixed lengths).
+    let fade_in = opt_f32(args, "fade_in_secs")?;
+    let fade_out = opt_f32(args, "fade_out_secs")?;
     let idx = check_last_audio(core)?;
-    core.audio_fade_last();
+    match (fade_in, fade_out) {
+        (None, None) => core.audio_fade_last(),
+        _ => core.audio_fade_at_with(
+            idx,
+            fade_in.unwrap_or(crate::audio_ops::FADE_IN_SECS),
+            fade_out.unwrap_or(crate::audio_ops::FADE_OUT_SECS),
+        ),
+    }
     audio_op_reply(core, idx)
 }
 
@@ -1404,17 +1488,30 @@ fn tool_audio_delete_clip(core: &mut EditorCore, args: &Value) -> Result<Value, 
 // tool_audio_delete_clip, runs the *_at op and reports
 // through `core.status` exactly like the *_last tools
 // above.
+//
+// Wave 2 (W2-98, the RM20 parity build): the effect
+// handlers also take the panel's effect parameters as
+// optional arguments, riding RM20's *_at_with primaries —
+// the same ops the panel's Effects settings dispatch, so
+// there is no second implementation of any audio maths.
+// An absent argument is the published constant the fixed
+// op delegates at, so a no-parameter call is identical
+// to the pre-parity tool (status included: the *_with
+// ops format from the sanitised values).
 // ---------------------------------------------------------------------
 
 fn tool_audio_echo(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let idx = check_audio_index(core, req_usize(args, "index")?)?;
-    core.audio_echo_at(idx);
+    let delay = opt_f32(args, "delay_secs")?.unwrap_or(crate::audio_ops::ECHO_DELAY_SECS);
+    let feedback = opt_f32(args, "feedback")?.unwrap_or(crate::audio_ops::ECHO_FEEDBACK);
+    core.audio_echo_at_with(idx, delay, feedback);
     audio_op_reply(core, idx)
 }
 
 fn tool_audio_lowpass(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let idx = check_audio_index(core, req_usize(args, "index")?)?;
-    core.audio_lowpass_at(idx);
+    let cutoff = opt_f32(args, "cutoff_hz")?.unwrap_or(crate::audio_ops::LOWPASS_HZ);
+    core.audio_lowpass_at_with(idx, cutoff);
     audio_op_reply(core, idx)
 }
 
@@ -1426,13 +1523,16 @@ fn tool_audio_trim_silence(core: &mut EditorCore, args: &Value) -> Result<Value,
 
 fn tool_audio_pitch(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let idx = check_audio_index(core, req_usize(args, "index")?)?;
-    core.audio_pitch_at(idx);
+    let semitones = opt_f32(args, "semitones")?.unwrap_or(crate::audio_ops::PITCH_SEMITONES);
+    core.audio_pitch_at_with(idx, semitones);
     audio_op_reply(core, idx)
 }
 
 fn tool_audio_compress(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let idx = check_audio_index(core, req_usize(args, "index")?)?;
-    core.audio_compress_at(idx);
+    let threshold = opt_f32(args, "threshold")?.unwrap_or(crate::audio_ops::COMP_THRESHOLD);
+    let ratio = opt_f32(args, "ratio")?.unwrap_or(crate::audio_ops::COMP_RATIO);
+    core.audio_compress_at_with(idx, threshold, ratio);
     audio_op_reply(core, idx)
 }
 
@@ -1897,7 +1997,7 @@ fn tool_graph_key(core: &mut EditorCore, args: &Value) -> Result<Value, String> 
     // channel may be created by this call, so the snapshot
     // must precede channel_mut; previously graph_key was not
     // an undo step at all. Finiteness is enforced by req_f32.
-    core.snapshot();
+    core.snapshot_labeled("Add graph key");
     let ch = crate::graph::channel_mut(&mut core.project.channels, fi, target);
     ch.add_key(frame, value);
     Ok(json!({
@@ -2056,7 +2156,7 @@ fn tool_mirror_channel_time(core: &mut EditorCore, args: &Value) -> Result<Value
     }
     .unwrap_or_else(|| (core.project.frames.len().saturating_sub(1)) as f32 / 2.0);
     let idx = channel_index(core, fi, target)?;
-    core.snapshot();
+    core.snapshot_labeled("Mirror channel time");
     let ch = &mut core.project.channels[idx];
     crate::graph::mirror_keys_time(&mut ch.keys, centre);
     // Mirroring reverses the key order; restore ascending order
@@ -2082,7 +2182,7 @@ fn tool_scale_channel_values(core: &mut EditorCore, args: &Value) -> Result<Valu
     let factor = req_f32(args, "factor")?;
     let pivot = opt_f32(args, "pivot")?.unwrap_or(0.0);
     let idx = channel_index(core, fi, target)?;
-    core.snapshot();
+    core.snapshot_labeled("Scale channel values");
     let ch = &mut core.project.channels[idx];
     crate::graph::scale_key_values(&mut ch.keys, factor, pivot);
     let keys = ch.keys.len();
@@ -2317,7 +2417,7 @@ fn tool_draw_shape(core: &mut EditorCore, args: &Value) -> Result<Value, String>
     let points = crate::paint::shape_points(kind, [x1, y1], [x2, y2]);
     let n_points = points.len();
     // One call = one undo step (Wave 11 undo discipline).
-    core.snapshot();
+    core.snapshot_labeled("Draw shape");
     core.project.strokes.push(Stroke {
         frame,
         points,
@@ -2382,7 +2482,7 @@ fn tool_draw_polygon(core: &mut EditorCore, args: &Value) -> Result<Value, Strin
     let points = crate::paint::regular_polygon_points([cx, cy], radius, sides, rotation - 90.0);
     let n_points = points.len();
     // One call = one undo step (Wave 11 undo discipline).
-    core.snapshot();
+    core.snapshot_labeled("Draw polygon");
     core.project.strokes.push(Stroke {
         frame,
         points,
@@ -2454,7 +2554,7 @@ fn tool_draw_star(core: &mut EditorCore, args: &Value) -> Result<Value, String> 
     );
     let n_points = points.len();
     // One call = one undo step (Wave 11 undo discipline).
-    core.snapshot();
+    core.snapshot_labeled("Draw star");
     core.project.strokes.push(Stroke {
         frame,
         points,
@@ -2478,7 +2578,7 @@ fn tool_smooth_strokes(core: &mut EditorCore, args: &Value) -> Result<Value, Str
     let frame = req_usize(args, "frame")?;
     check_frame(core, frame)?;
     // Wave 11 (B3 item 3): snapshot first, as in erase_strokes.
-    core.snapshot();
+    core.snapshot_labeled("Smooth strokes");
     let smoothed = crate::draw_ops::smooth_frame(&mut core.project, frame, 1);
     Ok(json!({
         "ok": true,
@@ -2502,7 +2602,7 @@ fn tool_erase_strokes(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
     // taken FIRST, before the op runs, exactly as B3 specced
     // (an erase that hits nothing still records the step;
     // the state it restores is identical, so undo is a no-op).
-    core.snapshot();
+    core.snapshot_labeled("Erase strokes");
     let changed = crate::draw_ops::erase(&mut core.project, frame, [x, y], radius);
     Ok(json!({
         "ok": true,
@@ -2524,7 +2624,7 @@ fn tool_simplify_strokes(core: &mut EditorCore, args: &Value) -> Result<Value, S
     if epsilon <= 0.0 {
         return Err("argument 'epsilon' must be positive".into());
     }
-    core.snapshot();
+    core.snapshot_labeled("Simplify strokes");
     let reduced = crate::draw_ops::simplify_strokes(&mut core.project, frame, epsilon);
     core.status = format!("Simplified strokes on frame {} ({reduced} reduced).", frame + 1);
     Ok(json!({
@@ -2581,7 +2681,7 @@ fn tool_apply_nib(core: &mut EditorCore, args: &Value) -> Result<Value, String> 
     // invisible to history and the autosave counter alike.
     // A frame with no strokes spends nothing.
     if core.project.strokes.iter().any(|s| s.frame == frame) {
-        core.snapshot();
+        core.snapshot_labeled("Apply nib profile");
     }
     let mut count = 0usize;
     for stroke in core.project.strokes.iter_mut().filter(|s| s.frame == frame) {
@@ -3034,7 +3134,7 @@ fn tool_set_bend(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     // what actually stored (previously the input was echoed).
     let radians = radians.clamp(-0.7, 0.7);
     // One call = one undo step (Wave 11 undo discipline).
-    core.snapshot();
+    core.snapshot_labeled("Set bend");
     let fr = &mut core.project.frames[frame];
     while fr.bends.len() <= fi {
         fr.bends.push(Vec::new());
@@ -3307,7 +3407,7 @@ fn tool_set_project_background(core: &mut EditorCore, args: &Value) -> Result<Va
     // One undo step: the background is project data like any
     // other (previously it had no writer on either surface's
     // MCP side and no reader anywhere — E7).
-    core.snapshot();
+    core.snapshot_labeled("Set project background");
     core.project.background = color;
     Ok(json!({
         "ok": true,
@@ -3524,6 +3624,258 @@ shell_unavailable_fn!(tool_shell_unavailable_duplicate_project_file, "shell_dupl
 shell_unavailable_fn!(tool_shell_unavailable_delete_project_file, "shell_delete_project_file");
 shell_unavailable_fn!(tool_shell_unavailable_set_sidebar, "shell_set_sidebar");
 
+// ---------------------------------------------------------------------
+// Roadmap Wave 2 integrator handlers (chapters, beat markers,
+// stored guides, title-card settings, template/import doors):
+// thin arg-parse + dispatch over the core ops, in this file's
+// idiom — each mutating op owns its one undo step and its
+// status line; a refusal is the op's status returned as Err
+// (the tool_delete_node precedent).
+
+fn tool_chapter_add(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let start = req_usize(args, "start_frame")?;
+    let end = req_usize(args, "end_frame")?;
+    let title = req_str(args, "title")?;
+    match core.chapter_add(start, end, title) {
+        Some(index) => Ok(json!({ "ok": true, "index": index, "status": core.status })),
+        None => Err(core.status.clone()),
+    }
+}
+
+fn tool_chapter_rename(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let index = req_usize(args, "index")?;
+    let title = req_str(args, "title")?;
+    if core.chapter_rename(index, title) {
+        Ok(json!({ "ok": true, "status": core.status }))
+    } else {
+        Err(core.status.clone())
+    }
+}
+
+fn tool_chapter_set_range(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let index = req_usize(args, "index")?;
+    let start = req_usize(args, "start_frame")?;
+    let end = req_usize(args, "end_frame")?;
+    if core.chapter_set_range(index, start, end) {
+        Ok(json!({ "ok": true, "status": core.status }))
+    } else {
+        Err(core.status.clone())
+    }
+}
+
+fn tool_chapter_move(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let index = req_usize(args, "index")?;
+    let to_index = req_usize(args, "to_index")?;
+    if core.chapter_move(index, to_index) {
+        Ok(json!({ "ok": true, "status": core.status }))
+    } else {
+        Err(core.status.clone())
+    }
+}
+
+fn tool_chapter_delete(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let index = req_usize(args, "index")?;
+    if core.chapter_delete(index) {
+        Ok(json!({ "ok": true, "status": core.status }))
+    } else {
+        Err(core.status.clone())
+    }
+}
+
+fn tool_chapter_list(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    let chapters: Vec<Value> = core
+        .chapters()
+        .iter()
+        .enumerate()
+        .map(|(index, c)| {
+            json!({
+                "index": index,
+                "title": c.title,
+                "start_frame": c.start_frame,
+                "end_frame": c.end_frame,
+            })
+        })
+        .collect();
+    Ok(json!({ "ok": true, "count": chapters.len(), "chapters": chapters }))
+}
+
+fn tool_beat_marker_add(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let frame = req_usize(args, "frame")?;
+    let name = req_str(args, "name")?;
+    match core.beat_marker_add(frame, name) {
+        Some(index) => Ok(json!({ "ok": true, "index": index, "status": core.status })),
+        None => Err(core.status.clone()),
+    }
+}
+
+fn tool_beat_marker_rename(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let index = req_usize(args, "index")?;
+    let name = req_str(args, "name")?;
+    if core.beat_marker_rename(index, name) {
+        Ok(json!({ "ok": true, "status": core.status }))
+    } else {
+        Err(core.status.clone())
+    }
+}
+
+fn tool_beat_marker_set_frame(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let index = req_usize(args, "index")?;
+    let frame = req_usize(args, "frame")?;
+    if core.beat_marker_set_frame(index, frame) {
+        Ok(json!({ "ok": true, "status": core.status }))
+    } else {
+        Err(core.status.clone())
+    }
+}
+
+fn tool_beat_marker_delete(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let index = req_usize(args, "index")?;
+    if core.beat_marker_delete(index) {
+        Ok(json!({ "ok": true, "status": core.status }))
+    } else {
+        Err(core.status.clone())
+    }
+}
+
+fn tool_beat_marker_list(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    let markers: Vec<Value> = core
+        .beat_markers()
+        .iter()
+        .enumerate()
+        .map(|(index, m)| {
+            json!({
+                "index": index,
+                "name": m.name,
+                "frame": m.frame,
+            })
+        })
+        .collect();
+    Ok(json!({ "ok": true, "count": markers.len(), "beat_markers": markers }))
+}
+
+fn tool_stored_guide_add(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let axis = match req_str(args, "axis")? {
+        "vertical" => crate::model::GuideAxis::Vertical,
+        "horizontal" => crate::model::GuideAxis::Horizontal,
+        other => {
+            return Err(format!(
+                "argument 'axis' must be \"vertical\" or \"horizontal\", got '{other}'"
+            ))
+        }
+    };
+    let position = req_f32(args, "position")?;
+    match core.stored_guide_add(axis, position) {
+        Some(index) => Ok(json!({ "ok": true, "index": index, "status": core.status })),
+        None => Err(core.status.clone()),
+    }
+}
+
+fn tool_stored_guide_move(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let index = req_usize(args, "index")?;
+    let position = req_f32(args, "position")?;
+    if core.stored_guide_move(index, position) {
+        Ok(json!({ "ok": true, "status": core.status }))
+    } else {
+        Err(core.status.clone())
+    }
+}
+
+fn tool_stored_guide_delete(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let index = req_usize(args, "index")?;
+    if core.stored_guide_delete(index) {
+        Ok(json!({ "ok": true, "status": core.status }))
+    } else {
+        Err(core.status.clone())
+    }
+}
+
+fn tool_stored_guide_list(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    let guides: Vec<Value> = core
+        .stored_guides()
+        .iter()
+        .enumerate()
+        .map(|(index, g)| {
+            json!({
+                "index": index,
+                "axis": match g.axis {
+                    crate::model::GuideAxis::Vertical => "vertical",
+                    crate::model::GuideAxis::Horizontal => "horizontal",
+                },
+                "position": g.position,
+            })
+        })
+        .collect();
+    Ok(json!({ "ok": true, "count": guides.len(), "stored_guides": guides }))
+}
+
+fn tool_title_cards_set_enabled(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let enabled = opt_bool(args, "enabled")?
+        .ok_or_else(|| "missing required argument 'enabled'".to_string())?;
+    let changed = core.title_cards_set_enabled(enabled);
+    Ok(json!({ "ok": true, "changed": changed, "status": core.status }))
+}
+
+fn tool_title_cards_set_duration(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let seconds = req_f32(args, "duration_seconds")?;
+    if core.title_cards_set_duration(seconds) {
+        Ok(json!({ "ok": true, "status": core.status }))
+    } else {
+        Err(core.status.clone())
+    }
+}
+
+fn tool_new_project_from_template(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    let id = req_str(args, "template")?;
+    let project =
+        crate::templates::template_project(id).ok_or_else(|| format!("unknown template '{id}'"))?;
+    core.snapshot_labeled("New from template");
+    let name = project.name.clone();
+    core.project = project;
+    core.current = 0;
+    core.selected_figure = 0;
+    core.selected_node = None;
+    core.note_project_swapped();
+    core.status = format!("New project from template: {name}.");
+    Ok(json!({ "ok": true, "project": project_summary(core), "status": core.status }))
+}
+
+fn tool_import_harness_story(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let story = req_str(args, "story_json")?;
+    let empty: Vec<Value> = Vec::new();
+    let bible_vals = match get(args, "bible_jsons") {
+        Some(v) => v
+            .as_array()
+            .ok_or_else(|| "argument 'bible_jsons' must be an array of strings".to_string())?,
+        None => &empty,
+    };
+    let mut bibles: Vec<String> = Vec::new();
+    for v in bible_vals {
+        bibles.push(
+            v.as_str()
+                .ok_or_else(|| "argument 'bible_jsons' must be an array of strings".to_string())?
+                .to_string(),
+        );
+    }
+    let refs: Vec<&str> = bibles.iter().map(|b| b.as_str()).collect();
+    let report = crate::harness_import::import_into_core(core, story, &refs)?;
+    Ok(json!({
+        "ok": true,
+        "title": report.title,
+        "frames": report.frames,
+        "chapters": report.chapters,
+        "cues": report.cues,
+        "figures": report.figures,
+        "missing_bibles": report.missing_bibles,
+        "bible_errors": report.bible_errors,
+        "unmapped": report.unmapped,
+        "notes": report.notes,
+        "status": core.status,
+    }))
+}
+
 pub fn tools() -> Vec<crate::mcp::Tool> {
     use crate::mcp::Tool;
     vec![
@@ -3643,7 +3995,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "get_pose",
-            description: "Read a figure's pose in a frame: {root: [x, y], angles: [degrees per node]}. Angles are the STORED values: parent-relative (each relative to its parent segment) and unnormalised (725 means 725, not 5). For the solved world direction of one segment, use get_node.",
+            description: "Read a figure's pose in a frame: {root: [x, y], angles: [degrees per node]}. Angles are the STORED values: parent-relative (each relative to its parent segment) and unnormalised (725 means 725, not 5). For the solved world direction of one segment, use get_node. The reply also carries 'scale': [sx, sy], the pose's stored squash & stretch factors (1.0 = unstretched; evaluation clamps them into 0.25–4.0 at read).",
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
@@ -3655,13 +4007,14 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "set_pose",
-            description: "Write a figure's pose in a frame. 'angles' is either a full array (one angle per node, degrees) or an object mapping node index to degrees; 'root' is [x, y]. Angles are stored parent-relative and verbatim (no wrapping — 725 stays 725). One undo step.",
+            description: "Write a figure's pose in a frame. 'angles' is either a full array (one angle per node, degrees) or an object mapping node index to degrees; 'root' is [x, y]. Angles are stored parent-relative and verbatim (no wrapping — 725 stays 725). 'scale' is an optional [sx, sy] squash & stretch pair, clamped to 0.25–4.0; an absent 'scale' keeps the stored factors. One undo step.",
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
                     "frame": { "type": "integer" },
                     "root": { "type": "array", "items": { "type": "number" } },
-                    "angles": { "description": "Full array of degrees, or {nodeIndex: degrees}" }
+                    "angles": { "description": "Full array of degrees, or {nodeIndex: degrees}" },
+                    "scale": { "type": "array", "items": { "type": "number" } }
                 }),
                 &["figure", "frame"],
             ),
@@ -3767,18 +4120,234 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "set_camera",
-            description: "Upsert a camera key at a frame: centre (x, y), zoom factor (1.0 = neutral, must be positive), optional rotation angle in degrees — stored wrapped to -180..180, the panel's convention. One undo step.",
+            description: "Upsert a camera key at a frame: centre (x, y), zoom factor (1.0 = neutral, must be positive), optional rotation angle in degrees — stored wrapped to -180..180, the panel's convention — and optional 'easing': the timing of the move FROM this key to the next, one of linear | smooth | ease-in | ease-out | hold (absent = keep the key's stored easing). One undo step.",
             schema: obj_schema(
                 json!({
                     "frame": { "type": "integer" },
                     "x": { "type": "number" },
                     "y": { "type": "number" },
                     "zoom": { "type": "number" },
-                    "angle": { "type": "number" }
+                    "angle": { "type": "number" },
+                    "easing": { "type": "string", "enum": ["linear", "smooth", "ease-in", "ease-out", "hold"] }
                 }),
                 &["frame", "x", "y", "zoom"],
             ),
             handler: tool_set_camera,
+        },
+        Tool {
+            name: "chapter_add",
+            description: "Add a chapter spanning 0-based frames 'start_frame'..='end_frame' with 'title' (the episode-structure op the dialogue lane's chapter row runs). Chapters are kept in episode order by their start frame. One undo step; an invalid range or empty title refuses and changes nothing.",
+            schema: obj_schema(
+                json!({
+                    "start_frame": { "type": "integer" },
+                    "end_frame": { "type": "integer" },
+                    "title": { "type": "string" }
+                }),
+                &["start_frame", "end_frame", "title"],
+            ),
+            handler: tool_chapter_add,
+        },
+        Tool {
+            name: "chapter_rename",
+            description: "Rename chapter 'index' to 'title' (trimmed; an empty title refuses). One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" },
+                    "title": { "type": "string" }
+                }),
+                &["index", "title"],
+            ),
+            handler: tool_chapter_rename,
+        },
+        Tool {
+            name: "chapter_set_range",
+            description: "Set chapter 'index' range to 0-based frames 'start_frame'..='end_frame'. One undo step; an invalid range refuses and changes nothing.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" },
+                    "start_frame": { "type": "integer" },
+                    "end_frame": { "type": "integer" }
+                }),
+                &["index", "start_frame", "end_frame"],
+            ),
+            handler: tool_chapter_set_range,
+        },
+        Tool {
+            name: "chapter_move",
+            description: "Move chapter 'index' to position 'to_index' in episode order. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" },
+                    "to_index": { "type": "integer" }
+                }),
+                &["index", "to_index"],
+            ),
+            handler: tool_chapter_move,
+        },
+        Tool {
+            name: "chapter_delete",
+            description: "Delete chapter 'index'. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" }
+                }),
+                &["index"],
+            ),
+            handler: tool_chapter_delete,
+        },
+        Tool {
+            name: "chapter_list",
+            description: "List the project's chapters in episode order: index, title, start_frame, end_frame. Read-only.",
+            schema: obj_schema(
+                json!({}),
+                &[],
+            ),
+            handler: tool_chapter_list,
+        },
+        Tool {
+            name: "beat_marker_add",
+            description: "Add a beat marker named 'name' at 0-based 'frame' (the story-beat markers the timeline draws). Markers are kept in timeline order. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "frame": { "type": "integer" },
+                    "name": { "type": "string" }
+                }),
+                &["frame", "name"],
+            ),
+            handler: tool_beat_marker_add,
+        },
+        Tool {
+            name: "beat_marker_rename",
+            description: "Rename beat marker 'index' to 'name'. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" },
+                    "name": { "type": "string" }
+                }),
+                &["index", "name"],
+            ),
+            handler: tool_beat_marker_rename,
+        },
+        Tool {
+            name: "beat_marker_set_frame",
+            description: "Move beat marker 'index' to 0-based 'frame' (the list stays in timeline order). One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" },
+                    "frame": { "type": "integer" }
+                }),
+                &["index", "frame"],
+            ),
+            handler: tool_beat_marker_set_frame,
+        },
+        Tool {
+            name: "beat_marker_delete",
+            description: "Delete beat marker 'index'. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" }
+                }),
+                &["index"],
+            ),
+            handler: tool_beat_marker_delete,
+        },
+        Tool {
+            name: "beat_marker_list",
+            description: "List the project's beat markers in timeline order: index, name, frame. Read-only.",
+            schema: obj_schema(
+                json!({}),
+                &[],
+            ),
+            handler: tool_beat_marker_list,
+        },
+        Tool {
+            name: "stored_guide_add",
+            description: "Add a stored guide line on 'axis' (vertical or horizontal) at stage coordinate 'position' (the stage's ruler-drag guides, persisted with the project). One undo step.",
+            schema: obj_schema(
+                json!({
+                    "axis": { "type": "string", "enum": ["vertical", "horizontal"] },
+                    "position": { "type": "number" }
+                }),
+                &["axis", "position"],
+            ),
+            handler: tool_stored_guide_add,
+        },
+        Tool {
+            name: "stored_guide_move",
+            description: "Move stored guide 'index' to stage coordinate 'position'. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" },
+                    "position": { "type": "number" }
+                }),
+                &["index", "position"],
+            ),
+            handler: tool_stored_guide_move,
+        },
+        Tool {
+            name: "stored_guide_delete",
+            description: "Delete stored guide 'index'. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" }
+                }),
+                &["index"],
+            ),
+            handler: tool_stored_guide_delete,
+        },
+        Tool {
+            name: "stored_guide_list",
+            description: "List the project's stored guides in creation order: index, axis, position. Read-only.",
+            schema: obj_schema(
+                json!({}),
+                &[],
+            ),
+            handler: tool_stored_guide_list,
+        },
+        Tool {
+            name: "title_cards_set_enabled",
+            description: "Switch chapter title cards in exports on or off (the Audio panel's Title cards section). A no-change call spends no undo step.",
+            schema: obj_schema(
+                json!({
+                    "enabled": { "type": "boolean" }
+                }),
+                &["enabled"],
+            ),
+            handler: tool_title_cards_set_enabled,
+        },
+        Tool {
+            name: "title_cards_set_duration",
+            description: "Set how long each chapter title card shows, in seconds ('duration_seconds'). One undo step on a real change.",
+            schema: obj_schema(
+                json!({
+                    "duration_seconds": { "type": "number" }
+                }),
+                &["duration_seconds"],
+            ),
+            handler: tool_title_cards_set_duration,
+        },
+        Tool {
+            name: "new_project_from_template",
+            description: "Replace the current project with a fresh project built from the named template ('template': episode-blank, dialogue-scene or acting-scene — the Home panel's template row). One undo step.",
+            schema: obj_schema(
+                json!({
+                    "template": { "type": "string" }
+                }),
+                &["template"],
+            ),
+            handler: tool_new_project_from_template,
+        },
+        Tool {
+            name: "import_harness_story",
+            description: "Import a faceless-shorts harness story: 'story_json' is the story file's text; optional 'bible_jsons' is an array of Character Bible file texts. The project is replaced by the imported episode scaffold (timing and structure; figures stand at rest — the report's 'unmapped' names every field family carried but not mapped). Exactly one undo step; a refusal changes nothing.",
+            schema: obj_schema(
+                json!({
+                    "story_json": { "type": "string" },
+                    "bible_jsons": { "type": "array", "items": { "type": "string" } }
+                }),
+                &["story_json"],
+            ),
+            handler: tool_import_harness_story,
         },
         Tool {
             name: "add_fx_clip",
@@ -3997,8 +4566,14 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "audio_fade",
-            description: "Apply a fade-in/fade-out to the LAST audio clip with the editor's fixed fade lengths (0.25 s in, 0.25 s out — not parameterised; use audio_clip_fade for per-clip lengths): a processed copy of its file is written and the clip repointed. One undo step. For a specific clip, prefer the indexed audio_clip_* family.",
-            schema: obj_schema(json!({}), &[]),
+            description: "Apply a fade-in/fade-out to the LAST audio clip: 'fade_in_secs' and 'fade_out_secs' set the lengths (each 0-10 s; defaults are the editor's fixed 0.25 s in, 0.25 s out): a processed copy of its file is written and the clip repointed. One undo step. For a specific clip, prefer the indexed audio_clip_* family.",
+            schema: obj_schema(
+                json!({
+                    "fade_in_secs": { "type": "number", "description": "Fade-in length in seconds, 0-10 (default 0.25)" },
+                    "fade_out_secs": { "type": "number", "description": "Fade-out length in seconds, 0-10 (default 0.25)" }
+                }),
+                &[],
+            ),
             handler: tool_audio_fade,
         },
         Tool {
@@ -4042,10 +4617,12 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "audio_echo",
-            description: "Apply a feedback echo (0.18s delay, 35% feedback) to the audio clip at 'index': a processed copy of its file is written and the clip repointed (the editor's Echo op). One undo step.",
+            description: "Apply a feedback echo to the audio clip at 'index': 'delay_secs' sets the delay (0.01-2.0 s, default 0.18) and 'feedback' the feedback (0-0.95, default 0.35): a processed copy of its file is written and the clip repointed (the editor's Echo op). One undo step.",
             schema: obj_schema(
                 json!({
-                    "index": { "type": "integer" }
+                    "index": { "type": "integer" },
+                    "delay_secs": { "type": "number", "description": "Echo delay in seconds, 0.01-2.0 (default 0.18)" },
+                    "feedback": { "type": "number", "description": "Echo feedback, 0-0.95 (default 0.35)" }
                 }),
                 &["index"],
             ),
@@ -4053,10 +4630,11 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "audio_lowpass",
-            description: "Apply a 1200 Hz low-pass filter to the audio clip at 'index': a processed copy of its file is written and the clip repointed (the editor's Lowpass op). One undo step.",
+            description: "Apply a low-pass filter to the audio clip at 'index': 'cutoff_hz' sets the cutoff (40-16000 Hz, default 1200): a processed copy of its file is written and the clip repointed (the editor's Lowpass op). One undo step.",
             schema: obj_schema(
                 json!({
-                    "index": { "type": "integer" }
+                    "index": { "type": "integer" },
+                    "cutoff_hz": { "type": "number", "description": "Low-pass cutoff in Hz, 40-16000 (default 1200)" }
                 }),
                 &["index"],
             ),
@@ -4075,10 +4653,11 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "audio_pitch",
-            description: "Pitch-shift the audio clip at 'index' up 2 semitones: a processed copy of its file is written and the clip repointed (the editor's Pitch op). One undo step.",
+            description: "Pitch-shift the audio clip at 'index' by 'semitones' (-24 to +24, default +2): a processed copy of its file is written and the clip repointed (the editor's Pitch op). One undo step.",
             schema: obj_schema(
                 json!({
-                    "index": { "type": "integer" }
+                    "index": { "type": "integer" },
+                    "semitones": { "type": "number", "description": "Pitch shift in semitones, -24 to +24 (default +2)" }
                 }),
                 &["index"],
             ),
@@ -4086,10 +4665,12 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "audio_compress",
-            description: "Compress the audio clip at 'index' (threshold 0.5, ratio 4.0): a processed copy of its file is written and the clip repointed (the editor's Compress op). One undo step.",
+            description: "Compress the audio clip at 'index': 'threshold' sets the threshold (0.05-1.0, default 0.5) and 'ratio' the ratio (1-20, default 4.0): a processed copy of its file is written and the clip repointed (the editor's Compress op). One undo step.",
             schema: obj_schema(
                 json!({
-                    "index": { "type": "integer" }
+                    "index": { "type": "integer" },
+                    "threshold": { "type": "number", "description": "Compressor threshold, 0.05-1.0 (default 0.5)" },
+                    "ratio": { "type": "number", "description": "Compressor ratio, 1-20 (default 4.0)" }
                 }),
                 &["index"],
             ),
@@ -5247,6 +5828,19 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             handler: crate::frame_swap::tool_insert_breakdown,
         },
         Tool {
+            name: "insert_breakdown_chain",
+            description: "Insert a chain of 'count' breakdown frames across the 'span' segments from the current frame toward the target key 'span' frames later (the Frames panel's breakdown chain): one favour curve distributes the breakdowns over the whole span — 'favour' 0.5 spaces them evenly, below 0.5 crowds them toward the current key, above 0.5 toward the target — and each breakdown samples its own segment the way insert_breakdown does (poses at the segment's eased fraction, bends interpolated linearly). A distribution position landing exactly on an existing frame is skipped — that pose already exists as a frame. 'favour' is clamped to 0.1–0.9, 'count' to 32 and 'span' to 64 (and to the segments remaining) by the op. One undo step; frame pins are not remapped (the timeline-length rule).",
+            schema: obj_schema(
+                json!({
+                    "favour": { "type": "number", "description": "Breakdown spacing bias between 0 and 1 (exclusive), default 0.5" },
+                    "count": { "type": "integer", "description": "Breakdowns to insert across the span, at least 1 (default 1)" },
+                    "span": { "type": "integer", "description": "Segments from the current frame to the target key, at least 1 (default 3)" }
+                }),
+                &[],
+            ),
+            handler: crate::frame_swap::tool_insert_breakdown_chain,
+        },
+        Tool {
             name: "get_keyframes",
             description: "Read one figure's keyframe list — the exact data the dopesheet lane draws (a frame is a keyframe when the figure's pose there differs from the previous frame's). Read-only.",
             schema: obj_schema(
@@ -5407,10 +6001,12 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "audio_clip_fade",
-            description: "Fade the audio clip at 'index' (0.25 s in/out, the panel's per-clip Fade) — the indexed form the panel has; the older audio_fade tool always edits the LAST clip. A clip whose file cannot be read is an error, not ok. One undo step.",
+            description: "Fade the audio clip at 'index': 'fade_in_secs' and 'fade_out_secs' set the lengths (each 0-10 s; defaults 0.25 s — the panel's per-clip Fade with its effect settings) — the indexed form the panel has; the older audio_fade tool always edits the LAST clip. A clip whose file cannot be read is an error, not ok. One undo step.",
             schema: obj_schema(
                 json!({
-                    "index": { "type": "integer" }
+                    "index": { "type": "integer" },
+                    "fade_in_secs": { "type": "number", "description": "Fade-in length in seconds, 0-10 (default 0.25)" },
+                    "fade_out_secs": { "type": "number", "description": "Fade-out length in seconds, 0-10 (default 0.25)" }
                 }),
                 &["index"],
             ),
@@ -6414,6 +7010,19 @@ Tool {
       handler: crate::editor::tool_camera_zoom_by,
   },
 Tool {
+      name: "camera_move_preset",
+      description: "Author a preset camera move at the current frame (the camera panel's Moves row): 'preset' is one of push-in, pull-out, pan-left, pan-right, truck-up, truck-down, arc-left, arc-right, shake. Non-shake presets write a start key (the camera as it stands, stamped with 'easing') and an end key 'frames' frames later; shake writes a deterministic damped key burst and ignores 'easing'. frames defaults to 24, range 1..=48 (shake needs >= 4); easing is one of linear | smooth | ease-in | ease-out | hold, default smooth. Exactly one undo step; a refused move (no room, bad arguments) spends nothing.",
+      schema: obj_schema(
+          json!({
+              "preset": { "type": "string", "enum": ["push-in", "pull-out", "pan-left", "pan-right", "truck-up", "truck-down", "arc-left", "arc-right", "shake"] },
+              "frames": { "type": "integer" },
+              "easing": { "type": "string", "enum": ["linear", "smooth", "ease-in", "ease-out", "hold"] }
+          }),
+          &["preset"],
+      ),
+      handler: crate::editor::tool_camera_move_preset,
+  },
+Tool {
       name: "rotate_camera",
       description: "Rotate the camera at the current frame by 'degrees' (the camera panel's rotate buttons): upserts a camera key carrying the pan/zoom in effect plus the new angle, wrapped to -180..180. One undo step. For an absolute angle at any frame, use set_camera with 'angle'.",
       schema: obj_schema(
@@ -7026,6 +7635,47 @@ mod tests {
     }
 
     #[test]
+    fn set_camera_easing_argument_sets_keeps_and_refuses() {
+        // Roadmap Wave 2 (W2-32): the optional 'easing'
+        // argument — set, keep-on-absent, refuse-on-bad-label.
+        let tools = tools();
+        let mut core = EditorCore::new();
+        let r = call(
+            &mut core,
+            &tools,
+            "set_camera",
+            json!({ "frame": 0, "x": 400.0, "y": 300.0, "zoom": 1.5, "easing": "hold" }),
+        )
+        .unwrap();
+        assert_eq!(r["camera"]["easing"], "hold");
+        assert_eq!(core.project.camera[0].easing, crate::model::CameraEase::Hold);
+        // Absent = keep the stored easing (the
+        // subtitle_set_style precedent), values still upsert.
+        let r = call(
+            &mut core,
+            &tools,
+            "set_camera",
+            json!({ "frame": 0, "x": 401.0, "y": 300.0, "zoom": 1.5 }),
+        )
+        .unwrap();
+        assert_eq!(r["camera"]["easing"], "hold");
+        assert_eq!(core.project.camera[0].x, 401.0);
+        // A bad label refuses BEFORE the snapshot: no undo
+        // step is taken and the key is untouched.
+        let depth0 = core.undo_depth();
+        let err = call(
+            &mut core,
+            &tools,
+            "set_camera",
+            json!({ "frame": 0, "x": 0.0, "y": 0.0, "zoom": 1.0, "easing": "bounce" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("easing"), "error names the argument: {err}");
+        assert_eq!(core.undo_depth(), depth0);
+        assert_eq!(core.project.camera[0].easing, crate::model::CameraEase::Hold);
+    }
+
+    #[test]
     fn tool_table_is_complete_and_unique() {
         let tools = tools();
         // 224 entering Wave 12; +6 for the asset surface
@@ -7079,6 +7729,44 @@ mod tests {
     // counts one edit, as the mark did), and the undo
     // assertions now prove the step exists.
     // -----------------------------------------------------------------
+
+    #[test]
+    fn set_pose_scale_round_trips_clamps_and_keeps_when_absent() {
+        // W2-31 (P-5b): 'scale' rides set_pose/get_pose with
+        // zero new tools — settable on its own, clamped at
+        // the write door, reported by get_pose, and kept
+        // (never reset) by calls that omit it.
+        let tools = tools();
+        let mut core = EditorCore::new();
+        // A fresh pose reports the identity scale.
+        let pose = call(&mut core, &tools, "get_pose", json!({ "figure": 0, "frame": 0 })).unwrap();
+        assert_eq!(pose["scale"], json!([1.0, 1.0]));
+        // A scale-only call is a valid write.
+        call(&mut core, &tools, "set_pose", json!({ "figure": 0, "frame": 0, "scale": [0.5, 2.0] }))
+            .unwrap();
+        let pose = call(&mut core, &tools, "get_pose", json!({ "figure": 0, "frame": 0 })).unwrap();
+        assert_eq!(pose["scale"], json!([0.5, 2.0]));
+        // The write door clamps into [0.25, 4.0].
+        call(&mut core, &tools, "set_pose", json!({ "figure": 0, "frame": 0, "scale": [0.01, 99.0] }))
+            .unwrap();
+        let stored = &core.project.frames[0].poses[0];
+        assert_eq!((stored.sx, stored.sy), (0.25, 4.0));
+        // An angles-only call leaves the scale alone.
+        let zeros = vec![0.0; core.project.figures[0].def.nodes.len()];
+        call(&mut core, &tools, "set_pose", json!({ "figure": 0, "frame": 0, "angles": zeros }))
+            .unwrap();
+        let pose = call(&mut core, &tools, "get_pose", json!({ "figure": 0, "frame": 0 })).unwrap();
+        assert_eq!(pose["scale"], json!([0.25, 4.0]));
+        // Malformed scales are structured errors, not panics.
+        assert!(
+            call(&mut core, &tools, "set_pose", json!({ "figure": 0, "frame": 0, "scale": [1.0] }))
+                .is_err()
+        );
+        assert!(
+            call(&mut core, &tools, "set_pose", json!({ "figure": 0, "frame": 0, "scale": "wide" }))
+                .is_err()
+        );
+    }
 
     #[test]
     fn set_frame_duration_marks_dirty_only_on_change() {
@@ -8531,6 +9219,190 @@ mod tests {
     }
 
     #[test]
+    fn wave2_98_audio_fx_tools_declare_the_panel_parameters() {
+        // W2-98 (RM20 parity): the six audio fx tools name
+        // RM20's parameters as OPTIONAL schema properties.
+        // No tool gains or loses a required argument and the
+        // roster itself is unchanged — the census delta is
+        // parameters only (the docs/MCP.md catalogue rows
+        // ride IA-W2-98-1).
+        let tools = tools();
+        let cases: [(&str, &[&str], &[&str]); 6] = [
+            ("audio_fade", &[], &["fade_in_secs", "fade_out_secs"]),
+            (
+                "audio_clip_fade",
+                &["index"],
+                &["fade_in_secs", "fade_out_secs"],
+            ),
+            ("audio_echo", &["index"], &["delay_secs", "feedback"]),
+            ("audio_lowpass", &["index"], &["cutoff_hz"]),
+            ("audio_pitch", &["index"], &["semitones"]),
+            ("audio_compress", &["index"], &["threshold", "ratio"]),
+        ];
+        for (name, required, optional) in cases {
+            let t = tools.iter().find(|t| t.name == name).unwrap();
+            let props = t.schema["properties"].as_object().unwrap();
+            let req: Vec<&str> = t.schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            assert_eq!(req, required.to_vec(), "{name}: required set changed");
+            for param in optional {
+                assert!(
+                    props.contains_key(*param),
+                    "{name}: missing optional '{param}'"
+                );
+            }
+            assert_eq!(
+                props.len(),
+                required.len() + optional.len(),
+                "{name}: property set drifted"
+            );
+        }
+    }
+
+    #[test]
+    fn wave2_98_audio_fx_tools_run_with_the_panel_parameters() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        call(&mut core, &tools, "new_project", json!({})).unwrap();
+        // Two real half-second tones: clip 1 takes the
+        // parameterised calls; clip 2 takes the default
+        // calls (and, being last, the audio_fade calls).
+        let dir = std::env::temp_dir();
+        let mk = |name: &str| {
+            let path = dir.join(format!("{name}-{}.wav", std::process::id()));
+            let wav = crate::audio_edit::WavData {
+                sample_rate: 8_000,
+                channels: 1,
+                samples: vec![0.5; 4_000],
+            };
+            std::fs::write(&path, crate::audio_edit::write_wav(&wav)).unwrap();
+            path
+        };
+        let a_path = mk("w298-a");
+        let b_path = mk("w298-b");
+        call(&mut core, &tools, "add_audio_clip", json!({
+            "path": a_path.to_string_lossy().into_owned(), "start_frame": 0
+        }))
+        .unwrap();
+        call(&mut core, &tools, "add_audio_clip", json!({
+            "path": b_path.to_string_lossy().into_owned(), "start_frame": 0
+        }))
+        .unwrap();
+
+        // Echo with the panel's values: the status names
+        // the sanitised parameters the op actually applied.
+        let r = call(&mut core, &tools, "audio_echo", json!({
+            "index": 0, "delay_secs": 0.5, "feedback": 0.5
+        }))
+        .unwrap();
+        assert!(
+            r["status"].as_str().unwrap().contains("(0.50s delay, 50% feedback)"),
+            "status: {}", r["status"]
+        );
+        let r = call(&mut core, &tools, "audio_lowpass", json!({
+            "index": 0, "cutoff_hz": 800
+        }))
+        .unwrap();
+        assert!(
+            r["status"].as_str().unwrap().contains("Low-pass filter (800 Hz)"),
+            "status: {}", r["status"]
+        );
+        // Pitch -12 doubles the frame count (the RM20 op
+        // pin, observed through the tool).
+        let r = call(&mut core, &tools, "audio_pitch", json!({
+            "index": 0, "semitones": -12
+        }))
+        .unwrap();
+        assert!(
+            r["status"].as_str().unwrap().contains("Pitch shift (-12 semitones)"),
+            "status: {}", r["status"]
+        );
+        let shifted = crate::audio_edit::read_wav(&core.project.audio[0].path).unwrap();
+        assert_eq!(shifted.frames(), 8_000);
+        let r = call(&mut core, &tools, "audio_compress", json!({
+            "index": 0, "threshold": 0.2, "ratio": 2.0
+        }))
+        .unwrap();
+        assert!(
+            r["status"]
+                .as_str()
+                .unwrap()
+                .contains("Compressor (threshold 0.2, ratio 2.0)"),
+            "status: {}", r["status"]
+        );
+
+        // Defaults are the pre-parity tools, byte for byte
+        // in the status line.
+        let r = call(&mut core, &tools, "audio_echo", json!({ "index": 1 })).unwrap();
+        assert!(
+            r["status"].as_str().unwrap().contains("(0.18s delay, 35% feedback)"),
+            "status: {}", r["status"]
+        );
+        // An out-of-range value rides the op's own sanitise
+        // clamp (delay capped at 2.0 s), not a handler clamp.
+        let r = call(&mut core, &tools, "audio_echo", json!({
+            "index": 1, "delay_secs": 99.0
+        }))
+        .unwrap();
+        assert!(
+            r["status"].as_str().unwrap().contains("(2.00s delay, 35% feedback)"),
+            "status: {}", r["status"]
+        );
+        let r = call(&mut core, &tools, "audio_fade", json!({
+            "fade_in_secs": 1.5, "fade_out_secs": 0.0
+        }))
+        .unwrap();
+        assert!(
+            r["status"]
+                .as_str()
+                .unwrap()
+                .contains("Fade (1.50s in, 0.00s out) applied to audio clip 2"),
+            "status: {}", r["status"]
+        );
+        let r = call(&mut core, &tools, "audio_fade", json!({})).unwrap();
+        assert!(
+            r["status"]
+                .as_str()
+                .unwrap()
+                .contains("Fade (0.25s in, 0.25s out) applied to audio clip 2"),
+            "status: {}", r["status"]
+        );
+        // The indexed fade takes the same parameters.
+        let r = call(&mut core, &tools, "audio_clip_fade", json!({
+            "index": 0, "fade_in_secs": 0.5, "fade_out_secs": 0.0
+        }))
+        .unwrap();
+        assert!(
+            r["status"]
+                .as_str()
+                .unwrap()
+                .contains("Fade (0.50s in, 0.00s out) applied to audio clip 1"),
+            "status: {}", r["status"]
+        );
+
+        // Mistyped parameters are clean argument errors.
+        assert!(call(&mut core, &tools, "audio_echo", json!({
+            "index": 0, "delay_secs": "fast"
+        }))
+        .is_err());
+        assert!(call(&mut core, &tools, "audio_echo", json!({
+            "index": 0, "feedback": true
+        }))
+        .is_err());
+        assert!(call(&mut core, &tools, "audio_fade", json!({
+            "fade_in_secs": "long"
+        }))
+        .is_err());
+
+        let _ = std::fs::remove_file(&a_path);
+        let _ = std::fs::remove_file(&b_path);
+    }
+
+    #[test]
     fn phase_j_parity_tools_registered_with_right_shapes() {
         let tools = tools();
         // fx_split_clip needs both the clip index and the
@@ -9457,5 +10329,20 @@ mod tests {
             json!({ "figure": 0, "start": 2, "end": 2 }),
         )
         .is_err());
+    }
+
+    #[test]
+    fn set_frame_durations_refuses_cast_overflow_entries() {
+        // Roadmap Wave 2 (W2-80, IA-W2-80-1).
+        let mut core = EditorCore::new();
+        let err = tool_set_frame_durations(
+            &mut core,
+            &json!({ "durations": [1e39] }),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "argument 'durations[0]' must be a finite number"
+        );
     }
 }

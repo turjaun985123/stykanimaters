@@ -483,16 +483,24 @@ use crate::State;
 pub const DOPE_HEADER_H: f32 = 18.0;
 
 /// Height of one figure row — header cell and frame
-/// cells alike: compact like the marker row (14) but
-/// tall enough for the 12 pt diamond and a real press
-/// target.
-pub const DOPE_ROW_H: f32 = 20.0;
+/// cells alike (Roadmap Wave 2, W2-55 — A20-14): the
+/// WCAG 2.5.8 target-size floor, 24 pt. The row was
+/// 20 — under the floor for a press/drag target the
+/// user hits on every pose (S18/A20 §1.8). The glyphs
+/// are unchanged (12 pt diamonds, centred), so the
+/// pressable grows while the visual stays as drawn;
+/// the strip cells' glyph area grows with the row
+/// (see [`strip_cell`]). Sprite rows take this height
+/// too — same press discipline, same constant.
+pub const DOPE_ROW_H: f32 = 24.0;
 
 /// Height of the frame-bend mark's bar (Wave AB,
 /// AB3): a 2 pt rule at the bottom of a bend cell —
 /// thick enough to read at a glance against either
 /// fill, thin enough to leave the glyphs their
-/// height (they centre in the 18 pt above it).
+/// height (they centre in the 22 pt above it —
+/// [`DOPE_ROW_H`] minus this bar; W2-55 raised the
+/// row from 20, when the figure was 18).
 pub const BEND_STRIP_H: f32 = 2.0;
 
 /// Width of the frame-bend mark's bar: the cell
@@ -1225,7 +1233,7 @@ pub fn move_pose_key(core: &mut EditorCore, fi: usize, from: usize, to: usize) -
             return false;
         }
     }
-    core.snapshot();
+    core.snapshot_labeled("Move pose key");
     let dir = if to > from { 1 } else { -1 };
     let mut at = from;
     while at != to {
@@ -1313,7 +1321,7 @@ pub fn move_state_key(core: &mut EditorCore, fi: usize, from: usize, to: usize) 
         );
         return false;
     }
-    core.snapshot();
+    core.snapshot_labeled("Move state key");
     let dir = if to > from { 1 } else { -1 };
     let mut at = from;
     while at != to {
@@ -1394,7 +1402,7 @@ pub fn move_bend_key(core: &mut EditorCore, fi: usize, from: usize, to: usize) -
         );
         return false;
     }
-    core.snapshot();
+    core.snapshot_labeled("Move bend key");
     let dir = if to > from { 1 } else { -1 };
     let mut at = from;
     while at != to {
@@ -1435,7 +1443,7 @@ pub fn delete_key_event(core: &mut EditorCore, fi: usize, frame: usize) -> bool 
         }) => stykanimate_rs::graph_keys::remove_key_at(core, channel, key_frame),
         Some(DopeKeyRef::Pose) => core.delete_keyframe(fi, frame),
         Some(DopeKeyRef::State) => {
-            core.snapshot();
+            core.snapshot_labeled("Delete state key");
             core.project.figures[fi].states.retain(|k| k.frame != frame);
             core.status = format!(
                 "Deleted figure {} state key at frame {}.",
@@ -1446,7 +1454,7 @@ pub fn delete_key_event(core: &mut EditorCore, fi: usize, frame: usize) -> bool 
         }
         Some(DopeKeyRef::Bend) => {
             let prev = prev_bend_row(&core.project, fi, frame);
-            core.snapshot();
+            core.snapshot_labeled("Delete bend key");
             set_bend_row(&mut core.project, fi, frame, &prev);
             core.status = format!(
                 "Deleted figure {} bend key at frame {} — the frame now holds the previous bend.",
@@ -1513,7 +1521,7 @@ pub fn stamp_key_event(core: &mut EditorCore, fi: usize, frame: usize) -> bool {
                 return false;
             };
             let row = bend_row(&core.project, fi, frame);
-            core.snapshot();
+            core.snapshot_labeled("Stamp pose key");
             core.project.frames[target].poses[fi] = pose;
             set_bend_row(&mut core.project, fi, target, &row);
             core.status = format!(
@@ -1551,7 +1559,7 @@ pub fn stamp_key_event(core: &mut EditorCore, fi: usize, frame: usize) -> bool {
                 return false;
             };
             key.frame = target;
-            core.snapshot();
+            core.snapshot_labeled("Stamp state key");
             let fig = &mut core.project.figures[fi];
             fig.states.push(key);
             fig.states.sort_by_key(|k| k.frame);
@@ -1593,7 +1601,7 @@ pub fn stamp_key_event(core: &mut EditorCore, fi: usize, frame: usize) -> bool {
                 );
                 return false;
             }
-            core.snapshot();
+            core.snapshot_labeled("Stamp bend key");
             set_bend_row(&mut core.project, fi, target, &row);
             core.status = format!(
                 "Copied figure {} bend key from frame {} to frame {}.",
@@ -2008,7 +2016,7 @@ pub fn drag_apply(s: &mut State, drag: &mut Option<DopeDrag>, dx: f32) {
                 }
                 let Some(g) = drag.as_mut() else { break };
                 if !g.snapshot_taken {
-                    s.core.snapshot();
+                    s.core.snapshot_labeled("Move graph keys");
                     g.snapshot_taken = true;
                 }
                 move_selected_keys_by(&mut s.core, &mut s.key_sel, step);
@@ -2041,7 +2049,7 @@ pub fn drag_apply(s: &mut State, drag: &mut Option<DopeDrag>, dx: f32) {
                 // first write, never after.
                 let Some(g) = drag.as_mut() else { break };
                 if !g.snapshot_taken {
-                    s.core.snapshot();
+                    s.core.snapshot_labeled("Move key");
                     g.snapshot_taken = true;
                 }
                 let stepped = match kind {
@@ -2520,7 +2528,10 @@ fn figure_row(r: &DopeRow, core: &EditorCore, ksel: &KeySel, chip_w: f32, t: &Th
         .radius(design::ROW_RADIUS)
         .hover(t.hover)
         .press(t.press)
-        .on_press(move |s: &mut State| s.core.select_figure(fi))
+        .on_press(move |s: &mut State| {
+            s.core.select_figure(fi);
+            crate::stage_view::note_character_selected(fi);
+        })
         .child(el().size(10.0, 10.0).radius(5.0).fill(dot))
         .child(
             text(fit_dope_name(&r.name))
@@ -2848,6 +2859,8 @@ mod tests {
         Pose {
             root: [root_x, 200.0],
             angles: vec![angle, 0.0, 0.0],
+            sx: 1.0,
+            sy: 1.0,
         }
     }
 
@@ -3399,6 +3412,20 @@ mod tests {
         assert_eq!(frame_readout(4, 5), "Frame 5 / 5");
         assert_eq!(frame_readout(9, 5), "Frame 5 / 5");
         assert_eq!(frame_readout(0, 0), "Frame 0 / 0");
+    }
+
+    #[test]
+    fn dope_row_height_meets_the_target_floor() {
+        // W2-55 (A20-14): the figure/sprite row height
+        // is the WCAG 2.5.8 target-size floor — 24 pt,
+        // not the 20 pt S18 measured. Header cells and
+        // frame cells both size from DOPE_ROW_H (see
+        // `figure_row` / `sprite_row`), so this
+        // constant IS the press height; and the strip
+        // cells' glyph area (row minus the two strips)
+        // stays positive at the floor.
+        assert_eq!(DOPE_ROW_H, 24.0);
+        assert!(DOPE_ROW_H - EXPO_STRIP_H - BEND_STRIP_H > 0.0);
     }
 
     #[test]

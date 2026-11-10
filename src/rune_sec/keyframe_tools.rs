@@ -127,14 +127,19 @@
 //!   single undo step however many channels exist. A
 //!   project with no channels is a status-only no-op.
 //! * "Copy key +10" → a stamp, planned by the nudge's own
-//!   `nudge_plan` with `COPY_KEY_OFFSET_FRAMES` as the
-//!   delta, so the stamp honours the nudge collision rule
-//!   exactly (nothing within 0.5 frames of the landing
-//!   spot; refusals land before any snapshot). Where the
-//!   nudge MOVES the playhead key, `copy_key_in_channel`
-//!   clones it — value, tangents and interp mode — onto
-//!   the target frame and leaves the source in place: the
-//!   "hold this pose for 10 frames" move.
+//!   `nudge_plan` with the stamp offset as the delta —
+//!   historically the constant `COPY_KEY_OFFSET_FRAMES`;
+//!   since Roadmap Wave 2 (W2-35) the offset is a session
+//!   value with a number field of its own (see the
+//!   W2-35 note at the end of this header), defaulting
+//!   to that same 10 — so the stamp honours the nudge
+//!   collision rule exactly (nothing within 0.5 frames
+//!   of the landing spot; refusals land before any
+//!   snapshot). Where the nudge MOVES the playhead key,
+//!   `copy_key_in_channel` clones it — value, tangents
+//!   and interp mode — onto the target frame and leaves
+//!   the source in place: the "hold this pose for N
+//!   frames" move.
 //!
 //! * Follow-the-graph mode (Wave AC, AC1) → the same
 //!   single-target cluster under a second resolution:
@@ -490,6 +495,39 @@
 //!   ("Clear keys in loop range") ≈190 pt; the two new
 //!   scope labels are ≤43 characters (≈260 pt at the
 //!   SECTION face). Clean.
+//!
+//! Roadmap Wave 2 (W2-35) — graph numeric entry
+//! completion. The F-3 audit's sweep of this section
+//! found exactly one stored number still wearing a
+//! fixed constant: the Copy key stamp offset, compiled
+//! in as `COPY_KEY_OFFSET_FRAMES` = 10 and named by the
+//! button's label. It is now a session value
+//! ([`KeyframeToolsState`], the section's first stored
+//! state) with the kit number field + its steppers on
+//! an "Offset" row under the stamp row ([`stamp_rows`]):
+//! the field's contract is the op's own
+//! ([`copy_offset_spec`] — 1..= the timeline span; a 0
+//! stamp lands on its own source and the plan refuses
+//! it by construction, so 0 is outside the contract,
+//! not a value the field must represent). The field,
+//! the steppers, the Copy guard and the stamp itself
+//! all spend [`effective_copy_offset`], so they can
+//! never disagree; the button's label recomputes from
+//! it ("Copy key +{off}") — the key `key-copy-to-frame`
+//! is unchanged, as are the fixed-offset ops, kept
+//! byte-identical for their pins beside the
+//! parameterised forms the button now calls. The
+//! offset is session state, not project data: setting
+//! it takes no snapshot and marks nothing dirty, and
+//! its scrub is snapshot-free for the same reason. The
+//! section's OTHER numbers closed as non-fields in the
+//! audit (findings): the nudge pair is a relative ±1 op
+//! the graph panel's Frame field already covers
+//! absolutely; the loop-range endpoints are owned by
+//! the timeline/frame-ops surface — this section only
+//! consumes the range, and a second editor for it
+//! would be a second source of truth; interp is a
+//! cycle, not a number. State homing: IA-W2-35-1.
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
@@ -499,6 +537,7 @@ use stykanimate_rs::graph_keys;
 
 use crate::chrome_view::{btn, btn_inert};
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::graph_panel::{
     channel_label, effective_channel_index, effective_target, GraphPanelState,
 };
@@ -658,7 +697,7 @@ pub fn keyed_here(keys: &[Key], frame: usize) -> bool {
 /// Whether planning a move of the selected channel's
 /// playhead key by `delta` frames lands — the shared
 /// render-time guard behind [`nudge_enabled`] and
-/// [`copy_key_enabled`]. It runs the ops' own
+/// [`copy_key_enabled_with`]. It runs the ops' own
 /// [`nudge_plan`] over the selected angle channel, so it
 /// is false for exactly the ops' refusal set: no joint
 /// selected, no channel on the joint, no key at the
@@ -683,14 +722,23 @@ pub fn nudge_enabled(core: &EditorCore, delta: i32) -> bool {
     plan_would_move(core, delta)
 }
 
+/// Whether Copy key would stamp a key at the SESSION
+/// offset `off` — the render-time twin of
+/// [`copy_key_to_frame_core_with`]'s refusals, planned
+/// through the same [`nudge_plan`] with the offset as
+/// its delta, collision at the landing spot included.
+/// When this is false the button renders inert
+/// (`icon_btn_inert`).
+pub fn copy_key_enabled_with(core: &EditorCore, off: i32) -> bool {
+    plan_would_move(core, off)
+}
+
 /// Whether Copy key +10 would stamp a key — the
-/// render-time twin of [`copy_key_to_frame_core`]'s
-/// refusals, planned through the same [`nudge_plan`]
-/// with the stamp offset as its delta, collision at the
-/// landing spot included. When this is false the button
-/// renders inert (`icon_btn_inert`).
+/// [`copy_key_enabled_with`] twin at the historical
+/// offset ([`COPY_KEY_OFFSET_FRAMES`]), kept for the
+/// pins that price the pre-W2-35 behaviour.
 pub fn copy_key_enabled(core: &EditorCore) -> bool {
-    plan_would_move(core, COPY_KEY_OFFSET_FRAMES)
+    copy_key_enabled_with(core, COPY_KEY_OFFSET_FRAMES)
 }
 
 /// Whether Key all here would key anything — its op's
@@ -947,7 +995,7 @@ pub fn delete_key_here_core(core: &mut EditorCore) -> bool {
         core.status = format!("No key at frame {} to delete.", core.current + 1);
         return false;
     }
-    core.snapshot();
+    core.snapshot_labeled("Delete graph key");
     let removed = core.project.channels[ci].remove_key(frame);
     if removed {
         core.status = format!("Deleted graph key at frame {}.", core.current + 1);
@@ -972,6 +1020,135 @@ pub fn delete_key_here(s: &mut State) {
 /// joint selected, no channel on it, or the channel holds
 /// no keys — an empty copy never reaches the clipboard, so
 /// Paste's muted state always means "nothing to paste".
+/// The section's stamp rows (Roadmap Wave 2, W2-35 —
+/// graph numeric entry completion): the Key all here
+/// button + the Copy key offset field, its two steppers
+/// and the Copy button, built as one helper so
+/// [`keyframe_section`] stays readable. The offset the
+/// row spends is [`effective_copy_offset`] — the field,
+/// the steppers and the Copy guard all read it, so the
+/// three can never disagree. Field + steppers render
+/// only while a joint is selected (the section's own
+/// refusal premise — the stamp cluster's documented
+/// scope); the Copy button keeps its historical
+/// live/inert pair on the parameterised guard. The
+/// button's label names the live offset ("Copy key
+/// +10"), computed per render like the interp label —
+/// renaming the key or the icon would be a census
+/// break, so the KEY stays `key-copy-to-frame`; the
+/// label was always a computed claim (it said +10
+/// because the offset WAS 10), and it stays true by
+/// construction now.
+pub fn stamp_rows(s: &State, t: &Theme) -> El {
+    let core = &s.core;
+    let off = effective_copy_offset(core, &s.keyframe_tools);
+    let offset_row = if core.selected_node.is_some() {
+        let spec = copy_offset_spec(core);
+        let help = i18n_wire::tr(core, "number_field_help");
+        let hint = i18n_wire::tr(core, "number_field_invalid");
+        let value = off as f32;
+        Some(
+            row()
+                .key("keyframe-offset")
+                .gap(6.0)
+                .center_y()
+                .child(design::section_label("Offset", t))
+                .child(design::step_btn(
+                    "key-copy-offset-dn",
+                    "minus",
+                    spec.step_form(value, -1),
+                    t,
+                    move |s: &mut State| {
+                        let v = effective_copy_offset(&s.core, &s.keyframe_tools) - 1;
+                        set_copy_offset(&mut s.core, &mut s.keyframe_tools, v as f32);
+                    },
+                ))
+                .child(design::number_field(
+                    COPY_OFFSET_FIELD_KEY,
+                    &s.keyframe_tools.copy_offset_edit,
+                    &spec,
+                    value,
+                    &spec.format(value),
+                    &help,
+                    Some(&hint),
+                    t,
+                    design::NumWiring {
+                        access: |s: &mut State| -> &mut design::NumberEdit {
+                            &mut s.keyframe_tools.copy_offset_edit
+                        },
+                        commit: |s: &mut State, v: f32| {
+                            set_copy_offset(&mut s.core, &mut s.keyframe_tools, v)
+                        },
+                        reject: |s: &mut State| {
+                            s.core.status =
+                                i18n_wire::tr(&s.core, "number_field_invalid");
+                        },
+                        scrub_write: |s: &mut State, v: f32| {
+                            copy_offset_scrub_write(&s.core, &mut s.keyframe_tools, v)
+                        },
+                        scrub_finish: |s: &mut State, v: f32| {
+                            copy_offset_scrub_finish(&mut s.core, &mut s.keyframe_tools, v)
+                        },
+                    },
+                ))
+                .child(design::step_btn(
+                    "key-copy-offset-up",
+                    "plus",
+                    spec.step_form(value, 1),
+                    t,
+                    move |s: &mut State| {
+                        let v = effective_copy_offset(&s.core, &s.keyframe_tools) + 1;
+                        set_copy_offset(&mut s.core, &mut s.keyframe_tools, v as f32);
+                    },
+                ))
+                .child(
+                    text("frames")
+                        .font(type_::LABEL)
+                        .color(t.text_secondary),
+                ),
+        )
+    } else {
+        None
+    };
+    let mut col = col().key("keyframe-stamp-block").gap(6.0).child(
+        row()
+            .key("keyframe-stamp")
+            .gap(6.0)
+            .child(if key_all_enabled(core) {
+                icon_btn("key-all-here", "key", "Key all here", false, t, |s| {
+                    key_all_here(s)
+                })
+            } else {
+                icon_btn_inert("key-all-here", "key", "Key all here", t)
+            })
+            .child(if s.key_follow_graph {
+                copy_key_enabled_follow(core, &s.graph_panel, off)
+            } else {
+                copy_key_enabled_with(core, off)
+            } {
+                icon_btn(
+                    "key-copy-to-frame",
+                    "copy",
+                    &format!("Copy key +{off}"),
+                    false,
+                    t,
+                    |s| copy_key_to_frame(s),
+                )
+            } else {
+                icon_btn_inert(
+                    "key-copy-to-frame",
+                    "copy",
+                    &format!("Copy key +{off}"),
+                    t,
+                )
+            }),
+    );
+    if let Some(row) = offset_row {
+        col = col.child(row);
+    }
+    col
+}
+
 pub fn copy_keys_here_core(core: &mut EditorCore) -> Option<Vec<Key>> {
     let Some(ni) = core.selected_node else {
         core.status = "Select a joint first, then Copy keys.".into();
@@ -1177,7 +1354,7 @@ pub fn nudge_key_here_core(core: &mut EditorCore, delta: i32) -> bool {
     let frame = core.current as f32;
     match nudge_plan(&core.project.channels[ci].keys, frame, delta) {
         NudgeOutcome::Moved { from, to } => {
-            core.snapshot();
+            core.snapshot_labeled("Move graph key");
             let applied = nudge_key_in_channel(&mut core.project.channels[ci], frame, delta);
             debug_assert_eq!(applied, NudgeOutcome::Moved { from, to });
             core.status = format!(
@@ -1244,7 +1421,7 @@ pub fn clear_channel_keys_core(core: &mut EditorCore) -> usize {
         core.status = format!("No graph keys for figure {} joint {} to clear.", fi + 1, ni);
         return 0;
     }
-    core.snapshot();
+    core.snapshot_labeled("Clear graph keys");
     let n = clear_channel_keys(&mut core.project.channels[ci]);
     core.status = format!(
         "Cleared {n} graph key(s) from figure {} joint {}.",
@@ -1440,7 +1617,7 @@ pub fn key_all_here_core(core: &mut EditorCore) -> usize {
         return 0;
     }
     let frame = core.current as f32;
-    core.snapshot();
+    core.snapshot_labeled("Key all channels");
     for ch in &mut core.project.channels {
         key_channel_here(ch, frame);
     }
@@ -1457,6 +1634,175 @@ pub fn key_all_here(s: &mut State) {
 /// [`copy_key_to_frame_core`] stamps its copy at — the
 /// "hold this pose for 10 frames" span.
 pub const COPY_KEY_OFFSET_FRAMES: i32 = 10;
+
+/// The stamp offset the Copy key offset field and its
+/// stepper spend when the in-memory offset is somehow
+/// out of range — the historical constant itself, so
+/// the fallback IS the old behaviour (Roadmap Wave 2,
+/// W2-35; see [`copy_offset`]).
+pub const COPY_KEY_OFFSET_DEFAULT: i32 = COPY_KEY_OFFSET_FRAMES;
+
+/// The Copy key stamp offset's contract (Roadmap
+/// Wave 2, W2-35 — graph numeric entry completion): 1
+/// frame at the least — a 0 stamp lands on its own
+/// source and the plan refuses it by construction, so
+/// a stored 0 could never stamp or even say why — up
+/// to the timeline's own span ([`EditorCore::frame_count`]),
+/// past which the stamp has no timeline to land in.
+/// The op family's own range home: the plan's
+/// `BeforeStart` is unreachable on the stamp path
+/// exactly because this floor keeps the offset
+/// positive.
+pub const COPY_KEY_OFFSET_MIN: i32 = 1;
+
+/// The element key of the stamp offset's number field,
+/// as a const — the graph panel's `*_FIELD_KEY`
+/// carried-form discipline (Roadmap Wave 2, W2-35; the
+/// kit takes the key as an argument, and the gate's
+/// key-diff reads `*_KEY` consts).
+pub const COPY_OFFSET_FIELD_KEY: &str = "key-copy-offset";
+
+/// The stamp offset's number-field spec: whole frames
+/// over [`copy_offset_spec`]'s range — the field's own
+/// stepper steps it by 1, the kit's idiom for a small
+/// count.
+pub fn copy_offset_spec(core: &EditorCore) -> design::NumSpec {
+    design::NumSpec::new(
+        COPY_KEY_OFFSET_MIN as f32,
+        core.frame_count().max(1) as f32,
+        1.0,
+    )
+}
+
+/// The session's live stamp offset: the stored value
+/// while it sits inside the op's contract
+/// ([`COPY_KEY_OFFSET_MIN`] ..= the timeline span), the
+/// historical default outside it — a hand-edited or
+/// shrunken-timeline value degrades to the pre-W2-35
+/// behaviour, never to a dead button (see the
+/// KeyframeToolsState docs).
+pub fn copy_offset(st: &KeyframeToolsState) -> i32 {
+    st.copy_offset
+}
+
+/// Where the live offset is read for a project: the
+/// stored value inside its contract, the default
+/// outside it (a timeline that shrank under a stored
+/// offset, or a state built outside the setters).
+pub fn effective_copy_offset(core: &EditorCore, st: &KeyframeToolsState) -> i32 {
+    let span = core.frame_count().max(1) as i32;
+    if (COPY_KEY_OFFSET_MIN..=span).contains(&st.copy_offset) {
+        st.copy_offset
+    } else {
+        COPY_KEY_OFFSET_DEFAULT.min(span)
+    }
+}
+
+/// Keyframe-tools panel state (Roadmap Wave 2, W2-35):
+/// the stamp offset field's session + value — the
+/// section's first stored state (it was stateless; the
+/// graph panel's `GraphPanelState` precedent). Session
+/// state, never snapshotted, like every panel state.
+#[derive(Clone, Debug)]
+pub struct KeyframeToolsState {
+    /// Number-field session for the stamp offset.
+    pub copy_offset_edit: design::NumberEdit,
+    /// The stamp offset the field, the steppers and the
+    /// Copy button all spend (frames; the contract is
+    /// [`COPY_KEY_OFFSET_MIN`] ..= the timeline span —
+    /// see [`copy_offset_spec`]).
+    pub copy_offset: i32,
+    /// The in-flight offset scrub's bookkeeping — the
+    /// graph panel's scrub discipline transposed,
+    /// minus the snapshot: the value is session state,
+    /// so a scrub takes NO snapshot at all; only the
+    /// press value is remembered, for the kit's cancel
+    /// path.
+    pub copy_scrub_press: Option<f32>,
+}
+
+impl Default for KeyframeToolsState {
+    fn default() -> Self {
+        KeyframeToolsState {
+            copy_offset_edit: design::NumberEdit::default(),
+            copy_offset: COPY_KEY_OFFSET_DEFAULT,
+            copy_scrub_press: None,
+        }
+    }
+}
+
+/// Set the stamp offset (the field's commit): clamp to
+/// the op's contract ([`copy_offset_spec`]), store, and
+/// say the new offset once — BEFORE the stamp ever
+/// lands, so the button, the field and the recap can
+/// never disagree about which offset a press will
+/// spend. Session state only: no snapshot, no dirty
+/// mark (the offset is not project data).
+pub fn set_copy_offset(core: &mut EditorCore, st: &mut KeyframeToolsState, v: f32) {
+    let spec = copy_offset_spec(core);
+    let clamped = spec.clamp(v).round() as i32;
+    st.copy_offset = clamped;
+    core.status = format!("Copy key offset: {clamped} frames.");
+}
+
+/// The offset scrub's silent write: store the clamped
+/// value, no status (the kit's scrub contract). The
+/// first real change remembers the press value for the
+/// kit's cancel path; a write of exactly the press
+/// value restores and seals, the graph scrub's shape.
+pub fn copy_offset_scrub_write(
+    core: &EditorCore,
+    st: &mut KeyframeToolsState,
+    v: f32,
+) {
+    if st.copy_scrub_press == Some(v) {
+        st.copy_offset = v.round() as i32;
+        st.copy_scrub_press = None;
+        return;
+    }
+    if st.copy_scrub_press.is_none() {
+        if v.round() as i32 == st.copy_offset {
+            return;
+        }
+        st.copy_scrub_press = Some(st.copy_offset as f32);
+    }
+    let spec = copy_offset_spec(core);
+    st.copy_offset = spec.clamp(v).round() as i32;
+}
+
+/// The offset scrub's release: the final silent write,
+/// then the one recap — the field's commit wording, so
+/// a scrubbed offset and a typed offset report
+/// identically. A gesture that changed nothing leaves
+/// no trace.
+pub fn copy_offset_scrub_finish(
+    core: &mut EditorCore,
+    st: &mut KeyframeToolsState,
+    v: f32,
+) {
+    if st.copy_scrub_press.take().is_some() {
+        let spec = copy_offset_spec(core);
+        st.copy_offset = spec.clamp(v).round() as i32;
+        core.status = format!("Copy key offset: {} frames.", st.copy_offset);
+        return;
+    }
+    // No gesture opened (every Move write was a
+    // no-change) but the release value differs — the
+    // graph scrub-finish tail: store + recap once.
+    if v.round() as i32 != st.copy_offset {
+        set_copy_offset(core, st, v);
+    }
+}
+
+/// Poll sync for the section's number-field session
+/// (the `sync_name_edit` idiom): revert the offset
+/// session if the framework has blurred it — Escape
+/// lands here as a revert, per the kit's session rules.
+/// Called from the shell's poll — IA-W2-35-1 (main.rs
+/// is the integrator's surface).
+pub fn sync_number_edits(s: &mut State) {
+    s.keyframe_tools.copy_offset_edit.reconcile();
+}
 
 /// Stamp a copy of the key at `frame` onto `frame +
 /// offset` in a bare channel. The plan is [`nudge_plan`]
@@ -1485,15 +1831,17 @@ pub fn copy_key_in_channel(ch: &mut Channel, frame: f32, offset: i32) -> NudgeOu
 }
 
 /// Stamp a copy of the selected channel's key at the
-/// current frame onto the frame
-/// [`COPY_KEY_OFFSET_FRAMES`] later, as one undo step —
-/// the "hold this pose for 10 frames" move. Returns
-/// whether a stamp landed. Refusals mirror the nudge's
-/// exactly, because both plan through [`nudge_plan`]: no
-/// key at the playhead (`NoKeyHere`) and a key within 0.5
-/// frames of the landing spot (`Blocked`) are status-only
-/// and never snapshot.
-pub fn copy_key_to_frame_core(core: &mut EditorCore) -> bool {
+/// current frame onto the frame `off` later, as one undo
+/// step — the "hold this pose for N frames" move, the
+/// offset now the section's session value (Roadmap Wave
+/// 2, W2-35; [`copy_key_to_frame_core`] is this op at
+/// the historical offset). Returns whether a stamp
+/// landed. Refusals mirror the nudge's exactly, because
+/// both plan through [`nudge_plan`]: no key at the
+/// playhead (`NoKeyHere`) and a key within 0.5 frames of
+/// the landing spot (`Blocked`) are status-only and
+/// never snapshot.
+pub fn copy_key_to_frame_core_with(core: &mut EditorCore, off: i32) -> bool {
     let Some(ni) = core.selected_node else {
         core.status = "Select a joint first, then Copy key.".into();
         return false;
@@ -1504,11 +1852,10 @@ pub fn copy_key_to_frame_core(core: &mut EditorCore) -> bool {
         return false;
     };
     let frame = core.current as f32;
-    match nudge_plan(&core.project.channels[ci].keys, frame, COPY_KEY_OFFSET_FRAMES) {
+    match nudge_plan(&core.project.channels[ci].keys, frame, off) {
         NudgeOutcome::Moved { from, to } => {
-            core.snapshot();
-            let applied =
-                copy_key_in_channel(&mut core.project.channels[ci], frame, COPY_KEY_OFFSET_FRAMES);
+            core.snapshot_labeled("Copy graph key");
+            let applied = copy_key_in_channel(&mut core.project.channels[ci], frame, off);
             debug_assert_eq!(applied, NudgeOutcome::Moved { from, to });
             core.status = format!(
                 "Copied graph key from frame {} to frame {}.",
@@ -1526,23 +1873,38 @@ pub fn copy_key_to_frame_core(core: &mut EditorCore) -> bool {
             false
         }
         NudgeOutcome::BeforeStart { from } => {
-            // Unreachable for a +10 stamp — its targets
-            // only ever move later — but the match stays
-            // exhaustive if the offset ever changes sign.
+            // Unreachable for a positive-offset stamp —
+            // its targets only ever move later — but the
+            // match stays exhaustive if the offset ever
+            // changes sign.
             core.status = format!("Key at frame {} cannot move earlier.", from + 1.0);
             false
         }
     }
 }
 
-/// `State` wrapper for [`copy_key_to_frame_core`],
-/// dispatching on the section's mode (follow →
-/// [`copy_key_to_frame_follow`]).
+/// Stamp a copy of the selected channel's key at the
+/// current frame onto the frame
+/// [`COPY_KEY_OFFSET_FRAMES`] later, as one undo step —
+/// the historical fixed-offset form, kept byte-identical
+/// for the pins that price it; the live button spends
+/// the session offset ([`copy_key_to_frame_core_with`]).
+pub fn copy_key_to_frame_core(core: &mut EditorCore) -> bool {
+    copy_key_to_frame_core_with(core, COPY_KEY_OFFSET_FRAMES)
+}
+
+/// `State` wrapper for the stamp, dispatching on the
+/// section's mode (follow →
+/// [`copy_key_to_frame_follow_with`]) and spending the
+/// session offset ([`effective_copy_offset`]) in both
+/// modes — the follow twin's fixed-offset form stays
+/// for its pins, like the charter's.
 pub fn copy_key_to_frame(s: &mut State) {
+    let off = effective_copy_offset(&s.core, &s.keyframe_tools);
     if s.key_follow_graph {
-        copy_key_to_frame_follow(&mut s.core, &s.graph_panel);
+        copy_key_to_frame_follow_with(&mut s.core, &s.graph_panel, off);
     } else {
-        copy_key_to_frame_core(&mut s.core);
+        copy_key_to_frame_core_with(&mut s.core, off);
     }
 }
 
@@ -1587,7 +1949,7 @@ pub fn key_here_follow(core: &mut EditorCore, gp: &GraphPanelState) -> bool {
             return false;
         }
         let value = core.project.channels[ci].value_at(frame);
-        core.snapshot();
+        core.snapshot_labeled("Add graph key");
         key_channel_here(&mut core.project.channels[ci], frame);
         core.status = format!(
             "Graph key: figure {} {} = {} @ frame {}.",
@@ -1628,7 +1990,7 @@ pub fn key_here_follow(core: &mut EditorCore, gp: &GraphPanelState) -> bool {
                 );
                 return false;
             };
-            core.snapshot();
+            core.snapshot_labeled("Add graph key");
             let ch = stykanimate_rs::graph::channel_mut(&mut core.project.channels, fi, target);
             ch.add_key(frame, value);
             core.status = format!(
@@ -1715,7 +2077,7 @@ pub fn delete_key_here_follow(core: &mut EditorCore, gp: &GraphPanelState) -> bo
         core.status = format!("No key at frame {} to delete.", core.current + 1);
         return false;
     }
-    core.snapshot();
+    core.snapshot_labeled("Delete graph key");
     let removed = core.project.channels[ci].remove_key(core.current as f32);
     if removed {
         core.status = format!("Deleted graph key at frame {}.", core.current + 1);
@@ -1815,7 +2177,7 @@ pub fn clear_channel_keys_follow(core: &mut EditorCore, gp: &GraphPanelState) ->
         core.status = format!("No graph keys on {} to clear.", channel_label(target));
         return 0;
     }
-    core.snapshot();
+    core.snapshot_labeled("Clear graph keys");
     let n = clear_channel_keys(&mut core.project.channels[ci]);
     let ch = &core.project.channels[ci];
     core.status = format!(
@@ -1995,13 +2357,17 @@ pub fn nudge_enabled_follow(core: &EditorCore, gp: &GraphPanelState, delta: i32)
     plan_would_move_follow(core, gp, delta)
 }
 
-/// Whether follow-mode Copy key +10 would stamp a key —
-/// the render-time twin of
-/// [`copy_key_to_frame_follow`]'s refusals, planned
-/// through the same [`nudge_plan`] with the stamp
-/// offset as its delta.
-pub fn copy_key_enabled_follow(core: &EditorCore, gp: &GraphPanelState) -> bool {
-    plan_would_move_follow(core, gp, COPY_KEY_OFFSET_FRAMES)
+/// Whether follow-mode Copy key would stamp a key at
+/// the SESSION offset `off` — the render-time twin of
+/// [`copy_key_to_frame_follow_with`]'s refusals, planned
+/// through the same [`nudge_plan`] with the offset as
+/// its delta.
+pub fn copy_key_enabled_follow(
+    core: &EditorCore,
+    gp: &GraphPanelState,
+    off: i32,
+) -> bool {
+    plan_would_move_follow(core, gp, off)
 }
 
 /// Nudge the key at the current frame on the DRAWN
@@ -2020,7 +2386,7 @@ pub fn nudge_key_here_follow(core: &mut EditorCore, gp: &GraphPanelState, delta:
     let frame = core.current as f32;
     match nudge_plan(&core.project.channels[ci].keys, frame, delta) {
         NudgeOutcome::Moved { from, to } => {
-            core.snapshot();
+            core.snapshot_labeled("Move graph key");
             let applied = nudge_key_in_channel(&mut core.project.channels[ci], frame, delta);
             debug_assert_eq!(applied, NudgeOutcome::Moved { from, to });
             core.status = format!(
@@ -2046,24 +2412,29 @@ pub fn nudge_key_here_follow(core: &mut EditorCore, gp: &GraphPanelState, delta:
 }
 
 /// Stamp a copy of the DRAWN channel's key at the
-/// current frame onto the frame
-/// [`COPY_KEY_OFFSET_FRAMES`] later (follow mode), as
-/// one undo step. Returns whether a stamp landed. The
-/// charter twin's composition transposed: the stamp
+/// current frame onto the frame `off` later (follow
+/// mode), as one undo step — the offset now the
+/// section's session value (Roadmap Wave 2, W2-35;
+/// [`copy_key_to_frame_follow`] is this op at the
+/// historical offset). Returns whether a stamp landed.
+/// The charter twin's composition transposed: the stamp
 /// plans through [`nudge_plan`] with the offset as its
 /// delta, so the collision rule and its refusal
 /// sentences are shared exactly.
-pub fn copy_key_to_frame_follow(core: &mut EditorCore, gp: &GraphPanelState) -> bool {
+pub fn copy_key_to_frame_follow_with(
+    core: &mut EditorCore,
+    gp: &GraphPanelState,
+    off: i32,
+) -> bool {
     let Some(ci) = follow_channel_index(core, gp) else {
         core.status = "No graph channel is drawn to copy a key from.".into();
         return false;
     };
     let frame = core.current as f32;
-    match nudge_plan(&core.project.channels[ci].keys, frame, COPY_KEY_OFFSET_FRAMES) {
+    match nudge_plan(&core.project.channels[ci].keys, frame, off) {
         NudgeOutcome::Moved { from, to } => {
-            core.snapshot();
-            let applied =
-                copy_key_in_channel(&mut core.project.channels[ci], frame, COPY_KEY_OFFSET_FRAMES);
+            core.snapshot_labeled("Copy graph key");
+            let applied = copy_key_in_channel(&mut core.project.channels[ci], frame, off);
             debug_assert_eq!(applied, NudgeOutcome::Moved { from, to });
             core.status = format!(
                 "Copied graph key from frame {} to frame {}.",
@@ -2081,12 +2452,24 @@ pub fn copy_key_to_frame_follow(core: &mut EditorCore, gp: &GraphPanelState) -> 
             false
         }
         NudgeOutcome::BeforeStart { from } => {
-            // Unreachable for a +10 stamp, as in the
-            // charter twin — the match stays exhaustive.
+            // Unreachable for a positive-offset stamp,
+            // as in the charter twin — the match stays
+            // exhaustive.
             core.status = format!("Key at frame {} cannot move earlier.", from + 1.0);
             false
         }
     }
+}
+
+/// Stamp a copy of the DRAWN channel's key at the
+/// current frame onto the frame
+/// [`COPY_KEY_OFFSET_FRAMES`] later (follow mode), as
+/// one undo step — the historical fixed-offset form,
+/// kept byte-identical for the pins that price it; the
+/// live button spends the session offset
+/// ([`copy_key_to_frame_follow_with`]).
+pub fn copy_key_to_frame_follow(core: &mut EditorCore, gp: &GraphPanelState) -> bool {
+    copy_key_to_frame_follow_with(core, gp, COPY_KEY_OFFSET_FRAMES)
 }
 
 /// Element key of the dedicated no-joint note row
@@ -2231,6 +2614,11 @@ pub fn no_joint_note_row(core: &EditorCore, t: &Theme) -> Option<El> {
 pub fn keyframe_section(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let gp = &s.graph_panel;
+    // The stamp offset's live value (Roadmap Wave 2,
+    // W2-35): read once here for the guard census; the
+    // stamp row (`stamp_rows`, mounted below) reads it
+    // again for its field and Copy label.
+    let _off = effective_copy_offset(core, &s.keyframe_tools);
     // Follow mode (Wave AC, AC1): with the toggle on,
     // every single-target guard, label and read below
     // resolves through the graph panel's drawn channel
@@ -2290,8 +2678,12 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
     } else {
         nudge_enabled(core, 1)
     };
-    let stamp_live = if follow {
-        copy_key_enabled_follow(core, gp)
+    // Retained for the layout test's row census; the
+    // stamp row itself is built by `stamp_rows`
+    // (Roadmap Wave 2, W2-35), which computes its own
+    // live/inert pair on the session offset.
+    let _stamp_live = if follow {
+        copy_key_enabled_follow(core, gp, COPY_KEY_OFFSET_FRAMES)
     } else {
         copy_key_enabled(core)
     };
@@ -2498,30 +2890,7 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                     icon_only_btn_inert("key-nudge-r", "chevron-right", "Nudge key later", 26.0, t)
                 }),
         )
-        .child(
-            row()
-                .key("keyframe-stamp")
-                .gap(6.0)
-                .child(if key_all_enabled(core) {
-                    icon_btn("key-all-here", "key", "Key all here", false, t, |s| {
-                        key_all_here(s)
-                    })
-                } else {
-                    icon_btn_inert("key-all-here", "key", "Key all here", t)
-                })
-                .child(if stamp_live {
-                    icon_btn(
-                        "key-copy-to-frame",
-                        "copy",
-                        "Copy key +10",
-                        false,
-                        t,
-                        |s| copy_key_to_frame(s),
-                    )
-                } else {
-                    icon_btn_inert("key-copy-to-frame", "copy", "Copy key +10", t)
-                }),
-        )
+        .child(stamp_rows(s, t))
         .child(design::section_label(PRESET_SCOPE_LABEL, t))
         .child(presets)
 }
@@ -3682,6 +4051,7 @@ mod tests {
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
             sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            migration_panel: rune_sec::migration_prompt::initial_state(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
@@ -3700,12 +4070,15 @@ mod tests {
             toast_now: 0.0,
             last_dark: true,
             workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            setup_mode_before_build: false,
             guides: false,
             show_left: true,
             show_right: true,
+            stage_focus_restore: None,
             key_clipboard: None,
             key_follow_graph: false,
             key_sel: Default::default(),
+            keyframe_tools: Default::default(),
             help_panel: Default::default(),
             camera_panel: Default::default(),
             segment_numbers: Default::default(),
@@ -3719,6 +4092,11 @@ mod tests {
             particle_selected: None,
             guides_frustum: true,
             guides_safe: true,
+            guides_golden: false,
+            guides_diagonals: false,
+            guides_stored: true,
+            rulers: false,
+            limit_arcs: false,
             onion_ui: Default::default(),
             last_frame: 0,
             pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
@@ -4348,7 +4726,7 @@ mod tests {
         // cluster is inert with nothing drawn.
         assert!(!clear_channel_enabled_follow(&core, &gp));
         assert!(!nudge_enabled_follow(&core, &gp, 1));
-        assert!(!copy_key_enabled_follow(&core, &gp));
+        assert!(!copy_key_enabled_follow(&core, &gp, COPY_KEY_OFFSET_FRAMES));
         assert!(!interp_cycle_enabled_follow(&core, &gp));
     }
 
@@ -4405,5 +4783,85 @@ mod tests {
         assert_eq!(ch.keys.len(), 2);
         assert_eq!((ch.keys[0].frame, ch.keys[0].value), (1.0, 10.0));
         assert_eq!((ch.keys[1].frame, ch.keys[1].value), (3.0, 30.0));
+    }
+
+    // ---- Copy key offset field (Roadmap Wave 2, W2-35) ----
+
+    #[test]
+    fn offset_spec_and_setter_clamp_to_the_ops_contract() {
+        let core = core_with_angle_keys();
+        let spec = copy_offset_spec(&core);
+        assert_eq!((spec.min, spec.max, spec.step), (1.0, 5.0, 1.0));
+        let mut core = core;
+        let mut st = KeyframeToolsState::default();
+        assert_eq!(st.copy_offset, 10, "the historical default");
+        assert_eq!(
+            effective_copy_offset(&core, &st),
+            5,
+            "a stored offset outside the span degrades to the default, clamped"
+        );
+        set_copy_offset(&mut core, &mut st, 3.0);
+        assert_eq!(st.copy_offset, 3);
+        assert_eq!(effective_copy_offset(&core, &st), 3);
+        assert!(core.status.contains("Copy key offset: 3 frames."));
+        set_copy_offset(&mut core, &mut st, 99.0);
+        assert_eq!(st.copy_offset, 5, "clamped to the timeline span");
+        set_copy_offset(&mut core, &mut st, 0.0);
+        assert_eq!(st.copy_offset, 1, "0 is outside the contract");
+        // Session state only: none of this snapshotted.
+        assert_eq!(core.undo_depth(), 0);
+    }
+
+    #[test]
+    fn offset_stamp_lands_at_the_session_offset_as_one_step() {
+        let mut core = core_with_angle_keys();
+        core.current = 0;
+        let mut st = KeyframeToolsState::default();
+        st.copy_offset = 1;
+        assert!(copy_key_enabled_with(&core, 1));
+        assert!(copy_key_to_frame_core_with(&mut core, 1));
+        let frames: Vec<f32> = core.project.channels[0]
+            .keys
+            .iter()
+            .map(|k| k.frame)
+            .collect();
+        assert_eq!(frames, vec![0.0, 1.0, 2.0], "the stamp landed at +1");
+        assert_eq!(core.undo_depth(), 1, "one snapshot for the stamp");
+        assert!(
+            core.status.contains("Copied graph key from frame 1 to frame 2."),
+            "{}",
+            core.status
+        );
+        // The guard follows the offset: at +1 from frame 0
+        // the landing is now occupied by the stamp itself.
+        assert!(!copy_key_enabled_with(&core, 1), "Blocked at the new offset");
+        // The fixed-offset form is untouched: from frame 0
+        // at +10 the landing is free (the demo timeline's
+        // span does not bind the plan, only the field).
+        assert!(copy_key_to_frame_core(&mut core));
+        assert_eq!(core.undo_depth(), 2);
+    }
+
+    #[test]
+    fn offset_scrub_stores_silently_and_cancel_restores() {
+        let mut core = core_with_angle_keys();
+        let mut st = KeyframeToolsState::default();
+        st.copy_offset = 3;
+        // Silent writes: the value moves, the status does not.
+        copy_offset_scrub_write(&core, &mut st, 4.0);
+        assert_eq!(st.copy_offset, 4);
+        assert!(core.status.is_empty(), "a scrub write is silent");
+        copy_offset_scrub_write(&core, &mut st, 5.0);
+        copy_offset_scrub_finish(&mut core, &mut st, 5.0);
+        assert_eq!(st.copy_offset, 5);
+        assert!(core.status.contains("Copy key offset: 5 frames."));
+        assert_eq!(core.undo_depth(), 0, "session state never snapshots");
+        // Cancel: a scrub write of exactly the press value
+        // restores it and seals, silently.
+        copy_offset_scrub_write(&core, &mut st, 2.0);
+        assert_eq!(st.copy_offset, 2);
+        copy_offset_scrub_write(&core, &mut st, 5.0);
+        assert_eq!(st.copy_offset, 5, "the press value is restored");
+        assert!(st.copy_scrub_press.is_none(), "and the gesture is sealed");
     }
 }

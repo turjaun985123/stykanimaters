@@ -122,6 +122,30 @@
 //!   exists — but a builder cannot know its call
 //!   site's shortcut, so that half of I-1 stays with
 //!   the call sites.
+//!
+//! AT NAMES (Roadmap Wave 2, W2-51 / audit A20-11): the
+//! wave-6 convention wired the label as `help` only, on
+//! the assumption it might also name the element for
+//! assistive technology. Verified from the pinned Rune
+//! rev's source (`crates/rune/src/a11y/node.rs`), it
+//! does NOT: `help` feeds the AT *description*; the AT
+//! *name* comes from `El::label`, the element's own
+//! text, or AccessKit's derivation from descendant text
+//! (button-role elements). A glyph is none of those, so
+//! every icon-only control was UNNAMED for AT despite
+//! its tooltip. The rule from this wave: **a builder
+//! that receives a human label wires it as BOTH `help`
+//! and `label`** — the same string, two channels, no
+//! signature change. The inert twins additionally carry
+//! `disabled(true)`, so AT reads them as unavailable
+//! rather than as live buttons that silently do
+//! nothing. `checked` is NOT wired in this family:
+//! `active` mixes momentary actions, selection state
+//! and true toggles across call sites, so toggle state
+//! is an opt-in the toggle call sites add themselves
+//! (IA-W2-51-1…4); the kit's intrinsic toggle form,
+//! `design::toggle_row`, carries `checked` in the
+//! builder.
 
 use rune::tok::{self, type_, Theme};
 use rune::{el, row, text, Color, El};
@@ -301,6 +325,7 @@ pub fn icon_btn(
     row()
         .key(key)
         .help(label)
+        .label(label)
         .px(10.0)
         .py(5.0)
         .radius(6.0)
@@ -338,6 +363,8 @@ pub fn icon_btn_inert(key: &str, icon: &str, label: &str, t: &Theme) -> El {
         return el()
             .key(key)
             .help(label)
+            .label(label)
+            .disabled(true)
             .px(10.0)
             .py(5.0)
             .radius(6.0)
@@ -347,6 +374,8 @@ pub fn icon_btn_inert(key: &str, icon: &str, label: &str, t: &Theme) -> El {
     row()
         .key(key)
         .help(label)
+        .label(label)
+        .disabled(true)
         .px(10.0)
         .py(5.0)
         .radius(6.0)
@@ -370,6 +399,12 @@ pub fn icon_btn_inert(key: &str, icon: &str, label: &str, t: &Theme) -> El {
 /// it is rendering. See the module docs' tooltip
 /// convention.
 ///
+/// AT NAME (Roadmap Wave 2, W2-51): the label ALSO wires
+/// as `El::label` — for this builder it is the ONLY
+/// accessible name the control has (a glyph contributes
+/// no text for AccessKit to derive a name from), which
+/// is the fix for the S18 census's unnamed icon buttons.
+///
 /// Unknown icon name → the same square with no glyph child
 /// (see the module docs' fallback rule).
 pub fn icon_only_btn(
@@ -384,6 +419,7 @@ pub fn icon_only_btn(
     let mut root = row()
         .key(key)
         .help(label)
+        .label(label)
         .w(size)
         .h(size)
         .radius(6.0)
@@ -421,6 +457,8 @@ pub fn icon_only_btn_inert(key: &str, icon: &str, label: &str, size: f32, t: &Th
     let mut root = row()
         .key(key)
         .help(label)
+        .label(label)
+        .disabled(true)
         .w(size)
         .h(size)
         .radius(6.0)
@@ -480,6 +518,7 @@ pub fn chip_btn(
     let mut root = row()
         .key(key)
         .help(label)
+        .label(label)
         .px(6.0)
         .py(3.0)
         .radius(5.0)
@@ -524,6 +563,8 @@ pub fn chip_btn_inert(key: &str, icon: Option<&str>, label: &str, t: &Theme) -> 
     let mut root = row()
         .key(key)
         .help(label)
+        .label(label)
+        .disabled(true)
         .px(6.0)
         .py(3.0)
         .radius(5.0)
@@ -578,6 +619,7 @@ pub fn danger_icon_btn(
     row()
         .key(key)
         .help(label)
+        .label(label)
         .px(10.0)
         .py(5.0)
         .radius(6.0)
@@ -812,6 +854,42 @@ mod tests {
         let _ = icon_only_btn("k-h12", "nope-not-real", "Play", 26.0, false, &t, |_| {});
         let _ = icon_only_btn_inert("k-h13", "play", "Play", 26.0, &t);
         let _ = icon_only_btn_inert("k-h14", "play", "", 26.0, &t);
+    }
+
+    #[test]
+    fn a11y_names_and_states_construct_across_the_family() {
+        // Roadmap Wave 2 (W2-51, audit A20-11): every
+        // builder in this file wires its label as the AT
+        // name (`El::label`) alongside the wave-6 help
+        // text, and the inert twins carry the AT disabled
+        // state. The wired values are not readable back
+        // from an element in a bin-crate unit test (the
+        // standing limit), so — as with the construction
+        // tests above — these pin that the wiring
+        // constructs on every branch: known/unknown icon,
+        // both themes' inputs, active and resting, and
+        // an empty label (which Rune maps to no name
+        // rather than an empty announcement). The
+        // presented-tree proof is the headless census
+        // re-run (IA-W2-51-9).
+        let dark = rune::tok::theme(true);
+        let light = rune::tok::theme(false);
+        for t in [&dark, &light] {
+            let _ = icon_btn("k-a1", "play", "Play", false, t, |_| {});
+            let _ = icon_btn("k-a2", "nope-not-real", "Play", true, t, |_| {});
+            let _ = icon_btn_inert("k-a3", "play", "Play", t);
+            let _ = icon_btn_inert("k-a4", "nope-not-real", "Play", t);
+            let _ = icon_only_btn("k-a5", "play", "Play", 26.0, false, t, |_| {});
+            let _ = icon_only_btn("k-a6", "nope-not-real", "Play", 26.0, true, t, |_| {});
+            let _ = icon_only_btn_inert("k-a7", "play", "Play", 26.0, t);
+            let _ = icon_only_btn_inert("k-a8", "play", "", 26.0, t);
+            let _ = chip_btn("k-a9", Some("play"), "Play", true, t, |_| {});
+            let _ = chip_btn("k-a10", None, "Round", false, t, |_| {});
+            let _ = chip_btn_inert("k-a11", None, "Round", t);
+            let _ = chip_btn_inert("k-a12", Some("play"), "Play", t);
+            let _ = danger_icon_btn("k-a13", "trash-can", "Delete", false, t, |_| {});
+            let _ = danger_icon_btn("k-a14", "nope-not-real", "Delete", false, t, |_| {});
+        }
     }
 
     #[test]

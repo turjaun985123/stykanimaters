@@ -209,7 +209,7 @@ impl EditorCore {
             return;
         };
         let new_start = entry.clip.start + delta_frames as f32;
-        self.snapshot();
+        self.snapshot_labeled("Move FX clip");
         fx_edit::move_clip(&mut self.project, index, new_start);
         let start = self.project.fx_clips[index].clip.start;
         self.status = format!(
@@ -230,7 +230,7 @@ impl EditorCore {
             return;
         };
         let new_duration = entry.clip.duration + delta;
-        self.snapshot();
+        self.snapshot_labeled("Resize FX clip");
         fx_edit::resize_clip(&mut self.project, index, new_duration);
         let duration = self.project.fx_clips[index].clip.duration;
         self.status = format!(
@@ -280,7 +280,7 @@ impl EditorCore {
             );
             return false;
         }
-        self.snapshot();
+        self.snapshot_labeled("Split FX clip");
         let mut second_half = self.project.fx_clips[index].clone();
         second_half.clip.start = at_frame;
         second_half.clip.duration = second;
@@ -309,7 +309,7 @@ impl EditorCore {
             self.status = format!("FX clip duplicate failed: no FX clip {}.", index + 1);
             return None;
         }
-        self.snapshot();
+        self.snapshot_labeled("Duplicate FX clip");
         let new_index = fx_edit::duplicate_clip(&mut self.project, index);
         if let Some(new_index) = new_index {
             self.status = format!(
@@ -328,7 +328,7 @@ impl EditorCore {
             self.status = format!("FX clip delete failed: no FX clip {}.", index + 1);
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Delete FX clip");
         fx_edit::delete_clip(&mut self.project, index);
         self.status = format!("FX clip {} deleted.", index + 1);
     }
@@ -344,7 +344,7 @@ impl EditorCore {
             self.status = format!("FX clip colour failed: no FX clip {}.", index + 1);
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Set FX clip colour");
         self.project.fx_clips[index].clip.color = color;
         self.status = format!("FX clip {} colour set to #{color:06X}.", index + 1);
     }
@@ -358,7 +358,7 @@ impl EditorCore {
             self.status = format!("FX clip end colour failed: no FX clip {}.", index + 1);
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Set FX clip second colour");
         self.project.fx_clips[index].clip.color2 = color2;
         self.status = match color2 {
             Some(color2) => format!(
@@ -380,7 +380,7 @@ impl EditorCore {
             self.status = format!("FX clip anchor failed: no FX clip {}.", index + 1);
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Set FX clip anchor");
         let entry = &mut self.project.fx_clips[index];
         entry.figure = figure;
         entry.node = node;
@@ -406,7 +406,7 @@ impl EditorCore {
             self.status = format!("FX clip kind failed: no FX clip {}.", index + 1);
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Set FX clip kind");
         self.project.fx_clips[index].clip.kind = kind;
         self.status = format!(
             "FX clip {} kind set to {}.",
@@ -433,7 +433,7 @@ impl EditorCore {
             self.status = format!("FX clip visibility failed: no FX clip {}.", index + 1);
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Set FX clip visibility");
         self.project.fx_clips[index].hidden = hidden;
         self.status = format!(
             "FX clip {} {}.",
@@ -458,7 +458,7 @@ impl EditorCore {
             self.status = format!("FX clip seed failed: no FX clip {}.", index + 1);
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Set FX clip seed");
         self.project.fx_clips[index].clip.seed = seed;
         self.status = format!("FX clip {} seed set to {seed}.", index + 1);
     }
@@ -479,7 +479,7 @@ impl EditorCore {
             self.status = format!("FX clip angle failed: no FX clip {}.", index + 1);
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Set FX clip angle");
         self.project.fx_clips[index].clip.angle = angle;
         self.status = format!(
             "FX clip {} angle set to {}°.",
@@ -502,7 +502,7 @@ impl EditorCore {
             self.status = format!("FX clip length failed: no FX clip {}.", index + 1);
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Set FX clip length");
         self.project.fx_clips[index].clip.length = length;
         self.status = format!(
             "FX clip {} length set to {}.",

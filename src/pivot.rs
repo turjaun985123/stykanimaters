@@ -353,7 +353,11 @@ fn pose_from_abs(def: &FigureDef, rest_abs: &[f32], angles_rad: &[f64], root: [f
         angles.push(rel);
         abs_chosen[k] = abs_chosen[parent] + rel;
     }
-    Pose { root, angles }
+    // .piv has no scale field to read: imported poses take
+    // scale 1.0, and squash is lost on a .piv round-trip —
+    // the known-lossy class the P-5b design records for this
+    // external format (stated there, not fixed there).
+    Pose { root, angles, sx: 1.0, sy: 1.0 }
 }
 
 /// Import a legacy `.stk` figure file as a definition.
@@ -983,6 +987,10 @@ fn assemble(
         subtitles: Vec::new(),
         subtitle_style: Default::default(),
         format_version: crate::model::FORMAT_VERSION_CURRENT,
+        chapters: Vec::new(),
+        stored_guides: Vec::new(),
+        title_cards: Default::default(),
+        beat_markers: Vec::new(),
     }
 }
 
@@ -1645,6 +1653,7 @@ fn import_v5(r: &mut Reader) -> Result<Project, String> {
                 y,
                 zoom,
                 angle: cam_angle.to_degrees() as f32,
+                easing: crate::model::CameraEase::Linear,
             });
         }
         raw_frames.push((duration.max(1) as f32, bg_id, objects));
@@ -1769,6 +1778,10 @@ fn import_v5(r: &mut Reader) -> Result<Project, String> {
         subtitles: Vec::new(),
         subtitle_style: Default::default(),
         format_version: crate::model::FORMAT_VERSION_CURRENT,
+        chapters: Vec::new(),
+        stored_guides: Vec::new(),
+        title_cards: Default::default(),
+        beat_markers: Vec::new(),
     })
 }
 
@@ -2926,6 +2939,7 @@ mod tests {
             y: 300.0,
             zoom: 1.5,
             angle: 0.0,
+            easing: crate::model::CameraEase::Linear,
         });
         let bytes = export_piv_v5(&project).unwrap();
         // The export is zlib-wrapped, like the files StykAnimate

@@ -53,6 +53,20 @@
 //! window for the same reason. `export_bundle` takes no
 //! range at all: bundles cover the whole timeline on both
 //! surfaces by deliberate design (see the handler).
+//!
+//! Roadmap Wave 2 (W2-47, IA-RM23-6): export naming and
+//! overwrite parity with the export panel. The bundle's
+//! file members carry the panel's project-stem names
+//! ([`export_stem`], the panel rule copied rule for rule —
+//! the panel lives in the bin crate) under the panel's
+//! naming templates ([`arg_naming`]); and no MCP export
+//! silently replaces an existing single file any more:
+//! `export_file`, `render`'s single-file formats,
+//! `render_contact_sheet` and `export_bundle`'s file
+//! members refuse and name the file unless the caller
+//! passes 'overwrite': true — the one-shot form of the
+//! panel's two-press guard ([`refuse_existing_targets`]).
+//! Sequence targets stay unguarded on both surfaces.
 
 use crate::editor::EditorCore;
 use crate::mcp::Tool;
@@ -172,6 +186,122 @@ fn arg_range_bound(args: &Value, legacy: &str, framed: &str) -> Result<Option<us
     Ok(found)
 }
 
+/// The export tools' overwrite switch (Roadmap Wave 2,
+/// W2-47 — IA-RM23-6): an optional 'overwrite' boolean,
+/// read exactly as the 'alpha' arguments are read (absent,
+/// null or non-boolean is false). False is the guard's
+/// default state: a single-file target that already exists
+/// refuses the call (see [`refuse_existing_targets`]);
+/// true is the caller's explicit second act — the one-shot
+/// analogue of pressing the export panel's export button a
+/// second time — and the write proceeds exactly as it did
+/// before the guard existed.
+fn arg_overwrite(args: &Value) -> bool {
+    args.get("overwrite").and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// The export bundle's naming template (W2-47): an
+/// optional 'naming' string over the export panel's
+/// closed template vocabulary (W2-62's `ExportNaming`
+/// in the Settings card): 'project' (the default —
+/// RM23's project stem), 'project-date' (the stem plus
+/// the export date) or 'animation' (the pre-RM23 shared
+/// stem). Absent or null is 'project'; any other value
+/// is refused in the argument helpers' voice, before
+/// anything is written.
+fn arg_naming(args: &Value) -> Result<String, String> {
+    match args.get("naming") {
+        None | Some(Value::Null) => Ok("project".to_string()),
+        Some(v) => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| "argument 'naming' must be a string".to_string())?;
+            match s {
+                "project" | "project-date" | "animation" => Ok(s.to_string()),
+                _ => Err(format!(
+                    "unknown naming template '{s}' (supported: project, project-date, animation)"
+                )),
+            }
+        }
+    }
+}
+
+/// The file stem the MCP bundle members are named from
+/// (W2-47 — IA-RM23-6): RM23's `project_stem` rule,
+/// copied rule for rule from its home in the export
+/// panel (`rune_sec::export_panel::project_stem`) — the
+/// panel lives in the bin crate, which the lib cannot
+/// call, so the rule lives in both places and both
+/// sides pin it (IA-W2-62-4's lib-copy precedent): the
+/// project name lowercased, every run of
+/// non-alphanumeric characters collapsed to one `-`,
+/// underscores kept, no leading/trailing dash; a name
+/// with no alphanumerics at all falls back to the
+/// historical stem, `animation`.
+fn export_stem(project: &Project) -> String {
+    let mut stem = String::new();
+    let mut pending_dash = false;
+    for ch in project.name.chars() {
+        if ch.is_alphanumeric() || ch == '_' {
+            if pending_dash && !stem.is_empty() {
+                stem.push('-');
+            }
+            pending_dash = false;
+            stem.extend(ch.to_lowercase());
+        } else {
+            pending_dash = true;
+        }
+    }
+    if stem.is_empty() {
+        "animation".to_string()
+    } else {
+        stem
+    }
+}
+
+/// The bundle stem under a naming template (W2-47):
+/// the MCP copy of the panel's template application
+/// (W2-62's `named_stem`) over [`export_stem`] —
+/// 'project' is the stem itself, 'project-date'
+/// appends the export date, 'animation' is the
+/// pre-RM23 shared stem. `date` is read only by
+/// 'project-date'. `naming` arrives validated by
+/// [`arg_naming`], so the fallback arm is the default.
+fn named_export_stem(project: &Project, naming: &str, date: &str) -> String {
+    match naming {
+        "project-date" => format!("{}-{date}", export_stem(project)),
+        "animation" => "animation".to_string(),
+        _ => export_stem(project),
+    }
+}
+
+/// Today's date as `YYYY-MM-DD` (UTC) — the date slot
+/// of the 'project-date' naming template, computed
+/// from the system clock with the civil-from-days
+/// conversion (the same arithmetic IA-W2-62-2 files
+/// for the panel; no date crate is in the tree). The
+/// shell has no local-timezone source, so the stamp
+/// is UTC — near midnight it can differ a day from
+/// local, the W2-62 remainder, recorded rather than
+/// hidden.
+fn export_date_string() -> String {
+    let days = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_secs() / 86_400) as i64)
+        .unwrap_or(0);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
 fn ensure_parent(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -244,6 +374,40 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         return Err(format!("could not write {}: {e}", path.display()));
     }
     rename_over(&tmp, path)
+}
+
+/// The MCP overwrite guard (Roadmap Wave 2, W2-47 —
+/// IA-RM23-6): refuse a call whose single-file targets
+/// already exist, unless the caller passed 'overwrite':
+/// true. This is the panel guard's rule (RM23) in the
+/// one-shot form MCP calls for: the panel arms on the
+/// first press and proceeds on the second; a tool call
+/// has no second press, so the first call refuses and
+/// names the file, and 'overwrite' is the explicit
+/// confirmation. The error's head and count shape are
+/// the panel sentence's own ("Export target already
+/// exists: {first} (and {n} more)"), in the argument
+/// helpers' voice; only the remedy differs, because
+/// the doors differ. Sequence targets (directories of
+/// frame-numbered files) are never passed here — the
+/// panel leaves them unguarded, and so does this.
+fn refuse_existing_targets(targets: &[&Path], overwrite: bool) -> Result<(), String> {
+    if overwrite {
+        return Ok(());
+    }
+    let existing: Vec<&Path> = targets.iter().copied().filter(|p| p.is_file()).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    let first = existing[0].display();
+    let more = if existing.len() > 1 {
+        format!(" (and {} more)", existing.len() - 1)
+    } else {
+        String::new()
+    };
+    Err(format!(
+        "export target already exists: {first}{more} — pass 'overwrite': true to replace it"
+    ))
 }
 
 /// Replace the session project and reset selection/playhead the
@@ -389,7 +553,7 @@ fn tool_import_file(core: &mut EditorCore, args: &Value) -> Result<Value, String
             // editor.rs `import_nodes_anim_file`: snapshot
             // first (the swap is one undo step), no baseline
             // restart — the snapshot counts as an edit.
-            core.snapshot();
+            core.snapshot_labeled("Import animation");
             replace_project(core, project);
             core.status = format!("Imported {path}.");
         }
@@ -399,7 +563,7 @@ fn tool_import_file(core: &mut EditorCore, args: &Value) -> Result<Value, String
             // (`import_nodes_file`: snapshot first, same rule as
             // the animation import above).
             let project = crate::nodes::import_nodes(&bytes)?;
-            core.snapshot();
+            core.snapshot_labeled("Import figure");
             replace_project(core, project);
             core.status = format!("Imported {path} as a figure.");
         }
@@ -422,7 +586,7 @@ fn tool_import_file(core: &mut EditorCore, args: &Value) -> Result<Value, String
             // the stage centre this tool used before, which put
             // MCP-imported figures in a different place than
             // GUI-imported ones.
-            core.snapshot();
+            core.snapshot_labeled("Import figure");
             let idx = core.project.figures.len();
             let color = FIGURE_COLORS[idx % FIGURE_COLORS.len()];
             let label = if name.is_empty() { "Imported figure".to_string() } else { name };
@@ -473,6 +637,9 @@ fn tool_export_file(core: &mut EditorCore, args: &Value) -> Result<Value, String
         .get("format")
         .and_then(Value::as_str)
         .ok_or_else(|| "missing required string argument: format".to_string())?;
+    // W2-47: the overwrite guard's switch, read before
+    // either write path below can run.
+    let overwrite = arg_overwrite(args);
     if format == "mp4_range" || format == "webm_range" {
         // Frame-range video exports write through ffmpeg like
         // export_mp4/export_webm, so they do not fit the byte
@@ -492,6 +659,10 @@ fn tool_export_file(core: &mut EditorCore, args: &Value) -> Result<Value, String
             }
         };
         let path_ref = Path::new(&path);
+        // W2-47: the guard runs before the parent is
+        // created and before ffmpeg is invoked — a
+        // refused range writes nothing at all.
+        refuse_existing_targets(&[path_ref], overwrite)?;
         ensure_parent(path_ref)?;
         // Wave W (W3): with a progress sink parked on the
         // core, the range entries' encode-phase twin runs
@@ -570,6 +741,8 @@ fn tool_export_file(core: &mut EditorCore, args: &Value) -> Result<Value, String
         }
     };
     let path_ref = Path::new(&path);
+    // W2-47: the guard, as on the range path above.
+    refuse_existing_targets(&[path_ref], overwrite)?;
     ensure_parent(path_ref)?;
     write_atomic(path_ref, &bytes)?;
     Ok(json!({
@@ -620,12 +793,53 @@ fn render_png_bytes(
         ));
     }
     if !(scale > 0.0) || !scale.is_finite() {
-        return Err("argument 'scale' must be a positive number".to_string());
+        return Err("argument 'scale' must be a positive finite number".to_string());
     }
     let img = crate::export::render_frame_at_scaled(p, frame as f32, scale as f32)
         .map_err(|e| e.to_string())?;
     let (w, h) = (img.width(), img.height());
     Ok((encode_png(&img)?, w, h))
+}
+
+/// The supersample-explicit half of [`render_png_bytes`]
+/// (Roadmap Wave 2, IA-W2-41-1): the same still render
+/// with the rasterizer's supersample factor chosen by
+/// the caller; the funnel's refusal surfaces verbatim.
+fn render_png_bytes_ss(
+    core: &EditorCore,
+    frame: usize,
+    scale: f64,
+    ss: u32,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    let p = &core.project;
+    if p.frames.is_empty() {
+        return Err("project has no frames to render".to_string());
+    }
+    if frame >= p.frames.len() {
+        return Err(format!(
+            "frame {frame} out of range (project has {} frames)",
+            p.frames.len()
+        ));
+    }
+    if !(scale > 0.0) || !scale.is_finite() {
+        return Err("argument 'scale' must be a positive finite number".to_string());
+    }
+    let img = crate::export::render_frame_at_scaled_ss(p, frame as f32, scale as f32, ss)
+        .map_err(|e| e.to_string())?;
+    let (w, h) = (img.width(), img.height());
+    Ok((encode_png(&img)?, w, h))
+}
+
+/// The optional `ss` argument (Roadmap Wave 2,
+/// IA-W2-41-1): absent → the export default.
+fn arg_ss(args: &Value) -> Result<u32, String> {
+    match args.get("ss") {
+        None | Some(Value::Null) => Ok(crate::export::DEFAULT_SUPERSAMPLE),
+        Some(v) => v
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| "argument 'ss' must be an integer in 1..=4".to_string()),
+    }
 }
 
 /// An optional frame range from 'from'/'to' arguments: both
@@ -728,6 +942,10 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
         .get("format")
         .and_then(Value::as_str)
         .ok_or_else(|| "missing required string argument: format".to_string())?;
+    // W2-47: the overwrite guard's switch (see
+    // arg_overwrite) — consulted by the single-file
+    // formats below before they write.
+    let overwrite = arg_overwrite(args);
     let project = &core.project;
     if project.frames.is_empty() {
         return Err("project has no frames to render".to_string());
@@ -781,15 +999,30 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     // alpha entries; every other format ignores it, as
     // formats ignore scale-mismatched arguments today.
     let alpha = args.get("alpha").and_then(Value::as_bool).unwrap_or(false);
+    // W2-47: the single-file formats refuse an existing
+    // target before the dispatch below writes anything
+    // (the panel guard's coverage: GIF/APNG/sheet and
+    // the jobbed MP4/WebM). The sequence formats write
+    // into a directory of frame-numbered files and stay
+    // unguarded, exactly as the panel leaves them.
+    if matches!(format, "gif" | "mp4" | "webm" | "apng" | "spritesheet") {
+        refuse_existing_targets(&[path_ref], overwrite)?;
+    }
     // Wave P (P15): the MP4 arm fills this with the clips
     // the export had to leave out (missing files); it
     // surfaces as a reply field below, only when non-empty.
     let mut mp4_missing_audio: Vec<String> = Vec::new();
     let frames = match format {
         "png" => {
+            // W2-47: a single PNG is a single-file
+            // target — the guard applies (the panel's
+            // contact-sheet class), before any render
+            // work is spent.
+            refuse_existing_targets(&[path_ref], overwrite)?;
             let frame = arg_frame(core, args)?;
             let scale = args.get("scale").and_then(Value::as_f64).unwrap_or(1.0);
-            let (bytes, w, h) = render_png_bytes(core, frame, scale)?;
+            let ss = arg_ss(args)?;
+            let (bytes, w, h) = render_png_bytes_ss(core, frame, scale, ss)?;
             ensure_parent(path_ref)?;
             write_atomic(path_ref, &bytes)?;
             return Ok(json!({
@@ -909,29 +1142,29 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
             let scale = args.get("scale").and_then(Value::as_f64);
             if alpha {
                 match (range, scale) {
-                    (Some((f, t)), Some(s)) => crate::export::export_sheet_alpha_range_scaled(
+                    (Some((f, t)), Some(s)) => crate::export::export_sheet_alpha_range_scaled_pack(
                         project, f, t, path_ref, s as f32,
                     ),
                     (Some((f, t)), None) => {
-                        crate::export::export_sheet_alpha_range(project, f, t, path_ref)
+                        crate::export::export_sheet_alpha_range_pack(project, f, t, path_ref)
                     }
                     (None, Some(s)) => {
-                        crate::export::export_sheet_alpha_scaled(project, path_ref, s as f32)
+                        crate::export::export_sheet_alpha_scaled_pack(project, path_ref, s as f32)
                     }
-                    (None, None) => crate::export::export_spritesheet_alpha(project, path_ref),
+                    (None, None) => crate::export::export_spritesheet_alpha_pack(project, path_ref),
                 }
             } else {
                 match (range, scale) {
                     (Some((f, t)), Some(s)) => {
-                        crate::export::export_sheet_range_scaled(project, f, t, path_ref, s as f32)
+                        crate::export::export_sheet_range_scaled_pack(project, f, t, path_ref, s as f32)
                     }
                     (Some((f, t)), None) => {
-                        crate::export::export_sheet_range(project, f, t, path_ref)
+                        crate::export::export_sheet_range_pack(project, f, t, path_ref)
                     }
                     (None, Some(s)) => {
-                        crate::export::export_sheet_scaled(project, path_ref, s as f32)
+                        crate::export::export_sheet_scaled_pack(project, path_ref, s as f32)
                     }
-                    (None, None) => crate::export::export_spritesheet(project, path_ref),
+                    (None, None) => crate::export::export_spritesheet_pack(project, path_ref),
                 }
             }
         }
@@ -1123,11 +1356,92 @@ pub(crate) fn base64_encode(data: &[u8]) -> String {
     out
 }
 
+
+// ---------------------------------------------------------------------
+// Roadmap Wave 2 integrator handlers (W2-49 sheet import,
+// W2-20 episode QA probe, W2-96 diagnostics bundle).
+
+fn tool_asset_import_sheet(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let path = arg_path(args)?;
+    let imported = crate::media::import_spritesheet_file(core, &path)?;
+    Ok(json!({
+        "ok": true,
+        "indices": imported.indices,
+        "names": imported.names,
+        "sliced": imported.sliced,
+        "status": core.status,
+    }))
+}
+
+fn tool_episode_qa_probe(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let path = arg_path(args)?;
+    let params = crate::rune_sec::export_panel::EpisodeQaParams::default();
+    let report = crate::rune_sec::export_panel::probe_episode(
+        std::path::Path::new(&path),
+        &core.project,
+        &params,
+    );
+    let checks: Vec<Value> = report
+        .checks
+        .iter()
+        .map(|c| {
+            json!({
+                "name": c.name,
+                "status": match c.status {
+                    crate::rune_sec::export_panel::EpisodeCheckStatus::Pass => "pass",
+                    crate::rune_sec::export_panel::EpisodeCheckStatus::Fail => "fail",
+                    crate::rune_sec::export_panel::EpisodeCheckStatus::Unmeasured => "unmeasured",
+                },
+                "evidence": c.evidence,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "ok": true,
+        "passed": report.passed,
+        "summary": report.summary,
+        "checks": checks,
+    }))
+}
+
+fn tool_diagnostics_bundle(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    let dirs = crate::shell::store_dirs();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let input = crate::diagnostics::DiagnosticsInput {
+        generated_at_unix: now,
+        ui_scale: None,
+        language: Some(format!("{:?}", core.lang)),
+        language_tier: None,
+        mcp_tool_count: Some(crate::mcp::all_tools().len()),
+        undo_depth: core.undo_depth(),
+        redo_depth: core.redo_depth(),
+        recent_status: vec![crate::diagnostics::StatusFact {
+            severity: "info".to_string(),
+            text: core.status.clone(),
+        }],
+        home: None,
+    };
+    let bundle = crate::diagnostics::build_bundle(&core.project, &dirs, &input);
+    let out_dir = crate::diagnostics::diagnostics_dir(&dirs);
+    match crate::diagnostics::write_bundle(&out_dir, &bundle) {
+        Ok(path) => Ok(json!({
+            "ok": true,
+            "path": path.display().to_string(),
+            "files": bundle.entries().len(),
+        })),
+        Err(e) => Err(format!("diagnostics bundle failed: {e}")),
+    }
+}
+
 fn tool_render_frame_base64(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let frame = arg_frame(core, args)?;
+    let ss = arg_ss(args)?;
     // Exact stage size: the agent sees the frame at the project's
     // native resolution, one pixel per stage unit.
-    let (bytes, w, h) = render_png_bytes(core, frame, 1.0)?;
+    let (bytes, w, h) = render_png_bytes_ss(core, frame, 1.0, ss)?;
     Ok(json!({
         "frame": frame,
         "width": w,
@@ -1138,6 +1452,8 @@ fn tool_render_frame_base64(core: &mut EditorCore, args: &Value) -> Result<Value
 
 fn tool_render_contact_sheet(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let path = arg_path(args)?;
+    // W2-47: the overwrite guard's switch.
+    let overwrite = arg_overwrite(args);
     let project = &core.project;
     if project.frames.is_empty() {
         return Err("project has no frames to render".to_string());
@@ -1215,6 +1531,9 @@ fn tool_render_contact_sheet(core: &mut EditorCore, args: &Value) -> Result<Valu
     let sheet = crate::export::render_contact_sheet(project, &frames, cols, thumb_width);
     let (width, height) = (sheet.width(), sheet.height());
     let path_ref = Path::new(&path);
+    // W2-47: the panel guards its contact-sheet action;
+    // the tool does the same before writing.
+    refuse_existing_targets(&[path_ref], overwrite)?;
     ensure_parent(path_ref)?;
     // Same atomicity as the byte writers: encode to the temp
     // sibling (same extension, so the image crate infers the
@@ -1287,6 +1606,12 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
     if project.frames.is_empty() {
         return Err("project has no frames to render".to_string());
     }
+    // Roadmap Wave 2 (W2-47): the naming template and
+    // the overwrite switch, both argument-level reads
+    // resolved before anything is written (a naming
+    // refusal joins the scale refusal below in kind).
+    let naming = arg_naming(args)?;
+    let overwrite = arg_overwrite(args);
     // Wave T (T8): a present 'scale' is validated BEFORE
     // anything is written — the bundle writes its members in
     // place (no staging directory), so a bad scale left for
@@ -1328,13 +1653,35 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
     // still the only option-level refusal.
     let bundle_alpha = args.get("alpha").and_then(Value::as_bool).unwrap_or(false);
     let dir = Path::new(&path);
+    // W2-47 (IA-RM23-6): the bundle's file members are
+    // named from the project with the export panel's
+    // stem rule and naming template (see export_stem /
+    // named_export_stem) — the same names the panel's
+    // bundle writes for the same project — and the
+    // guard refuses the call before the directory is
+    // even created when one of those files already
+    // exists (the panel bundle's guarded set: MP4 +
+    // WebM for video, the spritesheet for images; the
+    // sequence members write directories and stay
+    // unguarded, as on the panel). Sequence members
+    // keep their own subdirectories so the four image
+    // formats never collide.
+    let stem = named_export_stem(project, &naming, &export_date_string());
+    let sheet_name = format!("{stem}-spritesheet.png");
+    let file_targets: Vec<std::path::PathBuf> = if kind == "images" {
+        vec![dir.join(&sheet_name)]
+    } else {
+        vec![
+            dir.join(format!("{stem}.mp4")),
+            dir.join(format!("{stem}.webm")),
+        ]
+    };
+    refuse_existing_targets(
+        &file_targets.iter().map(|p| p.as_path()).collect::<Vec<_>>(),
+        overwrite,
+    )?;
     std::fs::create_dir_all(dir)
         .map_err(|e| format!("could not create directory {path}: {e}"))?;
-    // Video members are named after the project (slugified the
-    // file-name way); sequence members get their own
-    // subdirectories so the four image formats never collide.
-    let stem = crate::projects::file_stem_for(&project.name)
-        .unwrap_or_else(|| "project".to_string());
     let engine = |r: std::io::Result<usize>| r.map_err(|e| e.to_string());
     // Wave X (X11): when the router parked a progress sink
     // on the core for this call, the members run through
@@ -1380,7 +1727,7 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
         let png_dir = dir.join("png");
         let jpeg_dir = dir.join("jpeg");
         let svg_dir = dir.join("svg");
-        let sheet = dir.join("spritesheet.png");
+        let sheet = dir.join(&sheet_name);
         let member_cb = tracker.as_ref().map(|t| t.render_callback(0));
         let member_progress: crate::export::RenderProgressCallback<'_> =
             match &member_cb {
@@ -1464,9 +1811,9 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
         // to this member, opaque or alpha (T8's rule), so
         // the unscaled alpha entry is the exact counterpart.
         let result = engine(if bundle_alpha {
-            crate::export::export_spritesheet_alpha(project, &sheet)
+            crate::export::export_spritesheet_alpha_pack(project, &sheet)
         } else {
-            crate::export::export_spritesheet(project, &sheet)
+            crate::export::export_spritesheet_pack(project, &sheet)
         });
         if let Some(t) = &tracker {
             t.complete_member(result.is_ok());
@@ -1642,7 +1989,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "export_file",
-            description: "Export the project: 'piv2', 'piv3', 'piv4' or 'piv5' write the whole animation as .piv bytes; 'stk' writes a single figure as Pivot .stk bytes and 'nodes' writes it as a Stick Nodes .nodes figure (both take the 'figure' index, defaulting to the selected figure); 'stknds' writes the whole animation as a Stick Nodes project; 'mp4_range' and 'webm_range' render only frames 'from_frame'..='to_frame' (both required, integer frame indices; the Wave 11 spellings 'from'/'to' are still accepted for the same bounds; a bound past the end of the timeline is refused) to a video file (needs ffmpeg) with the same frame content as the render tool's raster output — composited sprite/text instances and segment media included. 'mp4_range' also muxes the range's share of the project's audio (and fails rather than writing a silent file when audio is present but unusable); 'webm_range' also muxes the range's share of the project's audio as Opus (and fails rather than writing a silent file when a clip's file is present but cannot be probed or decoded; a missing file contributes no segment and is named in the reply's 'missing_audio', as for 'mp4_range'). The .piv/.stk/.nodes/.stknds formats are data interchange: they carry only what those formats hold, not the asset table, sprites, texts or audio. Parent directories are created. Progress: on a streaming transport (the stdio server), passing '_meta.progressToken' in the tools/call params streams encode-phase notifications/progress during 'mp4_range'/'webm_range' calls; the reply is unchanged.",
+            description: "Export the project: 'piv2', 'piv3', 'piv4' or 'piv5' write the whole animation as .piv bytes; 'stk' writes a single figure as Pivot .stk bytes and 'nodes' writes it as a Stick Nodes .nodes figure (both take the 'figure' index, defaulting to the selected figure); 'stknds' writes the whole animation as a Stick Nodes project; 'mp4_range' and 'webm_range' render only frames 'from_frame'..='to_frame' (both required, integer frame indices; the Wave 11 spellings 'from'/'to' are still accepted for the same bounds; a bound past the end of the timeline is refused) to a video file (needs ffmpeg) with the same frame content as the render tool's raster output — composited sprite/text instances and segment media included. 'mp4_range' also muxes the range's share of the project's audio (and fails rather than writing a silent file when audio is present but unusable); 'webm_range' also muxes the range's share of the project's audio as Opus (and fails rather than writing a silent file when a clip's file is present but cannot be probed or decoded; a missing file contributes no segment and is named in the reply's 'missing_audio', as for 'mp4_range'). The .piv/.stk/.nodes/.stknds formats are data interchange: they carry only what those formats hold, not the asset table, sprites, texts or audio. Parent directories are created. Progress: on a streaming transport (the stdio server), passing '_meta.progressToken' in the tools/call params streams encode-phase notifications/progress during 'mp4_range'/'webm_range' calls; the reply is unchanged. An existing destination file is never silently replaced: without 'overwrite' the call refuses and names the file (the one-shot form of the export panel's two-press overwrite guard); pass 'overwrite': true to replace it.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -1652,7 +1999,8 @@ pub fn tools() -> Vec<Tool> {
                     "from": { "type": "integer", "minimum": 0, "description": "First frame for formats 'mp4_range' and 'webm_range' (required there)" },
                     "to": { "type": "integer", "minimum": 0, "description": "Last frame for formats 'mp4_range' and 'webm_range' (required there)" },
                     "from_frame": { "type": "integer", "minimum": 0, "description": "First frame for formats 'mp4_range' and 'webm_range' (required there; alternative spelling of 'from')" },
-                    "to_frame": { "type": "integer", "minimum": 0, "description": "Last frame for formats 'mp4_range' and 'webm_range' (required there; alternative spelling of 'to')" }
+                    "to_frame": { "type": "integer", "minimum": 0, "description": "Last frame for formats 'mp4_range' and 'webm_range' (required there; alternative spelling of 'to')" },
+                    "overwrite": { "type": "boolean", "description": "Replace the destination file if it already exists (default false — an existing destination refuses the call and names the file)" }
                 },
                 "required": ["path", "format"]
             }),
@@ -1660,19 +2008,21 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "render",
-            description: "Render the animation. Formats: 'png' renders ONE frame (arg 'frame', default current; arg 'scale', default 1.0 = stage size, a true re-render at that scale) to a PNG file; 'gif', 'mp4' (needs ffmpeg), 'webm', 'apng' and 'spritesheet' render the whole timeline to the file at 'path'; 'svg', 'jpeg' and 'png_sequence' write one file per frame into the DIRECTORY at 'path' (created if needed). The sequence/animation formats 'gif', 'apng', 'spritesheet', 'svg', 'jpeg' and 'png_sequence' accept an optional frame range: args 'from_frame' and 'to_frame' (0-based, inclusive, given together; the Wave 11 spellings 'from'/'to' are still accepted for the same bounds; a bound past the end of the timeline is refused rather than clamped; echoed in the reply under the spelling used). Video ranges are export_file's mp4_range/webm_range. An optional 'scale' (default 1.0) multiplies the output size for 'png', 'png_sequence', 'gif', 'mp4', 'webm', 'apng', 'spritesheet' and 'jpeg' — a true re-render at that scale, never an upscale (the MP4 audio mux is unaffected); 'svg' does not take a scale. Parent directories are created for file targets. CONTENT — the raster formats (png, png_sequence, gif, mp4, webm, apng, spritesheet, jpeg) draw the full frame: camera (pan/zoom/rotation), figures with segment styling (cap, taper, colour gradient, segment opacity AND figure opacity) and bent segments, drawing strokes, FX/particles and weather, with sprite instances, text instances and segment media (images/text attached to segments) composited in. 'mp4' also muxes the project's audio when an unmuted clip's file exists (and fails if that mux fails); 'webm' never carries audio — the WebM path has no audio support. 'svg' is the vector writer: it draws figures (segment taper, gradients, segment opacity AND figure opacity, bent segments arced through the bend midpoint), strokes (a pressured stroke as per-segment lines at its baked widths), FX/particles and weather through the same camera, and it emits sprite instances, text instances and segment media (images embedded once per asset as PNG data with a placement matrix; an image item's figure×style opacity rides as an opacity attribute). One divergence from the raster remains: SVG text is a monospace font run where the raster stamps 3×5 bitmap glyphs (the content and centre agree; the advance width does not). Progress: on a streaming transport (the stdio server), passing '_meta.progressToken' in the tools/call params streams notifications/progress during the call — 'mp4'/'webm' report the encode phase, 'jpeg'/'png_sequence' the render phase; other formats report nothing and the reply is unchanged. An optional 'alpha' boolean (PNG sequence, spritesheet and APNG only) exports with a transparent background and per-pixel coverage alpha instead of the project background.",
+            description: "Render the animation. Formats: 'png' renders ONE frame (arg 'frame', default current; arg 'scale', default 1.0 = stage size, a true re-render at that scale) to a PNG file; 'gif', 'mp4' (needs ffmpeg), 'webm', 'apng' and 'spritesheet' render the whole timeline to the file at 'path'; 'svg', 'jpeg' and 'png_sequence' write one file per frame into the DIRECTORY at 'path' (created if needed). The sequence/animation formats 'gif', 'apng', 'spritesheet', 'svg', 'jpeg' and 'png_sequence' accept an optional frame range: args 'from_frame' and 'to_frame' (0-based, inclusive, given together; the Wave 11 spellings 'from'/'to' are still accepted for the same bounds; a bound past the end of the timeline is refused rather than clamped; echoed in the reply under the spelling used). Video ranges are export_file's mp4_range/webm_range. An optional 'scale' (default 1.0) multiplies the output size for 'png', 'png_sequence', 'gif', 'mp4', 'webm', 'apng', 'spritesheet' and 'jpeg' — a true re-render at that scale, never an upscale (the MP4 audio mux is unaffected); 'svg' does not take a scale. Parent directories are created for file targets. CONTENT — the raster formats (png, png_sequence, gif, mp4, webm, apng, spritesheet, jpeg) draw the full frame: camera (pan/zoom/rotation), figures with segment styling (cap, taper, colour gradient, segment opacity AND figure opacity) and bent segments, drawing strokes, FX/particles and weather, with sprite instances, text instances and segment media (images/text attached to segments) composited in. 'mp4' also muxes the project's audio when an unmuted clip's file exists (and fails if that mux fails); 'webm' never carries audio — the WebM path has no audio support. 'svg' is the vector writer: it draws figures (segment taper, gradients, segment opacity AND figure opacity, bent segments arced through the bend midpoint), strokes (a pressured stroke as per-segment lines at its baked widths), FX/particles and weather through the same camera, and it emits sprite instances, text instances and segment media (images embedded once per asset as PNG data with a placement matrix; an image item's figure×style opacity rides as an opacity attribute). One divergence from the raster remains: SVG text is a monospace font run where the raster stamps 3×5 bitmap glyphs (the content and centre agree; the advance width does not). Progress: on a streaming transport (the stdio server), passing '_meta.progressToken' in the tools/call params streams notifications/progress during the call — 'mp4'/'webm' report the encode phase, 'jpeg'/'png_sequence' the render phase; other formats report nothing and the reply is unchanged. An optional 'alpha' boolean (PNG sequence, spritesheet and APNG only) exports with a transparent background and per-pixel coverage alpha instead of the project background. An optional 'overwrite' boolean (default false) governs existing output files for the single-file formats ('png', 'gif', 'mp4', 'webm', 'apng', 'spritesheet'): without it an existing file refuses the call and is named — the one-shot form of the export panel's two-press overwrite guard; pass 'overwrite': true to replace it. The sequence formats write into a directory and are not guarded, as in the panel.",
             schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Output file path (a directory path for formats svg, jpeg and png_sequence)" },
                     "format": { "type": "string", "enum": ["png", "png_sequence", "gif", "mp4", "webm", "apng", "svg", "spritesheet", "jpeg"] },
                     "frame": { "type": "integer", "minimum": 0, "description": "Frame index for format 'png' (default: current frame)" },
+                    "ss": { "type": "integer", "minimum": 1, "maximum": 4, "description": "Supersample factor for the rasterizer's anti-aliasing (default 2; 1 = hard-edged draft at a quarter of the render work, 4 = finest edges at four times the work): format 'png' only" },
                     "from": { "type": "integer", "minimum": 0, "description": "First frame of an inclusive range (with 'to'); sequence/animation formats only" },
                     "to": { "type": "integer", "minimum": 0, "description": "Last frame of an inclusive range (with 'from'); sequence/animation formats only" },
                     "from_frame": { "type": "integer", "minimum": 0, "description": "First frame of an inclusive range (with 'to_frame'); sequence/animation formats only" },
                     "to_frame": { "type": "integer", "minimum": 0, "description": "Last frame of an inclusive range (with 'from_frame'); sequence/animation formats only" },
                     "scale": { "type": "number", "exclusiveMinimum": 0, "description": "Output scale relative to the stage size (default 1.0), a true re-render at that scale: formats 'png', 'png_sequence', 'gif', 'mp4', 'webm', 'apng', 'spritesheet' and 'jpeg' accept it" },
-                    "alpha": { "type": "boolean", "description": "Transparent background with per-pixel coverage alpha instead of the project background (default false): formats 'png_sequence', 'spritesheet' and 'apng' only" }
+                    "alpha": { "type": "boolean", "description": "Transparent background with per-pixel coverage alpha instead of the project background (default false): formats 'png_sequence', 'spritesheet' and 'apng' only" },
+                    "overwrite": { "type": "boolean", "description": "Replace the output file if it already exists (default false — an existing output file refuses the call and names the file): the single-file formats 'png', 'gif', 'mp4', 'webm', 'apng' and 'spritesheet' only; the sequence formats write into a directory and are not guarded" }
                 },
                 "required": ["path", "format"]
             }),
@@ -1680,33 +2030,71 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "export_bundle",
-            description: "Export a whole bundle of formats into the DIRECTORY at 'path' in one call (the export panel's two bundle buttons). kind 'images': a PNG sequence (png/ subdir), a JPEG sequence (jpeg/), one SVG per frame (svg/) and a spritesheet (spritesheet.png). kind 'video': '<project>.mp4' and '<project>.webm'. Member content matches the render tool per format: the image members are full raster frames (composited media included) and the SVG member matches the render tool's SVG (media included; text as font glyphs is its standing divergence); the mp4 member muxes usable project audio, the webm member is silent. Bundles always cover the WHOLE timeline — they deliberately ignore frame ranges, matching the panel. An optional 'scale' (default 1.0) scales the 'images' bundle's PNG sequence member (a true re-render at that scale); every other member is unaffected, and an invalid scale (not a positive finite number) refuses the call before anything is written. Every member is attempted: the reply lists each member with ok + frame count, or ok:false + the failure's reason; member failures never fail the call itself. Progress: on a streaming transport (the stdio server), passing '_meta.progressToken' in the tools/call params streams notifications/progress during the call — one combined bundle count (frames completed across all members against the bundle's total, allocated before the first member runs; members without a phase contract of their own count when they complete; if a member fails, the stream ends without a terminal count); the reply is unchanged. An optional 'alpha' boolean (default false) exports the 'images' bundle's PNG sequence and spritesheet members with a transparent background and per-pixel coverage alpha instead of the project background (the PNG member rides the bundle 'scale'); the JPEG and SVG members and the whole 'video' bundle have no alpha form and are written exactly as without it, and the reply then records 'alpha' on the call and on each member — true only where the member was actually written with alpha.",
+            description: "Export a whole bundle of formats into the DIRECTORY at 'path' in one call (the export panel's two bundle buttons). kind 'images': a PNG sequence (png/ subdir), a JPEG sequence (jpeg/), one SVG per frame (svg/) and a spritesheet (<project>-spritesheet.png). kind 'video': '<project>.mp4' and '<project>.webm'. Member content matches the render tool per format: the image members are full raster frames (composited media included) and the SVG member matches the render tool's SVG (media included; text as font glyphs is its standing divergence); the mp4 member muxes usable project audio, the webm member is silent. Bundles always cover the WHOLE timeline — they deliberately ignore frame ranges, matching the panel. An optional 'scale' (default 1.0) scales the 'images' bundle's PNG sequence member (a true re-render at that scale); every other member is unaffected, and an invalid scale (not a positive finite number) refuses the call before anything is written. Every member is attempted: the reply lists each member with ok + frame count, or ok:false + the failure's reason; member failures never fail the call itself. Progress: on a streaming transport (the stdio server), passing '_meta.progressToken' in the tools/call params streams notifications/progress during the call — one combined bundle count (frames completed across all members against the bundle's total, allocated before the first member runs; members without a phase contract of their own count when they complete; if a member fails, the stream ends without a terminal count); the reply is unchanged. An optional 'alpha' boolean (default false) exports the 'images' bundle's PNG sequence and spritesheet members with a transparent background and per-pixel coverage alpha instead of the project background (the PNG member rides the bundle 'scale'); the JPEG and SVG members and the whole 'video' bundle have no alpha form and are written exactly as without it, and the reply then records 'alpha' on the call and on each member — true only where the member was actually written with alpha. The file members are named from the project with the export panel's stem rule; an optional 'naming' argument selects the panel's naming template ('project' default; 'project-date' appends the export date to the stem; 'animation' is the pre-RM23 shared stem). The bundle's file members are overwrite-guarded like the panel's: if the spritesheet (kind 'images') or either video file already exists, the call refuses before writing anything and names the file, unless 'overwrite': true is passed.",
             schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Destination directory (created if needed)" },
                     "kind": { "type": "string", "enum": ["images", "video"], "description": "Which bundle to export" },
                     "scale": { "type": "number", "exclusiveMinimum": 0, "description": "Output scale for the PNG sequence member relative to the stage size (default 1.0); an invalid value refuses the call before anything is written" },
-                    "alpha": { "type": "boolean", "description": "Transparent background with per-pixel coverage alpha for the PNG sequence and spritesheet members of the 'images' bundle (default false)" }
+                    "alpha": { "type": "boolean", "description": "Transparent background with per-pixel coverage alpha for the PNG sequence and spritesheet members of the 'images' bundle (default false)" },
+                    "naming": { "type": "string", "enum": ["project", "project-date", "animation"], "description": "Naming template for the bundle's file members, the export panel's vocabulary (default 'project')" },
+                    "overwrite": { "type": "boolean", "description": "Replace the bundle's file members if they already exist (default false — an existing member file refuses the call before anything is written and names the file)" }
                 },
                 "required": ["path", "kind"]
             }),
             handler: tool_export_bundle,
         },
         Tool {
-            name: "render_frame_base64",
-            description: "Render one frame (default: current) as a PNG at exact stage size and return it base64-encoded, so you can SEE the frame. The PNG is the full raster frame — the same content as render format 'png', with sprite/text instances and segment media composited in. Returns {frame, width, height, png_base64}.",
+            name: "asset_import_sheet",
+            description: "Import the spritesheet file at 'path' (the Assets surface's sheet import): when the sheet carries a W2-49 sidecar it is sliced into one image asset per cell; without a sidecar the whole sheet imports as a single asset. Returns {indices, names, sliced}. One undo step.",
             schema: json!({
                 "type": "object",
                 "properties": {
-                    "frame": { "type": "integer", "minimum": 0, "description": "Frame index (default: current frame)" }
+                    "path": { "type": "string", "description": "Spritesheet file path" }
+                },
+                "required": ["path"]
+            }),
+            handler: tool_asset_import_sheet,
+        },
+        Tool {
+            name: "episode_qa_probe",
+            description: "Run the episode QA probe over the finished export file at 'path' against the current project (the export panel's Episode QA): measures the file (streams, audio scan, frame samples, chapter metadata, subtitle and title-card burn-in ink) and returns the named checks with pass/fail/unmeasured status and evidence, the roll-up 'passed' and the counted summary. Read-only.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Exported episode file path" }
+                },
+                "required": ["path"]
+            }),
+            handler: tool_episode_qa_probe,
+        },
+        Tool {
+            name: "diagnostics_bundle",
+            description: "Write a diagnostics bundle for the current session's project (the Help panel's Diagnostics card): counts-only project census, platform facts and redacted store-dir roles — no project content, names, cue text or absolute paths — into the data dir's diagnostics folder. Returns the bundle path and file count. Read-only over the project.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                },
+                "required": []
+            }),
+            handler: tool_diagnostics_bundle,
+        },
+        Tool {
+            name: "render_frame_base64",
+            description: "Render one frame (default: current) as a PNG at exact stage size and return it base64-encoded, so you can SEE the frame. The PNG is the full raster frame — the same content as render format 'png', with sprite/text instances and segment media composited in. Returns {frame, width, height, png_base64}. Pass 'ss' to trade render time for edge quality.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "frame": { "type": "integer", "minimum": 0, "description": "Frame index (default: current frame)" },
+                    "ss": { "type": "integer", "minimum": 1, "maximum": 4, "description": "Supersample factor for the rasterizer's anti-aliasing (default 2; 1 = hard-edged draft at a quarter of the render work, 4 = finest edges at four times the work)" }
                 }
             }),
             handler: tool_render_frame_base64,
         },
         Tool {
             name: "render_contact_sheet",
-            description: "Render a contact sheet (grid of frame thumbnails) to the file at 'path' — each thumbnail is a full raster render of its frame (composited media included), and the written file's format follows the path's extension (use a .png path for a PNG; the image writer infers the format from it). Frame selection: 'frames' is an optional array of frame indices (out-of-range indices are clamped and reported in a note); or pass 'from'/'to' (0-based, inclusive, together) to draw the picks from that window; with neither, the default is up to 12 evenly spaced frames across the timeline — NOT one tile per frame (the export panel's sheet differs: it tiles every frame). 'frames' and 'from'/'to' together are an error. 'cols' is the grid column count (default 4, at least 1); 'thumb_width' is each thumbnail's width in pixels (default 240, 16..=1024). Returns {path, width, height, frames, cols, thumb_width}. Parent directories are created.",
+            description: "Render a contact sheet (grid of frame thumbnails) to the file at 'path' — each thumbnail is a full raster render of its frame (composited media included), and the written file's format follows the path's extension (use a .png path for a PNG; the image writer infers the format from it). Frame selection: 'frames' is an optional array of frame indices (out-of-range indices are clamped and reported in a note); or pass 'from'/'to' (0-based, inclusive, together) to draw the picks from that window; with neither, the default is up to 12 evenly spaced frames across the timeline — NOT one tile per frame (the export panel's sheet differs: it tiles every frame). 'frames' and 'from'/'to' together are an error. 'cols' is the grid column count (default 4, at least 1); 'thumb_width' is each thumbnail's width in pixels (default 240, 16..=1024). Returns {path, width, height, frames, cols, thumb_width}. Parent directories are created. An existing file at 'path' is never silently replaced: without 'overwrite' the call refuses and names the file (the one-shot form of the export panel's guard on its contact-sheet action); pass 'overwrite': true to replace it.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -1715,7 +2103,8 @@ pub fn tools() -> Vec<Tool> {
                     "from": { "type": "integer", "minimum": 0, "description": "Window start for the evenly spaced picks (with 'to'; not with 'frames')" },
                     "to": { "type": "integer", "minimum": 0, "description": "Window end for the evenly spaced picks (with 'from'; not with 'frames')" },
                     "cols": { "type": "integer", "minimum": 1, "description": "Grid columns (default 4)" },
-                    "thumb_width": { "type": "integer", "minimum": 16, "maximum": 1024, "description": "Thumbnail width in pixels (default 240)" }
+                    "thumb_width": { "type": "integer", "minimum": 16, "maximum": 1024, "description": "Thumbnail width in pixels (default 240)" },
+                    "overwrite": { "type": "boolean", "description": "Replace the file at 'path' if it already exists (default false — an existing file refuses the call and names the file)" }
                 },
                 "required": ["path"]
             }),
@@ -2124,7 +2513,7 @@ mod tests {
         let path = dir.join("scene.styk.json");
 
         // One counted edit: the session reads dirty.
-        core.snapshot();
+        core.snapshot_labeled("Test edit");
         assert_eq!(core.edits_since_autosave(), 1);
         call("save_project", &mut core, json!({ "path": path.to_string_lossy() }))
             .expect("save failed");
@@ -2163,7 +2552,7 @@ mod tests {
 
         // Dirty the session, then load: the opened project
         // must not inherit the previous project's edit count.
-        core.snapshot();
+        core.snapshot_labeled("Test edit");
         assert_eq!(core.edits_since_autosave(), 1);
         call("load_project", &mut core, json!({ "path": path.to_string_lossy() }))
             .expect("load failed");
@@ -2175,7 +2564,7 @@ mod tests {
     #[test]
     fn piv_import_restarts_the_dirty_baseline() {
         let mut core = EditorCore::new();
-        core.snapshot();
+        core.snapshot_labeled("Test edit");
         assert_eq!(core.edits_since_autosave(), 1);
         let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/legacy-v3.piv");
         call("import_file", &mut core, json!({ "path": fixture })).expect("piv import failed");
@@ -3374,5 +3763,317 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&opaque_dir);
         let _ = std::fs::remove_dir_all(&alpha_dir);
+    }
+
+    // -----------------------------------------------------------------
+    // Roadmap Wave 2 (W2-47): export naming parity + the
+    // overwrite guard — the panel's stem rule and naming
+    // templates on the bundle's file members, and
+    // refuse-with-named-error on every single-file target
+    // the export tools write, until 'overwrite': true.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn export_stem_matches_the_panels_rule() {
+        // The panel's own matrix (export_panel's
+        // project_stem pin, IA-RM23-6's rule-for-rule
+        // copy): sanitisation, the underscore rule and
+        // the 'animation' fallback agree on both sides.
+        let mut core = EditorCore::new();
+        for (name, want) in [
+            ("Untitled", "untitled"),
+            ("The Last Promise", "the-last-promise"),
+            ("Ep. 12 — Finale!", "ep-12-finale"),
+            ("my_ep  2", "my_ep-2"),
+            ("  --A--  ", "a"),
+            ("!!!", "animation"),
+            ("", "animation"),
+        ] {
+            core.project.name = name.to_string();
+            assert_eq!(export_stem(&core.project), want, "name {name:?}");
+        }
+    }
+
+    #[test]
+    fn named_export_stem_applies_the_templates() {
+        let mut core = EditorCore::new();
+        core.project.name = "The Last Promise".to_string();
+        assert_eq!(
+            named_export_stem(&core.project, "project", "2026-11-10"),
+            "the-last-promise"
+        );
+        assert_eq!(
+            named_export_stem(&core.project, "project-date", "2026-11-10"),
+            "the-last-promise-2026-11-10"
+        );
+        assert_eq!(
+            named_export_stem(&core.project, "animation", "2026-11-10"),
+            "animation"
+        );
+    }
+
+    #[test]
+    fn export_file_refuses_an_existing_target_until_overwrite() {
+        let dir = temp_dir("guard-export-file");
+        let mut core = EditorCore::new();
+        core.project = Project::new_demo();
+        let target = dir.join("out.piv");
+        std::fs::write(&target, b"sentinel").unwrap();
+        let err = call(
+            "export_file",
+            &mut core,
+            json!({ "path": target.to_string_lossy(), "format": "piv5" }),
+        )
+        .expect_err("an existing target must refuse without 'overwrite'");
+        assert!(err.contains("export target already exists"), "{err}");
+        assert!(
+            err.contains(&target.display().to_string()),
+            "the error names the file: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"sentinel",
+            "a refused export wrote"
+        );
+        let out = call(
+            "export_file",
+            &mut core,
+            json!({ "path": target.to_string_lossy(), "format": "piv5", "overwrite": true }),
+        )
+        .expect("overwrite:true must export");
+        assert_eq!(out["format"], "piv5");
+        let bytes = std::fs::read(&target).unwrap();
+        assert_ne!(bytes, b"sentinel");
+        assert!(
+            crate::pivot::import_piv(&bytes).is_ok(),
+            "the replacement is a real .piv"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_file_range_refusal_precedes_the_write() {
+        // The guard runs before the encoder: with an
+        // existing target and no 'overwrite', the refusal
+        // — not an encode result — is what comes back,
+        // and the file is untouched. (This holds with or
+        // without ffmpeg present, because the encoder
+        // never runs.)
+        let dir = temp_dir("guard-range");
+        let mut core = range_core();
+        let target = dir.join("x.mp4");
+        std::fs::write(&target, b"sentinel").unwrap();
+        let err = call(
+            "export_file",
+            &mut core,
+            json!({ "path": target.to_string_lossy(), "format": "mp4_range", "from_frame": 0, "to_frame": 1 }),
+        )
+        .expect_err("an existing range target must refuse");
+        assert!(err.contains("export target already exists"), "{err}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"sentinel");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_refuses_an_existing_single_file_target() {
+        let dir = temp_dir("guard-render");
+        let mut core = EditorCore::new();
+        core.project = Project::new_demo();
+        let target = dir.join("frame0.png");
+        std::fs::write(&target, b"sentinel").unwrap();
+        let err = call(
+            "render",
+            &mut core,
+            json!({ "path": target.to_string_lossy(), "format": "png", "frame": 0 }),
+        )
+        .expect_err("an existing PNG target must refuse");
+        assert!(err.contains("export target already exists"), "{err}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"sentinel");
+        call(
+            "render",
+            &mut core,
+            json!({ "path": target.to_string_lossy(), "format": "png", "frame": 0, "overwrite": true }),
+        )
+        .expect("overwrite:true must render");
+        let bytes = std::fs::read(&target).unwrap();
+        assert_eq!(&bytes[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_sequence_targets_stay_unguarded() {
+        // Directory targets are the panel's unguarded
+        // class: a second sequence render into the same
+        // directory replaces frame files with no
+        // 'overwrite' argument at all.
+        let dir = temp_dir("guard-sequence");
+        let mut core = EditorCore::new();
+        core.project = Project::new_demo();
+        for _ in 0..2 {
+            call(
+                "render",
+                &mut core,
+                json!({ "path": dir.to_string_lossy(), "format": "png_sequence" }),
+            )
+            .expect("sequence renders are unguarded");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn contact_sheet_refuses_an_existing_target() {
+        let dir = temp_dir("guard-contact");
+        let mut core = EditorCore::new();
+        core.project = Project::new_demo();
+        let target = dir.join("sheet.png");
+        std::fs::write(&target, b"sentinel").unwrap();
+        let err = call(
+            "render_contact_sheet",
+            &mut core,
+            json!({ "path": target.to_string_lossy() }),
+        )
+        .expect_err("an existing contact-sheet target must refuse");
+        assert!(err.contains("export target already exists"), "{err}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"sentinel");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bundle_file_members_carry_the_panel_names() {
+        let mut core = bundle_core();
+        core.project.name = "The Last Promise".to_string();
+        let dir = temp_dir("bundle-naming");
+        let reply = call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": dir.to_string_lossy(), "kind": "images" }),
+        )
+        .expect("images bundle failed");
+        assert_eq!(reply["succeeded"], 4, "{reply}");
+        // The sheet member is '<stem>-spritesheet.png'
+        // (RM23's file_name_for), no longer the shared
+        // pre-RM23 'spritesheet.png'.
+        let sheet = dir.join("the-last-promise-spritesheet.png");
+        assert!(sheet.is_file(), "the sheet member carries the project stem");
+        let sheet_member = reply["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["format"] == "spritesheet")
+            .expect("sheet member in the reply");
+        assert_eq!(sheet_member["path"], sheet.display().to_string());
+        // The video members name the same stem (their
+        // targets are in the reply whether or not the
+        // encoders ran).
+        let vdir = temp_dir("bundle-naming-video");
+        let reply = call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": vdir.to_string_lossy(), "kind": "video" }),
+        )
+        .expect("video bundle failed");
+        let targets: Vec<&str> = reply["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["path"].as_str().unwrap())
+            .collect();
+        assert!(targets[0].ends_with("the-last-promise.mp4"), "{targets:?}");
+        assert!(targets[1].ends_with("the-last-promise.webm"), "{targets:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&vdir);
+    }
+
+    #[test]
+    fn bundle_refuses_when_a_file_member_exists() {
+        let mut core = bundle_core();
+        core.project.name = "The Last Promise".to_string();
+        let dir = temp_dir("bundle-guard");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sheet = dir.join("the-last-promise-spritesheet.png");
+        std::fs::write(&sheet, b"sentinel").unwrap();
+        let err = call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": dir.to_string_lossy(), "kind": "images" }),
+        )
+        .expect_err("an existing sheet member must refuse the bundle");
+        assert!(err.contains("export target already exists"), "{err}");
+        assert!(
+            err.contains("the-last-promise-spritesheet.png"),
+            "the error names the member: {err}"
+        );
+        // Nothing else was written and the sentinel is
+        // intact: the refusal precedes every member.
+        assert!(!dir.join("png").exists(), "a refused bundle wrote members");
+        assert_eq!(std::fs::read(&sheet).unwrap(), b"sentinel");
+        let reply = call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": dir.to_string_lossy(), "kind": "images", "overwrite": true }),
+        )
+        .expect("overwrite:true must run the bundle");
+        assert_eq!(reply["succeeded"], 4, "{reply}");
+        assert_ne!(std::fs::read(&sheet).unwrap(), b"sentinel");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bundle_naming_templates_and_refusals() {
+        let mut core = bundle_core();
+        core.project.name = "The Last Promise".to_string();
+        // The legacy template names the shared stem.
+        let legacy_dir = temp_dir("bundle-naming-legacy");
+        call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": legacy_dir.to_string_lossy(), "kind": "images", "naming": "animation" }),
+        )
+        .expect("legacy-named bundle failed");
+        assert!(legacy_dir.join("animation-spritesheet.png").is_file());
+        // The date template appends a YYYY-MM-DD slot.
+        let date_dir = temp_dir("bundle-naming-date");
+        call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": date_dir.to_string_lossy(), "kind": "images", "naming": "project-date" }),
+        )
+        .expect("date-named bundle failed");
+        let names: Vec<String> = bundle_tree(&date_dir)
+            .iter()
+            .map(|(p, _)| p.clone())
+            .collect();
+        let sheet = names
+            .iter()
+            .find(|p| p.ends_with("-spritesheet.png"))
+            .expect("a sheet member was written");
+        let middle = sheet
+            .strip_prefix("the-last-promise-")
+            .and_then(|s| s.strip_suffix("-spritesheet.png"))
+            .expect("the sheet name is stem + date + suffix");
+        assert_eq!(middle.len(), 10, "a YYYY-MM-DD date slot: {middle}");
+        assert!(
+            middle.chars().enumerate().all(|(i, c)| {
+                if i == 4 || i == 7 {
+                    c == '-'
+                } else {
+                    c.is_ascii_digit()
+                }
+            }),
+            "a YYYY-MM-DD date slot: {middle}"
+        );
+        // An unknown template refuses before the target
+        // directory is created.
+        let target = temp_dir("bundle-naming-bad").join("out");
+        let err = call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": target.to_string_lossy(), "kind": "images", "naming": "fancy" }),
+        )
+        .expect_err("an unknown naming template must refuse");
+        assert!(err.contains("unknown naming template 'fancy'"), "{err}");
+        assert!(!target.exists(), "a refused naming left a bundle behind");
+        let _ = std::fs::remove_dir_all(&legacy_dir);
+        let _ = std::fs::remove_dir_all(&date_dir);
     }
 }

@@ -140,9 +140,37 @@
 //! notation (the `—` no-frame marker, the two-decimal
 //! number format inside the duration slot) stay
 //! literal.
+//!
+//! Roadmap Wave 2 (W2-38): the "Breakdown" row and the
+//! "Breakdown chain" row close the section. The
+//! Breakdown row is IA-RM17-2's specified row, landed
+//! by this seat: the Wave 1 integration carried its
+//! i18n keys (IA-RM17-3) and its MCP registration
+//! (IA-RM17-1) but not the row itself, so until now the
+//! op had no panel door. The row is the IA's design
+//! verbatim — the favour slider (percent state; the
+//! drag writes view state only), the count stepper and
+//! the Insert button over
+//! `frame_swap::insert_breakdowns`, gated like
+//! Inbetween. The chain row adds the span stepper, the
+//! Insert chain button over
+//! `frame_swap::insert_breakdown_chain`, and the
+//! favour-curve preview: a strip drawing the chain's
+//! landing positions (the lib's
+//! `breakdown_chain_positions`, via
+//! [`breakdown_preview_dots`]) against the span's frame
+//! ticks, so a position that would land exactly on an
+//! existing frame — and be skipped by the op — is
+//! visible before the press. The chain row's three
+//! labels resolve through the `frame_breakdown_chain`
+//! / `frame_breakdown_span` /
+//! `frame_insert_breakdown_chain` keys (IA-W2-38-2);
+//! until that splice lands, `tr` falls back to the key
+//! itself (the Q7 pattern this file's Wave T/U pins
+//! already document).
 
 use rune::tok::{type_, Theme};
-use rune::{row, text, El};
+use rune::{el, row, text, Drag, El, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::Frame;
 
@@ -174,6 +202,52 @@ pub const INSERT_COUNT_MAX: usize = 60;
 /// Insert-N count a fresh [`FrameOpsState`] starts with.
 pub const INSERT_COUNT_DEFAULT: usize = 4;
 
+/// Smallest breakdown favour the panel's slider offers,
+/// as a percent — the op's own floor
+/// (`frame_swap::BREAKDOWN_FAVOUR_MIN`), in the percent
+/// domain the slider and steppers work in.
+pub const BREAKDOWN_FAVOUR_PCT_MIN: u8 = 10;
+/// Largest breakdown favour percent — see
+/// [`BREAKDOWN_FAVOUR_PCT_MIN`].
+pub const BREAKDOWN_FAVOUR_PCT_MAX: u8 = 90;
+/// Breakdown favour a fresh [`FrameOpsState`] starts
+/// with: 50, the even midpoint (the legacy inbetween).
+pub const BREAKDOWN_FAVOUR_PCT_DEFAULT: u8 = 50;
+/// Smallest breakdown count: zero would be a no-op that
+/// still spent an undo step.
+pub const BREAKDOWN_COUNT_MIN: usize = 1;
+/// Largest breakdown count — the op's own cap
+/// (`frame_swap::BREAKDOWN_COUNT_MAX`).
+pub const BREAKDOWN_COUNT_MAX: usize = 8;
+
+/// Smallest breakdown chain span: one segment — the
+/// chain over a single segment is the Breakdown row's
+/// own insert (the lib pins the parity).
+pub const BREAKDOWN_SPAN_MIN: usize = 1;
+/// Largest breakdown chain span — the op's own cap
+/// (`frame_swap::BREAKDOWN_CHAIN_SPAN_MAX`).
+pub const BREAKDOWN_SPAN_MAX: usize = 64;
+/// Breakdown chain span a fresh [`FrameOpsState`]
+/// starts with — the op's default
+/// (`frame_swap::BREAKDOWN_CHAIN_SPAN_DEFAULT`).
+pub const BREAKDOWN_SPAN_DEFAULT: usize = 3;
+
+/// Breakdown slider geometry — the layers panel's local
+/// pair (its opacity slider): a 200pt drag root, 28pt
+/// tall, with the kit's 22pt track centred inside.
+const BREAKDOWN_SLIDER_W: f32 = 200.0;
+/// See [`BREAKDOWN_SLIDER_W`].
+const BREAKDOWN_SLIDER_H: f32 = 28.0;
+
+/// Chain preview geometry: the breakdown slider's
+/// footprint, so the two rows' strips align — a 200pt
+/// wide, 28pt tall strip.
+pub const BREAKDOWN_PREVIEW_W: f32 = 200.0;
+/// See [`BREAKDOWN_PREVIEW_W`].
+pub const BREAKDOWN_PREVIEW_H: f32 = 28.0;
+/// A breakdown dot's diameter in the preview strip.
+const BREAKDOWN_PREVIEW_DOT: f32 = 8.0;
+
 /// UI-side frame-ops state (see the module docs). Stored on the
 /// shell's `State` as `frame_ops`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -203,6 +277,33 @@ pub struct FrameOpsState {
     /// [`INSERT_COUNT_DEFAULT`]. Not part of the project —
     /// a view-side preference like the range selection.
     pub insert_count: usize,
+    /// Breakdown favour the Frames panel's slider holds,
+    /// as a percent inside
+    /// [`BREAKDOWN_FAVOUR_PCT_MIN`]..=
+    /// [`BREAKDOWN_FAVOUR_PCT_MAX`] (kept there by
+    /// [`step_breakdown_favour_pct`] and the slider
+    /// drag). A view-side preference like `insert_count`:
+    /// 50 is the even midpoint, below favours the current
+    /// key, above the next. Shared by the Breakdown row
+    /// and the Breakdown chain row — one favour curve
+    /// drives both ops. Session-only.
+    pub breakdown_favour_pct: u8,
+    /// How many breakdowns the panel's Insert breakdown
+    /// and Insert chain buttons will author (kept inside
+    /// [`BREAKDOWN_COUNT_MIN`]..=[`BREAKDOWN_COUNT_MAX`]
+    /// by [`step_breakdown_count`]). The chain op's own
+    /// cap is wider (32) — that reach belongs to the MCP
+    /// door; the panel's one shared count stays inside
+    /// the single-insert range both rows were designed
+    /// around. Session-only, like `insert_count`.
+    pub breakdown_count: usize,
+    /// How many segments the Breakdown chain row's
+    /// Insert chain button spans, from the current frame
+    /// to the chain's target key (kept inside
+    /// [`BREAKDOWN_SPAN_MIN`]..=[`BREAKDOWN_SPAN_MAX`] by
+    /// [`step_breakdown_span`]). Session-only, like
+    /// `insert_count`.
+    pub breakdown_span: usize,
     /// Whether the timeline card is collapsed to its
     /// frame-chips row (Focused Wave, D1). The timeline
     /// section's chrome state: `timeline_marks` reads it
@@ -262,6 +363,12 @@ pub struct FrameOpsState {
     /// The subtitle lane's visibility flag — see
     /// [`FrameOpsState::show_marker_lane`].
     pub show_subtitle_lane: bool,
+    /// The dialogue lane's visibility flag — see
+    /// [`FrameOpsState::show_marker_lane`]. (Roadmap
+    /// Wave 2, W2-12: the lane's data gate is
+    /// `dialogue_lane::dialogue_present` — cues or
+    /// chapters exist.)
+    pub show_dialogue_lane: bool,
     /// The timeline's chip width in points (Roadmap
     /// Wave 1, RM13 — P-1 timeline zoom). The ONE zoom
     /// value every timeline-geometry consumer reads
@@ -293,11 +400,15 @@ impl Default for FrameOpsState {
             frame_copied: false,
             range_copied: false,
             insert_count: INSERT_COUNT_DEFAULT,
+            breakdown_favour_pct: BREAKDOWN_FAVOUR_PCT_DEFAULT,
+            breakdown_count: 1,
+            breakdown_span: BREAKDOWN_SPAN_DEFAULT,
             timeline_collapsed: false,
             show_marker_lane: true,
             show_clips_lane: true,
             show_dopesheet_lane: true,
             show_subtitle_lane: true,
+            show_dialogue_lane: true,
             timeline_zoom: crate::rune_sec::timeline_marks::CHIP_W,
             timeline_follow: false,
         }
@@ -324,6 +435,10 @@ pub enum TimelineLane {
     /// The subtitle lane (`subtitle-lane`): cue
     /// blocks, data-gated on cues existing.
     Subtitles,
+    /// The dialogue lane (`dialogue-lane`): dialogue
+    /// lines bound to cues + chapters, data-gated on
+    /// cues or chapters existing.
+    Dialogue,
 }
 
 impl FrameOpsState {
@@ -336,6 +451,7 @@ impl FrameOpsState {
             TimelineLane::Clips => self.show_clips_lane,
             TimelineLane::Dopesheet => self.show_dopesheet_lane,
             TimelineLane::Subtitles => self.show_subtitle_lane,
+            TimelineLane::Dialogue => self.show_dialogue_lane,
         }
     }
 
@@ -348,6 +464,7 @@ impl FrameOpsState {
             TimelineLane::Clips => &mut self.show_clips_lane,
             TimelineLane::Dopesheet => &mut self.show_dopesheet_lane,
             TimelineLane::Subtitles => &mut self.show_subtitle_lane,
+            TimelineLane::Dialogue => &mut self.show_dialogue_lane,
         };
         *flag = !*flag;
         *flag
@@ -501,6 +618,12 @@ pub fn can_smooth(core: &EditorCore) -> bool {
     core.frame_count() >= 3 && !core.project.figures.is_empty()
 }
 
+/// `delete_selected_path_point` needs at least three
+/// frames (a point with two neighbours) and a figure.
+pub fn can_delete_path_point(core: &EditorCore) -> bool {
+    core.frame_count() >= 3 && !core.project.figures.is_empty()
+}
+
 /// Clamp a duration multiplier to the engine's allowed range,
 /// [0.25, 8.0] — the clamp `EditorCore::adjust_frame_duration`
 /// applies (the model itself carries no range). Pure mirror so
@@ -595,6 +718,136 @@ pub fn clamp_insert_count(count: usize) -> usize {
 pub fn step_insert_count(count: usize, delta: i32) -> usize {
     let stepped = clamp_insert_count(count) as i64 + delta as i64;
     stepped.clamp(INSERT_COUNT_MIN as i64, INSERT_COUNT_MAX as i64) as usize
+}
+
+/// Clamp a breakdown favour percent to
+/// [`BREAKDOWN_FAVOUR_PCT_MIN`]..=
+/// [`BREAKDOWN_FAVOUR_PCT_MAX`] — the op's own range in
+/// percent. The single authority: the steppers, the
+/// slider drag and the readout all pass through it.
+pub fn clamp_breakdown_favour_pct(pct: u8) -> u8 {
+    pct.clamp(BREAKDOWN_FAVOUR_PCT_MIN, BREAKDOWN_FAVOUR_PCT_MAX)
+}
+
+/// One stepper step (±5 from the buttons) on the
+/// breakdown favour percent: clamp, step, clamp again —
+/// the `step_insert_count` discipline, so a stale
+/// out-of-range value heals.
+pub fn step_breakdown_favour_pct(pct: u8, delta: i32) -> u8 {
+    let stepped = clamp_breakdown_favour_pct(pct) as i32 + delta;
+    stepped.clamp(BREAKDOWN_FAVOUR_PCT_MIN as i32, BREAKDOWN_FAVOUR_PCT_MAX as i32) as u8
+}
+
+/// Clamp a breakdown count to
+/// [`BREAKDOWN_COUNT_MIN`]..=[`BREAKDOWN_COUNT_MAX`].
+pub fn clamp_breakdown_count(count: usize) -> usize {
+    count.clamp(BREAKDOWN_COUNT_MIN, BREAKDOWN_COUNT_MAX)
+}
+
+/// One stepper step on the breakdown count — see
+/// [`step_breakdown_favour_pct`].
+pub fn step_breakdown_count(count: usize, delta: i32) -> usize {
+    let stepped = clamp_breakdown_count(count) as i64 + delta as i64;
+    stepped.clamp(BREAKDOWN_COUNT_MIN as i64, BREAKDOWN_COUNT_MAX as i64) as usize
+}
+
+/// Clamp a breakdown chain span to
+/// [`BREAKDOWN_SPAN_MIN`]..=[`BREAKDOWN_SPAN_MAX`] — the
+/// op's own range, mirrored (see [`BREAKDOWN_SPAN_MAX`]).
+pub fn clamp_breakdown_span(span: usize) -> usize {
+    span.clamp(BREAKDOWN_SPAN_MIN, BREAKDOWN_SPAN_MAX)
+}
+
+/// One stepper step on the breakdown chain span — see
+/// [`step_breakdown_favour_pct`].
+pub fn step_breakdown_span(span: usize, delta: i32) -> usize {
+    let stepped = clamp_breakdown_span(span) as i64 + delta as i64;
+    stepped.clamp(BREAKDOWN_SPAN_MIN as i64, BREAKDOWN_SPAN_MAX as i64) as usize
+}
+
+/// The breakdown favour percent a slider drag at local
+/// `x` over a root of width `w` means: the drag fraction
+/// mapped onto the favour range (the layers panel's
+/// `opacity_at` shape, range-shifted).
+pub fn breakdown_favour_pct_at(x: f32, w: f32) -> u8 {
+    if w <= 0.0 {
+        return BREAKDOWN_FAVOUR_PCT_DEFAULT;
+    }
+    let frac = (x / w).clamp(0.0, 1.0);
+    let span = (BREAKDOWN_FAVOUR_PCT_MAX - BREAKDOWN_FAVOUR_PCT_MIN) as f32;
+    (BREAKDOWN_FAVOUR_PCT_MIN as f32 + frac * span).round() as u8
+}
+
+/// The breakdown favour slider's drag handler: Down,
+/// Move and Up all write the percent the pointer means.
+/// View state only — no snapshot, no status (the lane-
+/// flag discipline); the insert itself announces through
+/// the core's status when its button is pressed.
+fn breakdown_favour_drag(s: &mut State, d: &mut Drag) {
+    s.frame_ops.breakdown_favour_pct = breakdown_favour_pct_at(d.x, d.w);
+}
+
+/// The chain preview's dots: the global span fractions
+/// (0..1) at which a chain with the panel's current
+/// favour / count / span would land — the lib's
+/// `breakdown_chain_positions` mapped back to fractions
+/// of the span. The preview strip and the op read the
+/// same positions, so what the strip draws is what the
+/// press authors; a position the op would skip (one
+/// landing exactly on an existing frame) is absent here
+/// too, and the strip's frame ticks show where it went.
+pub fn breakdown_preview_dots(favour_pct: u8, count: usize, span: usize) -> Vec<f32> {
+    let favour = clamp_breakdown_favour_pct(favour_pct) as f32 / 100.0;
+    let count = clamp_breakdown_count(count);
+    let span = clamp_breakdown_span(span);
+    stykanimate_rs::frame_swap::breakdown_chain_positions(favour, count, span)
+        .into_iter()
+        .map(|(seg, local)| (seg as f32 + local) / span as f32)
+        .collect()
+}
+
+/// The chain row's favour-curve preview: a strip the
+/// breakdown slider's size, drawing the span's frame
+/// ticks on a rail and one accent dot per landing
+/// position from [`breakdown_preview_dots`]. VISUAL
+/// ONLY — no handler; the container carries the
+/// section's one preview key. A tick with no dot near
+/// it is a distribution position the op will skip (it
+/// lands on that frame) — the skip made visible before
+/// the press, not discovered after it.
+fn breakdown_preview(ops: &FrameOpsState, t: &Theme) -> El {
+    let span = clamp_breakdown_span(ops.breakdown_span);
+    let mut strip = el()
+        .key("breakdown-preview")
+        .size(BREAKDOWN_PREVIEW_W, BREAKDOWN_PREVIEW_H)
+        .child(
+            el()
+                .size(BREAKDOWN_PREVIEW_W, 4.0)
+                .absolute(0.0, (BREAKDOWN_PREVIEW_H - 4.0) / 2.0)
+                .radius(2.0)
+                .fill(t.control_track),
+        );
+    for k in 0..=span {
+        let x = (k as f32 / span as f32) * (BREAKDOWN_PREVIEW_W - 2.0);
+        strip = strip.child(
+            el()
+                .size(2.0, 10.0)
+                .absolute(x, (BREAKDOWN_PREVIEW_H - 10.0) / 2.0)
+                .radius(1.0)
+                .fill(t.text_secondary),
+        );
+    }
+    for u in breakdown_preview_dots(ops.breakdown_favour_pct, ops.breakdown_count, span) {
+        let x = u * (BREAKDOWN_PREVIEW_W - BREAKDOWN_PREVIEW_DOT);
+        strip = strip.child(
+            el()
+                .size(BREAKDOWN_PREVIEW_DOT, BREAKDOWN_PREVIEW_DOT)
+                .absolute(x, (BREAKDOWN_PREVIEW_H - BREAKDOWN_PREVIEW_DOT) / 2.0)
+                .radius(BREAKDOWN_PREVIEW_DOT / 2.0)
+                .fill(design::accent()),
+        );
+    }
+    strip
 }
 
 /// The Insert button can act only when there is a current
@@ -729,7 +982,7 @@ pub fn insert_frames_after_current(core: &mut EditorCore, count: usize) -> usize
     };
     let at = core.current + 1;
     let after = core.current;
-    core.snapshot();
+    core.snapshot_labeled("Insert frames");
     let blanks: Vec<Frame> = (0..n).map(|_| blank.clone()).collect();
     // Collecting the Splice forces the replacement to complete;
     // the replaced range is empty, so nothing is removed.
@@ -943,6 +1196,16 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
             } else {
                 btn_muted_live("smooth-path", &i18n_wire::tr(core, "frame_smooth_path"), false, t, press)
             }
+        })
+        .child({
+            let press = |s: &mut State| {
+                crate::stage_view::delete_selected_path_point(&mut s.core);
+            };
+            if can_delete_path_point(core) {
+                btn("delete-path-point", &i18n_wire::tr(core, "frame_delete_path_point"), false, t, press)
+            } else {
+                btn_muted_live("delete-path-point", &i18n_wire::tr(core, "frame_delete_path_point"), false, t, press)
+            }
         });
 
     let clipboard = row()
@@ -1141,6 +1404,139 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
             crate::rune_sec::icon_btn::icon_btn_inert("fop-ins-n", "plus", &i18n_wire::tr(core, "frame_insert_frames"), t)
         });
 
+    // "Breakdown" row (Roadmap Wave 1, RM17 — P-5a;
+    // specified as IA-RM17-2, landed by W2-38): the
+    // favour slider + count stepper + insert button for
+    // frame_swap::insert_breakdowns. The slider writes
+    // view state only; the button is the gesture, gated
+    // like Inbetween (a breakdown needs a following
+    // frame), muted-live so its refusal still speaks.
+    let breakdown_row = row()
+        .key("frames-breakdown")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(design::section_label(&i18n_wire::tr(core, "frame_breakdown"), t).grow(1.0))
+        .child(
+            el()
+                .key("breakdown-favour")
+                .size(BREAKDOWN_SLIDER_W, BREAKDOWN_SLIDER_H)
+                .on_drag(|s: &mut State, d: &mut Drag, _tx: &mut Tx| breakdown_favour_drag(s, d))
+                .child(
+                    design::slider_track(
+                        (clamp_breakdown_favour_pct(ops.breakdown_favour_pct) as f32
+                            - BREAKDOWN_FAVOUR_PCT_MIN as f32)
+                            / (BREAKDOWN_FAVOUR_PCT_MAX - BREAKDOWN_FAVOUR_PCT_MIN) as f32,
+                        t,
+                    )
+                    .absolute(0.0, (BREAKDOWN_SLIDER_H - 22.0) / 2.0),
+                ),
+        )
+        .child(design::stepper_value(
+            &i18n_wire::tr(core, "frame_breakdown_favour")
+                .replace("{pct}", &clamp_breakdown_favour_pct(ops.breakdown_favour_pct).to_string()),
+            t,
+        ))
+        .child({
+            let press = |s: &mut State| {
+                s.frame_ops.breakdown_count = step_breakdown_count(s.frame_ops.breakdown_count, -1);
+            };
+            if ops.breakdown_count <= BREAKDOWN_COUNT_MIN {
+                btn_muted_live("fop-bd-n-dn", "-", false, t, press)
+            } else {
+                btn("fop-bd-n-dn", "-", false, t, press)
+            }
+        })
+        .child(design::stepper_value(
+            &i18n_wire::tr(core, "frame_breakdown_count")
+                .replace("{count}", &clamp_breakdown_count(ops.breakdown_count).to_string()),
+            t,
+        ))
+        .child({
+            let press = |s: &mut State| {
+                s.frame_ops.breakdown_count = step_breakdown_count(s.frame_ops.breakdown_count, 1);
+            };
+            if ops.breakdown_count >= BREAKDOWN_COUNT_MAX {
+                btn_muted_live("fop-bd-n-up", "+", false, t, press)
+            } else {
+                btn("fop-bd-n-up", "+", false, t, press)
+            }
+        })
+        .child({
+            let press = |s: &mut State| {
+                let pct = clamp_breakdown_favour_pct(s.frame_ops.breakdown_favour_pct);
+                let count = clamp_breakdown_count(s.frame_ops.breakdown_count);
+                stykanimate_rs::frame_swap::insert_breakdowns(&mut s.core, pct as f32 / 100.0, count);
+            };
+            if can_inbetween(core) {
+                btn("fop-bd-ins", &i18n_wire::tr(core, "frame_insert_breakdown"), false, t, press)
+            } else {
+                btn_muted_live("fop-bd-ins", &i18n_wire::tr(core, "frame_insert_breakdown"), false, t, press)
+            }
+        });
+
+    // "Breakdown chain" row (Roadmap Wave 2, W2-38):
+    // the favour-curve preview + span stepper + insert
+    // button for frame_swap::insert_breakdown_chain.
+    // Favour and count are the Breakdown row's state —
+    // one favour curve drives both ops — and the
+    // preview reads that same state, so the strip shows
+    // exactly the distribution the button will author.
+    // The button is gated like Inbetween (a chain needs
+    // a following frame), muted-live so a refusal (no
+    // following frame, or every position landing on an
+    // existing frame) still speaks.
+    let chain_row = row()
+        .key("frames-chain")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(design::section_label(&i18n_wire::tr(core, "frame_breakdown_chain"), t).grow(1.0))
+        .child(breakdown_preview(ops, t))
+        .child({
+            let press = |s: &mut State| {
+                s.frame_ops.breakdown_span = step_breakdown_span(s.frame_ops.breakdown_span, -1);
+            };
+            if ops.breakdown_span <= BREAKDOWN_SPAN_MIN {
+                btn_muted_live("fop-bd-span-dn", "-", false, t, press)
+            } else {
+                btn("fop-bd-span-dn", "-", false, t, press)
+            }
+        })
+        .child(design::stepper_value(
+            &i18n_wire::tr(core, "frame_breakdown_span")
+                .replace("{count}", &clamp_breakdown_span(ops.breakdown_span).to_string()),
+            t,
+        ))
+        .child({
+            let press = |s: &mut State| {
+                s.frame_ops.breakdown_span = step_breakdown_span(s.frame_ops.breakdown_span, 1);
+            };
+            if ops.breakdown_span >= BREAKDOWN_SPAN_MAX {
+                btn_muted_live("fop-bd-span-up", "+", false, t, press)
+            } else {
+                btn("fop-bd-span-up", "+", false, t, press)
+            }
+        })
+        .child({
+            let press = |s: &mut State| {
+                let pct = clamp_breakdown_favour_pct(s.frame_ops.breakdown_favour_pct);
+                let count = clamp_breakdown_count(s.frame_ops.breakdown_count);
+                let span = clamp_breakdown_span(s.frame_ops.breakdown_span);
+                stykanimate_rs::frame_swap::insert_breakdown_chain(
+                    &mut s.core,
+                    pct as f32 / 100.0,
+                    count,
+                    span,
+                );
+            };
+            if can_inbetween(core) {
+                btn("fop-bd-chain", &i18n_wire::tr(core, "frame_insert_breakdown_chain"), false, t, press)
+            } else {
+                btn_muted_live("fop-bd-chain", &i18n_wire::tr(core, "frame_insert_breakdown_chain"), false, t, press)
+            }
+        });
+
     let mut panel = design::panel_col("frames", t)
         .child(
             row()
@@ -1169,6 +1565,8 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
         .child(dur)
         .child(this_frame)
         .child(insert_row)
+        .child(breakdown_row)
+        .child(chain_row)
 }
 
 #[cfg(test)]
@@ -1221,6 +1619,7 @@ mod tests {
             TimelineLane::Clips,
             TimelineLane::Dopesheet,
             TimelineLane::Subtitles,
+            TimelineLane::Dialogue,
         ] {
             assert!(ops.lane_shown(lane), "{lane:?} starts shown");
         }
@@ -1885,6 +2284,29 @@ mod tests {
             assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
             assert_eq!(i18n_wire::tr(&core, key), template);
         }
+        // Roadmap Wave 1 (RM17, IA-RM17-2/3) + Wave 2
+        // (W2-38, IA-W2-38-2): the Breakdown row's labels
+        // and readouts, and the Breakdown chain row's.
+        // The RM17 four are in the tables (IA-RM17-3
+        // landed at the Wave 1 integration — the favour
+        // and count entries are templates, pinned in
+        // their stored form like the U6 block above);
+        // the chain three pass only once IA-W2-38-2's
+        // splice lands, until then tr falls back to the
+        // key itself (the Q7 pattern), like the Wave T
+        // block above did in its wave.
+        for (key, english) in [
+            ("frame_breakdown", "Breakdown"),
+            ("frame_breakdown_favour", "Favour {pct}%"),
+            ("frame_breakdown_count", "{count} breakdowns"),
+            ("frame_insert_breakdown", "Insert breakdown"),
+            ("frame_breakdown_chain", "Breakdown chain"),
+            ("frame_breakdown_span", "Span {count}"),
+            ("frame_insert_breakdown_chain", "Insert chain"),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
         // Composed spot checks through the public
         // helpers: the exact pre-wire sentences. (The
         // Insert-N count composes inline in
@@ -1944,5 +2366,76 @@ mod tests {
         assert_eq!(ops.chip_w(), crate::rune_sec::timeline_marks::ZOOM_MIN_W);
         ops.timeline_zoom = f32::INFINITY;
         assert_eq!(ops.chip_w(), crate::rune_sec::timeline_marks::CHIP_W);
+    }
+
+    // ---- breakdown + chain state (RM17 IA-RM17-2 / W2-38) ----
+
+    #[test]
+    fn breakdown_state_defaults_to_the_even_midpoint() {
+        let ops = FrameOpsState::default();
+        assert_eq!(ops.breakdown_favour_pct, BREAKDOWN_FAVOUR_PCT_DEFAULT);
+        assert_eq!(ops.breakdown_favour_pct, 50, "the even midpoint");
+        assert_eq!(ops.breakdown_count, 1);
+        assert_eq!(ops.breakdown_span, BREAKDOWN_SPAN_DEFAULT);
+    }
+
+    #[test]
+    fn breakdown_steppers_clamp_and_heal() {
+        assert_eq!(step_breakdown_favour_pct(50, -5), 45);
+        assert_eq!(step_breakdown_favour_pct(50, 5), 55);
+        assert_eq!(
+            step_breakdown_favour_pct(BREAKDOWN_FAVOUR_PCT_MIN, -5),
+            BREAKDOWN_FAVOUR_PCT_MIN
+        );
+        assert_eq!(
+            step_breakdown_favour_pct(BREAKDOWN_FAVOUR_PCT_MAX, 5),
+            BREAKDOWN_FAVOUR_PCT_MAX
+        );
+        // A stale out-of-range stored value heals into
+        // range before the step is taken.
+        assert_eq!(step_breakdown_favour_pct(0, 5), BREAKDOWN_FAVOUR_PCT_MIN + 5);
+        assert_eq!(step_breakdown_count(1, -1), BREAKDOWN_COUNT_MIN);
+        assert_eq!(step_breakdown_count(BREAKDOWN_COUNT_MAX, 1), BREAKDOWN_COUNT_MAX);
+        assert_eq!(step_breakdown_span(1, -1), BREAKDOWN_SPAN_MIN);
+        assert_eq!(step_breakdown_span(BREAKDOWN_SPAN_MAX, 1), BREAKDOWN_SPAN_MAX);
+        assert_eq!(clamp_breakdown_span(999), BREAKDOWN_SPAN_MAX);
+        assert_eq!(clamp_breakdown_count(0), BREAKDOWN_COUNT_MIN);
+    }
+
+    #[test]
+    fn breakdown_favour_slider_maps_the_range_onto_the_track() {
+        assert_eq!(breakdown_favour_pct_at(0.0, 200.0), BREAKDOWN_FAVOUR_PCT_MIN);
+        assert_eq!(breakdown_favour_pct_at(200.0, 200.0), BREAKDOWN_FAVOUR_PCT_MAX);
+        assert_eq!(breakdown_favour_pct_at(100.0, 200.0), BREAKDOWN_FAVOUR_PCT_DEFAULT);
+        // A zero-width track (no layout yet) reads as the
+        // default rather than dividing by zero.
+        assert_eq!(breakdown_favour_pct_at(10.0, 0.0), BREAKDOWN_FAVOUR_PCT_DEFAULT);
+    }
+
+    #[test]
+    fn breakdown_preview_dots_match_the_chain_positions() {
+        // Panel defaults (favour 50, count 1, span 3):
+        // one dot at the span's middle.
+        let dots = breakdown_preview_dots(
+            BREAKDOWN_FAVOUR_PCT_DEFAULT,
+            1,
+            BREAKDOWN_SPAN_DEFAULT,
+        );
+        assert_eq!(dots.len(), 1);
+        assert!((dots[0] - 0.5).abs() < 1e-4, "dots: {dots:?}");
+        // Even spacing over a commensurate span: every
+        // position lands on a frame, so the strip shows
+        // ticks and NO dots — the skip made visible.
+        assert!(breakdown_preview_dots(50, 3, 4).is_empty());
+        // Over three segments the dots sit at the
+        // distribution's global fractions, ascending.
+        let dots = breakdown_preview_dots(50, 3, 3);
+        assert_eq!(dots.len(), 3);
+        assert!(
+            (dots[0] - 0.25).abs() < 1e-4
+                && (dots[1] - 0.5).abs() < 1e-4
+                && (dots[2] - 0.75).abs() < 1e-4,
+            "dots: {dots:?}"
+        );
     }
 }

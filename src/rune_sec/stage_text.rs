@@ -205,12 +205,54 @@
 //! clips only because a bitmap ends). A frame with no live
 //! cue yields no prims at all, so cue-free projects draw
 //! exactly as before.
+//!
+//! ## Subtitles, shaped (Roadmap Wave 2, W2-45 — IA-RM2-4)
+//!
+//! The bitmap glyphs above are now only the PIXEL route.
+//! When the style's font is [`SubtitleFont::Shaped`] (the
+//! default) and a band's line resolves through RM2's font
+//! engine (`media::shaped_text_resolves` — the probe whose
+//! doc named this adoption as its first caller), the band
+//! leaves the canvas prim stream and is drawn by the
+//! element layer ([`stage_subtitle_layers`]) as a
+//! rasterised tile: the line shaped and rasterised by the
+//! SAME engine the export burn-in uses
+//! (`media::composite_shaped_text`), with the burn-in's
+//! own halo — the box colour stamped at the eight
+//! one-cell offsets, then the text colour centred — so
+//! the stage shows the delivered frame's glyphs, not an
+//! approximation of them. Bengali dialogue reads as
+//! Bengali on stage, exactly as it now burns in.
+//!
+//! The routing is PER BAND, mirroring the funnel's
+//! per-item fallback: a line that resolves goes shaped; a
+//! line that does not (a font-less system) stays bitmap,
+//! in the same stack position — [`subtitle_bands`] is
+//! untouched, and [`subtitle_geometry`] emits exactly the
+//! unclaimed bands' prims, so the two surfaces partition
+//! the bands and can never double-draw or drop a line.
+//! Under the explicit Pixel style nothing is claimed and
+//! `subtitle_geometry`'s stream is byte-identical to the
+//! pre-W2-45 stream.
+//!
+//! Placement stays the shared layout's: the tile spans
+//! the stage's full width and one line height, centred on
+//! the band centre, and the element is placed by the same
+//! display transform the canvas maps prims through (see
+//! [`subtitle_tile_placement`]) — the shaped renderer
+//! centres its line on the band centre exactly (the
+//! bitmap's half-cell quirk belongs to the Pixel renderer,
+//! the settlement export.rs's overlay documents). The
+//! tile container clips to the stage box, the canvas's
+//! own bound; a stack taller than the stage still paints
+//! past the opposite edge inside that box, as before.
 
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{InstanceKey, SegmentMedia, V2};
 use stykanimate_rs::subtitles::{
     live_subtitle_cues, subtitle_display_lines, subtitle_font_size, subtitle_line_center_y,
-    subtitle_line_height, subtitle_stack_line_offset, SubtitleCue, SubtitlePosition, SubtitleStyle,
+    subtitle_line_height, subtitle_stack_line_offset, SubtitleCue, SubtitleFont,
+    SubtitlePosition, SubtitleStyle,
 };
 
 /// One primitive of stage text geometry, in stage coordinates.
@@ -661,21 +703,363 @@ fn with_subtitle_backing(boxes: Vec<TextPrim>, box_color: u32) -> Vec<TextPrim> 
 /// non-positive dimension — there is no picture to pin
 /// furniture to) all yield an empty vec, so those frames
 /// draw exactly as they did before subtitles.
-pub fn subtitle_geometry(core: &EditorCore) -> Vec<TextPrim> {
+/// The bands of the core's live cues at its display
+/// frame: [`subtitle_bands`] over `live_subtitle_cues`,
+/// with [`subtitle_geometry`]'s early-outs (no cues, a
+/// degenerate stage) yielding an empty vec. The one band
+/// list both stage subtitle surfaces partition — the
+/// canvas prim stream below and the shaped element layer
+/// ([`stage_subtitle_layers`]) — so the partition cannot
+/// drift.
+pub fn live_subtitle_bands(core: &EditorCore) -> Vec<SubtitleBand> {
     let project = &core.project;
     if project.subtitles.is_empty() || project.stage[0] <= 0.0 || project.stage[1] <= 0.0 {
         return Vec::new();
     }
     let frame = core.display_frame().floor() as usize;
     let live = live_subtitle_cues(project, frame);
+    subtitle_bands(project.stage, &project.subtitle_style, &live)
+}
+
+/// Whether the shaped element layer claims this band
+/// (W2-45): the style's font is
+/// [`SubtitleFont::Shaped`] AND the band's line resolves
+/// through RM2's font engine. The probe is
+/// `media::shaped_text_resolves` — per band, mirroring
+/// the export funnel's per-item fallback, so on a system
+/// missing a script's font that script's lines stay
+/// bitmap while the rest of the stack goes shaped.
+pub fn subtitle_band_shaped(style: &SubtitleStyle, band: &SubtitleBand) -> bool {
+    style.font == SubtitleFont::Shaped && stykanimate_rs::media::shaped_text_resolves(&band.text)
+}
+
+/// One band's bitmap prims: its glyph boxes
+/// ([`label_boxes`] at the band centre, the shared font
+/// size, the style's text colour), each preceded by its
+/// backing plate in the style's box colour — the whole
+/// pre-W2-45 per-band stream, factored so the routing
+/// partition is testable band by band.
+fn subtitle_band_prims(band: &SubtitleBand) -> Vec<TextPrim> {
+    with_subtitle_backing(
+        label_boxes(band.center, 0.0, &band.text, band.font_size, band.text_color),
+        band.box_color,
+    )
+}
+
+/// Every BITMAP-routed subtitle prim visible at the
+/// core's display frame, in stage coordinates: for each
+/// live cue's every line the shaped layer does NOT claim
+/// (see [`subtitle_band_shaped`]), in stored order, the
+/// line's glyph boxes (the shared [`label_boxes`] layout
+/// at the shared font size, in the style's text colour,
+/// fully opaque), each preceded by its backing plate in
+/// the style's box colour (see
+/// [`with_subtitle_backing`]). The stage painter fills
+/// them in stream order, so every plate lands under its
+/// own glyph and the lines stack exactly as
+/// [`subtitle_bands`] laid them out.
+///
+/// Under the explicit [`SubtitleFont::Pixel`] style no
+/// band is ever claimed, so this stream is the whole
+/// pre-W2-45 stream, byte-identical. Under Shaped, the
+/// claimed bands draw in the element layer instead —
+/// the two surfaces partition [`live_subtitle_bands`].
+///
+/// Liveness is `live_subtitle_cues` over the frame the
+/// display frame falls in (`display_frame` floored, the
+/// core's own conversion in `advance_play`) — the
+/// contract's half-open rule. A project with no cues, a
+/// frame with no live cue, and a degenerate stage (a
+/// non-positive dimension — there is no picture to pin
+/// furniture to) all yield an empty vec, so those frames
+/// draw exactly as they did before subtitles.
+pub fn subtitle_geometry(core: &EditorCore) -> Vec<TextPrim> {
+    let style = core.project.subtitle_style;
     let mut out = Vec::new();
-    for band in subtitle_bands(project.stage, &project.subtitle_style, &live) {
-        out.extend(with_subtitle_backing(
-            label_boxes(band.center, 0.0, &band.text, band.font_size, band.text_color),
-            band.box_color,
-        ));
+    for band in live_subtitle_bands(core) {
+        if subtitle_band_shaped(&style, &band) {
+            continue;
+        }
+        out.extend(subtitle_band_prims(&band));
     }
     out
+}
+
+/// Supersample factor for shaped subtitle tiles: the
+/// tile is rasterised at this multiple of its on-screen
+/// point size, so the element the renderer scales into
+/// its box stays crisp. A cache/quality constant, not a
+/// layout value — the tile's geometry is set by the
+/// stage-space band, never by the raster.
+pub const SUBTITLE_TILE_SUPERSAMPLE: f32 = 2.0;
+
+/// The pixel size of one band's shaped tile at raster
+/// scale `px_scale` (tile pixels per stage unit): the
+/// stage's full width (the line is centred on the stage
+/// centre; a shaped line has no pre-shape width, and the
+/// stage width is the width every surface clips to) by
+/// one line height. Zero on a degenerate input.
+fn subtitle_tile_dims(band: &SubtitleBand, stage: [f32; 2], px_scale: f32) -> (u32, u32) {
+    if !(px_scale > 0.0) || !px_scale.is_finite() {
+        return (0, 0);
+    }
+    let w = (stage[0] * px_scale).ceil();
+    let h = (band.line_height * px_scale).ceil();
+    if !(w >= 1.0) || !(h >= 1.0) {
+        return (0, 0);
+    }
+    (w as u32, h as u32)
+}
+
+/// Rasterise one band's line as a shaped tile: straight
+/// RGBA, `subtitle_tile_dims` pixels, the line centred —
+/// drawn through the export burn-in's own recipe
+/// (export.rs's `subtitle_overlay` + `burn_in_subtitles`):
+/// `media::composite_shaped_text` in the style's box
+/// colour at the eight one-cell offsets (cell = size / 5,
+/// the shared bitmap cell) first, then in the text colour
+/// centred, all at the shared font size × `px_scale`.
+/// `None` when the line resolves to no face (the band
+/// then stays on the bitmap route by construction —
+/// [`subtitle_band_shaped`] probes with the same engine)
+/// or the scale is degenerate. This is a rasterisation of
+/// the shared layout, never a second layout: the only
+/// centre is the band's.
+pub fn subtitle_shaped_tile(
+    band: &SubtitleBand,
+    stage: [f32; 2],
+    px_scale: f32,
+) -> Option<(u32, u32, Vec<u8>)> {
+    let (w, h) = subtitle_tile_dims(band, stage, px_scale);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let mut img = image::RgbaImage::new(w, h);
+    let size_px = band.font_size * px_scale;
+    let cell = size_px / 5.0;
+    let centre = [stage[0] * px_scale / 2.0, h as f32 / 2.0];
+    for (dx, dy) in [
+        (-1.0, 0.0),
+        (1.0, 0.0),
+        (0.0, -1.0),
+        (0.0, 1.0),
+        (-1.0, -1.0),
+        (1.0, -1.0),
+        (-1.0, 1.0),
+        (1.0, 1.0),
+    ] {
+        if !stykanimate_rs::media::composite_shaped_text(
+            &mut img,
+            [centre[0] + dx * cell, centre[1] + dy * cell],
+            &band.text,
+            size_px,
+            band.box_color,
+            1.0,
+        ) {
+            return None;
+        }
+    }
+    if !stykanimate_rs::media::composite_shaped_text(
+        &mut img,
+        centre,
+        &band.text,
+        size_px,
+        band.text_color,
+        1.0,
+    ) {
+        return None;
+    }
+    Some((w, h, img.into_raw()))
+}
+
+/// Where one band's tile element goes: everything the
+/// element build needs, computed from the band, the stage
+/// and the display transform (see
+/// [`subtitle_tile_placement`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SubtitleTilePlacement {
+    /// Layout-box top-left in canvas element points (the
+    /// box's position before its rotation about its
+    /// centre origin).
+    pub top_left: [f32; 2],
+    /// Element size in points: the stage width and the
+    /// band's line height under the transform's scale.
+    pub size: [f32; 2],
+    /// Element rotation in radians (clockwise, y-down):
+    /// the negated camera angle — `RotTransform::to_screen`
+    /// turns points about the view centre by −angle, so an
+    /// element carrying the same rotation about the band
+    /// centre lands its tile pixels exactly where the
+    /// canvas maps the band's stage points.
+    pub rotate_rad: f32,
+}
+
+/// The placement of one band's tile element under a
+/// display transform — the pure algebra, separated from
+/// the element build so the tests can pin it: the tile
+/// covers the stage rect [0, stage_w] × the band's line
+/// height in stage space, so its element box is that rect
+/// at the transform's scale, centred on
+/// `rt.to_screen(band.center)` (the origin-½ rotation
+/// pivot), turned by −angle like the canvas's own
+/// mapping. Exact for the same reason the sprite layer's
+/// placement is: `to_screen` is affine in the stage point
+/// at scale `rt.vt.scale`, so rotating the unrotated box
+/// about the band centre by the canvas's own angle
+/// reproduces the mapping point for point.
+pub fn subtitle_tile_placement(
+    band: &SubtitleBand,
+    stage: [f32; 2],
+    rt: &crate::rune_sec::stage_camera::RotTransform,
+) -> SubtitleTilePlacement {
+    let s = rt.vt.scale;
+    let size = [stage[0] * s, band.line_height * s];
+    let c = rt.to_screen(band.center);
+    SubtitleTilePlacement {
+        top_left: [c[0] - size[0] / 2.0, c[1] - size[1] / 2.0],
+        size,
+        rotate_rad: -rt.angle_deg.to_radians(),
+    }
+}
+
+/// Cache key for one baked subtitle tile image: the
+/// line's text, the tile's pixel size, the rasterised
+/// font size (millipixels — the quantisation that keeps
+/// a continuous view zoom from re-baking every frame;
+/// sub-millipixel size changes reuse the last bake), and
+/// the two style colours the bake draws with.
+#[derive(Clone, PartialEq, Eq, std::hash::Hash)]
+struct SubtitleTileKey {
+    text: String,
+    w: u32,
+    h: u32,
+    size_milli: i32,
+    text_color: u32,
+    box_color: u32,
+}
+
+thread_local! {
+    /// Baked subtitle tile images, one per
+    /// [`SubtitleTileKey`] — the element layer's
+    /// counterpart of the sprite bitmaps' cache in
+    /// stage_view.rs. `None` entries are cached too (a
+    /// line that fails to bake is re-asked only when its
+    /// key changes).
+    static SUBTITLE_TILE_IMAGES: std::cell::RefCell<
+        std::collections::HashMap<SubtitleTileKey, Option<rune::Image>>,
+    > = const { std::cell::RefCell::new(std::collections::HashMap::new()) };
+}
+
+/// The baked Rune image for one band's tile at raster
+/// scale `px_scale`. `None` when the tile does not bake
+/// (an unresolvable line — the band stays bitmap, so the
+/// layer simply mounts nothing for it).
+fn subtitle_tile_image(
+    band: &SubtitleBand,
+    stage: [f32; 2],
+    px_scale: f32,
+) -> Option<rune::Image> {
+    let (w, h) = subtitle_tile_dims(band, stage, px_scale);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let key = SubtitleTileKey {
+        text: band.text.clone(),
+        w,
+        h,
+        size_milli: (band.font_size * px_scale * 1000.0).round() as i32,
+        text_color: band.text_color,
+        box_color: band.box_color,
+    };
+    if let Some(hit) = SUBTITLE_TILE_IMAGES.with(|c| c.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    let baked = subtitle_shaped_tile(band, stage, px_scale).and_then(|(bw, bh, raw)| {
+        // The sprite bitmaps' recipe (W2-06): a throwaway
+        // ImageCache whose decode is waited out, so the
+        // returned handle owns its pixels after the cache
+        // drops.
+        let cache = rune::ImageCache::new(std::sync::Arc::new(|| {}));
+        let image = cache.rgba(bw, bh, raw);
+        image.wait().ok()?;
+        Some(image)
+    });
+    SUBTITLE_TILE_IMAGES.with(|c| {
+        c.borrow_mut().insert(key, baked.clone());
+    });
+    baked
+}
+
+/// The stage subtitle shaped layer as a mount list for
+/// the shell: ONE container element when at least one
+/// live band is claimed by the shaped route (and bakes),
+/// ZERO elements otherwise — so a Pixel-styled, cue-free
+/// or font-less frame's tree is exactly the tree it has
+/// always been. The container is pinned to the stage
+/// wrap's box, clips its children to that box (the
+/// canvas's own bound), and carries the counted key
+/// `stage-subtitle-layer`; each line element carries the
+/// variable key family `stage-subtitle-line-{band index}`
+/// (the index into [`live_subtitle_bands`], so a line
+/// keeps its key when a sibling falls back to bitmap).
+/// The elements carry no handlers, so they never shadow
+/// the canvas's drag/press routing, and `instant_changes`
+/// lands position, rotation and content at once instead
+/// of springing them — the canvas draws the same bands
+/// immediately, and a springing tile would lag the
+/// subtitle behind the frame it captions. Mounting — one
+/// `.children(...)` line in main.rs, in the stage wrap
+/// after the sprite layer's mount (IA-W2-06-1), before
+/// the toasts — is IA-W2-45-1.
+pub fn stage_subtitle_layers(
+    core: &EditorCore,
+    el_size: [f32; 2],
+) -> Vec<rune::El> {
+    let style = core.project.subtitle_style;
+    if style.font != SubtitleFont::Shaped {
+        return Vec::new();
+    }
+    let bands = live_subtitle_bands(core);
+    if bands.is_empty() {
+        return Vec::new();
+    }
+    let rt = crate::stage_view::display_transform(core, el_size);
+    let s = rt.vt.scale;
+    if !(s > 0.0) || !s.is_finite() {
+        return Vec::new();
+    }
+    let px_scale = s * SUBTITLE_TILE_SUPERSAMPLE;
+    let mut layer = rune::col()
+        .key("stage-subtitle-layer")
+        .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+        .clip_rounded(0.0)
+        .instant_changes();
+    let mut mounted = 0usize;
+    for (i, band) in bands.iter().enumerate() {
+        if !subtitle_band_shaped(&style, band) {
+            continue;
+        }
+        let Some(image) = subtitle_tile_image(band, core.project.stage, px_scale) else {
+            continue;
+        };
+        let p = subtitle_tile_placement(band, core.project.stage, &rt);
+        layer = layer.child(
+            rune::el()
+                .key(format!("stage-subtitle-line-{i}"))
+                .absolute(p.top_left[0], p.top_left[1])
+                .w(p.size[0])
+                .h(p.size[1])
+                .origin(0.5, 0.5)
+                .rotate(p.rotate_rad)
+                .instant_changes()
+                .pixels(image.pixels()),
+        );
+        mounted += 1;
+    }
+    if mounted == 0 {
+        return Vec::new();
+    }
+    vec![layer]
 }
 
 /// 3x5 bitmap glyph for `ch`: five rows, 3 bits each, bit 2 is
@@ -1661,7 +2045,13 @@ mod tests {
     fn core_with_cue(text: &str, start: usize, end: usize) -> EditorCore {
         let mut core = EditorCore::new();
         core.project.stage = [640.0, 360.0];
-        core.project.subtitle_style = subtitle_style(SubtitlePosition::Bottom, 1.0);
+        // Roadmap Wave 2 (W2-45): the geometry pins in this
+        // section pin the BITMAP (Pixel) stream, so the
+        // fixture style names Pixel explicitly — under the
+        // default Shaped style a resolvable line leaves
+        // this stream for the element layer (the partition
+        // is pinned in the W2-45 section below).
+        core.project.subtitle_style.font = SubtitleFont::Pixel;
         core.project.subtitles.push(SubtitleCue {
             start_frame: start,
             end_frame: end,
@@ -1756,6 +2146,184 @@ mod tests {
         // Each cue's stream opens with a box-colour plate.
         assert!(matches!(&prims[0], TextPrim::GlyphBox { color, .. } if *color == 0x112233));
         assert!(matches!(&prims[20], TextPrim::GlyphBox { color, .. } if *color == 0x112233));
+    }
+
+    // ---- Roadmap Wave 2, W2-45: the shaped route -----------------
+
+    /// A core whose style keeps the DEFAULT font (Shaped)
+    /// — `core_with_cue` with the Pixel override undone.
+    fn core_with_cue_shaped(text: &str, start: usize, end: usize) -> EditorCore {
+        let mut core = core_with_cue(text, start, end);
+        core.project.subtitle_style.font = SubtitleFont::Shaped;
+        core
+    }
+
+    #[test]
+    fn pixel_style_subtitle_geometry_is_the_pre_w2_45_stream() {
+        // The Pixel route is byte-identical by construction:
+        // the geometry is the per-band composition of the
+        // unchanged pieces — bands from the shared layout,
+        // glyph boxes from label_boxes, plates from
+        // with_subtitle_backing — for every band, in order.
+        let mut core = core_with_cue("HI", 0, 10);
+        core.project.subtitles.push(SubtitleCue {
+            start_frame: 0,
+            end_frame: 10,
+            text: "WORLD".into(),
+            speaker: None,
+        });
+        let bands = live_subtitle_bands(&core);
+        assert_eq!(bands.len(), 2);
+        let mut expected = Vec::new();
+        for band in &bands {
+            expected.extend(with_subtitle_backing(
+                label_boxes(band.center, 0.0, &band.text, band.font_size, band.text_color),
+                band.box_color,
+            ));
+        }
+        assert_eq!(subtitle_geometry(&core), expected);
+        // And no band is claimed under Pixel, whatever the
+        // line: the claim needs the Shaped style first.
+        assert!(bands
+            .iter()
+            .all(|b| !subtitle_band_shaped(&core.project.subtitle_style, b)));
+    }
+
+    #[test]
+    fn shaped_route_partitions_the_bands_with_the_media_probe() {
+        // A Bengali line under the default (Shaped) style:
+        // the canvas stream keeps exactly the bands the
+        // probe does NOT claim, composed the pre-W2-45
+        // way; the claimed bands are the layer's. On a
+        // system with a Bengali-covering font (this VM's
+        // Noto, CI's fonts-noto-core — RM2's environment
+        // note) the line resolves, so the stream is empty
+        // and the layer claims the band; on a font-less
+        // system nothing is claimed and the full bitmap
+        // stream stands. Either way the partition holds —
+        // no band is drawn twice or dropped.
+        let core = core_with_cue_shaped("বাংলা", 0, 10);
+        let style = core.project.subtitle_style;
+        let bands = live_subtitle_bands(&core);
+        assert_eq!(bands.len(), 1);
+        let claimed = subtitle_band_shaped(&style, &bands[0]);
+        assert_eq!(
+            claimed,
+            stykanimate_rs::media::shaped_text_resolves("বাংলা"),
+            "the claim IS the media probe's verdict"
+        );
+        if claimed {
+            assert!(subtitle_geometry(&core).is_empty(), "the claimed band leaves no prims");
+            assert_eq!(stage_subtitle_layers(&core, [640.0, 360.0]).len(), 1);
+        } else {
+            assert_eq!(
+                subtitle_geometry(&core),
+                with_subtitle_backing(
+                    label_boxes(bands[0].center, 0.0, &bands[0].text, bands[0].font_size, bands[0].text_color),
+                    bands[0].box_color,
+                )
+            );
+            assert!(stage_subtitle_layers(&core, [640.0, 360.0]).is_empty());
+        }
+    }
+
+    #[test]
+    fn shaped_bengali_tile_paints_real_glyphs_not_question_marks() {
+        // The P0-2 acceptance pin at the stage surface,
+        // RM2's environment note applying: a Bengali band's
+        // tile carries real shaped ink (hundreds of
+        // anti-aliased pixels across a wide run), where the
+        // bitmap route can only stamp the '?' fold. The
+        // ink's colour is the style's text colour — the
+        // halo stamps sit at one-cell offsets in the box
+        // colour and never reach the tile's middle rows'
+        // centre columns with text-colour coverage.
+        let core = core_with_cue_shaped("বাংলা", 0, 10);
+        let bands = live_subtitle_bands(&core);
+        let band = &bands[0];
+        assert!(
+            stykanimate_rs::media::shaped_text_resolves(&band.text),
+            "CI-class systems carry a Bengali-covering font (RM2's note)"
+        );
+        let (w, h, raw) = subtitle_shaped_tile(band, core.project.stage, 2.0)
+            .expect("a resolving band bakes a tile");
+        assert_eq!((w, h), (1280, 48), "stage width x line height at 2px per unit");
+        let ink = raw.chunks_exact(4).filter(|p| p[3] > 0).count();
+        assert!(ink > 500, "shaped ink pixels {ink}");
+        // Ink spans a real run: the lit columns cover far
+        // more than a single '?' cell (3 cells = 24px here).
+        let lit_cols = (0..w).filter(|&x| {
+            (0..h).any(|y| raw[((y * w + x) * 4 + 3) as usize] > 0)
+        });
+        assert!(lit_cols.count() > 100, "the run is wide");
+        // A line that resolves to no face bakes nothing:
+        // an unresolvable tile is the layer's cue to leave
+        // the band on the bitmap route. (A control-char
+        // line shapes trivially in the engine, so use a
+        // degenerate scale for the None leg instead.)
+        assert!(subtitle_shaped_tile(band, core.project.stage, 0.0).is_none());
+        assert!(subtitle_shaped_tile(band, core.project.stage, -1.0).is_none());
+    }
+
+    #[test]
+    fn subtitle_tile_placement_centres_the_box_on_the_band_centre() {
+        // Unrotated: the element box is the stage width by
+        // one line height at the transform's scale, centred
+        // where the canvas maps the band centre.
+        let core = core_with_cue_shaped("HI", 0, 10);
+        let bands = live_subtitle_bands(&core);
+        let band = &bands[0];
+        let rt = crate::rune_sec::stage_camera::RotTransform::from_parts(
+            [800.0, 600.0],
+            core.project.stage,
+            (320.0, 180.0, 1.0),
+            0.0,
+        );
+        let p = subtitle_tile_placement(band, core.project.stage, &rt);
+        let s = rt.vt.scale;
+        assert!((p.size[0] - 640.0 * s).abs() < 1e-3, "width {:?}", p.size);
+        assert!((p.size[1] - band.line_height * s).abs() < 1e-3, "height {:?}", p.size);
+        let centre = [p.top_left[0] + p.size[0] / 2.0, p.top_left[1] + p.size[1] / 2.0];
+        let mapped = rt.to_screen(band.center);
+        assert!(
+            (centre[0] - mapped[0]).abs() < 1e-3 && (centre[1] - mapped[1]).abs() < 1e-3,
+            "box centre {centre:?} vs mapped band centre {mapped:?}"
+        );
+        assert_eq!(p.rotate_rad, 0.0);
+        // Rotated camera: the element turns by the negated
+        // angle (the canvas's own direction) about the same
+        // mapped centre.
+        let rt30 = crate::rune_sec::stage_camera::RotTransform::from_parts(
+            [800.0, 600.0],
+            core.project.stage,
+            (320.0, 180.0, 1.0),
+            30.0,
+        );
+        let p30 = subtitle_tile_placement(band, core.project.stage, &rt30);
+        assert!((p30.rotate_rad - -30.0f32.to_radians()).abs() < 1e-6);
+        let centre30 = [
+            p30.top_left[0] + p30.size[0] / 2.0,
+            p30.top_left[1] + p30.size[1] / 2.0,
+        ];
+        let mapped30 = rt30.to_screen(band.center);
+        assert!(
+            (centre30[0] - mapped30[0]).abs() < 1e-3 && (centre30[1] - mapped30[1]).abs() < 1e-3,
+            "rotated box centre {centre30:?} vs mapped {mapped30:?}"
+        );
+    }
+
+    #[test]
+    fn stage_subtitle_layers_empty_without_a_claimed_band() {
+        // No cues at all (the demo project): no layer.
+        assert!(stage_subtitle_layers(&EditorCore::new(), [640.0, 360.0]).is_empty());
+        // A live cue under the Pixel style: the canvas owns
+        // the whole stream, the layer stays out.
+        let pixel = core_with_cue("HI", 0, 10);
+        assert!(stage_subtitle_layers(&pixel, [640.0, 360.0]).is_empty());
+        // A cue outside the display frame is not live:
+        // nothing to claim.
+        let later = core_with_cue_shaped("HI", 5, 9);
+        assert!(stage_subtitle_layers(&later, [640.0, 360.0]).is_empty());
     }
 
     #[test]

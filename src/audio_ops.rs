@@ -323,7 +323,7 @@ pub fn audio_set_muted_at(core: &mut EditorCore, index: usize, muted: bool) -> b
         };
         return true;
     }
-    core.snapshot();
+    core.snapshot_labeled(if muted { "Mute audio clip" } else { "Unmute audio clip" });
     core.project.audio[index].muted = muted;
     core.status = if muted {
         format!("Clip {} muted.", index + 1)
@@ -456,7 +456,7 @@ impl EditorCore {
             self.status = format!("Audio fade failed: could not write {}: {e}", out.display());
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Fade audio clip");
         self.project.audio[index].path = out.to_string_lossy().into_owned();
         self.status = format!(
             "Fade ({fade_in_secs:.2}s in, {fade_out_secs:.2}s out) applied to audio clip {}: {}.",
@@ -509,7 +509,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Reverse audio clip");
         self.project.audio[index].path = out.to_string_lossy().into_owned();
         self.status = format!(
             "Reverse applied to audio clip {}: {}.",
@@ -547,7 +547,7 @@ impl EditorCore {
         } else {
             gain.clamp(0.0, 2.0)
         };
-        self.snapshot();
+        self.snapshot_labeled("Audio clip gain");
         self.project.audio[index].gain = gain;
         self.status = format!("Audio clip {} gain set to {gain:.2}.", index + 1);
     }
@@ -630,7 +630,7 @@ impl EditorCore {
                 format!("No audio clips needed normalising to peak {target_peak:.2}.");
             return 0;
         }
-        self.snapshot();
+        self.snapshot_labeled("Normalize audio");
         let adjusted = changes.len();
         for (index, gain) in changes {
             self.project.audio[index].gain = gain;
@@ -648,7 +648,7 @@ impl EditorCore {
             self.status = format!("Audio delete failed: no clip {}.", index + 1);
             return;
         };
-        self.snapshot();
+        self.snapshot_labeled("Delete audio clip");
         self.project.audio.remove(index);
         self.status = format!("Audio clip {} deleted: {}.", index + 1, clip.path);
     }
@@ -681,7 +681,7 @@ impl EditorCore {
             self.status = format!("Audio duplicate failed: no clip {}.", index + 1);
             return None;
         };
-        self.snapshot();
+        self.snapshot_labeled("Duplicate audio clip");
         self.project.audio.insert(index + 1, clip);
         self.status = format!(
             "Audio clip {} duplicated as clip {}.",
@@ -702,7 +702,7 @@ impl EditorCore {
         };
         let start = clip.start_frame as i64 + delta_frames as i64;
         let start = start.max(0) as usize;
-        self.snapshot();
+        self.snapshot_labeled("Move audio clip");
         self.project.audio[index].start_frame = start;
         self.status = format!(
             "Audio clip {} moved to frame {}.",
@@ -782,7 +782,7 @@ impl EditorCore {
             self.status = format!("Audio echo failed: could not write {}: {e}", out.display());
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Echo audio");
         self.project.audio[index].path = out.to_string_lossy().into_owned();
         self.status = format!(
             "Echo applied to audio clip {} ({delay_secs:.2}s delay, {:.0}% feedback): {}.",
@@ -840,7 +840,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Lowpass audio");
         self.project.audio[index].path = out.to_string_lossy().into_owned();
         self.status = format!(
             "Low-pass filter ({cutoff_hz:.0} Hz) applied to audio clip {}: {}.",
@@ -889,7 +889,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Trim silence");
         self.project.audio[index].path = out.to_string_lossy().into_owned();
         self.status = format!(
             "Trimmed {} silent frame(s) ({} at the start, {} at the end) from audio clip {}: {}.",
@@ -953,7 +953,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Pitch audio");
         self.project.audio[index].path = out.to_string_lossy().into_owned();
         self.status = format!(
             "Pitch shift ({semitones:+.0} semitones) applied to audio clip {}: {}.",
@@ -1016,7 +1016,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Compress audio");
         self.project.audio[index].path = out.to_string_lossy().into_owned();
         self.status = format!(
             "Compressor (threshold {threshold:.1}, ratio {ratio:.1}) applied to audio clip {}: {}.",
@@ -1099,7 +1099,7 @@ impl EditorCore {
             });
         }
         let n = segments.len();
-        self.snapshot();
+        self.snapshot_labeled("Split audio at silences");
         // The first segment replaces the split clip; the rest
         // are inserted immediately after it, in order (the
         // placement `audio_split` uses for its second half).
@@ -1226,6 +1226,18 @@ fn aop_req_f32(args: &Value, key: &str) -> Result<f32, String> {
             Ok(f32v)
         }
         None => Err(format!("missing required argument '{key}'")),
+    }
+}
+
+/// The optional twin of [`aop_req_f32`]: an absent key is
+/// `Ok(None)`; a present key goes through the required
+/// parser unchanged, so the finiteness contract is the
+/// same for optional arguments (W2-98).
+fn aop_opt_f32(args: &Value, key: &str) -> Result<Option<f32>, String> {
+    if aop_get(args, key).is_some() {
+        aop_req_f32(args, key).map(Some)
+    } else {
+        Ok(None)
     }
 }
 
@@ -1401,14 +1413,21 @@ pub fn tool_audio_clip_info(core: &mut EditorCore, args: &Value) -> Result<Value
     Ok(out)
 }
 
-/// MCP handler: fade the clip at `index` (0.25 s in/out,
-/// the indexed [`EditorCore::audio_fade_at`] op) — the
+/// MCP handler: fade the clip at `index` (the indexed
+/// [`EditorCore::audio_fade_at_with`] op) — the
 /// selected-clip form the panel has and the registry's
 /// last-clip `audio_fade` tool cannot express. A clip
 /// whose file cannot be read is an `Err`, not `ok: true`.
+/// W2-98 (RM20 parity): the panel's fade lengths are
+/// optional arguments; absent, each is the published
+/// constant the fixed [`EditorCore::audio_fade_at`]
+/// delegates at, so a no-parameter call is identical to
+/// the pre-parity tool.
 pub fn tool_audio_clip_fade(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let idx = aop_check_index(core, aop_req_usize(args, "index")?)?;
-    core.audio_fade_at(idx);
+    let fade_in = aop_opt_f32(args, "fade_in_secs")?.unwrap_or(FADE_IN_SECS);
+    let fade_out = aop_opt_f32(args, "fade_out_secs")?.unwrap_or(FADE_OUT_SECS);
+    core.audio_fade_at_with(idx, fade_in, fade_out);
     aop_status_result(core, json!({ "audio_index": idx }))
 }
 
@@ -2904,6 +2923,38 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("failed"), "error carries the op's line: {err}");
         assert!(tool_audio_clip_fade(&mut core, &serde_json::json!({ "index": 9 })).is_err());
+    }
+
+    #[test]
+    fn mcp_clip_fade_accepts_the_panel_lengths() {
+        // W2-98 (RM20 parity): the optional lengths ride
+        // `audio_fade_at_with` — the status names the
+        // sanitised values — and a call without them is
+        // the pre-parity fixed fade (0.25 s in/out).
+        let dir = temp_dir("mcp-fade-params");
+        let a = write_ramp_wav(&dir, "a.wav");
+        let mut core = core_with(vec![clip(&a, 0)]);
+        let r = tool_audio_clip_fade(
+            &mut core,
+            &serde_json::json!({ "index": 0, "fade_in_secs": 0.5, "fade_out_secs": 0.0 }),
+        )
+        .unwrap();
+        assert!(
+            r["status"].as_str().unwrap().contains("Fade (0.50s in, 0.00s out)"),
+            "status: {}", r["status"]
+        );
+        let r = tool_audio_clip_fade(&mut core, &serde_json::json!({ "index": 0 })).unwrap();
+        assert!(
+            r["status"].as_str().unwrap().contains("Fade (0.25s in, 0.25s out)"),
+            "status: {}", r["status"]
+        );
+        // A mistyped length is a clean argument error.
+        assert!(tool_audio_clip_fade(
+            &mut core,
+            &serde_json::json!({ "index": 0, "fade_in_secs": "long" })
+        )
+        .is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

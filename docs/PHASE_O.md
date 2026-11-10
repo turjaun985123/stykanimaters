@@ -1243,6 +1243,44 @@ scene-invisible until a long-timeline scene is
 planted. Overflow verdicts remain the closing
 frame's artifact scan's to give.
 
+**Roadmap Wave 2 upkeep (W2-10, stage-share recovery —
+RM12 §5):** the Wave AC frame measured the stage at
+[328, 157, 744, h] — 52.8% of the 1408 main row — in
+every workspace (300 / 340 columns). The Wave 2
+frame's fresh-prefs dumps should show the per-workspace
+profile widths seeded through the layout-memory
+records: Animate 220 / 240 → stage [248, 157, 924, h]
+= 65.6% (in the 65–80% band); Draw 220 / 300 → 884
+(62.8%); Graph 260 / 300 → 848 (60.2%); Build /
+Build3D / Effects 260 / 320 → 828 (58.8%); Audio /
+Export at 808 (57.4%); Home unprofiled (legacy
+300 / 340 → 744, 52.8%). Stage x moves to
+16 + left + 12 per workspace. Heights are untouched
+by W2-10: the AC heights (default 504, loop-range
+488, sprites-populated 420, subtitles 464) move only
+by W2-55's and W2-12's priced card growth (−4 / −14 /
+−12, and −40 more in the cue scenes). At 1280×720 the
+Animate profile reads 764 of 1248 = 61.2% — the band
+is a 1440-class figure; stage focus (transient,
+session-only) takes the full row at any size.
+
+**Roadmap Wave 2 upkeep (W2-55, A20-14):** marker row
+14 → 24 (+10 where mounted) and dopesheet rows 20 → 24
+(+4 per figure/sprite row) grow the timeline card in
+its expanded form; the stage's headless rect shrinks
+by the same amounts (largest: loop-range +14,
+sprites-populated +12). No element counts change.
+
+**Roadmap Wave 2 upkeep (W2-66, focus-field):**
+`focus-field`: the default scene with the project name
+field pre-focused; its tree carries the closing set's
+only planted focus — one focused element
+(`proj-name`), the focusable set identical to
+`default`'s four textboxes, focusVisible 0 (rings not
+assertable from dumps, P14). Element count vs
+`default`: recorded from the closing dump at
+docs-close.
+
 ## 11. Honest remainders
 
 Standing user decisions — named, not relitigated:

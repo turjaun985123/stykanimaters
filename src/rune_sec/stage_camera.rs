@@ -40,8 +40,10 @@
 //! the framed view and [`frustum_safe_labels`] names
 //! them, and [`frustum_golden_geometry`] /
 //! [`frustum_diagonals_geometry`] are the golden-ratio and
-//! diagonal variants (built and pinned here; their own
-//! toggles are integrator wiring — see RM18's findings).
+//! diagonal variants (built and pinned here in Wave 1;
+//! their own toggles landed in Roadmap Wave 2, W2-33 —
+//! default-off overlay flags drawn in stage_view's
+//! guides pass, Settings rows in settings_popover).
 //! The stage-space family above stays what it honestly
 //! is: guides of the stage, not of the shot.
 //!
@@ -471,9 +473,9 @@ pub fn frustum_thirds_geometry(core: &EditorCore) -> Vec<GuidePrim> {
 /// the framed view (φ = (1 + √5) / 2). 4 primitives; none
 /// for a degenerate stage. A variant of
 /// [`frustum_thirds_geometry`] for directors who compose
-/// on the golden grid instead; the geometry is built and
-/// pinned here, and its own stage toggle is integrator
-/// wiring (it needs a shell flag this file cannot add).
+/// on the golden grid instead; built and pinned here in
+/// Wave 1, drawn since Roadmap Wave 2 (W2-33) under the
+/// default-off `guides_golden` overlay flag.
 pub fn frustum_golden_geometry(core: &EditorCore) -> Vec<GuidePrim> {
     let Some(c) = frustum_corners(core) else {
         return Vec::new();
@@ -491,9 +493,9 @@ pub fn frustum_golden_geometry(core: &EditorCore) -> Vec<GuidePrim> {
 /// The camera frustum's two diagonals (corner to corner of
 /// the framed view) — the diagonal-composition variant of
 /// the frustum guide family. 2 primitives; none for a
-/// degenerate stage. Built and pinned here; its own stage
-/// toggle is the same integrator wiring as
-/// [`frustum_golden_geometry`]'s.
+/// degenerate stage. Built and pinned here in Wave 1,
+/// drawn since Roadmap Wave 2 (W2-33) under the
+/// default-off `guides_diagonals` overlay flag.
 pub fn frustum_diagonals_geometry(core: &EditorCore) -> Vec<GuidePrim> {
     let Some(c) = frustum_corners(core) else {
         return Vec::new();
@@ -860,6 +862,7 @@ mod tests {
             y: 360.0,
             zoom,
             angle,
+            easing: stykanimate_rs::model::CameraEase::Linear,
         });
         core
     }

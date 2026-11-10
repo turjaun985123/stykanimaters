@@ -270,7 +270,7 @@ pub fn add_text_instance(
     x: f32,
     y: f32,
 ) -> usize {
-    core.snapshot();
+    core.snapshot_labeled("Add text");
     core.project.texts.push(TextInstance {
         content: content.to_string(),
         size: size.clamp(TEXT_SIZE_MIN, TEXT_SIZE_MAX),
@@ -303,7 +303,7 @@ pub fn update_text_instance(core: &mut EditorCore, index: usize, content: &str) 
         core.status = "Text unchanged.".into();
         return false;
     }
-    core.snapshot();
+    core.snapshot_labeled("Edit text");
     if let Some(inst) = core.project.texts.get_mut(index) {
         inst.content = content.to_string();
     }
@@ -321,7 +321,7 @@ pub fn delete_text_instance(core: &mut EditorCore, index: usize) -> bool {
         core.status = "No such text.".into();
         return false;
     }
-    core.snapshot();
+    core.snapshot_labeled("Delete text");
     core.project.texts.remove(index);
     core.status = "Text deleted.".into();
     true
@@ -338,7 +338,7 @@ pub fn duplicate_text_instance(core: &mut EditorCore, index: usize) -> Option<us
         return None;
     };
     let copy = duplicated_instance(inst);
-    core.snapshot();
+    core.snapshot_labeled("Duplicate text");
     core.project.texts.insert(index + 1, copy);
     core.status = "Text duplicated.".into();
     Some(index + 1)
@@ -359,7 +359,7 @@ pub fn nudge_text_instance(core: &mut EditorCore, index: usize, dx: f32, dy: f32
         core.status = "Text has no position to move.".into();
         return false;
     }
-    core.snapshot();
+    core.snapshot_labeled("Nudge text");
     if let Some(inst) = core.project.texts.get_mut(index) {
         offset_keys(&mut inst.keys, dx, dy);
     }
@@ -388,7 +388,7 @@ pub fn set_text_instance_size(core: &mut EditorCore, index: usize, size: f32) ->
         core.status = format!("Text size {next:.0}.");
         return false;
     }
-    core.snapshot();
+    core.snapshot_labeled("Text size");
     if let Some(inst) = core.project.texts.get_mut(index) {
         inst.size = next;
     }
@@ -407,7 +407,7 @@ pub fn rotate_text_instance(core: &mut EditorCore, index: usize, delta_rad: f32)
         core.status = "No such text.".into();
         return false;
     }
-    core.snapshot();
+    core.snapshot_labeled("Rotate text");
     if let Some(inst) = core.project.texts.get_mut(index) {
         rotate_keys(&mut inst.keys, delta_rad);
     }
@@ -424,7 +424,7 @@ pub fn set_text_instance_color(core: &mut EditorCore, index: usize, color: u32) 
         core.status = "No such text.".into();
         return false;
     }
-    core.snapshot();
+    core.snapshot_labeled("Set text colour");
     if let Some(inst) = core.project.texts.get_mut(index) {
         inst.color = color;
     }
@@ -453,7 +453,7 @@ pub fn move_text_instance(core: &mut EditorCore, index: usize, to_front: bool) -
         }
         return false;
     };
-    core.snapshot();
+    core.snapshot_labeled(if to_front { "Bring text to front" } else { "Send text to back" });
     let inst = core.project.texts.remove(index);
     core.project.texts.insert(target, inst);
     core.status = format!(
@@ -507,7 +507,7 @@ pub fn set_segment_text(
         core.status = "Type some text first.".into();
         return false;
     }
-    core.snapshot();
+    core.snapshot_labeled("Set segment text");
     if !session.commit(&mut core.project) {
         core.status = "Text target no longer exists.".into();
         return false;
@@ -555,7 +555,7 @@ pub fn set_segment_text_size(core: &mut EditorCore, fi: usize, ni: usize, size: 
         core.status = format!("Text size {next:.0}.");
         return false;
     }
-    core.snapshot();
+    core.snapshot_labeled("Segment text size");
     if let Some(def) = core
         .project
         .figures

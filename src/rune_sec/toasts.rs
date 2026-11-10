@@ -178,6 +178,39 @@
 //!   320 pt wide cards, 12 pt padding (Phase N: 8 pt stack
 //!   gap, 12 pt card radius).
 //!
+//! Roadmap Wave 2 (W2-59) gives the four voices four
+//! different weights in time. Until now every severity
+//! shared the one [`TOAST_TTL`]: an export failure and a
+//! neutral fact each had the same five seconds, and a
+//! failure the user didn't happen to be watching for was
+//! simply gone (the status line kept the text, but only
+//! until the next op overwrote it). Now
+//! [`Severity::ttl`] sets the lifetime per kind — Info
+//! keeps the 5 s baseline, Success (the path-bearing
+//! export/save confirmations) gets 8 s, Warn (a refusal:
+//! the asked-for op did NOT happen, and a missed refusal
+//! reads as a silent success) gets 10 s, and Error never
+//! expires on the clock: a failure stays until it is
+//! dismissed, cleared, or — the one bounded exception —
+//! displaced when every live toast is an Error and the
+//! [`MAX_TOASTS`] cap needs the slot. Three consequences
+//! ride along, all in this file: eviction under cap
+//! pressure takes the oldest TRANSIENT toast before any
+//! persistent one ([`ToastsState::push`]); the Undo
+//! action no longer rides a persistent card, whose
+//! render-time `undo_depth()` predicate could point at
+//! an unrelated op hours later
+//! ([`ToastsState::newest_actionable_index`]); and
+//! [`ToastsState::tick_needed`] tells the poll hook when
+//! a wake can still change the stack, so a lone stuck
+//! failure doesn't spin its 500 ms fade tick forever
+//! (the hook's side is IA-W2-59-1). The audit behind
+//! this — one production raising site, no file opener
+//! anywhere in the shell (so no export "Reveal" action
+//! exists to wire), autosave's retry already automatic
+//! (so no honest "Retry" button exists to wire) — is
+//! findings2/w2-59.md.
+//!
 //! Feeding contract (the integrator's side): when
 //! `core.status` changes, call
 //! `state.toasts.push_status(status_text, now)` — the
@@ -239,10 +272,35 @@ use crate::State;
 /// budget charges for it.
 pub const MAX_TOASTS: usize = 3;
 
-/// Seconds a toast stays live. A toast expires when its age
-/// is strictly greater than this (`age > TOAST_TTL`); at
-/// exactly `TOAST_TTL` it is still shown.
+/// Seconds an Info toast stays live — the baseline
+/// lifetime every severity used before Roadmap Wave 2
+/// (W2-59), and still the Info value (see
+/// [`Severity::ttl`]). A transient toast expires when its
+/// age is strictly greater than its severity's TTL
+/// (`age > ttl`); at exactly the TTL it is still shown.
 pub const TOAST_TTL: f32 = 5.0;
+
+/// Seconds a Success toast stays live (W2-59). The
+/// Success family is the export / save confirmations —
+/// the longest routine statuses the stack carries,
+/// path-bearing (`"Exported 48-frame MP4 to
+/// /home/…/out.mp4"`), and the ones a user most often
+/// wants to re-read or copy from the status line after
+/// glancing back at the stage: three seconds past the
+/// Info baseline buys that second look.
+pub const TOAST_TTL_SUCCESS: f32 = 8.0;
+
+/// Seconds a Warn toast stays live (W2-59). A Warn is a
+/// refusal: the op the user just asked for did NOT
+/// happen. Five seconds measured from a press the user
+/// may have aimed at the stage (not the corner the stack
+/// hangs in) is easy to miss entirely, and a missed
+/// refusal reads as a silent success — the worst failure
+/// mode this stack has. Ten seconds is two full Info
+/// lifetimes: long enough to survive a glance away and
+/// back, short enough that a stale refusal still clears
+/// itself without demanding a dismissal press.
+pub const TOAST_TTL_WARN: f32 = 10.0;
 
 /// Minimum live toasts for the stack to offer "Clear all":
 /// with fewer than two live toasts, the per-toast dismiss
@@ -349,6 +407,45 @@ impl Severity {
     /// and the recap text carry, in either theme.
     pub fn icon_color(self, t: &Theme) -> u32 {
         pack(self.color(t))
+    }
+
+    /// How long a toast of this severity stays live, in
+    /// seconds on the poll clock (Roadmap Wave 2, W2-59:
+    /// before this seat every severity shared the one
+    /// [`TOAST_TTL`], so a failure and a neutral fact had
+    /// the same weight and the same five seconds).
+    ///
+    /// - `Info` — [`TOAST_TTL`] (5 s), the established
+    ///   baseline: a neutral fact the user can afford to
+    ///   miss, because the status line keeps it.
+    /// - `Success` — [`TOAST_TTL_SUCCESS`] (8 s): the
+    ///   path-bearing confirmations earn a second look.
+    /// - `Warn` — [`TOAST_TTL_WARN`] (10 s): a refusal
+    ///   must outlast a glance away; a missed refusal
+    ///   reads as a silent success.
+    /// - `Error` — `f32::INFINITY`: a failure NEVER
+    ///   expires on the clock. It leaves only by an
+    ///   explicit dismissal (its own button, Clear all)
+    ///   or — the one bounded exception, forced by
+    ///   [`MAX_TOASTS`]' camera-pill geometry — by
+    ///   displacement when every live toast is an Error
+    ///   and a newer toast needs the slot (see
+    ///   [`ToastsState::push`]). The full text also stays
+    ///   in the status line for as long as it is the
+    ///   latest status, exactly as before.
+    pub fn ttl(self) -> f32 {
+        match self {
+            Severity::Info => TOAST_TTL,
+            Severity::Success => TOAST_TTL_SUCCESS,
+            Severity::Warn => TOAST_TTL_WARN,
+            Severity::Error => f32::INFINITY,
+        }
+    }
+
+    /// True when a toast of this severity leaves on the
+    /// clock alone (every severity except `Error`).
+    pub fn is_transient(self) -> bool {
+        self.ttl().is_finite()
     }
 }
 
@@ -555,16 +652,25 @@ impl Toast {
         now - self.born
     }
 
-    /// True once the toast is older than [`TOAST_TTL`].
+    /// True once the toast is older than its severity's
+    /// lifetime ([`Severity::ttl`]). A persistent toast
+    /// (Error, infinite TTL) never satisfies this: no
+    /// finite age exceeds infinity.
     pub fn expired(&self, now: f32) -> bool {
-        self.age(now) > TOAST_TTL
+        self.age(now) > self.severity.ttl()
     }
 
     /// Opacity for the view: fully opaque until the last
-    /// [`FADE_OUT`] seconds of life, then a linear fade to 0
-    /// at the expiry instant.
+    /// [`FADE_OUT`] seconds of a transient life, then a
+    /// linear fade to 0 at the expiry instant. A
+    /// persistent toast never fades — it is on screen
+    /// until it is dismissed, at full strength.
     fn fade(&self, now: f32) -> f32 {
-        ((TOAST_TTL - self.age(now)) / FADE_OUT).clamp(0.0, 1.0)
+        let ttl = self.severity.ttl();
+        if !ttl.is_finite() {
+            return 1.0;
+        }
+        ((ttl - self.age(now)) / FADE_OUT).clamp(0.0, 1.0)
     }
 }
 
@@ -610,7 +716,17 @@ impl ToastsState {
     ///   toast. (Wave 9: before, only a duplicate of the
     ///   NEWEST toast refreshed; non-consecutive twins
     ///   stacked.)
-    /// - Past [`MAX_TOASTS`], the oldest toast is dropped.
+    /// - Past [`MAX_TOASTS`], a toast is evicted — by
+    ///   severity, not by raw age (Roadmap Wave 2, W2-59).
+    ///   The victim is the OLDEST transient toast: a burst
+    ///   of fresh facts and confirmations collapses over
+    ///   itself instead of pushing a still-unread failure
+    ///   off the stack. A persistent (Error) toast is
+    ///   evicted only when every stored toast is
+    ///   persistent — then the oldest Error goes, because
+    ///   the cap is a hard geometry bound (the camera-pill
+    ///   arithmetic on [`MAX_TOASTS`]) and something must.
+    ///   The just-pushed toast never evicts itself.
     pub fn push(&mut self, text: impl Into<String>, severity: Severity, now: f32) {
         self.expire(now);
         let text = text.into();
@@ -624,7 +740,11 @@ impl ToastsState {
         }
         self.items.push(Toast::new(text, severity, now));
         while self.items.len() > MAX_TOASTS {
-            self.items.remove(0);
+            let protected = self.items.len() - 1;
+            let victim = (0..protected)
+                .find(|&i| self.items[i].severity.is_transient())
+                .unwrap_or(0);
+            self.items.remove(victim);
         }
     }
 
@@ -676,8 +796,8 @@ impl ToastsState {
     /// Remove the toast at `index` in `items` (the items
     /// index, not the live position — an expired toast that
     /// `expire` has not yet collected still occupies its
-    /// slot). Out-of-range is a no-op. The newest toast's
-    /// Undo action dismisses exactly its own toast this way
+    /// slot). Out-of-range is a no-op. The Undo action
+    /// dismisses exactly its own toast this way
     /// after running the undo.
     pub fn dismiss(&mut self, index: usize) {
         if index < self.items.len() {
@@ -695,17 +815,57 @@ impl ToastsState {
         self.items.retain(|t| t.expired(now));
     }
 
-    /// The items index of the newest toast alive at `now` —
-    /// the one that carries the Undo action — or `None` when
-    /// nothing is live.
+    /// The items index of the newest toast alive at `now`,
+    /// or `None` when nothing is live.
     pub fn newest_live_index(&self, now: f32) -> Option<usize> {
         self.items.iter().rposition(|t| !t.expired(now))
+    }
+
+    /// The items index of the toast that carries the Undo
+    /// action at `now`: the newest live TRANSIENT toast
+    /// (Roadmap Wave 2, W2-59). Before per-severity
+    /// lifetimes the action rode the newest live toast,
+    /// whatever it said, and every toast aged out within
+    /// seconds — the render-time `undo_depth() > 0`
+    /// predicate could only ever be a few seconds stale.
+    /// A persistent Error toast breaks that premise: it
+    /// can sit live for a whole session, and an Undo
+    /// button riding it would silently re-target whatever
+    /// the newest undoable op happens to be at render
+    /// time — an action labelled for one event, firing
+    /// on another. Persistent toasts therefore never
+    /// carry the action; it falls back to the newest
+    /// transient toast still live, and when only
+    /// persistent toasts are live there is no action.
+    pub fn newest_actionable_index(&self, now: f32) -> Option<usize> {
+        self.items
+            .iter()
+            .rposition(|t| !t.expired(now) && t.severity.is_transient())
+    }
+
+    /// True when the poll hook's toast tick can still
+    /// change anything visible: some toast is live AND
+    /// transient, so a future `expire` / fade step has
+    /// work to do (Roadmap Wave 2, W2-59). When only
+    /// persistent toasts are live the stack is static
+    /// until the next push or dismissal, and a wake
+    /// scheduled "so the toasts fade on time" would spin
+    /// the shell's 500 ms wake + redraw for the rest of
+    /// the session over a frame that cannot change. The
+    /// poll hook's wake condition is the integrator's
+    /// wiring (IA-W2-59-1); this predicate is the model's
+    /// half of it.
+    pub fn tick_needed(&self, now: f32) -> bool {
+        self.items
+            .iter()
+            .any(|t| !t.expired(now) && t.severity.is_transient())
     }
 }
 
 /// True when the core has at least one undo step — the
-/// render-time condition for the newest toast's Undo
-/// action.
+/// render-time condition for the Undo action (which rides
+/// the newest live transient toast — W2-59; see
+/// [`ToastsState::newest_actionable_index`]).
 pub fn undo_available(core: &EditorCore) -> bool {
     core.undo_depth() > 0
 }
@@ -724,7 +884,8 @@ fn clear_all_offered(live_count: usize) -> bool {
 /// corner. An empty stack builds an empty pinned column,
 /// which paints nothing.
 ///
-/// When [`undo_available`] holds, the newest live toast
+/// When [`undo_available`] holds, the newest live
+/// TRANSIENT toast
 /// carries the Undo action (see [`toast_row`]); the
 /// predicate is read at render time, so the button appears
 /// and disappears with the core's undo stack.
@@ -750,7 +911,11 @@ pub fn toasts_view(s: &State, now: f32) -> El {
         .gap(8.0)
         .items_end();
     let action_index = if undo_available(&s.core) {
-        s.toasts.newest_live_index(now)
+        // W2-59: the action rides the newest live
+        // TRANSIENT toast — a persistent Error toast
+        // never carries it (see
+        // `newest_actionable_index`).
+        s.toasts.newest_actionable_index(now)
     } else {
         None
     };
@@ -788,11 +953,14 @@ pub fn toasts_view(s: &State, now: f32) -> El {
 
 /// One toast card: a 3 pt severity bar at the leading edge,
 /// then the severity glyph and the status text on the theme
-/// card surface, fading over its last second. `index`
+/// card surface, fading over the last second of a transient
+/// life (a persistent Error card never fades — W2-59).
+/// `index`
 /// is the toast's items index — it keys the card (stable for
 /// the toast's whole life, unlike a live position) and the
 /// row's buttons dismiss by it. When `action` holds — this
-/// is the newest live toast and the core can undo — the card
+/// is the newest live transient toast and the core can
+/// undo — the card
 /// also carries the Undo button: pressing it undoes once and
 /// dismisses this toast (the undo's own status change feeds
 /// a fresh toast through the poll hook, as for any op).
@@ -815,6 +983,18 @@ pub fn toasts_view(s: &State, now: f32) -> El {
 /// SETTLE spring pair, composing with the age fade (the
 /// exit runs the same transition in reverse, then the
 /// last-second opacity fade finishes it).
+///
+/// Reduced motion (Roadmap Wave 2, W2-53 — verified
+/// from the pinned Rune rev 87caf2a, not assumed): the
+/// host Reduce Motion flag gates this pair inside the
+/// runtime — every animated property passes through
+/// `PropClass::reduce` in rune-motion's store, so the
+/// 24 pt slide (Spatial) lands at once and the fade
+/// becomes Rune's 0.18 s REDUCED_FADE. No call-site
+/// gate is needed or wanted here. The age fade is this
+/// file's own opacity arithmetic, not a Rune
+/// animation; it is a fade only (no travel), the one
+/// motion class Rune's reduced policy itself keeps.
 fn toast_row(toast: &Toast, index: usize, t: &Theme, now: f32, action: bool, undo_label: &str) -> El {
     let mut content = row()
         .center_y()
@@ -1088,6 +1268,163 @@ mod tests {
         assert_eq!(texts, ["young", "edge"], "age == TTL is still live; only age > TTL expires");
     }
 
+    // --- per-severity lifetimes (Roadmap Wave 2, W2-59) --
+    // Before this seat every severity shared TOAST_TTL:
+    // a failure and a neutral fact had the same five
+    // seconds. The pins below are the new contract —
+    // Info keeps the baseline, Success and Warn earn
+    // longer, Error never expires on the clock.
+
+    #[test]
+    fn severity_ttls_are_the_w2_59_contract() {
+        assert_eq!(Severity::Info.ttl(), TOAST_TTL);
+        assert_eq!(Severity::Success.ttl(), TOAST_TTL_SUCCESS);
+        assert_eq!(Severity::Warn.ttl(), TOAST_TTL_WARN);
+        assert_eq!(Severity::Error.ttl(), f32::INFINITY);
+        // The ordering is the point: each weightier
+        // severity outlives the one before it.
+        assert!(Severity::Info.ttl() < Severity::Success.ttl());
+        assert!(Severity::Success.ttl() < Severity::Warn.ttl());
+        assert!(Severity::Info.is_transient());
+        assert!(Severity::Success.is_transient());
+        assert!(Severity::Warn.is_transient());
+        assert!(!Severity::Error.is_transient());
+    }
+
+    #[test]
+    fn each_transient_severity_expires_at_its_own_boundary() {
+        // (severity, still live at, gone by) — live at
+        // exactly the TTL, expired just past it, per
+        // severity (all toasts born at 0).
+        for (sev, live_at, gone_by) in [
+            (Severity::Info, TOAST_TTL, TOAST_TTL + 0.01),
+            (Severity::Success, TOAST_TTL_SUCCESS, TOAST_TTL_SUCCESS + 0.01),
+            (Severity::Warn, TOAST_TTL_WARN, TOAST_TTL_WARN + 0.01),
+        ] {
+            let toast = Toast::new("x", sev, 0.0);
+            assert!(!toast.expired(live_at), "{sev:?} is live at its TTL");
+            assert!(toast.expired(gone_by), "{sev:?} is gone just past its TTL");
+        }
+        // The cross-severity consequence: at t=7 the
+        // Info toast (TTL 5) is dead while the Success
+        // (8) and Warn (10) toasts born with it live on.
+        let mut s = ToastsState::new();
+        s.push("fact", Severity::Info, 0.0);
+        s.push("Exported out/a.mp4", Severity::Success, 0.0);
+        s.push("No camera key on this frame.", Severity::Warn, 0.0);
+        let live: Vec<&str> = s.live(7.0).map(|t| t.text.as_str()).collect();
+        assert_eq!(live, ["Exported out/a.mp4", "No camera key on this frame."]);
+    }
+
+    #[test]
+    fn error_toasts_never_expire_and_never_fade() {
+        let mut s = ToastsState::new();
+        s.push_status("Audio fade failed: no clip 1.", 0.0);
+        assert_eq!(s.items[0].severity, Severity::Error);
+        // A simulated day later the failure is still the
+        // live stack: expire() cannot collect it, live()
+        // still yields it, and its opacity never drops.
+        s.expire(86_400.0);
+        assert_eq!(s.live_count(86_400.0), 1);
+        assert_eq!(s.items[0].fade(86_400.0), 1.0);
+        // Dismissal is the way out — the per-toast
+        // dismiss removes it like any other toast.
+        s.dismiss(0);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn cap_eviction_sacrifices_transients_before_a_persistent_error() {
+        // The burst-collapse rule: a stack holding a
+        // persistent failure sheds its transient toasts
+        // (oldest first) under cap pressure — the failure
+        // is never the eviction victim while any transient
+        // toast exists to take its place.
+        let mut s = ToastsState::new();
+        s.push_status("Audio fade failed: no clip 1.", 0.0);
+        s.push("one", Severity::Info, 0.0);
+        s.push("two", Severity::Info, 0.0);
+        assert_eq!(s.items.len(), MAX_TOASTS);
+        s.push("three", Severity::Info, 0.0);
+        let texts: Vec<&str> = s.items.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["Audio fade failed: no clip 1.", "two", "three"],
+            "the oldest transient ('one') is evicted; the Error holds its slot"
+        );
+        s.push("four", Severity::Info, 0.0);
+        let texts: Vec<&str> = s.items.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, ["Audio fade failed: no clip 1.", "three", "four"]);
+    }
+
+    #[test]
+    fn a_full_stack_of_errors_displaces_the_oldest_error() {
+        // The one bounded exception to Error persistence:
+        // when EVERY stored toast is persistent, the cap
+        // (a hard geometry bound) wins and the oldest
+        // Error is displaced by the newer arrival — the
+        // just-pushed toast never evicts itself.
+        let mut s = ToastsState::new();
+        for n in 0..MAX_TOASTS {
+            s.push_status(format!("Audio fade failed: no clip {n}."), 0.0);
+        }
+        s.push_status("Audio fade failed: no clip 99.", 0.0);
+        assert_eq!(s.items.len(), MAX_TOASTS);
+        let texts: Vec<&str> = s.items.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "Audio fade failed: no clip 1.",
+                "Audio fade failed: no clip 2.",
+                "Audio fade failed: no clip 99."
+            ]
+        );
+    }
+
+    #[test]
+    fn newest_actionable_index_skips_persistent_toasts() {
+        // The Undo action's host rule (W2-59): newest
+        // live TRANSIENT toast; a persistent Error on top
+        // of the stack does not capture it, and a stack of
+        // only persistent toasts offers no action host.
+        let mut s = ToastsState::new();
+        assert_eq!(s.newest_actionable_index(0.0), None);
+        s.push("fact", Severity::Info, 0.0);
+        assert_eq!(s.newest_actionable_index(0.0), Some(0));
+        s.push_status("Audio fade failed: no clip 1.", 0.0);
+        assert_eq!(s.newest_live_index(0.0), Some(1), "the Error is the newest live toast");
+        assert_eq!(
+            s.newest_actionable_index(0.0),
+            Some(0),
+            "but the action stays on the transient toast beneath it"
+        );
+        // Once the transient toast ages out, no host
+        // remains — the Error alone never carries Undo.
+        assert_eq!(s.newest_actionable_index(6.0), None);
+        let mut errors_only = ToastsState::new();
+        errors_only.push_status("Audio fade failed: no clip 1.", 0.0);
+        assert_eq!(errors_only.newest_actionable_index(0.0), None);
+    }
+
+    #[test]
+    fn tick_needed_only_while_a_transient_toast_is_live() {
+        // The poll-wake predicate (W2-59): the tick has
+        // work while any transient toast lives; a stack
+        // of persistent toasts alone is static.
+        let mut s = ToastsState::new();
+        assert!(!s.tick_needed(0.0), "an empty stack needs no tick");
+        s.push_status("Audio fade failed: no clip 1.", 0.0);
+        assert!(!s.tick_needed(0.0), "a lone persistent toast is static");
+        assert!(!s.tick_needed(86_400.0), "and stays static");
+        s.push("fact", Severity::Info, 0.0);
+        assert!(s.tick_needed(0.0), "a live transient toast needs the tick");
+        assert!(s.tick_needed(5.0), "still live at its TTL boundary");
+        assert!(
+            !s.tick_needed(5.01),
+            "once the transient dies only the persistent Error remains"
+        );
+    }
+
     #[test]
     fn expire_on_an_empty_state_is_a_noop() {
         let mut s = ToastsState::new();
@@ -1118,7 +1455,13 @@ mod tests {
 
     #[test]
     fn toast_age_and_expiry_boundary() {
-        let toast = Toast::new("x", Severity::Warn, 2.0);
+        // The boundary arithmetic at the Info baseline
+        // (born at 2.0, TTL 5.0): age counts from birth,
+        // and expiry is strict — at exactly the TTL the
+        // toast is still live. Per-severity boundaries
+        // are pinned in
+        // `each_transient_severity_expires_at_its_own_boundary`.
+        let toast = Toast::new("x", Severity::Info, 2.0);
         assert_eq!(toast.age(2.0), 0.0);
         assert_eq!(toast.age(4.5), 2.5);
         assert!(!toast.expired(7.0), "age == TTL is not expired");

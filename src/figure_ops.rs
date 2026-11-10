@@ -297,7 +297,7 @@ impl EditorCore {
             .iter()
             .map(|f| f.bends.get(fi).cloned())
             .collect();
-        self.snapshot();
+        self.snapshot_labeled("Duplicate figure");
         let mut copy = fig;
         copy.name = format!("{} copy", copy.name);
         self.project.figures.insert(fi + 1, copy);
@@ -361,7 +361,7 @@ impl EditorCore {
             self.status = "Figure has no segments to recolour.".into();
             return false;
         }
-        self.snapshot();
+        self.snapshot_labeled("Recolour figure");
         for node in &mut self.project.figures[fi].def.nodes {
             node.color = Some(color);
         }
@@ -400,7 +400,7 @@ impl EditorCore {
             self.status = "No figure to mirror.".into();
             return false;
         }
-        self.snapshot();
+        self.snapshot_labeled("Mirror figure");
         let frame_count = self.project.frames.len();
         for frame in &mut self.project.frames {
             if let Some(pose) = frame.poses.get_mut(fi) {
@@ -461,12 +461,25 @@ fn fop_opt_usize(args: &Value, key: &str) -> Result<Option<usize>, String> {
     }
 }
 
+/// Roadmap Wave 2 (W2-80, IA-W2-80-1): the finiteness
+/// rule this file's raw casts missed — a finite f64 like
+/// 1e39 still casts to f32 infinity, and that must be
+/// refused (the `mcp_tools.rs` `finite_f32` rule).
+fn fop_finite_f32(f: f64, key: &str) -> Result<f32, String> {
+    let v = f as f32;
+    if f.is_finite() && v.is_finite() {
+        Ok(v)
+    } else {
+        Err(format!("argument '{key}' must be a finite number"))
+    }
+}
+
 fn fop_req_f32(args: &Value, key: &str) -> Result<f32, String> {
     match fop_get(args, key) {
-        Some(v) => v
-            .as_f64()
-            .map(|f| f as f32)
-            .ok_or_else(|| format!("argument '{key}' must be a number")),
+        Some(v) => match v.as_f64() {
+            Some(f) => fop_finite_f32(f, key),
+            None => Err(format!("argument '{key}' must be a number")),
+        },
         None => Err(format!("missing required argument '{key}'")),
     }
 }
@@ -528,12 +541,14 @@ fn fop_opt_root(args: &Value, key: &str) -> Result<Option<[f32; 2]>, String> {
     if arr.len() != 2 {
         return Err(format!("argument '{key}' must have exactly 2 elements"));
     }
-    let x = arr[0]
-        .as_f64()
-        .ok_or_else(|| format!("argument '{key}[0]' must be a number"))? as f32;
-    let y = arr[1]
-        .as_f64()
-        .ok_or_else(|| format!("argument '{key}[1]' must be a number"))? as f32;
+    let x = match arr[0].as_f64() {
+        Some(f) => fop_finite_f32(f, &format!("{key}[0]"))?,
+        None => return Err(format!("argument '{key}[0]' must be a number")),
+    };
+    let y = match arr[1].as_f64() {
+        Some(f) => fop_finite_f32(f, &format!("{key}[1]"))?,
+        None => return Err(format!("argument '{key}[1]' must be a number")),
+    };
     Ok(Some([x, y]))
 }
 
@@ -847,8 +862,17 @@ pub fn tool_copy_pose_between(core: &mut EditorCore, args: &Value) -> Result<Val
 
 /// MCP `reset_pose`: the pose panel's Reset pose — write
 /// the figure's rest pose (root kept) over its pose in a
-/// frame, one snapshot. `figure` defaults to the selected
-/// figure, `frame` to the current frame.
+/// frame. `figure` defaults to the selected figure,
+/// `frame` to the current frame. Wave 2 (W2-30, P-10):
+/// the write is the core op's
+/// ([`EditorCore::reset_pose_to_rest`]) — the op owns
+/// the one labelled snapshot and the status, and a pose
+/// already AT the rest pose is a no-op that spends no
+/// step, reported here as `changed: false` with the
+/// op's status (the `set_rest_pose` tool's contract).
+/// The rest pose in the reply is exact in both cases:
+/// after a change it is what was written, and a no-op
+/// means the stored pose already equals it.
 pub fn tool_reset_pose(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let fi = fop_target_figure(core, args)?;
     let frame = fop_target_frame(core, args)?;
@@ -857,17 +881,12 @@ pub fn tool_reset_pose(core: &mut EditorCore, args: &Value) -> Result<Value, Str
         .get(fi)
         .ok_or_else(|| format!("Figure {} has no pose on frame {}.", fi + 1, frame + 1))?;
     let rest = core.project.figures[fi].def.rest_pose(cur.root);
-    core.snapshot();
-    core.project.frames[frame].poses[fi] = rest.clone();
-    core.status = format!(
-        "Figure {} reset to its rest pose on frame {}.",
-        fi + 1,
-        frame + 1
-    );
+    let changed = core.reset_pose_to_rest(fi, frame);
     Ok(json!({
         "ok": true,
         "figure": fi,
         "frame": frame,
+        "changed": changed,
         "pose": { "root": rest.root, "angles": rest.angles },
         "status": core.status,
     }))
@@ -921,11 +940,12 @@ pub fn tool_pose_apply_all_frames(
         .ok_or_else(|| "argument 'angles' must be an array of numbers".to_string())?;
     let mut angles: Vec<f32> = Vec::with_capacity(angles_arr.len());
     for (i, v) in angles_arr.iter().enumerate() {
-        angles.push(
-            v.as_f64()
-                .map(|f| f as f32)
-                .ok_or_else(|| format!("argument 'angles[{i}]' must be a number"))?,
-        );
+        angles.push(match v.as_f64() {
+            Some(f) => fop_finite_f32(f, &format!("angles[{i}]"))?,
+            None => {
+                return Err(format!("argument 'angles[{i}]' must be a number"));
+            }
+        });
     }
     let root = fop_opt_root(args, "root")?;
     let mut writable: Vec<usize> = Vec::new();
@@ -942,12 +962,23 @@ pub fn tool_pose_apply_all_frames(
         ));
     }
     let applied = writable.len();
-    core.snapshot();
+    core.snapshot_labeled("Apply pose to all frames");
     for f in writable {
         let r = root.unwrap_or(core.project.frames[f].poses[fi].root);
+        // Squash & stretch (W2-31, P-5b): this op authors
+        // root + angles only, so each frame's stored scale
+        // is PRESERVED — a field the op does not mention it
+        // does not reset (the set_pose absent-optional
+        // precedent).
+        let (sx, sy) = {
+            let p = &core.project.frames[f].poses[fi];
+            (p.sx, p.sy)
+        };
         core.project.frames[f].poses[fi] = Pose {
             root: r,
             angles: angles.clone(),
+            sx,
+            sy,
         };
     }
     core.status = if skipped == 0 {
@@ -1173,7 +1204,7 @@ pub fn tool_pose_library_apply(core: &mut EditorCore, args: &Value) -> Result<Va
             *a = -*a;
         }
     }
-    core.snapshot();
+    core.snapshot_labeled("Apply library pose");
     core.project.frames[frame].poses[fi] = pose.clone();
     core.status = if mirrored {
         format!(
@@ -2292,6 +2323,43 @@ mod tests {
     }
 
     #[test]
+    fn mcp_reset_pose_matches_the_core_op_step_for_step() {
+        // Wave 2 (W2-30, P-10): the MCP door and the core
+        // op are the SAME restore — identical project
+        // result, the same single "Reset pose" step, and
+        // the already-rest no-op is reported as
+        // `changed: false`, never spent.
+        let mut via_tool = EditorCore::new();
+        let mut via_op = EditorCore::new();
+        for core in [&mut via_tool, &mut via_op] {
+            core.project.frames[0].poses[0].angles[0] = 77.0;
+            core.project.frames[0].poses[0].sx = 0.8;
+        }
+        let out = tool_reset_pose(&mut via_tool, &json!({ "figure": 0, "frame": 0 }))
+            .expect("reset succeeds");
+        assert_eq!(out["changed"], json!(true));
+        assert!(via_op.reset_pose_to_rest(0, 0));
+        assert_eq!(
+            serde_json::to_string(&via_tool.project).unwrap(),
+            serde_json::to_string(&via_op.project).unwrap(),
+            "the tool's restore is the op's restore, byte for byte"
+        );
+        assert_eq!(via_tool.undo_labels(), via_op.undo_labels());
+        assert_eq!(via_tool.undo_depth(), 1);
+        assert_eq!(
+            via_tool.project.frames[0].poses[0].sx, 1.0,
+            "the squash returns to the setup pose's (1, 1) too"
+        );
+        // Second call: already at the setup pose — the
+        // tool still answers, reports the no-op, and
+        // spends no step.
+        let out = tool_reset_pose(&mut via_tool, &json!({ "figure": 0, "frame": 0 }))
+            .expect("the no-op still answers");
+        assert_eq!(out["changed"], json!(false));
+        assert_eq!(via_tool.undo_depth(), 1, "the no-op spent nothing");
+    }
+
+    #[test]
     fn mcp_centre_and_ground_move_the_root() {
         let mut core = EditorCore::new();
         let out = tool_figure_ground(&mut core, &json!({ "figure": 0 }))
@@ -2901,6 +2969,8 @@ mod tests {
                 .map(|i| Pose {
                     root: [i as f32 * 10.0, fr as f32],
                     angles: vec![i as f32 + 0.5],
+                    sx: 1.0,
+                    sy: 1.0,
                 })
                 .collect();
         }
@@ -3001,5 +3071,25 @@ mod tests {
             remap_figures_after_move(&mut project, from, to);
             assert_eq!(raw_refs(&project), before, "move {from} -> {to} is a no-op");
         }
+    }
+
+    #[test]
+    fn fop_finiteness_refuses_cast_overflow_arguments() {
+        // Roadmap Wave 2 (W2-80, IA-W2-80-1): a finite
+        // f64 above f32::MAX must refuse, not store an
+        // infinite cast, at all three figure_ops sites.
+        let args = json!({ "factor": 1e39 });
+        let err = fop_req_f32(&args, "factor").unwrap_err();
+        assert_eq!(err, "argument 'factor' must be a finite number");
+        let args = json!({ "root": [1e39, 0.0] });
+        let err = fop_opt_root(&args, "root").unwrap_err();
+        assert_eq!(err, "argument 'root[0]' must be a finite number");
+        let mut core = EditorCore::new();
+        let err = tool_pose_apply_all_frames(
+            &mut core,
+            &json!({ "figure": 0, "angles": [1e39] }),
+        )
+        .unwrap_err();
+        assert_eq!(err, "argument 'angles[0]' must be a finite number");
     }
 }

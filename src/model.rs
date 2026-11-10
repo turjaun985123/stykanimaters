@@ -357,6 +357,17 @@ impl NodeDef {
         self.min_angle.is_some() || self.max_angle.is_some()
     }
 
+    /// The partition of this node's relative-angle circle
+    /// into allowed and forbidden spans — the DISPLAY
+    /// counterpart of [`NodeDef::clamp_angle`]: the allowed
+    /// spans are exactly the angles `clamp_angle` returns
+    /// unchanged, and the forbidden spans are the
+    /// complement. See [`limit_spans`] for the span
+    /// conventions. `None` when the node carries no limits.
+    pub fn limit_spans(&self) -> Option<LimitSpans> {
+        limit_spans(self.min_angle, self.max_angle)
+    }
+
     /// The anatomical one-way range (min, max) the
     /// humanoid constructor ships on its elbows (Wave X,
     /// P-4): flexion to +160°, a 10° grace past straight.
@@ -371,6 +382,99 @@ impl NodeDef {
     /// to −160°, a 10° grace past straight. See
     /// [`NodeDef::ELBOW_LIMITS`] for the one-source rule.
     pub const KNEE_LIMITS: (f32, f32) = (-160.0, 10.0);
+}
+
+/// Allowed/forbidden spans of a joint's relative-angle
+/// circle (Roadmap Wave 2, W2-27): the partition
+/// [`NodeDef::clamp_angle`] enforces, expressed as data so
+/// displays (the stage's limit arcs, the segment
+/// inspector's arc readout) draw the SAME arc the solvers
+/// clamp to instead of re-deriving it.
+///
+/// Each span is `(start, end)` in degrees with
+/// `start <= end`, on the normalised circle `[-180, 180]`
+/// ([`norm_deg`]'s range); traversing a span from start to
+/// end moves through increasing angle — clockwise on
+/// screen, this model's positive direction ([`dir`]).
+/// Allowed and forbidden together tile the full circle
+/// exactly once, so their sweeps always sum to 360.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LimitSpans {
+    /// Spans a relative angle may take (the values
+    /// `clamp_angle` returns unchanged).
+    pub allowed: Vec<(f32, f32)>,
+    /// The complement: spans `clamp_angle` moves.
+    pub forbidden: Vec<(f32, f32)>,
+}
+
+impl LimitSpans {
+    /// Total allowed sweep in degrees.
+    pub fn allowed_degrees(&self) -> f32 {
+        self.allowed.iter().map(|(a, b)| b - a).sum()
+    }
+
+    /// Total forbidden sweep in degrees (the tiling
+    /// contract makes this 360 minus the allowed sweep).
+    pub fn forbidden_degrees(&self) -> f32 {
+        self.forbidden.iter().map(|(a, b)| b - a).sum()
+    }
+}
+
+/// The [`LimitSpans`] partition for a pair of joint-limit
+/// bounds — [`NodeDef::limit_spans`] without the node, for
+/// consumers that hold the bounds separately (the segment
+/// inspector's view state carries exactly the pair).
+///
+/// The bounds are normalised with [`norm_deg`] exactly as
+/// `clamp_angle` normalises them, so the partition is the
+/// clamp's own: both bounds with `min <= max` give the
+/// plain interval and the forbidden remainder on both
+/// sides; `min > max` gives the wrap arc through ±180 with
+/// the single forbidden span between them; a single bound
+/// leaves the allowed span open to that side's circle
+/// edge. A non-finite bound is treated as open — a
+/// display sanitisation only (a hand-edited project's NaN
+/// bound must not poison a drawing); `clamp_angle` itself
+/// is unchanged. `None` when both bounds are open.
+pub fn limit_spans(min_angle: Option<f32>, max_angle: Option<f32>) -> Option<LimitSpans> {
+    let min_angle = min_angle.filter(|v| v.is_finite());
+    let max_angle = max_angle.filter(|v| v.is_finite());
+    let mut allowed: Vec<(f32, f32)> = Vec::new();
+    let mut forbidden: Vec<(f32, f32)> = Vec::new();
+    match (min_angle, max_angle) {
+        (Some(lo), Some(hi)) => {
+            let (lo, hi) = (norm_deg(lo), norm_deg(hi));
+            if lo <= hi {
+                allowed.push((lo, hi));
+                if lo > -180.0 {
+                    forbidden.push((-180.0, lo));
+                }
+                if hi < 180.0 {
+                    forbidden.push((hi, 180.0));
+                }
+            } else {
+                allowed.push((lo, 180.0));
+                allowed.push((-180.0, hi));
+                forbidden.push((hi, lo));
+            }
+        }
+        (Some(lo), None) => {
+            let lo = norm_deg(lo);
+            allowed.push((lo, 180.0));
+            if lo > -180.0 {
+                forbidden.push((-180.0, lo));
+            }
+        }
+        (None, Some(hi)) => {
+            let hi = norm_deg(hi);
+            allowed.push((-180.0, hi));
+            if hi < 180.0 {
+                forbidden.push((hi, 180.0));
+            }
+        }
+        (None, None) => return None,
+    }
+    Some(LimitSpans { allowed, forbidden })
 }
 
 fn default_thickness() -> f32 {
@@ -539,6 +643,8 @@ impl FigureDef {
         Pose {
             root,
             angles: self.nodes.iter().map(|n| n.rest_angle).collect(),
+            sx: 1.0,
+            sy: 1.0,
         }
     }
 
@@ -638,15 +744,83 @@ fn clip_rig_matches(fig_def: &FigureDef, old_rest: &[f32], clip: &ClipDef) -> bo
         && clip.def.nodes.iter().map(|c| c.rest_angle).eq(old_rest.iter().copied())
 }
 
+/// Smallest pose squash & stretch factor (Roadmap Wave 2,
+/// W2-31 — the RM17 P-5b design): the `head_ring_scale`
+/// precedent's exact floor, so the codebase has one scale
+/// range, not two.
+pub const POSE_SCALE_MIN: f32 = 0.25;
+/// Largest pose squash & stretch factor — see
+/// [`POSE_SCALE_MIN`].
+pub const POSE_SCALE_MAX: f32 = 4.0;
+
+fn default_pose_scale() -> f32 {
+    1.0
+}
+
+fn pose_scale_is_default(scale: &f32) -> bool {
+    *scale == 1.0
+}
+
+/// Sanitise one stored pose-scale component at read (the
+/// `head_ring_radius` defensive pattern): a non-finite value
+/// falls back to 1.0 and any finite value is clamped into
+/// [POSE_SCALE_MIN, POSE_SCALE_MAX]. Files are never
+/// rewritten — a garbage value is neutralised at the point
+/// of use and the stored bytes stay the user's. This is
+/// also the one clamp home the write doors use.
+pub fn sanitise_pose_scale(v: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(POSE_SCALE_MIN, POSE_SCALE_MAX)
+    } else {
+        1.0
+    }
+}
+
 /// One figure's pose in one frame: root position plus one relative
 /// angle per node.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Pose {
     pub root: V2,
     pub angles: Vec<f32>,
+    /// Squash & stretch (Roadmap Wave 2, W2-31 — the RM17
+    /// P-5b design): a root-anchored non-uniform scale
+    /// carried BY THE POSE, exactly as angles are. `sx` is
+    /// the horizontal factor, `sy` the vertical; (0.8, 1.25)
+    /// is a squash. Evaluation scales every joint offset
+    /// from the root by (sx, sy) inside [`evaluate`], so
+    /// every consumer sees the same squashed figure, and
+    /// everything a pose already flows through — dense
+    /// frames, clips, the pose library, undo, copy/paste,
+    /// breakdowns — carries the scale with no new transport.
+    /// There is no figure-level transform and no new entity.
+    ///
+    /// Serde: defaulted to 1.0 and skipped on write while
+    /// 1.0 (the `SegmentMedia` scale precedent), so
+    /// pre-change files load at scale 1.0 with no migration
+    /// and projects that never squash serialise
+    /// byte-identically to before. No FORMAT_VERSION bump:
+    /// the field is additive-with-default. Honest hazard: an
+    /// OLD build opening a file that uses squash loads it
+    /// (unknown fields are ignored) but drops the scale on
+    /// its next save, silently — the standard additive-field
+    /// trade the project's format history has consistently
+    /// chosen over refusal.
+    #[serde(default = "default_pose_scale", skip_serializing_if = "pose_scale_is_default")]
+    pub sx: f32,
+    /// Vertical squash & stretch factor — see [`Pose::sx`].
+    #[serde(default = "default_pose_scale", skip_serializing_if = "pose_scale_is_default")]
+    pub sy: f32,
 }
 
 impl Pose {
+    /// This pose's squash & stretch with each component
+    /// sanitised at read ([`sanitise_pose_scale`]): the
+    /// stored values are never rewritten, but no consumer
+    /// ever sees a non-finite or out-of-range factor.
+    pub fn scale_sanitised(&self) -> (f32, f32) {
+        (sanitise_pose_scale(self.sx), sanitise_pose_scale(self.sy))
+    }
+
     /// Interpolate two poses of the same figure: root lerps linearly,
     /// angles take the shortest path around the circle.
     pub fn lerp(&self, other: &Pose, t: f32) -> Pose {
@@ -656,12 +830,26 @@ impl Pose {
             .zip(other.angles.iter())
             .map(|(a, b)| norm_deg(a + norm_deg(b - a) * t))
             .collect();
+        // Squash & stretch lerps in LOG space (the RM17
+        // P-5b design): a squash sequence 0.5 → 1 → 2 spaces
+        // evenly, where a linear lerp would dwell near 1;
+        // at the identity both agree, so unscaled poses lerp
+        // exactly as before. Endpoints are sanitised first,
+        // so the output is in range by construction (the
+        // final sanitise only absorbs float dust at the
+        // bounds).
+        let (ax, ay) = self.scale_sanitised();
+        let (bx, by) = other.scale_sanitised();
+        let sx = sanitise_pose_scale((ax.ln() + (bx.ln() - ax.ln()) * t).exp());
+        let sy = sanitise_pose_scale((ay.ln() + (by.ln() - ay.ln()) * t).exp());
         Pose {
             root: [
                 self.root[0] + (other.root[0] - self.root[0]) * t,
                 self.root[1] + (other.root[1] - self.root[1]) * t,
             ],
             angles,
+            sx,
+            sy,
         }
     }
 }
@@ -680,6 +868,28 @@ pub fn evaluate(def: &FigureDef, pose: &Pose) -> Vec<V2> {
                 abs_angle[i] = abs_angle[p] + pose.angles[i];
                 pos[i] = add(pos[p], scale(dir(abs_angle[i]), node.length));
             }
+        }
+    }
+    // Squash & stretch (Roadmap Wave 2, W2-31 — the RM17
+    // P-5b design): the pose's scale applies HERE, inside
+    // the one evaluation every consumer shares — stage,
+    // raster export, SVG, segment-media anchoring,
+    // thumbnails, hit-testing — scaling every joint offset
+    // from the root per axis, so the root (the ground /
+    // contact point) never moves and picking can never
+    // desynchronise from drawing. The identity is a fast
+    // path: an unscaled pose evaluates exactly as before.
+    // Segment thickness is a def property and is NOT
+    // scaled (the design's Q2 default: limbs stretch,
+    // stroke weight constant — the classic cartoon read).
+    let (sx, sy) = pose.scale_sanitised();
+    if sx != 1.0 || sy != 1.0 {
+        let root = pose.root;
+        for p in pos.iter_mut() {
+            *p = [
+                root[0] + (p[0] - root[0]) * sx,
+                root[1] + (p[1] - root[1]) * sy,
+            ];
         }
     }
     pos
@@ -1013,6 +1223,16 @@ pub struct CameraKey {
     /// Camera rotation in degrees (wave 6); 0 for all pre-v7 files.
     #[serde(default)]
     pub angle: f32,
+    /// Timing of the move FROM this key to the next
+    /// (Roadmap Wave 2, W2-32; RM18 P-6a design). Linear
+    /// for every pre-P-6a file, so stored shots keep their
+    /// timing — with one announced exception: zoom now
+    /// interpolates in log space for every segment (see
+    /// [`Project::camera_at`]), so an existing zoom move's
+    /// mid-segment zoom changes while its endpoints and
+    /// key frames do not.
+    #[serde(default)]
+    pub easing: CameraEase,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -1052,6 +1272,90 @@ impl Easing {
             Easing::Smooth => "smooth",
             Easing::EaseIn => "ease-in",
             Easing::EaseOut => "ease-out",
+        }
+    }
+}
+
+/// Per-segment camera timing (Roadmap Wave 2, W2-32; the
+/// RM18 P-6a design's option (ii)): the timing of the move
+/// FROM the key that carries it TO the next key. The four
+/// curve modes delegate to [`Easing`] verbatim — the
+/// camera's curves ARE the frame curves — while `Hold` is
+/// camera-local: adding it to `Easing` itself would
+/// silently widen the frame format and its MCP vocabulary.
+/// `Hold` keeps the segment at its starting key's values
+/// until the next key's frame, where the value cuts — a
+/// hard cut no longer needs two keys one frame apart
+/// fighting the lerp.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum CameraEase {
+    Linear,
+    Smooth,
+    EaseIn,
+    EaseOut,
+    Hold,
+}
+
+impl Default for CameraEase {
+    fn default() -> Self {
+        CameraEase::Linear
+    }
+}
+
+impl CameraEase {
+    /// The eased segment parameter. The curve modes are
+    /// [`Easing::apply`] exactly; `Hold` is 0 across the
+    /// whole segment and 1 at its end, so evaluation AT
+    /// the next key's frame yields that key — the cut.
+    pub fn apply(&self, t: f32) -> f32 {
+        match self {
+            CameraEase::Linear => Easing::Linear.apply(t),
+            CameraEase::Smooth => Easing::Smooth.apply(t),
+            CameraEase::EaseIn => Easing::EaseIn.apply(t),
+            CameraEase::EaseOut => Easing::EaseOut.apply(t),
+            CameraEase::Hold => {
+                if t >= 1.0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+
+    /// The next mode in the camera panel cycle's order.
+    pub fn next(&self) -> CameraEase {
+        match self {
+            CameraEase::Linear => CameraEase::Smooth,
+            CameraEase::Smooth => CameraEase::EaseIn,
+            CameraEase::EaseIn => CameraEase::EaseOut,
+            CameraEase::EaseOut => CameraEase::Hold,
+            CameraEase::Hold => CameraEase::Linear,
+        }
+    }
+
+    /// The serialised / MCP vocabulary (data, the way
+    /// [`Easing::label`] is).
+    pub fn label(&self) -> &'static str {
+        match self {
+            CameraEase::Linear => "linear",
+            CameraEase::Smooth => "smooth",
+            CameraEase::EaseIn => "ease-in",
+            CameraEase::EaseOut => "ease-out",
+            CameraEase::Hold => "hold",
+        }
+    }
+
+    /// Parse a [`CameraEase::label`] (the MCP `set_camera`
+    /// argument form).
+    pub fn from_label(s: &str) -> Option<CameraEase> {
+        match s {
+            "linear" => Some(CameraEase::Linear),
+            "smooth" => Some(CameraEase::Smooth),
+            "ease-in" => Some(CameraEase::EaseIn),
+            "ease-out" => Some(CameraEase::EaseOut),
+            "hold" => Some(CameraEase::Hold),
+            _ => None,
         }
     }
 }
@@ -1248,6 +1552,331 @@ pub struct FxClipEntry {
 /// versions in the same change.
 pub const FORMAT_VERSION_CURRENT: u32 = 1;
 
+/// One chapter of an episode: a titled, half-open authored
+/// frame range `[start_frame, end_frame)` (Roadmap Wave 2,
+/// W2-11 — P-15's episode structure model).
+///
+/// Chapters are the project's EPISODE structure — the unit
+/// the dialogue lane (W2-12), title cards (W2-15) and
+/// chapter-marker export (W2-18) all bind to. The rules
+/// deliberately mirror the timeline's other citizens:
+///
+/// * Frame numbers are AUTHORED frame indices — the same
+///   domain the playhead, camera keys and subtitle cues
+///   speak — and are NOT clamped to the timeline: a chapter
+///   authored past the last frame simply never shows, and
+///   extending the timeline later can bring it into view
+///   (the subtitle-cue posture).
+/// * The list's Vec order IS the episode order. Unlike the
+///   cue list (kept sorted by range), chapters are never
+///   re-sorted by the ops: order is narrative, ranges are
+///   attributes, and `chapter_move` reorders the Vec.
+/// * Overlapping chapters are allowed and gaps are allowed:
+///   [`Project::chapter_at`] returns the FIRST chapter in
+///   episode order covering a frame, and a frame in a gap
+///   belongs to no chapter. Partitioning the timeline is an
+///   authoring choice, not a model invariant.
+/// * Frame ops do not remap chapter ranges (the standing
+///   posture cues also live under — only camera keys are
+///   remapped, since Roadmap Wave 1's IA-RM18-1), and
+///   deleting a chapter never touches frames, cues or any
+///   other content: a chapter is structure, not content.
+///
+/// Every field carries a serde default, so a chapter object
+/// written by a newer or hand-trimmed file still loads.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Chapter {
+    /// The chapter's display title. Stored trimmed; never
+    /// empty or all-whitespace in a chapter the ops
+    /// accepted (see [`Chapter::validate`]).
+    #[serde(default)]
+    pub title: String,
+    /// First authored frame the chapter covers (0-based).
+    #[serde(default)]
+    pub start_frame: usize,
+    /// First authored frame the chapter no longer covers
+    /// (0-based, exclusive). Always `> start_frame` in a
+    /// chapter the ops accepted; may equal the frame count
+    /// (a chapter running to the end of the timeline).
+    #[serde(default)]
+    pub end_frame: usize,
+}
+
+impl Chapter {
+    /// The one validation rule every write path shares:
+    /// the range must be non-empty (`end_frame >
+    /// start_frame`) and the title must contain at least
+    /// one non-whitespace character. Returns the refusal
+    /// reason in the ops' failure voice (frame numbers
+    /// 1-based, as the status line speaks) — the same
+    /// shapes [`crate::subtitles::SubtitleCue::validate`]
+    /// returns, so both timeline citizens refuse alike.
+    pub fn validate(start_frame: usize, end_frame: usize, title: &str) -> Result<(), String> {
+        if end_frame <= start_frame {
+            return Err(format!(
+                "end frame {} must be after start frame {}",
+                end_frame + 1,
+                start_frame + 1
+            ));
+        }
+        if title.trim().is_empty() {
+            return Err("title is empty".to_string());
+        }
+        Ok(())
+    }
+
+    /// Whether `frame` falls in the chapter's half-open
+    /// range. An invalid stored chapter (hand-edited files
+    /// only — every write path refuses one) contains no
+    /// frame, because `end <= start` makes the test
+    /// unsatisfiable: the cue model's read posture.
+    pub fn contains(&self, frame: usize) -> bool {
+        self.start_frame <= frame && frame < self.end_frame
+    }
+}
+
+/// One story-beat marker: a NAME pinned to a single
+/// authored frame (Roadmap Wave 2, W2-19 — P-15's shot
+/// markers). Chapters (above) answer "what section is
+/// this frame in"; a beat marker answers "what MOMENT is
+/// this frame" — the reveal, the joke landing, the turn —
+/// the points an animator marks on the timeline and jumps
+/// between while timing an episode.
+///
+/// The rules deliberately mirror the timeline's other
+/// citizens, with two choices this seat states plainly:
+///
+/// * The frame is an AUTHORED frame index — the same
+///   domain the playhead, camera keys, subtitle cues and
+///   chapters speak — and is NOT clamped to the timeline:
+///   a marker authored past the last frame is stored
+///   verbatim and simply never shows, and extending the
+///   timeline later can bring it into view (the chapter /
+///   cue posture).
+/// * The list is kept sorted by frame by the ops (the cue
+///   list's discipline — cues are "kept sorted by range"),
+///   so list order IS timeline order and the next /
+///   previous queries read in the order the animator
+///   meets the beats. Markers sharing one frame keep
+///   their insertion order among themselves (a stable
+///   sort), and more than one marker may sit on a frame:
+///   one frame can be both the reveal and the joke.
+/// * The NAME is user text and is stored VERBATIM — never
+///   trimmed or normalised by the ops (the seat's
+///   verbatim rule). This is a deliberate divergence from
+///   chapter titles, which are stored trimmed: a beat
+///   name is a label the user typed, and the only refusal
+///   is a name with no visible character at all (see
+///   [`BeatMarker::validate`]). Names are data, not i18n.
+/// * Frame ops do NOT remap beat markers — the standing
+///   no-remap posture subtitle cues and chapters live
+///   under (only camera keys are remapped, since
+///   IA-RM18-1, for reasons specific to camera). Inserting
+///   frames before a beat leaves the marker on its
+///   authored frame number; deleting frames never deletes
+///   a marker. IA-W2-11-4's open remap question governs
+///   {cues, chapters}; if it is ever decided for them,
+///   beat markers must be decided in the same ruling —
+///   this seat does not pre-empt it.
+///
+/// Every field carries a serde default, so a marker object
+/// written by a newer or hand-trimmed file still loads.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BeatMarker {
+    /// The marker's name, stored verbatim as the user
+    /// typed it. Never empty or all-whitespace in a marker
+    /// the ops accepted (see [`BeatMarker::validate`]).
+    #[serde(default)]
+    pub name: String,
+    /// The authored frame the beat sits on (0-based). May
+    /// lie past the end of the timeline (see the type
+    /// docs); never clamped by the ops.
+    #[serde(default)]
+    pub frame: usize,
+}
+
+impl BeatMarker {
+    /// The one validation rule every write path shares:
+    /// the name must contain at least one non-whitespace
+    /// character. That is the ONLY refusal — a passing
+    /// name is stored byte-for-byte as given, surrounding
+    /// whitespace included (the verbatim rule). Returns
+    /// the refusal reason in the ops' failure voice, the
+    /// same shape [`Chapter::validate`] returns for its
+    /// title rule, so both episode citizens refuse alike.
+    pub fn validate(name: &str) -> Result<(), String> {
+        if name.trim().is_empty() {
+            return Err("name is empty".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Which way a [`StoredGuide`] runs (Roadmap Wave 2, W2-05).
+/// A vertical guide is a line of constant x; a horizontal
+/// guide is a line of constant y. The axis is half of the
+/// guide's whole identity — the other half is its position
+/// along the OTHER axis (see [`StoredGuide::position`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuideAxis {
+    /// The guide runs top-to-bottom at a fixed stage x.
+    Vertical,
+    /// The guide runs left-to-right at a fixed stage y.
+    Horizontal,
+}
+
+impl Default for GuideAxis {
+    /// A guide object that names no axis (a `{}` guide in
+    /// a hand-trimmed file) reads as vertical — the axis of
+    /// the first guide most editors seed from their left
+    /// ruler. The choice only affects degenerate stored
+    /// data; every write path names its axis explicitly.
+    fn default() -> Self {
+        GuideAxis::Vertical
+    }
+}
+
+impl GuideAxis {
+    /// Whether this axis runs top-to-bottom (constant x).
+    pub fn is_vertical(self) -> bool {
+        matches!(self, GuideAxis::Vertical)
+    }
+
+    /// The stage coordinate a point's guide-relevant
+    /// component is read from: x for a vertical guide, y
+    /// for a horizontal one. The one place the axis →
+    /// component mapping lives, so hit tests, drag
+    /// sessions and drawing can never disagree about which
+    /// component a guide pins.
+    pub fn coordinate(self, p: V2) -> f32 {
+        if self.is_vertical() {
+            p[0]
+        } else {
+            p[1]
+        }
+    }
+}
+
+/// One user-placed guide line, stored with the project
+/// (Roadmap Wave 2, W2-05 — rulers + stored guides).
+///
+/// The stored-guides counterpart to the composition guides
+/// the stage has always drawn (thirds / frustum / safe /
+/// golden / diagonals): those are DERIVED from the stage or
+/// the camera and live nowhere; a stored guide is AUTHORED
+/// — the user dragged it off a ruler onto a stage
+/// coordinate and expects it in the file, at that
+/// coordinate, on the next open. So it is project data,
+/// edited through the `EditorCore` stored-guide ops (one
+/// undo step per gesture) and drawn by the stage's guides
+/// pass through the same camera transform as everything
+/// else: guides are WORLD-space. Moving the camera (or the
+/// shell's view pan/zoom) moves where a guide appears,
+/// never where it IS.
+///
+/// Shape decisions, each tied to a standing precedent:
+///
+/// * **Position is a stage coordinate, verbatim** — not
+///   normalised to the stage, not clamped to it, not a
+///   screen offset. A guide may sit outside the stage rect
+///   (a margin line at x = −40 is legitimate); it is stored
+///   as authored and simply draws where it lands (the
+///   chapter/cue no-clamp posture, W2-11).
+/// * **The list's order is creation order and is never
+///   sorted** — positions are attributes, not sort keys
+///   (the chapter rule). Rendering and nearest-guide
+///   queries do not care about order; ties in the nearest
+///   query resolve to the earliest-created guide.
+/// * **No per-guide visibility or lock flag.** Visibility
+///   is one shell overlay toggle for the whole family
+///   (the composition guides' footing); a lock would be a
+///   second state machine for a line the user can delete
+///   and re-add in one gesture. Filed as a remainder in
+///   W2-05's findings, not smuggled in here.
+///
+/// Every field carries a serde default, so a guide object
+/// written by a newer or hand-trimmed file still loads,
+/// and a project file with no `stored_guides` key at all
+/// loads with none (see [`Project::stored_guides`]).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StoredGuide {
+    /// Which way the line runs.
+    #[serde(default)]
+    pub axis: GuideAxis,
+    /// The stage coordinate the line sits at, on the axis
+    /// PERPENDICULAR to its run: x for a vertical guide,
+    /// y for a horizontal one. Always finite in a guide
+    /// the ops accepted (see [`StoredGuide::validate`]);
+    /// a non-finite stored value (hand-edited files only)
+    /// is inert — it matches no hit test and its line
+    /// endpoints are non-finite, so the stage pass skips
+    /// it (see [`StoredGuide::endpoints`]).
+    #[serde(default)]
+    pub position: f32,
+}
+
+impl StoredGuide {
+    /// The one validation rule every write path shares:
+    /// the position must be a FINITE stage coordinate.
+    /// NaN would poison every distance comparison the hit
+    /// test makes (all comparisons false, guide ungrabbable
+    /// and undeletable by drag), and an infinite position
+    /// draws nothing while still costing a list slot — both
+    /// are refused at the door, in the ops' failure voice.
+    /// Any finite value, inside or outside the stage, is
+    /// accepted: clamping is not validation's job here.
+    pub fn validate(position: f32) -> Result<(), String> {
+        if position.is_finite() {
+            Ok(())
+        } else {
+            Err("guide position must be a finite stage coordinate".to_string())
+        }
+    }
+
+    /// The line's endpoints in stage coordinates, spanning
+    /// the stage rect on its run axis: a vertical guide at
+    /// x runs (x, 0) → (x, stage_h); a horizontal guide at
+    /// y runs (0, y) → (stage_w, y). Spanning the STAGE
+    /// (not the view) is deliberate: the line is a stage
+    /// annotation like the thirds grid, and the camera
+    /// transform decides which part of it is on screen —
+    /// a guide outside the stage still draws its full line
+    /// at its coordinate, visible whenever the view
+    /// includes that coordinate. `None` when the stored
+    /// position is non-finite (hand-edited files only):
+    /// the read posture for invalid stored data is to draw
+    /// nothing, never to sanitise the value into a
+    /// different guide.
+    pub fn endpoints(&self, stage: [f32; 2]) -> Option<(V2, V2)> {
+        if !self.position.is_finite() {
+            return None;
+        }
+        Some(if self.axis.is_vertical() {
+            ([self.position, 0.0], [self.position, stage[1]])
+        } else {
+            ([0.0, self.position], [stage[0], self.position])
+        })
+    }
+
+    /// The stage point where this guide's drag handle
+    /// sits: on the stage edge its ruler lives on — the
+    /// TOP edge for a vertical guide, the LEFT edge for a
+    /// horizontal one (the edge the guide was dragged out
+    /// of, and the edge dragging it back to deletes it).
+    /// `None` on the same non-finite rule as
+    /// [`StoredGuide::endpoints`].
+    pub fn handle(&self, stage: [f32; 2]) -> Option<V2> {
+        if !self.position.is_finite() {
+            return None;
+        }
+        Some(if self.axis.is_vertical() {
+            [self.position, 0.0]
+        } else {
+            [0.0, self.position]
+        })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
     /// Format version this project was written in (see
@@ -1334,6 +1963,43 @@ pub struct Project {
     /// unscaled, white text over a black backing.
     #[serde(default)]
     pub subtitle_style: crate::subtitles::SubtitleStyle,
+    /// Episode structure: the project's chapters, in
+    /// episode order (see [`Chapter`]). Files saved before
+    /// this field existed carry no value and load with no
+    /// chapters — the serde default absorbs the field, so
+    /// `format_version` stays 1 (the bump rule on
+    /// [`FORMAT_VERSION_CURRENT`]).
+    #[serde(default)]
+    pub chapters: Vec<Chapter>,
+    /// User-placed guide lines, in creation order (see
+    /// [`StoredGuide`]). Files saved before this field
+    /// existed carry no value and load with no guides —
+    /// the serde default absorbs the field, so
+    /// `format_version` stays 1 (the bump rule on
+    /// [`FORMAT_VERSION_CURRENT`]).
+    #[serde(default)]
+    pub stored_guides: Vec<StoredGuide>,
+    /// Chapter title-card settings (see
+    /// [`crate::title_cards`]). Files saved before this
+    /// field existed carry no value and load with the
+    /// defaults — cards OFF, so an existing project's
+    /// exports never change until the user opts in —
+    /// absorbed through the serde default, so
+    /// `format_version` stays 1 (the bump rule on
+    /// [`FORMAT_VERSION_CURRENT`]).
+    #[serde(default)]
+    pub title_cards: crate::title_cards::TitleCardSettings,
+    /// Story-beat markers: named single-frame points on
+    /// the timeline, kept sorted by frame (see
+    /// [`BeatMarker`]). Files saved before this field
+    /// existed carry no value and load with no markers —
+    /// the serde default absorbs the field, so
+    /// `format_version` stays 1 (the bump rule on
+    /// [`FORMAT_VERSION_CURRENT`]). An empty list is not
+    /// serialised at all, so a marker-less project saves
+    /// byte-identically to its pre-W2-19 form.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub beat_markers: Vec<BeatMarker>,
 }
 
 fn default_format_version() -> u32 {
@@ -1412,7 +2078,94 @@ impl Project {
             head_ring_scale: 1.0,
             subtitles: Vec::new(),
             subtitle_style: Default::default(),
+            chapters: Vec::new(),
+            stored_guides: Vec::new(),
+            title_cards: Default::default(),
+            beat_markers: Vec::new(),
         }
+    }
+
+    /// The chapter covering `frame` (an authored frame
+    /// index), when one does: the FIRST chapter in episode
+    /// order whose half-open range holds the frame, so an
+    /// overlap resolves to the earlier chapter and a gap
+    /// resolves to none. Pure query over stored state —
+    /// nothing is re-validated or re-sorted at read.
+    pub fn chapter_at(&self, frame: usize) -> Option<&Chapter> {
+        self.chapters.iter().find(|c| c.contains(frame))
+    }
+
+    /// The episode-order index of the chapter covering
+    /// `frame` — [`Project::chapter_at`]'s positional twin,
+    /// for callers (timeline navigation, the dialogue lane)
+    /// that address chapters by index.
+    pub fn chapter_index_at(&self, frame: usize) -> Option<usize> {
+        self.chapters.iter().position(|c| c.contains(frame))
+    }
+
+    /// The first beat marker (in timeline order) sitting
+    /// exactly on `frame`, when one does. Pure query over
+    /// stored state — nothing is validated or re-sorted at
+    /// read, so a hand-edited file's list order is what it
+    /// is (the ops keep the list sorted by frame; the read
+    /// never trusts or repairs that).
+    pub fn beat_marker_at(&self, frame: usize) -> Option<&BeatMarker> {
+        self.beat_markers.iter().find(|m| m.frame == frame)
+    }
+
+    /// The nearest beat-marker frame strictly AFTER
+    /// `from` — the target of a next-beat jump. A scan,
+    /// not a binary search, for the [`Project::beat_marker_at`]
+    /// reason: the answer is correct whatever order a
+    /// hand-edited file stored the list in. `None` when no
+    /// marker lies ahead — jumps never wrap (the
+    /// `goto_next_keyframe` precedent).
+    pub fn next_beat_frame(&self, from: usize) -> Option<usize> {
+        self.beat_markers
+            .iter()
+            .map(|m| m.frame)
+            .filter(|&f| f > from)
+            .min()
+    }
+
+    /// The nearest beat-marker frame strictly BEFORE
+    /// `from` — [`Project::next_beat_frame`]'s mirror.
+    pub fn prev_beat_frame(&self, from: usize) -> Option<usize> {
+        self.beat_markers
+            .iter()
+            .map(|m| m.frame)
+            .filter(|&f| f < from)
+            .max()
+    }
+
+    /// The stored guide nearest to stage point `p`, when
+    /// one lies within `tolerance` stage units of it
+    /// (Roadmap Wave 2, W2-05): distance is measured on
+    /// each guide's own perpendicular axis only — a
+    /// vertical guide is near when p's x is near its
+    /// position, wherever p's y is, because the line runs
+    /// the whole stage height (and vice versa). The
+    /// smallest distance wins; an exact tie resolves to
+    /// the earliest-created guide (list order). Guides
+    /// with a non-finite stored position never match:
+    /// every comparison against NaN is false, so the
+    /// inert-guide read posture falls out of the maths
+    /// rather than a special case. Pure query — the stage
+    /// drag session's hit test, nothing is validated or
+    /// re-sorted at read.
+    pub fn nearest_stored_guide(&self, p: V2, tolerance: f32) -> Option<usize> {
+        let mut best: Option<(usize, f32)> = None;
+        for (i, g) in self.stored_guides.iter().enumerate() {
+            let d = (g.axis.coordinate(p) - g.position).abs();
+            let better = match best {
+                None => true,
+                Some((_, bd)) => d < bd,
+            };
+            if d <= tolerance && better {
+                best = Some((i, d));
+            }
+        }
+        best.map(|(i, _)| i)
     }
 
     /// The head ring radius for this project, in stage
@@ -1682,8 +2435,30 @@ impl Project {
         self.frame_time_at_beats(seconds * self.fps.max(1.0))
     }
 
+    /// Interpolate a zoom factor in LOG space (Roadmap
+    /// Wave 2, W2-32): a 1×→4× dolly then moves at a
+    /// constant perceived rate — its midpoint is 2×, where
+    /// the pre-W2-32 linear lerp's was 2.5×. This is the
+    /// one announced timing change for EXISTING projects:
+    /// endpoints and key frames are exact; only a zoom
+    /// move's mid-segment values move. Non-positive stored
+    /// zooms (reachable only from hand-edited files — every
+    /// write path validates positive) fall back to the
+    /// linear lerp rather than poisoning the frame.
+    fn lerp_zoom(a: f32, b: f32, t: f32) -> f32 {
+        if a > 0.0 && b > 0.0 {
+            (a.ln() + (b.ln() - a.ln()) * t).exp()
+        } else {
+            a + (b - a) * t
+        }
+    }
+
     /// Camera (centre x, centre y, zoom) at a fractional frame time.
-    /// With no keys the camera frames the whole stage.
+    /// With no keys the camera frames the whole stage. Within
+    /// a segment the starting key's [`CameraKey::easing`]
+    /// warps the segment parameter (Roadmap Wave 2, W2-32):
+    /// pan lerps on the eased `t`, zoom lerps in log space
+    /// on it (see [`Project::lerp_zoom`]).
     pub fn camera_at(&self, frame: f32) -> (f32, f32, f32) {
         let default = (self.stage[0] / 2.0, self.stage[1] / 2.0, 1.0);
         if let Some(fi) = self.camera_follow {
@@ -1714,10 +2489,11 @@ impl Project {
             let (a, b) = (w[0], w[1]);
             if frame >= a.frame as f32 && frame <= b.frame as f32 {
                 let t = (frame - a.frame as f32) / (b.frame - a.frame).max(1) as f32;
+                let t = a.easing.apply(t);
                 return (
                     a.x + (b.x - a.x) * t,
                     a.y + (b.y - a.y) * t,
-                    a.zoom + (b.zoom - a.zoom) * t,
+                    Self::lerp_zoom(a.zoom, b.zoom, t),
                 );
             }
         }
@@ -1725,7 +2501,9 @@ impl Project {
     }
 
     /// Interpolated camera rotation (degrees) at `frame`, using the
-    /// shortest angular path between keys. 0 when no keys exist.
+    /// shortest angular path between keys, warped by the starting
+    /// key's [`CameraKey::easing`] (Roadmap Wave 2, W2-32). 0 when
+    /// no keys exist.
     pub fn camera_angle_at(&self, frame: f32) -> f32 {
         if self.camera.is_empty() {
             return 0.0;
@@ -1744,6 +2522,7 @@ impl Project {
             let (a, b) = (w[0], w[1]);
             if frame >= a.frame as f32 && frame <= b.frame as f32 {
                 let t = (frame - a.frame as f32) / (b.frame - a.frame).max(1) as f32;
+                let t = a.easing.apply(t);
                 let d = norm_deg(b.angle - a.angle);
                 return norm_deg(a.angle + d * t);
             }
@@ -1769,7 +2548,8 @@ impl Project {
             let (a, b) = (w[0], w[1]);
             if frame >= a.frame as f32 && frame <= b.frame as f32 {
                 let t = (frame - a.frame as f32) / (b.frame - a.frame).max(1) as f32;
-                return a.zoom + (b.zoom - a.zoom) * t;
+                let t = a.easing.apply(t);
+                return Self::lerp_zoom(a.zoom, b.zoom, t);
             }
         }
         1.0
@@ -1782,7 +2562,7 @@ impl Project {
             k.y = y;
             k.zoom = zoom;
         } else {
-            self.camera.push(CameraKey { frame, x, y, zoom, angle: 0.0 });
+            self.camera.push(CameraKey { frame, x, y, zoom, angle: 0.0, easing: CameraEase::Linear });
             self.camera.sort_by_key(|k| k.frame);
         }
     }
@@ -2124,6 +2904,51 @@ mod tests {
         node.max_angle = Some(-30.0);
         assert_eq!(node.clamp_angle(0.0), -30.0);
         assert_eq!(node.clamp_angle(-90.0), -90.0);
+    }
+
+    #[test]
+    fn limit_spans_partition_matches_clamp_angle() {
+        // Roadmap Wave 2 (W2-27): the display partition is
+        // the clamp's own — an angle sits in an allowed
+        // span iff `clamp_angle` returns it unchanged, and
+        // the two families tile the circle (sweeps sum to
+        // 360). Sampled at every whole degree so the span
+        // endpoints themselves are exercised.
+        let cases: [(Option<f32>, Option<f32>); 7] = [
+            (Some(-10.0), Some(160.0)),
+            (Some(-160.0), Some(10.0)),
+            (Some(170.0), Some(-170.0)),
+            (Some(30.0), None),
+            (None, Some(-30.0)),
+            (Some(45.0), Some(45.0)),
+            (Some(-180.0), Some(180.0)),
+        ];
+        for (min, max) in cases {
+            let mut node = unpinned_node();
+            node.min_angle = min;
+            node.max_angle = max;
+            let spans = node.limit_spans().expect("limits are set");
+            assert!(
+                (spans.allowed_degrees() + spans.forbidden_degrees() - 360.0).abs() < 0.001,
+                "case {min:?}/{max:?} tiles the circle"
+            );
+            let mut v = -180.0;
+            while v <= 180.0 {
+                let inside = spans.allowed.iter().any(|(a, b)| v >= *a && v <= *b);
+                assert_eq!(node.clamp_angle(v) == v, inside, "case {min:?}/{max:?} at {v}");
+                v += 1.0;
+            }
+        }
+        // No limits: no partition.
+        assert!(unpinned_node().limit_spans().is_none());
+        assert!(limit_spans(None, None).is_none());
+        // Bounds normalise like the clamp's: 190° is -170°.
+        let spans = limit_spans(Some(190.0), Some(200.0)).expect("limits are set");
+        assert_eq!(spans.allowed, vec![(-170.0, -160.0)]);
+        // A non-finite bound reads as open (display
+        // sanitisation; the clamp is untouched).
+        let spans = limit_spans(Some(f32::NAN), Some(90.0)).expect("one bound stands");
+        assert_eq!(spans.allowed, vec![(-180.0, 90.0)]);
     }
 
     #[test]
@@ -2715,6 +3540,103 @@ mod audio_gain_tests {
         let back: FxClipEntry = serde_json::from_str(&json).unwrap();
         assert!(back.hidden);
     }
+
+    // ---- Camera easing (Roadmap Wave 2, W2-32; RM18 P-6a) ----
+
+    fn cam_key(frame: usize, x: f32, zoom: f32, easing: CameraEase) -> CameraKey {
+        CameraKey { frame, x, y: 0.0, zoom, angle: 0.0, easing }
+    }
+
+    #[test]
+    fn camera_key_without_easing_loads_linear() {
+        // The pre-P-6a file shape: no `easing` key at all.
+        let key: CameraKey = serde_json::from_str(
+            r#"{"frame": 2, "x": 300.0, "y": 250.0, "zoom": 1.5, "angle": 33.0}"#,
+        )
+        .unwrap();
+        assert_eq!(key.easing, CameraEase::Linear);
+        // The current writer's shape round-trips a
+        // non-default mode.
+        let json = serde_json::to_string(&cam_key(0, 0.0, 1.0, CameraEase::Hold)).unwrap();
+        let back: CameraKey = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.easing, CameraEase::Hold);
+    }
+
+    #[test]
+    fn camera_zoom_interpolates_in_log_space() {
+        let mut p = Project::new_demo();
+        p.camera = vec![
+            cam_key(0, 0.0, 1.0, CameraEase::Linear),
+            cam_key(10, 0.0, 4.0, CameraEase::Linear),
+        ];
+        // Endpoints are exact — keys never move.
+        assert_eq!(p.camera_at(0.0).2, 1.0);
+        assert_eq!(p.camera_at(10.0).2, 4.0);
+        // The midpoint of a 1×→4× dolly is 2× in log space
+        // (the pre-W2-32 linear lerp gave 2.5×) — the one
+        // announced timing change for existing projects.
+        let mid = p.camera_at(5.0).2;
+        assert!((mid - 2.0).abs() < 1e-4, "log midpoint: {mid}");
+        // Eased: EaseIn at t = 0.5 warps the parameter to
+        // 0.25, so the zoom is 4^0.25.
+        p.camera[0].easing = CameraEase::EaseIn;
+        let eased = p.camera_at(5.0).2;
+        assert!((eased - 4f32.powf(0.25)).abs() < 1e-4, "eased log zoom: {eased}");
+    }
+
+    #[test]
+    fn camera_easing_warps_pan_and_angle() {
+        let mut p = Project::new_demo();
+        p.camera = vec![
+            cam_key(0, 0.0, 1.0, CameraEase::Smooth),
+            cam_key(10, 100.0, 1.0, CameraEase::Linear),
+        ];
+        p.camera[1].angle = 90.0;
+        // Smooth's midpoint equals Linear's (0.5) for both
+        // pan and the shortest-path angle lerp...
+        assert_eq!(p.camera_at(5.0).0, 50.0);
+        assert_eq!(p.camera_angle_at(5.0), 45.0);
+        // ...but its quarter (smoothstep(0.25) = 0.15625)
+        // trails Linear's 25.
+        assert_eq!(p.camera_at(2.5).0, 15.625);
+        // EaseIn's quarter is 0.0625 of the move.
+        p.camera[0].easing = CameraEase::EaseIn;
+        assert_eq!(p.camera_at(2.5).0, 6.25);
+    }
+
+    #[test]
+    fn camera_hold_keeps_the_start_value_then_cuts() {
+        let mut p = Project::new_demo();
+        p.camera = vec![
+            cam_key(0, 10.0, 1.0, CameraEase::Hold),
+            cam_key(10, 100.0, 4.0, CameraEase::Linear),
+        ];
+        p.camera[1].angle = 90.0;
+        // Anywhere inside the segment: the start key's
+        // values verbatim — zoom included, no log drift.
+        assert_eq!(p.camera_at(9.999), (10.0, 0.0, 1.0));
+        assert_eq!(p.camera_angle_at(9.999), 0.0);
+        // At the next key's frame: the cut.
+        assert_eq!(p.camera_at(10.0), (100.0, 0.0, 4.0));
+        assert_eq!(p.camera_angle_at(10.0), 90.0);
+    }
+
+    #[test]
+    fn camera_ease_cycle_and_vocabulary_round_trip() {
+        let order = [
+            CameraEase::Linear,
+            CameraEase::Smooth,
+            CameraEase::EaseIn,
+            CameraEase::EaseOut,
+            CameraEase::Hold,
+        ];
+        for (i, e) in order.iter().enumerate() {
+            assert_eq!(e.next(), order[(i + 1) % order.len()]);
+            assert_eq!(CameraEase::from_label(e.label()), Some(*e));
+        }
+        assert_eq!(CameraEase::from_label("bounce"), None);
+        assert_eq!(CameraEase::default(), CameraEase::Linear);
+    }
 }
 
 // ---- Wave 10 scatter data model ----
@@ -2799,7 +3721,8 @@ mod scatter_wave10_tests {
 mod mcp_roundtrip_wave11_tests {
     use crate::graph::{Channel, ChannelTarget, Interp, Key};
     use crate::model::{
-        AudioClip, CameraKey, CapKind, ClipDef, ClipLoop, Easing, FigureDef, Frame, FxClipEntry,
+        AudioClip, CameraEase, CameraKey, CapKind, ClipDef, ClipLoop, Easing, FigureDef, Frame,
+        FxClipEntry,
         ImageAsset, InstanceKey, ParticleEvent, ParticleKind, Pose, Project, SegmentMedia, Shape,
         SprayMark, SpriteInstance, Stroke, TextInstance,
     };
@@ -2822,13 +3745,14 @@ mod mcp_roundtrip_wave11_tests {
         project.tween_playback = true;
         project.easing = Easing::EaseIn;
         project.camera_follow = Some(0);
-        // Camera: set_camera (incl. the angle arg).
+        // Camera: set_camera (incl. the angle and easing args).
         project.camera.push(CameraKey {
             frame: 2,
             x: 300.0,
             y: 250.0,
             zoom: 1.5,
             angle: 33.0,
+            easing: CameraEase::Hold,
         });
         // Figure flags: layers (hidden / locked / opacity),
         // figure_set_color, clip assignment.
@@ -3016,13 +3940,14 @@ mod mcp_roundtrip_wave11_tests {
         assert!(back.tween_playback);
         assert_eq!(back.easing, Easing::EaseIn);
         assert_eq!(back.camera_follow, Some(0));
-        // Camera key, angle included.
+        // Camera key, angle and easing included.
         assert_eq!(back.camera.len(), 1);
         let key = &back.camera[0];
         assert_eq!(
             (key.frame, key.x, key.y, key.zoom, key.angle),
             (2, 300.0, 250.0, 1.5, 33.0)
         );
+        assert_eq!(key.easing, CameraEase::Hold);
         // Figure flags + node fields.
         let fig = &back.figures[0];
         assert!(fig.hidden && fig.locked);
@@ -3139,11 +4064,95 @@ mod mcp_roundtrip_wave11_tests {
         let pose = Pose {
             root: [123.0, 456.0],
             angles: vec![0.0, 90.0, -45.5, 180.0],
+            sx: 1.0,
+            sy: 1.0,
         };
         let json = serde_json::to_string(&pose).unwrap();
         let back: Pose = serde_json::from_str(&json).unwrap();
         assert_eq!(back.root, pose.root);
         assert_eq!(back.angles, pose.angles);
+    }
+
+    #[test]
+    fn pose_scale_serde_defaults_skips_and_round_trips() {
+        // W2-31 (P-5b): a pre-change pose JSON (no scale
+        // fields) loads at scale 1.0; an unscaled pose
+        // serialises WITHOUT the fields (byte-identical to
+        // the pre-change shape); a squashed pose round-trips
+        // its factors exactly.
+        let legacy: Pose =
+            serde_json::from_str(r#"{"root":[10.0,20.0],"angles":[0.0,90.0]}"#).unwrap();
+        assert_eq!((legacy.sx, legacy.sy), (1.0, 1.0));
+        let plain = serde_json::to_string(&legacy).unwrap();
+        assert!(!plain.contains("sx"), "unscaled pose serialised scale: {plain}");
+        assert!(!plain.contains("sy"), "unscaled pose serialised scale: {plain}");
+        let squashed = Pose { root: [10.0, 20.0], angles: vec![0.0], sx: 0.8, sy: 1.25 };
+        let json = serde_json::to_string(&squashed).unwrap();
+        assert!(json.contains("\"sx\":0.8"), "squashed pose lost sx: {json}");
+        let back: Pose = serde_json::from_str(&json).unwrap();
+        assert_eq!((back.sx, back.sy), (0.8, 1.25));
+    }
+
+    #[test]
+    fn evaluate_applies_pose_scale_about_the_root() {
+        // W2-31 (P-5b): evaluate scales every joint offset
+        // from the root per axis; the root itself never
+        // moves; an identity pose evaluates exactly as the
+        // unscaled FK.
+        let def = FigureDef::humanoid();
+        let mut pose = def.rest_pose([400.0, 300.0]);
+        let plain = evaluate(&def, &pose);
+        pose.sx = 2.0;
+        pose.sy = 0.5;
+        let scaled = evaluate(&def, &pose);
+        assert_eq!(scaled[0], [400.0, 300.0], "the root moved under its own scale");
+        for (i, (p, s)) in plain.iter().zip(scaled.iter()).enumerate() {
+            let expect = [
+                400.0 + (p[0] - 400.0) * 2.0,
+                300.0 + (p[1] - 300.0) * 0.5,
+            ];
+            assert!(
+                (s[0] - expect[0]).abs() < 1e-3 && (s[1] - expect[1]).abs() < 1e-3,
+                "node {i}: scaled {s:?}, expected {expect:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pose_lerp_interpolates_scale_in_log_space() {
+        // W2-31 (P-5b): the midpoint of 0.5 and 2.0 is the
+        // geometric mean 1.0, not the arithmetic 1.25; at
+        // the identity the log lerp agrees with the old
+        // behaviour exactly.
+        let a = Pose { root: [0.0, 0.0], angles: vec![0.0], sx: 0.5, sy: 0.25 };
+        let b = Pose { root: [0.0, 0.0], angles: vec![0.0], sx: 2.0, sy: 4.0 };
+        let mid = a.lerp(&b, 0.5);
+        assert!((mid.sx - 1.0).abs() < 1e-6, "log midpoint sx = {}", mid.sx);
+        assert!((mid.sy - 1.0).abs() < 1e-6, "log midpoint sy = {}", mid.sy);
+        let one = Pose { root: [0.0, 0.0], angles: vec![0.0], sx: 1.0, sy: 1.0 };
+        let same = one.lerp(&one.clone(), 0.37);
+        assert_eq!((same.sx, same.sy), (1.0, 1.0));
+    }
+
+    #[test]
+    fn pose_scale_sanitise_neutralises_garbage_at_read() {
+        // W2-31 (P-5b): the limits pass scoped to the new
+        // fields — non-finite stored factors read as 1.0,
+        // finite ones clamp into [0.25, 4.0], and evaluation
+        // of a garbage pose can never produce non-finite
+        // positions. The stored bytes are NOT rewritten.
+        assert_eq!(sanitise_pose_scale(f32::NAN), 1.0);
+        assert_eq!(sanitise_pose_scale(f32::INFINITY), 1.0);
+        assert_eq!(sanitise_pose_scale(0.1), POSE_SCALE_MIN);
+        assert_eq!(sanitise_pose_scale(9.0), POSE_SCALE_MAX);
+        assert_eq!(sanitise_pose_scale(1.5), 1.5);
+        let def = FigureDef::humanoid();
+        let mut pose = def.rest_pose([100.0, 100.0]);
+        pose.sx = f32::NAN;
+        pose.sy = 100.0;
+        let pos = evaluate(&def, &pose);
+        assert!(pos.iter().all(|p| p[0].is_finite() && p[1].is_finite()));
+        assert!(pose.sx.is_nan(), "evaluate rewrote the stored value");
     }
 }
 
@@ -4023,6 +5032,8 @@ mod wave_y_p10_setup_pose_tests {
         Pose {
             root: [480.0, 470.0],
             angles,
+            sx: 1.0,
+            sy: 1.0,
         }
     }
 
@@ -4152,6 +5163,8 @@ mod wave_y_p10_setup_pose_tests {
                 let pose = &f.poses[0];
                 let off = Pose {
                     root: pose.root,
+                    sx: 1.0,
+                    sy: 1.0,
                     angles: pose
                         .angles
                         .iter()
@@ -4171,6 +5184,8 @@ mod wave_y_p10_setup_pose_tests {
             let pose = &f.poses[0];
             let off = Pose {
                 root: pose.root,
+                sx: 1.0,
+                sy: 1.0,
                 angles: pose
                     .angles
                     .iter()
@@ -4267,6 +5282,8 @@ mod wave_y_p10_setup_pose_tests {
         let short = Pose {
             root: [0.0, 0.0],
             angles: vec![0.0; 2],
+            sx: 1.0,
+            sy: 1.0,
         };
         assert!(p.set_rest_from_pose(0, &short, SetRestMode::Rebase).is_none());
         let mut nan = good.clone();

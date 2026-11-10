@@ -132,6 +132,46 @@
 //!   stepper presses away on a figure built another
 //!   way. Stored poses are never rewritten by a limit —
 //!   enforcement binds solving, not data.
+//! * Limit arc display (Roadmap Wave 2, W2-27) →
+//!   `format_limit_arc` / `toggle_limit_arcs` (this
+//!   module), under the preset row: while the node
+//!   carries a limit, a readout line (key
+//!   `seg-lim-arc-readout`) names the allowed/blocked
+//!   sweep from the model's own partition
+//!   (`model::limit_spans` — the arc `clamp_angle`
+//!   enforces, so the line and the stage drawing agree
+//!   by construction), and a kit toggle row (key
+//!   `seg-lim-arc-toggle`, literal label "Limit arc on
+//!   stage" — the i18n adoption is IA-W2-27-3) flips
+//!   `State::limit_arcs`, the shell flag the stage's
+//!   limit-arc pass reads (IA-W2-27-1). Display only:
+//!   neither control writes the project, and no
+//!   set-rest clamp is built — that stays the standing
+//!   IA-AA9-1 user decision.
+//! * Rig properties (Roadmap Wave 2, W2-26 — RM19 R6)
+//!   — keys `seg-node-name` / `seg-node-head` /
+//!   `seg-node-ik-end` / `seg-bend-side-neg` /
+//!   `seg-bend-side-pos`, mounted directly under the
+//!   header cluster: the constructor-only `NodeDef`
+//!   properties (name, head, IK end, bend side) become
+//!   editable. The name field is a `TextEdit` session
+//!   homed in [`SegmentNumberState`] (`name_edit`),
+//!   seeded by [`sync_segment_name_field`] from the
+//!   poll sync ([`sync_number_edits`]); Enter submits
+//!   to the core's `set_node_name` (the trim and the
+//!   empty refusal live there). Head / IK end are kit
+//!   toggle rows onto `set_node_head` /
+//!   `set_node_ik_end` — the IK chain refusal is the
+//!   core's standing sentence — and Bend side is a
+//!   −/+ pair onto `set_node_bend_side`, writing
+//!   `NodeDef.bend`'s ±1.0 sign: NOT the frame bend
+//!   the Bend stepper row below steps. Every setter
+//!   is validate-first in the core: exactly one
+//!   `snapshot_labeled` per real change, a no-change
+//!   write spends nothing, locked figures refuse in
+//!   the standing sentence. The four labels are
+//!   literals this wave (the i18n splice RM19 priced
+//!   as IA-RM19-8 is filed as IA-W2-26-2).
 //! * Cycle bend → `cycle_bend()` (editor.rs:1106) — key
 //!   `cycle-bend`. There is no ± bend op in the core; bend
 //!   steps 0 → +0.35 → +0.7 → −0.35 → −0.7 rad per frame.
@@ -406,9 +446,9 @@
 //! values are model vocabulary, not labels.
 
 use rune::tok::{type_, Theme};
-use rune::{row, text, Color, El};
+use rune::{row, text, Color, El, TextEdit, Tx};
 use stykanimate_rs::editor::EditorCore;
-use stykanimate_rs::model::{angle_of, ImageAsset, NodeDef, SegmentMedia, Shape};
+use stykanimate_rs::model::{angle_of, limit_spans, ImageAsset, NodeDef, SegmentMedia, Shape};
 
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
@@ -537,6 +577,19 @@ pub struct InspectorSegmentState {
     pub name: String,
     /// True for the figure's origin node (no parent segment).
     pub is_root: bool,
+    /// The node's head flag (`NodeDef::head`) — the
+    /// value behind the Head toggle (Roadmap Wave 2,
+    /// W2-26, RM19 R6).
+    pub head: bool,
+    /// The node's IK-end flag (`NodeDef::ik_end`) — the
+    /// value behind the IK end toggle (W2-26).
+    pub ik_end: bool,
+    /// The node's preferred IK bend side
+    /// (`NodeDef::bend`, a ±1.0 sign by convention) —
+    /// the value behind the Bend side −/+ pair (W2-26).
+    /// NOT the current frame's bend (that is
+    /// `bend_deg`, the Bend readout's quantity).
+    pub bend_side: f32,
     /// Segment length (definition units).
     pub length: f32,
     /// Segment thickness (definition units).
@@ -717,7 +770,7 @@ pub fn rotate_selected(core: &mut EditorCore, delta_deg: f32) {
         );
         return;
     }
-    core.snapshot();
+    core.snapshot_labeled("Rotate segment");
     let pose = &mut core.project.frames[core.current].poses[fi];
     pose.angles[ni] += delta_deg;
     let new = pose.angles[ni];
@@ -784,7 +837,7 @@ pub fn bend_selected(core: &mut EditorCore, delta_rad: f32) {
         .copied()
         .unwrap_or(0.0);
     let new = (cur + delta_rad).clamp(-BEND_LIMIT_RAD, BEND_LIMIT_RAD);
-    core.snapshot();
+    core.snapshot_labeled("Bend segment");
     let frame = &mut core.project.frames[core.current];
     if frame.bends.len() <= fi {
         frame.bends.resize(fi + 1, Vec::new());
@@ -920,7 +973,7 @@ pub fn set_angle_selected(core: &mut EditorCore, deg: f32) {
     let Some((fi, ni)) = angle_write_target(core) else {
         return;
     };
-    core.snapshot();
+    core.snapshot_labeled("Set segment angle");
     core.project.frames[core.current].poses[fi].angles[ni] = deg;
     core.status = format!(
         "Segment {} angle {} on frame {}.",
@@ -1010,7 +1063,7 @@ pub fn set_bend_selected(core: &mut EditorCore, rad: f32) {
     let Some((fi, ni, nodes)) = bend_write_target(core) else {
         return;
     };
-    core.snapshot();
+    core.snapshot_labeled("Set segment bend");
     let new = bend_write(core, fi, ni, nodes, rad);
     core.status = format!(
         "Segment {} bend {} on frame {}.",
@@ -1070,6 +1123,7 @@ fn scrub_write(
     value: f32,
     current: f32,
     write: fn(&mut EditorCore, f32) -> bool,
+    label: &str,
 ) {
     if gesture.open && value == gesture.press {
         write(core, value);
@@ -1080,7 +1134,7 @@ fn scrub_write(
         if value == current {
             return;
         }
-        core.snapshot();
+        core.snapshot_labeled(label);
         gesture.press = current;
         gesture.open = true;
     }
@@ -1097,11 +1151,12 @@ fn scrub_finish(
     current: f32,
     write: fn(&mut EditorCore, f32) -> bool,
     status: String,
+    label: &str,
 ) {
     if gesture.open {
         write(core, value);
     } else if value != current {
-        core.snapshot();
+        core.snapshot_labeled(label);
         write(core, value);
     } else {
         return;
@@ -1123,6 +1178,33 @@ pub const ROT_FIELD_KEY: &str = "seg-rot-value";
 /// See [`LEN_FIELD_KEY`].
 pub const BEND_FIELD_KEY: &str = "seg-bend-value";
 
+/// Persistent edit state for the Node name field
+/// (Roadmap Wave 2, W2-26 — RM19 R6): the figure
+/// rename field's discipline
+/// (`inspector_figure::InspectorFigureEditState`) for
+/// the selected NODE — a half-typed name must survive
+/// re-renders, so the buffer cannot be derived from
+/// the core each frame. Homed inside
+/// [`SegmentNumberState`] (the segment inspector's
+/// existing `State` home), so no new `State` field —
+/// and none of the shell's full `State` literals —
+/// had to move.
+#[derive(Clone, Debug, Default)]
+pub struct SegmentNameEditState {
+    /// The name field's text buffer.
+    pub name: TextEdit,
+    /// The (figure, node) `name` was last synced from,
+    /// so a selection change re-syncs the field even
+    /// when two nodes happen to share a name.
+    pub for_node: Option<(usize, usize)>,
+}
+
+impl SegmentNameEditState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 /// The segment inspector's stored number-field state
 /// (Roadmap Wave 1, F-3): one [`design::NumberEdit`]
 /// session per adopted field, plus the scrub
@@ -1130,7 +1212,9 @@ pub const BEND_FIELD_KEY: &str = "seg-bend-value";
 /// (Rotate, Bend — Length/Thickness scrub through the
 /// core's `*_quiet` setters and need none). Homed on
 /// `State` by the integrator (IA-RM4-2), like the
-/// camera panel's state.
+/// camera panel's state. Roadmap Wave 2 (W2-26) adds
+/// the Node name field's session ([`SegmentNameEditState`])
+/// to the same home.
 #[derive(Clone, Debug, Default)]
 pub struct SegmentNumberState {
     /// Length field session (`insp-len-value`).
@@ -1145,6 +1229,9 @@ pub struct SegmentNumberState {
     pub rot_scrub: ScrubGesture,
     /// Bend scrub bookkeeping.
     pub bend_scrub: ScrubGesture,
+    /// Node name field session (`seg-node-name`,
+    /// W2-26).
+    pub name_edit: SegmentNameEditState,
 }
 
 /// The Length field's contract: the op family's own
@@ -1202,11 +1289,78 @@ pub fn bend_spec() -> design::NumSpec {
 /// number-field session the framework has blurred —
 /// Escape lands here as a revert, per the kit's
 /// session rules ([`design::NumberEdit::reconcile`]).
+/// Roadmap Wave 2 (W2-26): the same poll call also
+/// keeps the Node name field seeded ([`sync_segment_name_field`]),
+/// so the name session needs no new poll line.
 pub fn sync_number_edits(s: &mut State) {
     s.segment_numbers.len_edit.reconcile();
     s.segment_numbers.th_edit.reconcile();
     s.segment_numbers.rot_edit.reconcile();
     s.segment_numbers.bend_edit.reconcile();
+    sync_segment_name_field(&s.core, &mut s.segment_numbers.name_edit);
+}
+
+/// Keep the Node name field showing the selected
+/// node's current name — `inspector_figure::
+/// sync_name_field`'s focus-guarded pattern, keyed on
+/// the (figure, node) pair: while the field is focused
+/// it is never touched (a sync mid-typing would eat
+/// keystrokes); otherwise the field is re-seeded
+/// whenever the selection moved or the node's name
+/// changed elsewhere (a rig op, a load, an undo).
+pub fn sync_segment_name_field(core: &EditorCore, edit: &mut SegmentNameEditState) {
+    if edit.name.focused {
+        return;
+    }
+    let Some(st) = segment_state(core) else {
+        edit.for_node = None;
+        return;
+    };
+    if edit.for_node != Some((st.figure, st.node)) || edit.name.text != st.name {
+        edit.name.replace_text(st.name);
+        edit.for_node = Some((st.figure, st.node));
+    }
+}
+
+/// Enter (submit) in the Node name field: apply the
+/// field's text to the selected node through the
+/// core's setter (trim, empty refusal and the one
+/// snapshot live there — `EditorCore::set_node_name`).
+fn apply_segment_name(s: &mut State) {
+    let raw = s.segment_numbers.name_edit.name.text.clone();
+    let fi = s.core.selected_figure;
+    if let Some(ni) = s.core.selected_node {
+        s.core.set_node_name(fi, ni, &raw);
+    }
+}
+
+/// The Node name row (W2-26): label, the field, and
+/// no button — RM19 §5 priced exactly the field key
+/// for the name (Enter submits, the `on_submit`
+/// below); the figure rename's pencil button key was
+/// not in R6's price. The field binds
+/// [`SegmentNumberState`]'s `name_edit` buffer;
+/// [`sync_segment_name_field`] keeps it seeded.
+fn node_name_row(s: &State, t: &Theme) -> El {
+    row()
+        .w_full()
+        .center_y()
+        .gap(8.0)
+        .child(text("Node name").font(type_::LABEL).color(t.text_secondary))
+        .child(
+            design::text_field(
+                &s.segment_numbers.name_edit.name,
+                type_::BODY,
+                s.segment_numbers.name_edit.name.focused,
+                t,
+            )
+            .key("seg-node-name")
+            .single_line()
+            .grow(1.0)
+            .color(t.text)
+            .on_edit(|s: &mut State| &mut s.segment_numbers.name_edit.name)
+            .on_submit(|s: &mut State, _tx: &mut Tx| apply_segment_name(s)),
+        )
 }
 
 /// Format a bend in degrees as the readout line's
@@ -1370,7 +1524,10 @@ pub fn adjust_joint_limit(core: &mut EditorCore, bound: LimitBound, delta: f32) 
     if cur == Some(new) {
         return;
     }
-    core.snapshot();
+    core.snapshot_labeled(match bound {
+        LimitBound::Min => "Joint limit minimum",
+        LimitBound::Max => "Joint limit maximum",
+    });
     // Validated above; the `if let` is unreachable
     // armour, not an expected path.
     if let Some(node) = core
@@ -1401,6 +1558,37 @@ pub fn adjust_joint_limit(core: &mut EditorCore, bound: LimitBound, delta: f32) 
 /// Same discipline as `adjust_joint_limit`: validate
 /// → ONE `snapshot()` → mutate → status; refusals
 /// are status-only; and clearing a node that carries
+/// Flip the stage's joint-limit arc display
+/// (`State::limit_arcs`, Roadmap Wave 2, W2-27): the
+/// shell feeds the flag to the stage's overlay, which
+/// draws the selected node's limit partition at its
+/// joint (see `stage_view::limit_arc_prims`). Shell
+/// view state only — no snapshot, no status, no project
+/// write: the guides toggles' footing in
+/// settings_popover.
+pub fn toggle_limit_arcs(s: &mut State) {
+    s.limit_arcs = !s.limit_arcs;
+}
+
+/// The Limit arc readout line's text (Roadmap Wave 2,
+/// W2-27): the selected node's allowed/blocked sweep in
+/// whole degrees, from the model's own partition
+/// ([`limit_spans`] — the arc `clamp_angle` enforces, so
+/// the line and the stage drawing can never disagree).
+/// `None` while the node carries no limits — the line
+/// then does not render. Literal English like this
+/// wave's other new panel strings (the W2-26/W2-33
+/// precedent); the i18n template adoption is
+/// IA-W2-27-3.
+pub fn format_limit_arc(min_angle: Option<f32>, max_angle: Option<f32>) -> Option<String> {
+    let spans = limit_spans(min_angle, max_angle)?;
+    Some(format!(
+        "Limit arc: {}° allowed, {}° blocked",
+        format_whole_number(spans.allowed_degrees()),
+        format_whole_number(spans.forbidden_degrees())
+    ))
+}
+
 /// no limits is a silent no-op (the button is not
 /// rendered then — this is the armour, not an
 /// expected path).
@@ -1433,7 +1621,7 @@ pub fn clear_joint_limits(core: &mut EditorCore) {
     if !any {
         return;
     }
-    core.snapshot();
+    core.snapshot_labeled("Clear joint limits");
     if let Some(node) = core
         .project
         .figures
@@ -1526,7 +1714,7 @@ pub fn apply_joint_limit_preset(core: &mut EditorCore, preset: LimitPreset) {
     if cur == (Some(lo), Some(hi)) {
         return;
     }
-    core.snapshot();
+    core.snapshot_labeled("Limit preset");
     // Validated above; the `if let` is unreachable
     // armour, not an expected path.
     if let Some(node) = core
@@ -1693,7 +1881,7 @@ pub fn attach_asset(core: &mut EditorCore, asset: usize) {
     if already {
         return;
     }
-    core.snapshot();
+    core.snapshot_labeled("Attach asset");
     // Validated above; the `if let` is unreachable
     // armour, not an expected path.
     if let Some(node) = core
@@ -1916,7 +2104,7 @@ pub fn adjust_media_offset(core: &mut EditorCore, axis: MediaAxis, delta: f32) {
     if new == cur {
         return;
     }
-    core.snapshot();
+    core.snapshot_labeled("Sprite offset");
     store_media_transform(core, fi, ni, new);
     core.status = format!(
         "Sprite offset set to ({}, {}).",
@@ -1942,7 +2130,7 @@ pub fn adjust_media_scale(core: &mut EditorCore, delta: f32) {
     if new == cur {
         return;
     }
-    core.snapshot();
+    core.snapshot_labeled("Sprite scale");
     store_media_transform(core, fi, ni, new);
     core.status = format!("Sprite scale set to {}.", format_media_scale(new.scale));
 }
@@ -1963,7 +2151,7 @@ pub fn adjust_media_rotate(core: &mut EditorCore, delta: f32) {
     if new == cur {
         return;
     }
-    core.snapshot();
+    core.snapshot_labeled("Sprite rotation");
     store_media_transform(core, fi, ni, new);
     core.status = format!(
         "Sprite rotation set to {}.",
@@ -1982,7 +2170,7 @@ pub fn toggle_media_flip(core: &mut EditorCore) {
     };
     let mut new = cur;
     new.flip = !cur.flip;
-    core.snapshot();
+    core.snapshot_labeled("Flip sprite");
     store_media_transform(core, fi, ni, new);
     core.status = if new.flip {
         "Sprite flip on.".into()
@@ -2005,7 +2193,7 @@ pub fn reset_media_transform(core: &mut EditorCore) {
     if cur.is_identity() {
         return;
     }
-    core.snapshot();
+    core.snapshot_labeled("Reset sprite transform");
     store_media_transform(core, fi, ni, MediaTransformState::IDENTITY);
     core.status = "Sprite transform reset to defaults.".into();
 }
@@ -2057,7 +2245,7 @@ pub fn adjust_media_opacity(core: &mut EditorCore, delta: f32) {
     if new == cur {
         return;
     }
-    core.snapshot();
+    core.snapshot_labeled("Sprite opacity");
     store_media_opacity(core, fi, ni, new);
     core.status = format!(
         "Sprite opacity set to {}.",
@@ -2181,6 +2369,9 @@ pub fn segment_state(core: &EditorCore) -> Option<InspectorSegmentState> {
         node: ni,
         name: node.name.clone(),
         is_root: node.parent.is_none(),
+        head: node.head,
+        ik_end: node.ik_end,
+        bend_side: node.bend,
         length: node.length,
         thickness: node.thickness,
         angle_deg,
@@ -2577,6 +2768,57 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                 |s| select_first_child(&mut s.core),
             )),
     );
+    // Rig properties (Roadmap Wave 2, W2-26 — RM19
+    // R6): the constructor-only NodeDef properties,
+    // mounted directly under the header cluster per
+    // RM19 §5. Each press resolves the selection at
+    // press time and calls the core setter, so a
+    // press can never write a stale node; the setters
+    // own the refusals (locked figure, the IK chain)
+    // and the undo discipline. Labels are literals
+    // this wave (IA-W2-26-2 files the i18n splice).
+    panel = panel
+        .child(node_name_row(s, t))
+        .child(design::toggle_row("seg-node-head", "Head", st.head, t, |s| {
+            if let Some(cur) = segment_state(&s.core) {
+                let on = !cur.head;
+                s.core.set_node_head(cur.figure, cur.node, on);
+            }
+        }))
+        .child(design::toggle_row(
+            "seg-node-ik-end",
+            "IK end",
+            st.ik_end,
+            t,
+            |s| {
+                if let Some(cur) = segment_state(&s.core) {
+                    let on = !cur.ik_end;
+                    s.core.set_node_ik_end(cur.figure, cur.node, on);
+                }
+            },
+        ))
+        .child(
+            row()
+                .w_full()
+                .center_y()
+                .gap(8.0)
+                .child(
+                    text("Bend side")
+                        .font(type_::LABEL)
+                        .color(t.text_secondary)
+                        .grow(1.0),
+                )
+                .child(btn("seg-bend-side-neg", "−", st.bend_side < 0.0, t, |s| {
+                    if let Some(cur) = segment_state(&s.core) {
+                        s.core.set_node_bend_side(cur.figure, cur.node, -1.0);
+                    }
+                }))
+                .child(btn("seg-bend-side-pos", "+", st.bend_side > 0.0, t, |s| {
+                    if let Some(cur) = segment_state(&s.core) {
+                        s.core.set_node_bend_side(cur.figure, cur.node, 1.0);
+                    }
+                })),
+        );
     panel = panel
         .child(readout_row(
             &i18n_wire::tr(&s.core, "segment_length"),
@@ -2734,6 +2976,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                                     v,
                                     current,
                                     write_angle_quiet,
+                                    "Set segment angle",
                                 );
                             },
                             scrub_finish: move |s: &mut State, v: f32| {
@@ -2752,6 +2995,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                                     current,
                                     write_angle_quiet,
                                     status,
+                                    "Set segment angle",
                                 );
                             },
                         },
@@ -2844,6 +3088,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                                             v,
                                             current,
                                             write_bend_quiet,
+                                            "Set segment bend",
                                         );
                                     },
                                     scrub_finish: move |s: &mut State,
@@ -2863,6 +3108,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                                             current,
                                             write_bend_quiet,
                                             status,
+                                            "Set segment bend",
                                         );
                                     },
                                 },
@@ -2991,6 +3237,31 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                     |s| apply_joint_limit_preset(&mut s.core, LimitPreset::Knee),
                 )),
         );
+        // Limit arc display (Roadmap Wave 2, W2-27):
+        // while the node carries a limit, a readout line
+        // names its allowed/blocked sweep (the model's
+        // partition, `format_limit_arc` — the bend
+        // readout's muted form), and a kit toggle row
+        // flips the stage overlay that draws that same
+        // partition at the joint. Display only: neither
+        // control writes the project — the toggle is
+        // shell view state, and no set-rest clamp is
+        // built (the standing IA-AA9-1 decision).
+        if let Some(line) = format_limit_arc(st.min_angle, st.max_angle) {
+            panel = panel.child(
+                text(line)
+                    .key("seg-lim-arc-readout")
+                    .font(type_::LABEL)
+                    .color(t.text_secondary),
+            );
+        }
+        panel = panel.child(design::toggle_row(
+            "seg-lim-arc-toggle",
+            "Limit arc on stage",
+            s.limit_arcs,
+            t,
+            |s: &mut State| toggle_limit_arcs(s),
+        ));
     }
     panel = panel
         .child(
@@ -3502,6 +3773,61 @@ mod tests {
         let core = core_with_selection(Some(0));
         let st = segment_state(&core).expect("the origin exists");
         assert!(st.is_root);
+    }
+
+    #[test]
+    fn segment_state_carries_the_rig_flags() {
+        // W2-26 (RM19 R6): the derived state carries
+        // the three constructor-only properties the new
+        // controls edit — head (node 2 is the
+        // constructor's head), IK end (node 4, a hand)
+        // and the bend-side sign (node 4 bends −1, the
+        // elbow convention) — read live from the def.
+        let core = core_with_selection(Some(2));
+        let st = segment_state(&core).expect("the head node exists");
+        assert!(st.head, "node 2 is the constructor's head");
+        assert!(!st.ik_end);
+        assert_eq!(st.bend_side, 1.0);
+        let core = core_with_selection(Some(4));
+        let st = segment_state(&core).expect("the hand node exists");
+        assert!(!st.head);
+        assert!(st.ik_end, "node 4 is a constructor IK end");
+        assert_eq!(st.bend_side, -1.0, "elbows bend backwards");
+    }
+
+    #[test]
+    fn sync_segment_name_field_seeds_follows_and_respects_focus() {
+        // W2-26: the name session seeds from the
+        // selected node, follows selection changes and
+        // external renames, and is never touched while
+        // focused (a sync mid-typing would eat
+        // keystrokes — the figure field's discipline).
+        let mut core = core_with_selection(Some(1));
+        let mut edit = SegmentNameEditState::new();
+        sync_segment_name_field(&core, &mut edit);
+        assert_eq!(edit.name.text, "chest");
+        assert_eq!(edit.for_node, Some((0, 1)));
+        core.selected_node = Some(3);
+        sync_segment_name_field(&core, &mut edit);
+        assert_eq!(edit.name.text, "upper-arm L");
+        assert_eq!(edit.for_node, Some((0, 3)));
+        // An external rename (the core setter, an MCP
+        // write, an undo) re-seeds the unfocused field.
+        assert!(core.set_node_name(0, 3, "bicep L"));
+        sync_segment_name_field(&core, &mut edit);
+        assert_eq!(edit.name.text, "bicep L");
+        // While focused the buffer is the user's, even
+        // when the model moves under it.
+        edit.name.focused = true;
+        assert!(core.set_node_name(0, 3, "other"));
+        sync_segment_name_field(&core, &mut edit);
+        assert_eq!(edit.name.text, "bicep L", "focused field untouched");
+        // No selection stands the session down.
+        let bare = EditorCore::new();
+        let mut edit2 = SegmentNameEditState::new();
+        edit2.for_node = Some((0, 1));
+        sync_segment_name_field(&bare, &mut edit2);
+        assert_eq!(edit2.for_node, None);
     }
 
     #[test]
@@ -4085,6 +4411,7 @@ mod tests {
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
             sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            migration_panel: rune_sec::migration_prompt::initial_state(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
@@ -4103,12 +4430,15 @@ mod tests {
             toast_now: 0.0,
             last_dark: true,
             workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            setup_mode_before_build: false,
             guides: false,
             show_left: true,
             show_right: true,
+            stage_focus_restore: None,
             key_clipboard: None,
             key_follow_graph: false,
             key_sel: Default::default(),
+            keyframe_tools: Default::default(),
             help_panel: Default::default(),
             camera_panel: crate::rune_sec::camera_panel::CameraPanelState::default(),
             segment_numbers: SegmentNumberState::default(),
@@ -4122,6 +4452,11 @@ stroke_selected: None,
 particle_selected: None,
 guides_frustum: true,
 guides_safe: true,
+guides_golden: false,
+guides_diagonals: false,
+guides_stored: true,
+rulers: false,
+limit_arcs: false,
 onion_ui: Default::default(),
 last_frame: 0,
 pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
@@ -4142,6 +4477,7 @@ playback_speed: 1.0,
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
             sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            migration_panel: rune_sec::migration_prompt::initial_state(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
@@ -4160,12 +4496,15 @@ playback_speed: 1.0,
             toast_now: 0.0,
             last_dark: true,
             workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            setup_mode_before_build: false,
             guides: false,
             show_left: true,
             show_right: true,
+            stage_focus_restore: None,
             key_clipboard: None,
             key_follow_graph: false,
             key_sel: Default::default(),
+            keyframe_tools: Default::default(),
             help_panel: Default::default(),
             camera_panel: crate::rune_sec::camera_panel::CameraPanelState::default(),
             segment_numbers: SegmentNumberState::default(),
@@ -4179,6 +4518,11 @@ stroke_selected: None,
 particle_selected: None,
 guides_frustum: true,
 guides_safe: true,
+guides_golden: false,
+guides_diagonals: false,
+guides_stored: true,
+rulers: false,
+limit_arcs: false,
 onion_ui: Default::default(),
 last_frame: 0,
 pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
@@ -4199,6 +4543,7 @@ playback_speed: 1.0,
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
             sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            migration_panel: rune_sec::migration_prompt::initial_state(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
@@ -4217,12 +4562,15 @@ playback_speed: 1.0,
             toast_now: 0.0,
             last_dark: true,
             workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            setup_mode_before_build: false,
             guides: false,
             show_left: true,
             show_right: true,
+            stage_focus_restore: None,
             key_clipboard: None,
             key_follow_graph: false,
             key_sel: Default::default(),
+            keyframe_tools: Default::default(),
             help_panel: Default::default(),
             camera_panel: crate::rune_sec::camera_panel::CameraPanelState::default(),
             segment_numbers: SegmentNumberState::default(),
@@ -4236,6 +4584,11 @@ stroke_selected: None,
 particle_selected: None,
 guides_frustum: true,
 guides_safe: true,
+guides_golden: false,
+guides_diagonals: false,
+guides_stored: true,
+rulers: false,
+limit_arcs: false,
 onion_ui: Default::default(),
 last_frame: 0,
 pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
@@ -5368,6 +5721,60 @@ playback_speed: 1.0,
         core.undo();
         assert_eq!(core.project.figures[fi].def.nodes[1].min_angle, None);
         assert_eq!(core.project.figures[fi].def.nodes[1].max_angle, Some(10.0));
+    }
+
+    #[test]
+    fn limit_arc_readout_reports_the_models_partition() {
+        // Roadmap Wave 2 (W2-27): the readout's numbers
+        // are `limit_spans`' sweeps in whole degrees —
+        // elbow/knee (170 allowed either way), the wrap
+        // arc (20), a single bound (150), a pinned joint
+        // (0), and nothing at all without limits.
+        assert_eq!(
+            format_limit_arc(Some(-10.0), Some(160.0)).as_deref(),
+            Some("Limit arc: 170° allowed, 190° blocked")
+        );
+        assert_eq!(
+            format_limit_arc(Some(-160.0), Some(10.0)).as_deref(),
+            Some("Limit arc: 170° allowed, 190° blocked")
+        );
+        assert_eq!(
+            format_limit_arc(Some(170.0), Some(-170.0)).as_deref(),
+            Some("Limit arc: 20° allowed, 340° blocked")
+        );
+        assert_eq!(
+            format_limit_arc(Some(30.0), None).as_deref(),
+            Some("Limit arc: 150° allowed, 210° blocked")
+        );
+        assert_eq!(
+            format_limit_arc(Some(45.0), Some(45.0)).as_deref(),
+            Some("Limit arc: 0° allowed, 360° blocked")
+        );
+        assert_eq!(format_limit_arc(None, None), None);
+        // The panel builds with the toggle on and a
+        // limited node selected (the readout + toggle row
+        // mount without incident).
+        let mut s = crate::init();
+        s.core = core_with_selection(Some(1));
+        let fi = s.core.selected_figure;
+        s.core.project.figures[fi].def.nodes[1].min_angle = Some(-10.0);
+        s.core.project.figures[fi].def.nodes[1].max_angle = Some(160.0);
+        s.limit_arcs = true;
+        let t = rune::tok::theme(true);
+        let _ = inspector_segment(&s, &t);
+    }
+
+    #[test]
+    fn limit_arc_toggle_flips_only_its_own_flag() {
+        // W2-27: the seed is OFF (IA-W2-27-1), the helper
+        // flips it and nothing else, and a second flip
+        // restores it — the guides toggles' discipline.
+        let mut s = crate::init();
+        assert!(!s.limit_arcs, "seeded off");
+        toggle_limit_arcs(&mut s);
+        assert!(s.limit_arcs);
+        toggle_limit_arcs(&mut s);
+        assert!(!s.limit_arcs);
     }
 
     #[test]

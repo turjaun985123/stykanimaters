@@ -14,6 +14,7 @@ image = { version = "0.25", default-features = false, features = ["png", "gif", 
 flate2 = "1"
 png = "0.17"
 swash = "0.2"
+zeno = "0.3"
 
 [profile.dev]
 opt-level = 1

@@ -228,6 +228,24 @@
 //! [`sprite_handle_pick_at`] with the PRIOR selection —
 //! wiring that lives in `main.rs` and is filed as
 //! IA-RM22-3 in the seat's findings.
+//!
+//! Roadmap Wave 2 (W2-09) completed the handle set:
+//! IA-RM22-3's routing is verified landed in `main.rs`
+//! (handle-first, before the segment and body picks),
+//! and two flip handles — [`SpriteHandle::FlipX`] on
+//! the quad's right edge, [`SpriteHandle::FlipY`] on
+//! its bottom edge — write through this same drag
+//! machinery: a press on one is the whole gesture (the
+//! toggle target is computed from the recorded base
+//! and written live at the press, bypassing the
+//! travel-based jitter gate), and the release settles
+//! it through `set_sprite_key_full` — exactly one undo
+//! step, the panel flip toggle's own transform
+//! (`sprites_panel::flipped_key`) behind a handle
+//! instead of a button. A body press never arms a
+//! flip (the pivot precedent): the flip handles ride
+//! the quad's edges, where a press means "grab the
+//! sprite".
 
 use std::cell::RefCell;
 
@@ -583,6 +601,46 @@ pub fn sprite_prims(
                         width: OUTLINE_WIDTH,
                     });
                     square(&mut out, handles.rotate);
+                    // The flip handles (Roadmap Wave 2,
+                    // W2-09): a double-triangle glyph at
+                    // each handle centre — two segments
+                    // from the wing points (centre ± the
+                    // perpendicular half) to the tip
+                    // (centre + the direction half). The
+                    // direction is the axis the image
+                    // mirrors across: FlipX's glyph runs
+                    // along the top edge's direction,
+                    // FlipY's along the left edge's, so
+                    // the tip points the way the artwork
+                    // flips.
+                    let flip_glyph = |out: &mut Vec<SpritePrim>, m: V2, dir: V2| {
+                        let dl = len(dir);
+                        if dl <= f32::EPSILON {
+                            return;
+                        }
+                        let d = scale(dir, 1.0 / dl);
+                        let perp = [-d[1], d[0]];
+                        let tip = add(m, scale(d, HANDLE_MARK_HALF));
+                        for s in [-1.0f32, 1.0] {
+                            let wing = add(m, scale(perp, s * HANDLE_MARK_HALF));
+                            out.push(SpritePrim::CornerMark {
+                                sprite,
+                                a: wing,
+                                b: tip,
+                                width: CORNER_MARK_WIDTH,
+                            });
+                        }
+                    };
+                    flip_glyph(
+                        &mut out,
+                        handles.flip_x,
+                        sub(handles.corners[1], handles.corners[0]),
+                    );
+                    flip_glyph(
+                        &mut out,
+                        handles.flip_y,
+                        sub(handles.corners[3], handles.corners[0]),
+                    );
                 }
             }
         }
@@ -663,6 +721,19 @@ pub enum SpriteHandle {
     /// compensates by the same offset (see
     /// [`handle_target`]).
     Pivot,
+    /// The flip-X handle on the quad's right edge
+    /// (Roadmap Wave 2, W2-09): a press toggles the
+    /// key's `flip_x` — the mirror the stage bitmap
+    /// layer (W2-06) paints from the pre-mirrored pixel
+    /// variant of the same decode. Not a travel drag:
+    /// the press is the whole gesture (see
+    /// [`handle_target`]).
+    FlipX,
+    /// The flip-Y handle on the quad's bottom edge
+    /// (Roadmap Wave 2, W2-09): a press toggles the
+    /// key's `flip_y`, exactly as [`SpriteHandle::FlipX`]
+    /// toggles its own axis.
+    FlipY,
 }
 
 /// The selected sprite's handle positions for one
@@ -678,6 +749,12 @@ pub struct SpriteHandles {
     pub rotate: V2,
     /// The pivot point's stage position.
     pub pivot: V2,
+    /// The flip-X handle's centre: the midpoint of the
+    /// quad's right edge (Roadmap Wave 2, W2-09).
+    pub flip_x: V2,
+    /// The flip-Y handle's centre: the midpoint of the
+    /// quad's bottom edge (Roadmap Wave 2, W2-09).
+    pub flip_y: V2,
 }
 
 /// Handle positions for `quad` under sampled key
@@ -703,19 +780,34 @@ pub fn sprite_handles(quad: &SpriteQuad, key: &InstanceKey) -> SpriteHandles {
     } else {
         top_mid
     };
+    // The flip handles (Roadmap Wave 2, W2-09) ride the
+    // two edges the rotate knob's edge does not: FlipX
+    // at the right edge's midpoint, FlipY at the bottom
+    // edge's. Both sit ON the quad (unlike the knob), so
+    // only the handle-first routing can arm them — a
+    // body press at the same point is a move (see
+    // `drag_mode_at`).
+    let flip_x = scale(add(c[1], c[2]), 0.5);
+    let flip_y = scale(add(c[2], c[3]), 0.5);
     SpriteHandles {
         corners: *c,
         rotate,
         pivot,
+        flip_x,
+        flip_y,
     }
 }
 
 /// The handle at stage point `p`, if any: the nearest
 /// handle centre within `radius` stage units (ties go
 /// to the earlier-considered handle — pivot, then
-/// corners in quad order, then the rotate knob — so a
-/// small sprite's crowded centre resolves to the pivot
-/// the point is probably aiming at).
+/// corners in quad order, then the rotate knob, then
+/// the flip handles (Roadmap Wave 2, W2-09 — last, so
+/// on a small sprite a tie at a shared corner/edge
+/// point resolves to the corner or pivot the point
+/// also names) — so a small sprite's crowded centre
+/// resolves to the pivot the point is probably aiming
+/// at).
 pub fn handle_at(handles: &SpriteHandles, p: V2, radius: f32) -> Option<SpriteHandle> {
     let mut best: Option<(SpriteHandle, f32)> = None;
     let mut consider = |h: SpriteHandle, at: V2| {
@@ -729,6 +821,8 @@ pub fn handle_at(handles: &SpriteHandles, p: V2, radius: f32) -> Option<SpriteHa
         consider(SpriteHandle::Corner(i), *c);
     }
     consider(SpriteHandle::Rotate, handles.rotate);
+    consider(SpriteHandle::FlipX, handles.flip_x);
+    consider(SpriteHandle::FlipY, handles.flip_y);
     best.map(|(h, _)| h)
 }
 
@@ -737,8 +831,10 @@ pub fn handle_at(handles: &SpriteHandles, p: V2, radius: f32) -> Option<SpriteHa
 /// press routing consults BEFORE the body pick, so a
 /// handle press never falls through to a move (the
 /// rotate knob sits outside the quad, where the body
-/// pick cannot see it at all). The shell wiring is
-/// IA-RM22-3; this fn is its whole engine half.
+/// pick cannot see it at all). The shell wiring was
+/// IA-RM22-3 — verified landed in Wave 1's integration
+/// (Roadmap Wave 2, W2-09); this fn is its whole
+/// engine half.
 /// `None` when nothing is selected, the selection is
 /// stale, the sprite has no sampled key or quad at the
 /// display frame, or no handle is within reach.
@@ -1024,6 +1120,19 @@ fn move_target(record: &SpriteDrag, p: V2) -> Option<InstanceKey> {
 ///   by exactly the stage offset the slide implies, so
 ///   the image's corners do not move: what changes is
 ///   which point of the image the key's position names.
+/// - **FlipX / FlipY** (Roadmap Wave 2, W2-09): the
+///   base key with that axis's flip toggled — the
+///   transform the Sprites panel's own flip toggles
+///   write (`sprites_panel::flipped_key`), computed
+///   from the recorded base. The pointer's position is
+///   irrelevant: the toggle is the whole target, so a
+///   press settles it exactly once and no travel can
+///   toggle it twice (the settle restores the pre-drag
+///   list and re-derives the target from the base, as
+///   every mode does). Mirroring about a centred pivot
+///   keeps the image's corners exactly; an off-centre
+///   pivot's corners mirror with the image, as they do
+///   for the panel toggle — one transform, two doors.
 fn handle_target(
     project: &Project,
     record: &SpriteDrag,
@@ -1109,6 +1218,16 @@ fn handle_target(
                 ..base
             }
         }
+        // The flip handles (Roadmap Wave 2, W2-09): the
+        // panel toggle's transform, from the base.
+        SpriteHandle::FlipX => InstanceKey {
+            flip_x: !base.flip_x,
+            ..base
+        },
+        SpriteHandle::FlipY => InstanceKey {
+            flip_y: !base.flip_y,
+            ..base
+        },
     };
     (key.x.is_finite()
         && key.y.is_finite()
@@ -1160,6 +1279,26 @@ fn sprite_drag_apply(core: &mut EditorCore, p: V2) {
     };
     if !drag_identity_holds(core, &record) {
         SPRITE_DRAG.with(|cell| *cell.borrow_mut() = None);
+        return;
+    }
+    if matches!(
+        record.mode,
+        SpriteDragMode::Handle(SpriteHandle::FlipX | SpriteHandle::FlipY)
+    ) {
+        // Flip handles (Roadmap Wave 2, W2-09) settle
+        // on the press's own application: a flip is a
+        // toggle, not a travel — gating it behind the
+        // drag threshold below would leave a clean
+        // click on the handle writing nothing, and the
+        // release would find no change to commit. The
+        // press point IS the whole gesture, so the
+        // target (the base with one flip toggled) is
+        // written live at once; the release commits it
+        // through the ordinary settle — one undo step —
+        // and a cancel restores it like any other mode.
+        if let Some(key) = drag_target(&core.project, &record, p) {
+            write_key_live(core, record.sprite, key);
+        }
         return;
     }
     if !record.moved {
@@ -1235,7 +1374,14 @@ pub fn sprite_handle_drag_down(
 /// it would change every centre press in the shell; the
 /// rotate knob sits outside the quad, where this press
 /// path never sees a point. Both arm through
-/// [`sprite_handle_drag_down`] instead.
+/// [`sprite_handle_drag_down`] instead. The flip
+/// handles (Roadmap Wave 2, W2-09) are NOT armed here
+/// either, though they ride the quad's edges where a
+/// body press lands and `handle_at` may resolve to one:
+/// this fn matches only the corner, so an edge press
+/// stays a move — a press that meant "grab the sprite"
+/// must not mirror it as a side effect. Only the
+/// handle-first routing arms a flip.
 fn drag_mode_at(core: &EditorCore, sprite: usize, p: V2) -> SpriteDragMode {
     let frame_f = core.display_frame();
     if let Some(quad) = sprite_quads(&core.project, frame_f)
@@ -1360,29 +1506,67 @@ pub fn sprite_drag_up(core: &mut EditorCore, p: V2, cancelled: bool) {
 }
 
 /// The sprite drag's HUD line (Roadmap Wave 1, RM15 —
-/// P-3 / R-A2-3): the dragged instance's live key position
-/// while a drag is armed, in the stage feedback layer's
-/// readout format (`stage_view::drag_hud_lines` is the
-/// core-drag twin, and the stage's feedback pass
-/// concatenates the two). The position is the key the
-/// live writes have placed at the drag's frame — after
-/// the jitter gate trips that key exists in the list;
-/// before it, the grab's base key is what a release would
-/// write, so it is what the HUD says. `None` when no drag
-/// is armed or the record no longer names its sprite.
+/// P-3 / R-A2-3; mode-aware per RM22's IA-RM22-5, landed
+/// by Roadmap Wave 2's W2-07): the line names the
+/// quantity the gesture is dragging, read off the same
+/// live key in every mode — the key the live writes have
+/// placed at the drag's frame (after the jitter gate
+/// trips that key exists in the list; before it, the
+/// grab's base key is what a release would write, so it
+/// is what the HUD says):
+///
+/// * **Move**: the key's position (`SPRITE x, y`) — the
+///   pre-W2-07 line, unchanged.
+/// * **Handle(Rotate)**: the key's angle
+///   (`SPRITE ANGLE n DEG`).
+/// * **Handle(Corner)**: the key's scale (`SPRITE SCALE
+///   Xf` — a second factor when a materialised
+///   `scale_y` differs from `scale`, since the drag is
+///   then genuinely non-uniform).
+/// * **Handle(Pivot)**: the key's pivot
+///   (`SPRITE PIVOT f, f`).
+/// * **Handle(FlipX) / Handle(FlipY)** (Roadmap Wave 2,
+///   W2-09): the pending toggle (`SPRITE FLIP X` /
+///   `SPRITE FLIP Y`) — the press already wrote the
+///   toggled key live, so the line names the axis the
+///   release will commit.
+///
+/// The formats are IA-RM22-5's strings in the canvas
+/// stamp's charset (`stage_view::drag_hud_lines`' house
+/// rule: the stamp has no degree or multiplication sign,
+/// so DEG and X spell them). `None` when no drag is
+/// armed or the record no longer names its sprite.
 pub fn sprite_drag_hud(core: &EditorCore) -> Option<String> {
     let record = SPRITE_DRAG.with(|cell| cell.borrow().clone())?;
     if !drag_identity_holds(core, &record) {
         return None;
     }
     let inst = core.project.sprites.get(record.sprite)?;
-    let (x, y) = inst
+    let key = inst
         .keys
         .iter()
         .find(|k| k.frame == record.frame as f32)
-        .map(|k| (k.x, k.y))
-        .unwrap_or((record.base.x, record.base.y));
-    Some(format!("SPRITE {:.0}, {:.0}", x, y))
+        .copied()
+        .unwrap_or(record.base);
+    Some(match record.mode {
+        SpriteDragMode::Move => format!("SPRITE {:.0}, {:.0}", key.x, key.y),
+        SpriteDragMode::Handle(SpriteHandle::Rotate) => {
+            format!("SPRITE ANGLE {:.0} DEG", key.angle)
+        }
+        SpriteDragMode::Handle(SpriteHandle::Corner(_)) => {
+            let sy = key.eff_scale_y();
+            if (sy - key.scale).abs() < 0.005 {
+                format!("SPRITE SCALE X{:.2}", key.scale)
+            } else {
+                format!("SPRITE SCALE X{:.2}, X{:.2}", key.scale, sy)
+            }
+        }
+        SpriteDragMode::Handle(SpriteHandle::Pivot) => {
+            format!("SPRITE PIVOT {:.2}, {:.2}", key.pivot_x, key.pivot_y)
+        }
+        SpriteDragMode::Handle(SpriteHandle::FlipX) => "SPRITE FLIP X".to_string(),
+        SpriteDragMode::Handle(SpriteHandle::FlipY) => "SPRITE FLIP Y".to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -2206,6 +2390,72 @@ mod tests {
     }
 
     #[test]
+    fn sprite_drag_hud_names_the_handle_quantity() {
+        // IA-RM22-5 (landed by W2-07): a handle drag's HUD
+        // line names the quantity the handle drags, read
+        // off the live key — angle for the rotate knob,
+        // scale for a corner, pivot for the pivot handle.
+        // Sprite 0's frame-0 key is (300, 200), scale 10,
+        // angle 0, centre pivot, on a 4x2 asset.
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+
+        // Rotate: press above the anchor (300, 200), drag
+        // to its right — a quarter turn clockwise, written
+        // live onto the key.
+        sprite_handle_drag_down(&mut core, 0, SpriteHandle::Rotate, [300.0, 100.0]);
+        assert!(sprite_drag_move(&mut core, [400.0, 200.0]));
+        assert_eq!(
+            sprite_drag_hud(&core),
+            Some("SPRITE ANGLE 90 DEG".to_string())
+        );
+        sprite_drag_up(&mut core, [400.0, 200.0], true);
+
+        // Corner: press 40 units along the (unrotated) u
+        // axis from the anchor, drag to 60 — the u factor
+        // is 1.5, so scale 10 becomes 15; scale_y follows
+        // (stored 0), so one factor is the whole story.
+        sprite_handle_drag_down(&mut core, 0, SpriteHandle::Corner(0), [340.0, 200.0]);
+        assert!(sprite_drag_move(&mut core, [360.0, 200.0]));
+        assert_eq!(
+            sprite_drag_hud(&core),
+            Some("SPRITE SCALE X15.00".to_string())
+        );
+        sprite_drag_up(&mut core, [360.0, 200.0], true);
+
+        // Pivot: the image is 4 px wide at scale 10 (40
+        // stage units), so a 10-unit pointer move slides
+        // pivot_x by a quarter: 0.50 -> 0.75. The corners
+        // stay put (the anchor compensates) — only the
+        // pivot numbers move, which is the HUD's point.
+        sprite_handle_drag_down(&mut core, 0, SpriteHandle::Pivot, [300.0, 200.0]);
+        assert!(sprite_drag_move(&mut core, [310.0, 200.0]));
+        assert_eq!(
+            sprite_drag_hud(&core),
+            Some("SPRITE PIVOT 0.75, 0.50".to_string())
+        );
+        sprite_drag_up(&mut core, [310.0, 200.0], true);
+        assert_eq!(sprite_drag_hud(&core), None, "the drag is over");
+    }
+
+    #[test]
+    fn sprite_drag_hud_names_both_scale_factors_when_non_uniform() {
+        // A corner drag on a key whose scale_y is
+        // materialised (stored, not following) drives the
+        // two axes independently; the HUD names both.
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+        core.project.sprites[0].keys[0].scale_y = 5.0;
+        sprite_handle_drag_down(&mut core, 0, SpriteHandle::Corner(0), [340.0, 200.0]);
+        assert!(sprite_drag_move(&mut core, [360.0, 200.0]));
+        assert_eq!(
+            sprite_drag_hud(&core),
+            Some("SPRITE SCALE X15.00, X5.00".to_string())
+        );
+        sprite_drag_up(&mut core, [360.0, 200.0], true);
+    }
+
+    #[test]
     fn handles_sit_on_the_quad_corners_pivot_and_knob() {
         // Roadmap Wave 1 (RM22, P-12): sprite 0 at frame 0
         // is a 40x20 quad at (300,200) with a centre pivot.
@@ -2307,5 +2557,124 @@ mod tests {
         let key = core.project.sprites[0].keys[0];
         assert_eq!((key.x, key.y), (320.0, 220.0), "the key moved by the delta");
         assert_eq!((key.pivot_x, key.pivot_y), (0.5, 0.5), "the pivot is untouched");
+    }
+
+    #[test]
+    fn flip_handles_sit_on_the_right_and_bottom_edges() {
+        // Roadmap Wave 2 (W2-09): sprite 0 at frame 0 is
+        // the 40x20 quad (280,190)-(320,210) — FlipX
+        // centres on the right edge (320, 200), FlipY on
+        // the bottom edge (300, 210), and the pick the
+        // shell consults finds both.
+        let project = project_with_sprites();
+        let quads = sprite_quads(&project, 0.0);
+        let key = InstanceKey::sample(&project.sprites[0].keys, 0.0).unwrap();
+        let handles = sprite_handles(&quads[0], &key);
+        assert!(close(handles.flip_x, [320.0, 200.0]), "flip_x {:?}", handles.flip_x);
+        assert!(close(handles.flip_y, [300.0, 210.0]), "flip_y {:?}", handles.flip_y);
+        assert_eq!(handle_at(&handles, [320.0, 200.0], 7.0), Some(SpriteHandle::FlipX));
+        assert_eq!(handle_at(&handles, [300.0, 210.0], 7.0), Some(SpriteHandle::FlipY));
+        // A corner still wins its own point — the flip
+        // handle half an edge away is out of reach there,
+        // and ties resolve to the earlier-considered
+        // handle regardless.
+        assert_eq!(handle_at(&handles, [320.0, 190.0], 7.0), Some(SpriteHandle::Corner(1)));
+        // The shell's handle-first pick (IA-RM22-3,
+        // landed) resolves both flip handles too.
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+        assert_eq!(
+            sprite_handle_pick_at(&core, Some(0), [320.0, 200.0]),
+            Some((0, SpriteHandle::FlipX))
+        );
+        assert_eq!(
+            sprite_handle_pick_at(&core, Some(0), [300.0, 210.0]),
+            Some((0, SpriteHandle::FlipY))
+        );
+    }
+
+    #[test]
+    fn flip_x_press_toggles_the_key_in_one_undo_step() {
+        // W2-09: a press on the FlipX handle is the whole
+        // gesture — no pointer travel — and the release
+        // commits exactly the panel toggle's transform:
+        // flip_x toggled, every other field the base's,
+        // one undo step, the op's own recap sentence. The
+        // quad is unchanged by the toggle (the fixture's
+        // pivot is centred); the stage bitmap layer
+        // (W2-06) shows the pre-mirrored variant instead.
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+        let before = keys_json(&core, 0);
+        let depth = core.undo_depth();
+        sprite_handle_drag_down(&mut core, 0, SpriteHandle::FlipX, [320.0, 200.0]);
+        sprite_drag_up(&mut core, [320.0, 200.0], false);
+        let key = core.project.sprites[0].keys[0];
+        assert!(key.flip_x && !key.flip_y, "only X toggled: {key:?}");
+        assert_eq!((key.x, key.y, key.scale, key.angle), (300.0, 200.0, 10.0, 0.0));
+        assert_eq!((key.pivot_x, key.pivot_y), (0.5, 0.5));
+        assert_eq!(core.undo_depth(), depth + 1, "one undo step for the toggle");
+        assert_eq!(core.status, "Sprite 1 key set at frame 1.");
+        core.undo();
+        assert_eq!(keys_json(&core, 0), before, "undo restores the unflipped keys");
+        // A second press toggles back — again one step.
+        sprite_handle_drag_down(&mut core, 0, SpriteHandle::FlipX, [320.0, 200.0]);
+        sprite_drag_up(&mut core, [320.0, 200.0], false);
+        assert!(!core.project.sprites[0].keys[0].flip_x, "the toggle is symmetric");
+        assert_eq!(core.undo_depth(), depth + 1);
+    }
+
+    #[test]
+    fn flip_y_press_toggles_and_a_cancel_spends_nothing() {
+        // W2-09: FlipY is the symmetric axis, and a
+        // cancelled release restores the pre-drag list
+        // byte-for-byte — the toggle the press wrote
+        // live is not an edit until it settles.
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+        let before = keys_json(&core, 0);
+        let depth = core.undo_depth();
+        sprite_handle_drag_down(&mut core, 0, SpriteHandle::FlipY, [300.0, 210.0]);
+        sprite_drag_up(&mut core, [300.0, 210.0], true);
+        assert_eq!(keys_json(&core, 0), before, "a cancel leaves no trace");
+        assert_eq!(core.undo_depth(), depth, "a cancel spends no step");
+        sprite_handle_drag_down(&mut core, 0, SpriteHandle::FlipY, [300.0, 210.0]);
+        sprite_drag_up(&mut core, [300.0, 210.0], false);
+        let key = core.project.sprites[0].keys[0];
+        assert!(!key.flip_x && key.flip_y, "only Y toggled: {key:?}");
+        assert_eq!(core.undo_depth(), depth + 1);
+    }
+
+    #[test]
+    fn flip_drag_hud_names_the_pending_toggle() {
+        // W2-09 (IA-RM22-5's family): while a flip press
+        // is armed the HUD names the axis the release
+        // will commit, read off the live key the press
+        // already wrote.
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+        sprite_handle_drag_down(&mut core, 0, SpriteHandle::FlipX, [320.0, 200.0]);
+        assert!(sprite_drag_move(&mut core, [320.0, 200.0]));
+        assert_eq!(sprite_drag_hud(&core), Some("SPRITE FLIP X".to_string()));
+        sprite_drag_up(&mut core, [320.0, 200.0], true);
+        assert_eq!(sprite_drag_hud(&core), None, "the drag is over");
+    }
+
+    #[test]
+    fn body_press_on_a_flip_handle_still_moves() {
+        // W2-09's guard, mirroring the pivot's: the flip
+        // handles ride the quad's edges, where a body
+        // press lands — but arming a toggle from a press
+        // that meant "grab the sprite" would mirror the
+        // image on every edge grab. Only the handle-first
+        // routing (sprite_handle_pick_at) arms a flip.
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+        sprite_drag_down(&mut core, 0, [320.0, 200.0]);
+        assert!(sprite_drag_move(&mut core, [340.0, 220.0]));
+        sprite_drag_up(&mut core, [340.0, 220.0], false);
+        let key = core.project.sprites[0].keys[0];
+        assert_eq!((key.x, key.y), (320.0, 220.0), "the key moved by the delta");
+        assert!(!key.flip_x && !key.flip_y, "no flip was toggled");
     }
 }

@@ -45,6 +45,9 @@
 //! `{frame}` is the 0-based timeline index the key belongs
 //! to — the engine's own frame numbering (`CameraKey.frame`,
 //! [`graph_key_frame`]), not the chips' 1-based labels.
+//! Roadmap Wave 2 (W2-19) adds a third glyph key in the
+//! same pattern: `marker-beat-{frame}` for a frame carrying
+//! a story-beat marker (`Project::beat_markers`).
 //! Phase J adds `timeline-ruler` on the time ruler above
 //! the chips. Phase L adds `timeline-loop-row` on the loop
 //! row under the timeline (see the Loop row section
@@ -73,14 +76,22 @@
 //! dragging along it seeks — `core.goto` on the frame
 //! under the pointer ([`ruler_frame_at_x`]), on both the
 //! down and the move phase, so a press lands on its frame
-//! at once and a drag scrubs. The handler sits on the
+//! at once and a drag scrubs. Roadmap Wave 2 (W2-40)
+//! makes that seek fractional: the playhead lands at the
+//! sub-frame position under the pointer
+//! ([`ruler_frame_time_at_x`], whose floor is exactly
+//! `ruler_frame_at_x`), and the stage shows the
+//! interpolated pose while tween playback is on — see
+//! `EditorCore::seek_fractional` for the authoring rule
+//! (edits land on the frame the playhead is inside).
+//! The handler sits on the
 //! ruler row itself, a sibling of the chips row inside
 //! the same scrolled column, so its drag points are the
 //! same content coordinates the chips' drag reads — the
 //! ruler can never be mistaken for the chips' gesture (a
 //! separate element owns it), and it writes nothing but
 //! the playhead: no range selection, no loop edges, and
-//! `goto` never touches the play state (the marker-press
+//! the seek never touches the play state (the marker-press
 //! precedent). Like the chips row, a horizontal drag on
 //! the ruler seeks instead of scrolling the viewport;
 //! the wheel still scrolls.
@@ -94,7 +105,9 @@
 //! its frame carries a camera key (`Project::camera`,
 //! `CameraKey.frame` — an exact frame number) and `●` when
 //! any graph channel has a key on it; both glyphs when both,
-//! blank when neither. Each glyph is its own pressable
+//! blank when neither. Roadmap Wave 2 (W2-19) adds `▼` when
+//! the frame carries a story-beat marker (see the W2-19
+//! paragraph below). Each glyph is its own pressable
 //! element (Phase I): pressing one seeks to its frame with
 //! `core.goto`. That cannot fight the chips' drag gesture —
 //! the drag handler sits on the chips row, a sibling, and a
@@ -125,6 +138,28 @@
 //! and one over every channel's keys — never per-cell
 //! searches ([`frame_markers`] exists for single-frame
 //! callers and tests).
+//!
+//! Roadmap Wave 2 (W2-19) grows the row a third glyph: a
+//! cell shows `▼` when its frame carries a story-beat
+//! marker (`Project::beat_markers` — a named single-frame
+//! point, P-15's shot markers). The triangle is from the
+//! same Geometric Shapes block as `◆` / `●`, and shape —
+//! not colour — is what distinguishes it (it takes the
+//! graph glyph's secondary tone; on the current frame
+//! every glyph goes white as before). The row is
+//! glyph-only, so pressing a beat glyph does the one
+//! extra thing the other two presses do not: it posts the
+//! marker's NAME on the status line as it seeks
+//! ([`goto_beat_marker`]) — the name is the marker's whole
+//! payload, and a display that never showed it would be
+//! hiding the data. The mount predicate grows with the
+//! row: the row now also mounts when only beat markers
+//! exist, and a marker stored past the timeline's end
+//! marks nothing (the graph-key rule — out-of-timeline
+//! data asserts nothing rather than piling onto the last
+//! frame). A project with no beat markers renders this
+//! row exactly as it did before W2-19: same cells, same
+//! elements, zero delta.
 //!
 //! Wave 10 (audit F1/F2) changes two things about the
 //! row. **Current column (F1):** the current frame's
@@ -929,9 +964,16 @@ pub fn in_sel(range_sel: Option<(usize, usize)>, i: usize) -> bool {
     }
 }
 
-/// Height of one marker cell in points: a slim strip under
-/// its chip, just tall enough for one line of glyphs.
-pub const MARKER_H: f32 = 14.0;
+/// Height of one marker cell in points (Roadmap Wave 2,
+/// W2-55 — A20-14): the WCAG 2.5.8 target-size floor,
+/// 24 pt. The row was 14 — the smallest, most-repeated
+/// precision target in the app (S18/A20 §1.8). The glyph
+/// itself is unchanged (one LABEL line, centred in the
+/// cell and in its press wrapper, both of which take
+/// this height), so the pressable grows while the visual
+/// stays slim — the A20-14 pattern. The chips above are
+/// already [`CHIP_H`] = 24; this row now matches them.
+pub const MARKER_H: f32 = 24.0;
 
 /// Height of the time ruler in points: a slim strip above
 /// the chips, just tall enough for its 10-point labels.
@@ -1030,6 +1072,26 @@ pub fn ruler_frame_at_x(x: f32, frame_count: usize, chip_w: f32) -> usize {
     idx.min(frame_count - 1)
 }
 
+/// The FRACTIONAL frame time under ruler position `x`
+/// (Roadmap Wave 2, W2-40) — [`ruler_frame_at_x`]'s
+/// continuous form, the sub-frame scrub's conversion. One
+/// pitch of x is one frame of time, chip and the gap after
+/// it alike, so the fraction runs steadily through a
+/// frame's whole slot; the floor of the result is exactly
+/// `ruler_frame_at_x` at the same x (pinned below), so the
+/// scrub's authoring frame is the frame every other ruler
+/// reader names. The domain clamps to `[0, count)`: frame
+/// time `count` is the timeline's end, outside the
+/// playhead's domain, so a captured drag past the row
+/// parks a hair inside the last frame instead of on its
+/// start (the integer form's clamp, one level down).
+pub fn ruler_frame_time_at_x(x: f32, frame_count: usize, chip_w: f32) -> f32 {
+    if frame_count == 0 || !x.is_finite() || x <= 0.0 {
+        return 0.0;
+    }
+    (x / pitch(chip_w)).min(frame_count as f32 - 0.001)
+}
+
 /// The timeline frame a graph key at fractional time `t`
 /// belongs to: `t` rounded with `f32::round` (nearest frame,
 /// halves away from zero) — the graph panel's own seek
@@ -1048,15 +1110,17 @@ pub fn graph_key_frame(t: f32, count: usize) -> Option<usize> {
     Some(f as usize)
 }
 
-/// Does `frame` carry a camera key, and does it carry a
-/// graph key — `(camera, graph)`? A camera key matches by
-/// its exact stored frame; a graph key matches by
-/// [`graph_key_frame`]'s rounding, over every channel. A
-/// frame index past the timeline end carries neither.
-pub fn frame_markers(core: &EditorCore, frame: usize) -> (bool, bool) {
+/// Does `frame` carry a camera key, a graph key, and a
+/// story-beat marker — `(camera, graph, beat)`? A camera
+/// key matches by its exact stored frame; a graph key
+/// matches by [`graph_key_frame`]'s rounding, over every
+/// channel; a beat marker matches by its exact stored
+/// frame (W2-19). A frame index past the timeline end
+/// carries none of the three.
+pub fn frame_markers(core: &EditorCore, frame: usize) -> (bool, bool, bool) {
     let count = core.frame_count();
     if frame >= count {
-        return (false, false);
+        return (false, false, false);
     }
     let camera = core.project.camera.iter().any(|k| k.frame == frame);
     let graph = core
@@ -1065,17 +1129,19 @@ pub fn frame_markers(core: &EditorCore, frame: usize) -> (bool, bool) {
         .iter()
         .flat_map(|ch| ch.keys.iter())
         .any(|k| graph_key_frame(k.frame, count) == Some(frame));
-    (camera, graph)
+    let beat = core.project.beat_marker_at(frame).is_some();
+    (camera, graph, beat)
 }
 
 /// [`frame_markers`] for the whole timeline in one pass:
-/// one sweep over the camera keys and one over every
-/// channel's keys, marking into a per-frame vector. This is
-/// what the marker row renders from — the per-cell cost is
-/// a vector read, however many keys the project carries.
-pub fn markers_for_project(core: &EditorCore) -> Vec<(bool, bool)> {
+/// one sweep over the camera keys, one over every
+/// channel's keys, and one over the beat markers, marking
+/// into a per-frame vector. This is what the marker row
+/// renders from — the per-cell cost is a vector read,
+/// however many keys the project carries.
+pub fn markers_for_project(core: &EditorCore) -> Vec<(bool, bool, bool)> {
     let count = core.frame_count();
-    let mut out = vec![(false, false); count];
+    let mut out = vec![(false, false, false); count];
     for key in &core.project.camera {
         if key.frame < count {
             out[key.frame].0 = true;
@@ -1086,6 +1152,11 @@ pub fn markers_for_project(core: &EditorCore) -> Vec<(bool, bool)> {
             if let Some(f) = graph_key_frame(key.frame, count) {
                 out[f].1 = true;
             }
+        }
+    }
+    for marker in &core.project.beat_markers {
+        if marker.frame < count {
+            out[marker.frame].2 = true;
         }
     }
     out
@@ -1105,6 +1176,13 @@ pub fn graph_marker_key(frame: usize) -> String {
     format!("marker-graph-{frame}")
 }
 
+/// Element key of the beat marker on `frame`:
+/// `marker-beat-{frame}`, with `frame` the 0-based
+/// timeline index (see the module docs' key section).
+pub fn beat_marker_key(frame: usize) -> String {
+    format!("marker-beat-{frame}")
+}
+
 /// What pressing a marker does: seek the playhead to the
 /// marker's frame — the core's plain `goto`, the same seek
 /// a chip click performs. A marker only exists for a frame
@@ -1113,10 +1191,27 @@ fn goto_marker(s: &mut State, frame: usize) {
     s.core.goto(frame);
 }
 
+/// What pressing a BEAT marker does (W2-19): the same
+/// seek as [`goto_marker`], plus the marker's name posted
+/// on the status line — the row is glyph-only, and a beat
+/// marker's name is its whole payload, so the press is
+/// where the display speaks it. The wording is the core
+/// jump ops' own ("Beat marker '{name}' at frame {n}."),
+/// so a press and a next/previous jump report the same
+/// landing in the same voice.
+fn goto_beat_marker(s: &mut State, frame: usize) {
+    s.core.goto(frame);
+    if let Some(marker) = s.core.project.beat_marker_at(frame) {
+        let name = marker.name.clone();
+        s.core.status = format!("Beat marker '{name}' at frame {}.", frame + 1);
+    }
+}
+
 /// Whether the marker row has anything to show: at
-/// least one frame carrying a camera or a graph marker.
+/// least one frame carrying a camera key, a graph key
+/// or a beat marker (W2-19 added the third).
 /// This is the row's mount predicate (Wave 10, audit
-/// F2): the row renders only camera and graph markers,
+/// F2): the row renders only those three marks,
 /// so "no markers anywhere" is the one state in which
 /// it would paint a full row of blank cells — the state
 /// it now collapses out of, the clips lane's rule
@@ -1132,8 +1227,8 @@ fn goto_marker(s: &mut State, frame: usize) {
 /// row is blank, and empty on a camera-keyed project
 /// whose figures are never posed, whose markers must
 /// still show.
-pub fn any_markers(markers: &[(bool, bool)]) -> bool {
-    markers.iter().any(|&(camera, graph)| camera || graph)
+pub fn any_markers(markers: &[(bool, bool, bool)]) -> bool {
+    markers.iter().any(|&(camera, graph, beat)| camera || graph || beat)
 }
 
 /// The colour one marker glyph paints. Off the current
@@ -1143,7 +1238,9 @@ pub fn any_markers(markers: &[(bool, bool)]) -> bool {
 /// white — the current chip's own treatment (accent
 /// fill, white content) carried into its marker cell
 /// (Wave 10, audit F1), so the glyph stays legible on
-/// the cell's accent ground.
+/// the cell's accent ground. The beat triangle (W2-19)
+/// takes the graph arm (`camera == false`): shape, not
+/// colour, distinguishes it from the graph dot.
 pub fn marker_glyph_color(
     current: bool,
     camera: bool,
@@ -1186,7 +1283,7 @@ fn marker_row(core: &EditorCore, t: &Theme, chip_w: f32) -> Option<El> {
     }
     let accent = tok::accent(0, true);
     let mut marker_row = row().key("timeline-markers").gap(CHIP_GAP);
-    for (i, &(camera, graph)) in markers.iter().enumerate() {
+    for (i, &(camera, graph, beat)) in markers.iter().enumerate() {
         let current = i == core.current;
         let mut cell = row().size(chip_w, MARKER_H).center().gap(2.0);
         if current {
@@ -1236,6 +1333,28 @@ fn marker_row(core: &EditorCore, t: &Theme, chip_w: f32) -> Option<El> {
                     ),
             );
         }
+        if beat {
+            cell = cell.child(
+                el()
+                    .key(beat_marker_key(i))
+                    .grow(1.0)
+                    .h(MARKER_H)
+                    .center()
+                    .hover(t.hover)
+                    .press(t.press)
+                    .on_press(move |s: &mut State| goto_beat_marker(s, i))
+                    .child(
+                        text("▼")
+                            .font(type_::LABEL)
+                            .color(marker_glyph_color(
+                                current,
+                                false,
+                                accent,
+                                t.text_secondary,
+                            )),
+                    ),
+            );
+        }
         marker_row = marker_row.child(cell);
     }
     Some(marker_row)
@@ -1251,11 +1370,23 @@ fn marker_row(core: &EditorCore, t: &Theme, chip_w: f32) -> Option<El> {
 /// because this handler sits on the ruler row inside the
 /// same scrolled column. Play state, the range selection
 /// and the loop range are never written here.
+///
+/// Roadmap Wave 2 (W2-40): the seek is FRACTIONAL — the
+/// playhead lands at the exact sub-frame position under
+/// the pointer ([`ruler_frame_time_at_x`] into
+/// `EditorCore::seek_fractional`), so a slow drag shows
+/// the interpolated pose on the stage (while tween
+/// playback is on — `display_frame`'s rule) instead of
+/// stepping frame to frame. `current` still names the
+/// frame the pointer is inside, so the chips' highlight
+/// and every authoring op agree with the integer seek
+/// this replaces; a press at a frame's exact start is
+/// the old `goto` landing, unchanged.
 fn ruler_drag(s: &mut State, d: &mut Drag) {
     match d.phase {
         Phase::Down | Phase::Move => {
-            let frame = ruler_frame_at_x(d.x, s.core.frame_count(), s.frame_ops.chip_w());
-            s.core.goto(frame);
+            let t = ruler_frame_time_at_x(d.x, s.core.frame_count(), s.frame_ops.chip_w());
+            s.core.seek_fractional(t);
         }
         Phase::Up => {}
     }
@@ -1438,6 +1569,7 @@ pub fn applicable_lanes(
     has_clips: bool,
     animate: bool,
     has_cues: bool,
+    has_chapters: bool,
 ) -> Vec<TimelineLane> {
     let mut lanes = Vec::new();
     if has_markers {
@@ -1451,6 +1583,9 @@ pub fn applicable_lanes(
     }
     if has_cues {
         lanes.push(TimelineLane::Subtitles);
+    }
+    if has_cues || has_chapters {
+        lanes.push(TimelineLane::Dialogue);
     }
     lanes
 }
@@ -1477,6 +1612,7 @@ fn lane_toggle_key_label(lane: TimelineLane) -> (&'static str, &'static str) {
         TimelineLane::Clips => ("timeline-lane-clips", "Clips"),
         TimelineLane::Dopesheet => ("timeline-lane-dopesheet", "Dopesheet"),
         TimelineLane::Subtitles => ("timeline-lane-subtitles", "Subtitles"),
+        TimelineLane::Dialogue => ("timeline-lane-dialogue", "Dialogue"),
     }
 }
 
@@ -1676,6 +1812,18 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
             content = content.child(subtitles);
         }
     }
+    // Roadmap Wave 2 (W2-12 — P-15): the dialogue lane —
+    // dialogue lines bound to their cues and chapters,
+    // stacked under the subtitle lane. The same mount
+    // rule: the collapsed gate and the user's per-lane
+    // flag through `lane_mounted`, the data gate inside
+    // the builder (`dialogue_present`: cues or chapters
+    // exist).
+    if lane_mounted(collapsed, s.frame_ops.lane_shown(TimelineLane::Dialogue), true) {
+        if let Some(dialogue) = crate::rune_sec::dialogue_lane::dialogue_lane(s, t) {
+            content = content.child(dialogue);
+        }
+    }
     let timeline = row()
         .key("timeline")
         .child(content)
@@ -1821,6 +1969,7 @@ fn lane_toggles_row(s: &State, t: &Theme) -> Option<El> {
         !clip_spans(core).is_empty(),
         s.workspace == crate::rune_sec::workspaces::Workspace::Animate,
         !core.project.subtitles.is_empty(),
+        !core.project.chapters.is_empty(),
     );
     if lanes.is_empty() {
         return None;
@@ -2010,8 +2159,8 @@ fn overview_shape(s: &State, t: &Theme) -> Shape {
             color,
         );
     }
-    for (i, &(camera, graph)) in markers_for_project(core).iter().enumerate() {
-        if !camera && !graph {
+    for (i, &(camera, graph, beat)) in markers_for_project(core).iter().enumerate() {
+        if !camera && !graph && !beat {
             continue;
         }
         let cx = frac(i as f32 + 0.5);
@@ -2102,8 +2251,10 @@ fn overview_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
 }
 
 /// Height of ONE sub-lane row of the clips lane in
-/// points: a slim strip in the marker row's spirit
-/// ([`MARKER_H`] is 14), just tall enough for one bar.
+/// points: a slim strip in the marker row's spirit,
+/// just tall enough for one bar. (The clips lane is a
+/// passive canvas — no pressables — so the A20-14
+/// target-height floor does not reach it; W2-55.)
 /// The lane stacks these rows (audio rows above FX
 /// rows, overlapping same-kind spans on separate rows)
 /// and is [`clips_lane_height`] tall overall.
@@ -2417,7 +2568,7 @@ mod tests {
         // in the card's stacking order, whatever subset
         // passes.
         assert_eq!(
-            applicable_lanes(true, true, true, true),
+            applicable_lanes(true, true, true, true, false),
             vec![
                 TimelineLane::Markers,
                 TimelineLane::Clips,
@@ -2426,15 +2577,15 @@ mod tests {
             ]
         );
         assert_eq!(
-            applicable_lanes(false, true, false, true),
+            applicable_lanes(false, true, false, true, false),
             vec![TimelineLane::Clips, TimelineLane::Subtitles]
         );
         assert_eq!(
-            applicable_lanes(false, false, true, false),
+            applicable_lanes(false, false, true, false, false),
             vec![TimelineLane::Dopesheet],
             "Animate alone offers the dopesheet toggle"
         );
-        assert!(applicable_lanes(false, false, false, false).is_empty());
+        assert!(applicable_lanes(false, false, false, false, false).is_empty());
     }
 
     #[test]
@@ -2753,6 +2904,7 @@ mod tests {
             y: 0.0,
             zoom: 1.0,
             angle: 0.0,
+            easing: stykanimate_rs::model::CameraEase::Linear,
         });
         core.project.channels.push(Channel {
             figure: 0,
@@ -2773,9 +2925,9 @@ mod tests {
         // channels, so all five frames are unmarked.
         let core = EditorCore::new();
         assert_eq!(core.frame_count(), 5);
-        assert_eq!(markers_for_project(&core), vec![(false, false); 5]);
-        assert_eq!(frame_markers(&core, 0), (false, false));
-        assert_eq!(frame_markers(&core, 4), (false, false));
+        assert_eq!(markers_for_project(&core), vec![(false, false, false); 5]);
+        assert_eq!(frame_markers(&core, 0), (false, false, false));
+        assert_eq!(frame_markers(&core, 4), (false, false, false));
     }
 
     #[test]
@@ -2784,20 +2936,68 @@ mod tests {
         assert_eq!(
             markers_for_project(&core),
             vec![
-                (false, true),  // 0: graph 0.4
-                (false, false), // 1: nothing
-                (true, true),   // 2: camera + graph 2.49
-                (false, true),  // 3: graph 2.5 rounds up
-                (false, true),  // 4: graph 3.6
+                (false, true, false),  // 0: graph 0.4
+                (false, false, false), // 1: nothing
+                (true, true, false),   // 2: camera + graph 2.49
+                (false, true, false),  // 3: graph 2.5 rounds up
+                (false, true, false),  // 4: graph 3.6
             ]
         );
         // The single-frame helper agrees, and a frame past
-        // the end reports neither marker even though a
+        // the end reports no marker even though a
         // camera key is stored there.
-        assert_eq!(frame_markers(&core, 2), (true, true));
-        assert_eq!(frame_markers(&core, 1), (false, false));
-        assert_eq!(frame_markers(&core, 3), (false, true));
-        assert_eq!(frame_markers(&core, 99), (false, false));
+        assert_eq!(frame_markers(&core, 2), (true, true, false));
+        assert_eq!(frame_markers(&core, 1), (false, false, false));
+        assert_eq!(frame_markers(&core, 3), (false, true, false));
+        assert_eq!(frame_markers(&core, 99), (false, false, false));
+    }
+
+    #[test]
+    fn markers_for_project_maps_beat_markers() {
+        // W2-19: a beat marker marks its exact stored
+        // frame; one stored past the timeline's end marks
+        // nothing (the graph-key rule), and a beat-only
+        // project qualifies for the marker row on its own.
+        let mut core = EditorCore::new();
+        core.project.beat_markers = vec![
+            stykanimate_rs::model::BeatMarker {
+                name: "The Reveal".to_string(),
+                frame: 3,
+            },
+            stykanimate_rs::model::BeatMarker {
+                name: "Finale".to_string(),
+                frame: 99,
+            },
+        ];
+        assert_eq!(
+            markers_for_project(&core),
+            vec![
+                (false, false, false),
+                (false, false, false),
+                (false, false, false),
+                (false, false, true),
+                (false, false, false),
+            ]
+        );
+        assert_eq!(frame_markers(&core, 3), (false, false, true));
+        assert_eq!(frame_markers(&core, 99), (false, false, false));
+        assert!(any_markers(&markers_for_project(&core)));
+        assert_eq!(beat_marker_key(3), "marker-beat-3");
+    }
+
+    #[test]
+    fn pressing_a_beat_marker_seeks_and_names_it() {
+        // W2-19: the beat press is the one marker press
+        // that also speaks — the status line carries the
+        // marker's name in the core jump ops' voice.
+        let mut state = demo_state();
+        state.core.project.beat_markers = vec![stykanimate_rs::model::BeatMarker {
+            name: "The Reveal".to_string(),
+            frame: 3,
+        }];
+        goto_beat_marker(&mut state, 3);
+        assert_eq!(state.core.current, 3);
+        assert_eq!(state.core.status, "Beat marker 'The Reveal' at frame 4.");
     }
 
     #[test]
@@ -2890,6 +3090,40 @@ mod tests {
 
     // ---- ruler drag-to-seek (Phase K): the slot pitch is
     // CHIP_W + CHIP_GAP = 34, the chips' own geometry ----
+
+    #[test]
+    fn w2_40_ruler_frame_time_at_x_is_the_continuous_form() {
+        // Roadmap Wave 2 (W2-40): one pitch (34 pt at the
+        // default chip width) is one frame of time — the
+        // midpoint of slot 0 is frame time 0.5, the midpoint
+        // of slot 1 is 1.5, and a slot's exact start is the
+        // whole frame (the old integer landing).
+        assert_eq!(ruler_frame_time_at_x(0.0, 5, CHIP_W), 0.0);
+        assert!((ruler_frame_time_at_x(17.0, 5, CHIP_W) - 0.5).abs() < 1e-6);
+        assert!((ruler_frame_time_at_x(34.0, 5, CHIP_W) - 1.0).abs() < 1e-6);
+        assert!((ruler_frame_time_at_x(51.0, 5, CHIP_W) - 1.5).abs() < 1e-6);
+        // The fraction runs through the gap too: the last
+        // point of slot 0 is a hair before frame time 1.
+        let gap_end = ruler_frame_time_at_x(33.9, 5, CHIP_W);
+        assert!(gap_end > 0.99 && gap_end < 1.0, "gap end: {gap_end}");
+        // The floor relation: the scrub's authoring frame
+        // is the integer conversion's frame at every x.
+        for x in [0.0, 10.0, 29.9, 33.9, 34.0, 49.0, 68.0, 135.9, 136.0, 500.0] {
+            assert_eq!(
+                ruler_frame_time_at_x(x, 5, CHIP_W).floor() as usize,
+                ruler_frame_at_x(x, 5, CHIP_W),
+                "floors agree at x {x}"
+            );
+        }
+        // Clamps and guards: past the end parks inside the
+        // last frame (frame time 5 would be the timeline's
+        // end); negative, non-finite and empty read as 0.
+        let end = ruler_frame_time_at_x(10_000.0, 5, CHIP_W);
+        assert!(end > 4.9 && end < 5.0, "end clamp: {end}");
+        assert_eq!(ruler_frame_time_at_x(-1.0, 5, CHIP_W), 0.0);
+        assert_eq!(ruler_frame_time_at_x(f32::NAN, 5, CHIP_W), 0.0);
+        assert_eq!(ruler_frame_time_at_x(40.0, 0, CHIP_W), 0.0);
+    }
 
     #[test]
     fn ruler_frame_at_x_maps_slots_at_the_chip_pitch() {
@@ -3006,6 +3240,7 @@ mod tests {
         assert_eq!(camera_marker_key(2), "marker-cam-2");
         assert_eq!(graph_marker_key(2), "marker-graph-2");
         assert_eq!(graph_marker_key(4), "marker-graph-4");
+        assert_eq!(beat_marker_key(2), "marker-beat-2");
     }
 
     #[test]
@@ -3021,7 +3256,7 @@ mod tests {
         let _ = timeline_marks(&state, &t);
         let markers = markers_for_project(&state.core);
         let mut camera_frames = Vec::new();
-        for (i, &(camera, _)) in markers.iter().enumerate() {
+        for (i, &(camera, _, _)) in markers.iter().enumerate() {
             if camera {
                 camera_frames.push(i);
             }
@@ -3032,8 +3267,8 @@ mod tests {
         // the camera marker in the same cell.
         assert!(markers[2].1);
         assert_eq!(graph_marker_key(2), "marker-graph-2");
-        // A frame with neither key gets no marker element.
-        assert_eq!(markers[1], (false, false));
+        // A frame with no key gets no marker element.
+        assert_eq!(markers[1], (false, false, false));
     }
 
     #[test]
@@ -3054,13 +3289,28 @@ mod tests {
     #[test]
     fn any_markers_needs_one_marked_frame() {
         assert!(!any_markers(&[]));
-        assert!(!any_markers(&[(false, false); 5]));
-        assert!(any_markers(&[(false, false), (true, false)]));
-        assert!(any_markers(&[(false, true), (false, false)]));
+        assert!(!any_markers(&[(false, false, false); 5]));
+        assert!(any_markers(&[(false, false, false), (true, false, false)]));
+        assert!(any_markers(&[(false, true, false), (false, false, false)]));
+        // A beat marker alone qualifies the row (W2-19).
+        assert!(any_markers(&[(false, false, true)]));
         // The computed vectors agree: the marked fixture
         // qualifies, the demo's all-blank one does not.
         assert!(any_markers(&markers_for_project(&marked_core())));
         assert!(!any_markers(&markers_for_project(&EditorCore::new())));
+    }
+
+    #[test]
+    fn marker_height_meets_the_target_floor() {
+        // W2-55 (A20-14): the marker press height is
+        // the WCAG 2.5.8 target-size floor — 24 pt,
+        // the chips' own height — not the 14 pt strip
+        // S18 measured. The cell and both press
+        // wrappers take MARKER_H (see `marker_row`),
+        // so this constant IS the press height; the
+        // glyph stays one centred LABEL line.
+        assert_eq!(MARKER_H, 24.0);
+        assert_eq!(MARKER_H, CHIP_H);
     }
 
     #[test]
@@ -3185,6 +3435,7 @@ mod tests {
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
             sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            migration_panel: rune_sec::migration_prompt::initial_state(),
             frame_ops: FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
@@ -3203,12 +3454,15 @@ mod tests {
             toast_now: 0.0,
             last_dark: true,
             workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            setup_mode_before_build: false,
             guides: false,
             show_left: true,
             show_right: true,
+            stage_focus_restore: None,
             key_clipboard: None,
             key_follow_graph: false,
             key_sel: Default::default(),
+            keyframe_tools: Default::default(),
             help_panel: Default::default(),
             camera_panel: Default::default(),
             segment_numbers: Default::default(),
@@ -3222,6 +3476,11 @@ stroke_selected: None,
 particle_selected: None,
 guides_frustum: true,
 guides_safe: true,
+guides_golden: false,
+guides_diagonals: false,
+guides_stored: true,
+rulers: false,
+limit_arcs: false,
 onion_ui: Default::default(),
 last_frame: 0,
 pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),

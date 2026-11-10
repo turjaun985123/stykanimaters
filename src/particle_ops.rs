@@ -99,7 +99,7 @@ impl EditorCore {
         let seed = (self.project.particles.len() as u32)
             .wrapping_mul(2654435761)
             .wrapping_add(12345);
-        self.snapshot();
+        self.snapshot_labeled("Add particle event");
         self.project.particles.push(ParticleEvent {
             frame,
             figure: None,
@@ -129,7 +129,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Delete particle event");
         self.project.particles.remove(index);
         self.status = format!("Particle event {} deleted.", index + 1);
     }
@@ -161,7 +161,7 @@ impl EditorCore {
             .wrapping_add(12345);
         let mut copy = self.project.particles[index].clone();
         copy.seed = seed;
-        self.snapshot();
+        self.snapshot_labeled("Duplicate particle event");
         self.project.particles.insert(index + 1, copy);
         self.status = format!(
             "Particle event {} duplicated as event {}.",
@@ -183,7 +183,7 @@ impl EditorCore {
             return;
         }
         let frame = self.particle_clamp_frame(frame);
-        self.snapshot();
+        self.snapshot_labeled("Move particle event");
         self.project.particles[index].frame = frame;
         self.status = format!(
             "Particle event {} moved to frame {}.",
@@ -213,7 +213,7 @@ impl EditorCore {
         let current = self.project.particles[index].frame;
         let target = (current as i64 + i64::from(delta)).max(0) as usize;
         let frame = self.particle_clamp_frame(target);
-        self.snapshot();
+        self.snapshot_labeled("Move particle event");
         self.project.particles[index].frame = frame;
         self.status = format!(
             "Particle event {} moved to frame {}.",
@@ -251,7 +251,7 @@ impl EditorCore {
             return;
         }
         let node = if figure.is_some() { node } else { None };
-        self.snapshot();
+        self.snapshot_labeled("Set particle anchor");
         let event = &mut self.project.particles[index];
         event.figure = figure;
         event.node = node;
@@ -279,7 +279,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Set particle position");
         let event = &mut self.project.particles[index];
         event.x = x;
         event.y = y;
@@ -302,7 +302,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Set particle kind");
         self.project.particles[index].kind = kind;
         self.status = format!(
             "Particle event {} kind set to {kind:?}.",
@@ -324,7 +324,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Set particle colour");
         self.project.particles[index].color = color;
         self.status = format!(
             "Particle event {} colour set to #{color:06X}.",
@@ -353,7 +353,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Set particle seed");
         self.project.particles[index].seed = seed;
         self.status = format!("Particle event {} seed set to {seed}.", index + 1);
     }
@@ -454,7 +454,11 @@ fn particle_mcp_i32(args: &Value, key: &str) -> Result<i32, String> {
 fn particle_mcp_f32(args: &Value, key: &str) -> Result<f32, String> {
     match particle_mcp_get(args, key) {
         Some(v) => match v.as_f64() {
-            Some(f) if f.is_finite() => Ok(f as f32),
+            // Roadmap Wave 2 (W2-80, IA-W2-80-1): the
+            // CAST value must be finite too — a finite
+            // f64 like 1e39 casts to f32 infinity (the
+            // `gk_opt_f32` rule in graph_keys.rs).
+            Some(f) if f.is_finite() && (f as f32).is_finite() => Ok(f as f32),
             _ => Err(format!("argument '{key}' must be a finite number")),
         },
         None => Err(format!("missing required argument '{key}'")),
@@ -1367,5 +1371,13 @@ mod tests {
         assert_eq!(err, "argument 'seed' is too large");
         assert_eq!(core.edits_since_autosave(), edits + 1, "no refusal took a snapshot");
         assert_eq!(core.project.particles[0].seed, 42);
+    }
+
+    #[test]
+    fn particle_mcp_f32_refuses_cast_overflow_arguments() {
+        // Roadmap Wave 2 (W2-80, IA-W2-80-1).
+        let args = serde_json::json!({ "x": 1e39 });
+        let err = particle_mcp_f32(&args, "x").unwrap_err();
+        assert_eq!(err, "argument 'x' must be a finite number");
     }
 }

@@ -5,7 +5,7 @@
 
 use crate::export::{
     export_gif as render_gif, export_mp4 as render_mp4, export_png_sequence,
-    export_spritesheet as render_sheet, export_webm as render_webm,
+    export_spritesheet_pack as render_sheet, export_webm as render_webm,
 };
 use crate::model::{
     aim_node, apply_ik, dist, evaluate, norm_deg, FigureDef, NodeDef, Project, SetRestMode, V2,
@@ -74,6 +74,14 @@ pub struct EditorCore {
     pub current: usize,
     pub selected_figure: usize,
     pub selected_node: Option<usize>,
+    /// Roadmap Wave 2 (W2-01): the marquee figure
+    /// set — the figures the stage's last marquee
+    /// committed, sorted figure indices. Session
+    /// state like the single selection beside it:
+    /// never serialised, not an edit, and every
+    /// consumer re-validates indices against the
+    /// live project.
+    pub selected_figures: Vec<usize>,
     pub dragging: Option<DragKind>,
     pub onion: bool,
     pub playing: bool,
@@ -222,6 +230,15 @@ pub struct EditorCore {
     /// when set. Runtime only, like `solo`: undo snapshots cover
     /// the project, not this.
     pub loop_range: Option<(usize, usize)>,
+    /// Roadmap Wave 2 (W2-40): ping-pong travel direction —
+    /// `true` while a ping-pong pass is travelling backwards.
+    /// Runtime only, like `loop_range`: undo snapshots cover
+    /// the project, not this. Read and written only by
+    /// [`EditorCore::advance_ping_pong`]; every other playhead
+    /// writer (`goto`, `advance`, seeks, frame ops) leaves it
+    /// alone, so a seek mid-bounce keeps the direction of
+    /// travel instead of silently restarting the pass.
+    pub play_reverse: bool,
     pub show_paths: bool,
     pub light_theme: bool,
     pub library: Vec<(String, FigureDef)>,
@@ -386,6 +403,7 @@ impl EditorCore {
             current: 0,
             selected_figure: 0,
             selected_node: None,
+            selected_figures: Vec::new(),
             dragging: None,
             onion: true,
             playing: false,
@@ -410,6 +428,7 @@ impl EditorCore {
             frame_clipboard: Vec::new(),
             playhead: 0.0,
             loop_range: None,
+            play_reverse: false,
             show_paths: false,
             light_theme: false,
             library: Self::load_library(),
@@ -1585,6 +1604,1027 @@ impl EditorCore {
         };
     }
 
+    /// Reparent node `ni` of the selected figure onto
+    /// `new_parent` (Roadmap Wave 2, W2-23 — RM19 §4.1,
+    /// the IA-RM19-5 signature). **No node index moves**
+    /// — only `nodes[ni].parent` changes — so the §4.0
+    /// remap table does not apply: pose angles, frame
+    /// bends, graph channels and figure states all keep
+    /// naming the same nodes, untouched.
+    ///
+    /// The world rest pose is preserved: with world rest
+    /// orientations W(·) composed over `rest_angle`s from
+    /// the root (the rest pose IS the def's FK — a root's
+    /// world orientation is 0, exactly as `evaluate`
+    /// seeds it), the node's new rest angle is
+    /// `W(ni) − W(new_parent)`, normalised. Lengths are
+    /// unchanged and children follow — their relative
+    /// rests are untouched, so the whole subtree keeps
+    /// its world rest pose. Preserving the *relative*
+    /// angle instead would swing the subtree silently;
+    /// this is the only honest default (RM19 §4.1).
+    ///
+    /// Refusals spend no snapshot and return false:
+    /// no such figure or node, the figure is locked,
+    /// `ni` is the root, `new_parent` is out of range,
+    /// or `new_parent` is `ni` itself or one of its
+    /// descendants (the cycle refusal). A successful
+    /// reparent spends exactly one snapshot labelled
+    /// "Reparent node" and returns true.
+    pub fn reparent_node(&mut self, ni: usize, new_parent: usize) -> bool {
+        let fi = self.selected_figure;
+        let Some(fig) = self.project.figures.get(fi) else {
+            self.status = "Select a figure first.".into();
+            return false;
+        };
+        if ni >= fig.def.nodes.len() {
+            self.status = "Select a segment first.".into();
+            return false;
+        }
+        if fig.locked {
+            self.status = "Figure is locked — unlock it in the figures list.".into();
+            return false;
+        }
+        let def = &fig.def;
+        if def.nodes[ni].parent.is_none() {
+            self.status = "The root cannot be reparented.".into();
+            return false;
+        }
+        if new_parent >= def.nodes.len() {
+            self.status = "That parent does not exist.".into();
+            return false;
+        }
+        if new_parent == ni || Self::subtree_contains(def, ni, new_parent) {
+            self.status = "That would make the segment its own ancestor.".into();
+            return false;
+        }
+        // World rest orientations, composed BEFORE the
+        // write from the def as it stands.
+        let world = Self::rest_world_angles(def);
+        let new_rest = crate::model::norm_deg(world[ni] - world[new_parent]);
+        let parent_name = def.nodes[new_parent].name.clone();
+        let node_name = def.nodes[ni].name.clone();
+        self.snapshot_labeled("Reparent node");
+        let node = &mut self.project.figures[fi].def.nodes[ni];
+        node.parent = Some(new_parent);
+        node.rest_angle = new_rest;
+        self.status = format!("{node_name} reparented to {parent_name}.");
+        true
+    }
+
+    /// Cycle the selected node's parent to the next
+    /// legal parent in tree order (Roadmap Wave 2,
+    /// W2-23 — RM19 §3/§4.1's panel idiom: a parent
+    /// picker needs no new kit, so the panel's
+    /// "Reparent" button cycles). The candidate list is
+    /// [`EditorCore::legal_parents`] — every node except
+    /// `ni` and its subtree, in the rig tree's pre-order
+    /// — and the step after the current parent wraps to
+    /// the first candidate. The write itself is
+    /// [`EditorCore::reparent_node`], so a successful
+    /// cycle costs exactly one "Reparent node" snapshot;
+    /// every refusal (no selection, locked figure, the
+    /// root, no other legal parent) spends nothing.
+    pub fn cycle_reparent_selected(&mut self) -> bool {
+        let Some(ni) = self.selected_node else {
+            self.status = "Select a segment first.".into();
+            return false;
+        };
+        let fi = self.selected_figure;
+        let Some(fig) = self.project.figures.get(fi) else {
+            self.status = "Select a figure first.".into();
+            return false;
+        };
+        if ni >= fig.def.nodes.len() {
+            self.status = "Select a segment first.".into();
+            return false;
+        }
+        if fig.locked {
+            self.status = "Figure is locked — unlock it in the figures list.".into();
+            return false;
+        }
+        if fig.def.nodes[ni].parent.is_none() {
+            self.status = "The root cannot be reparented.".into();
+            return false;
+        }
+        let Some(next) = Self::next_legal_parent(&fig.def, ni) else {
+            self.status = "No other legal parent for this segment.".into();
+            return false;
+        };
+        self.reparent_node(ni, next)
+    }
+
+    /// The legal parents for node `ni`, in tree order:
+    /// every node of the def except `ni` itself and its
+    /// whole subtree (parenting onto any of those would
+    /// close a cycle), ordered by the rig tree's
+    /// pre-order walk — the same order the panel shows.
+    /// Pure over the def; malformed parent links
+    /// (out-of-range, self-parented, cycles) cannot hang
+    /// it: a visited set bounds the walk, as in the rig
+    /// tree's own rows.
+    pub fn legal_parents(def: &crate::model::FigureDef, ni: usize) -> Vec<usize> {
+        if ni >= def.nodes.len() {
+            return Vec::new();
+        }
+        let mut banned = vec![false; def.nodes.len()];
+        banned[ni] = true;
+        // Ban the subtree: children in node-index order,
+        // transitively. The visited marks themselves
+        // bound the walk on cyclic defs.
+        let mut stack = vec![ni];
+        while let Some(n) = stack.pop() {
+            for (i, node) in def.nodes.iter().enumerate() {
+                if node.parent == Some(n) && !banned[i] {
+                    banned[i] = true;
+                    stack.push(i);
+                }
+            }
+        }
+        Self::preorder(def)
+            .into_iter()
+            .filter(|&i| !banned[i])
+            .collect()
+    }
+
+    /// The candidate [`EditorCore::legal_parents`]
+    /// offers after `ni`'s current parent, wrapping to
+    /// the first candidate at the end of the list;
+    /// `None` when the list is empty (a lone root, or a
+    /// root whose subtree is the whole figure). A
+    /// current parent missing from the list (it cannot
+    /// be — the parent is never in the subtree) falls
+    /// back to the first candidate.
+    pub fn next_legal_parent(def: &crate::model::FigureDef, ni: usize) -> Option<usize> {
+        let legal = Self::legal_parents(def, ni);
+        let current = def.nodes.get(ni)?.parent;
+        match current.and_then(|p| legal.iter().position(|&c| c == p)) {
+            Some(pos) => legal.get(pos + 1).or_else(|| legal.first()).copied(),
+            None => legal.first().copied(),
+        }
+    }
+
+    /// Whether `target` lies in the subtree rooted at
+    /// `root` (root itself excluded — the caller checks
+    /// identity separately): walk `target`'s parent
+    /// chain looking for `root`. A visited bound keeps
+    /// a cyclic def from hanging the walk.
+    fn subtree_contains(def: &crate::model::FigureDef, root: usize, target: usize) -> bool {
+        let mut cur = def.nodes.get(target).and_then(|n| n.parent);
+        let mut steps = 0;
+        while let Some(p) = cur {
+            if p == root {
+                return true;
+            }
+            steps += 1;
+            if steps > def.nodes.len() {
+                return false;
+            }
+            cur = def.nodes.get(p).and_then(|n| n.parent);
+        }
+        false
+    }
+
+    /// World rest orientation of every node: the
+    /// running sum of `rest_angle`s from the root (a
+    /// root's own world orientation is 0, matching
+    /// `evaluate`'s seeding). Nodes are stored
+    /// parent-before-child in every constructor the app
+    /// ships; a node whose parent link is malformed
+    /// (out of range, self, or not yet visited) reads as
+    /// a root rather than panicking — the rig tree's
+    /// rows take the same line on bad links.
+    fn rest_world_angles(def: &crate::model::FigureDef) -> Vec<f32> {
+        let mut world = vec![0.0f32; def.nodes.len()];
+        let mut done = vec![false; def.nodes.len()];
+        for (i, node) in def.nodes.iter().enumerate() {
+            world[i] = match node.parent {
+                Some(p) if p < def.nodes.len() && p != i && done[p] => world[p] + node.rest_angle,
+                _ => 0.0,
+            };
+            done[i] = true;
+        }
+        world
+    }
+
+    /// Every node in the rig tree's display order: a
+    /// pre-order walk from the roots, children in
+    /// node-index order, a visited set bounding the
+    /// walk; a node caught in a parent cycle shows as
+    /// its own root rather than dropping out (the rig
+    /// tree rows' own rule, mirrored so the cycle order
+    /// and the row order can never disagree).
+    fn preorder(def: &crate::model::FigureDef) -> Vec<usize> {
+        fn is_root(def: &crate::model::FigureDef, ni: usize) -> bool {
+            match def.nodes[ni].parent {
+                None => true,
+                Some(p) => p >= def.nodes.len() || p == ni,
+            }
+        }
+        fn walk(def: &crate::model::FigureDef, ni: usize, visited: &mut Vec<bool>, out: &mut Vec<usize>) {
+            if visited[ni] {
+                return;
+            }
+            visited[ni] = true;
+            out.push(ni);
+            for i in 0..def.nodes.len() {
+                if def.nodes[i].parent == Some(ni) {
+                    walk(def, i, visited, out);
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(def.nodes.len());
+        let mut visited = vec![false; def.nodes.len()];
+        for ni in 0..def.nodes.len() {
+            if is_root(def, ni) {
+                walk(def, ni, &mut visited, &mut out);
+            }
+        }
+        for ni in 0..def.nodes.len() {
+            walk(def, ni, &mut visited, &mut out);
+        }
+        out
+    }
+
+    /// The members of the subtree rooted at `ni`, in
+    /// the rig tree's pre-order (root first, children in
+    /// node-index order). The membership set is collected
+    /// by a child-walk bounded by its own marks, so a
+    /// cyclic hand-authored def cannot hang it; the
+    /// ordering rides [`EditorCore::preorder`] so it can
+    /// never disagree with the panel's rows.
+    fn subtree_members(def: &crate::model::FigureDef, ni: usize) -> Vec<usize> {
+        if ni >= def.nodes.len() {
+            return Vec::new();
+        }
+        let mut member = vec![false; def.nodes.len()];
+        member[ni] = true;
+        let mut stack = vec![ni];
+        while let Some(n) = stack.pop() {
+            for (i, node) in def.nodes.iter().enumerate() {
+                if node.parent == Some(n) && !member[i] {
+                    member[i] = true;
+                    stack.push(i);
+                }
+            }
+        }
+        Self::preorder(def)
+            .into_iter()
+            .filter(|&i| member[i])
+            .collect()
+    }
+
+    /// Split the segment parent→`ni` of the selected
+    /// figure at its midpoint with a new collinear node
+    /// (Roadmap Wave 2, W2-24 — RM19 §4.2, the
+    /// IA-RM19-5 signature). The new node N is
+    /// **appended** to `nodes`, never spliced at `ni`,
+    /// so every existing node index stays valid and the
+    /// §4.0 remap table does not engage — the only
+    /// writes to node-indexed stores are slot extensions
+    /// (one 0.0 angle slot and one 0.0 bend slot per
+    /// frame row, absence-guarded exactly like
+    /// `add_segment` / `delete_segment`): parents (only
+    /// `ni`'s own, rewired to N), pose angles (extended,
+    /// existing values untouched), frame bends
+    /// (extended), graph channels (not node-moving —
+    /// untouched), figure states (frame→clip addressed,
+    /// no node index — untouched).
+    ///
+    /// The rest pose is preserved **exactly**: N takes
+    /// `ni`'s parent, half of `ni`'s length and `ni`'s
+    /// rest angle; `ni` keeps the other half of its
+    /// length with rest angle 0 under N, so `ni`'s joint
+    /// lands where it always did and its children are
+    /// untouched. N's remaining fields are
+    /// `add_segment`'s defaults. Posed frames: pose
+    /// angles are relative, so existing poses keep their
+    /// shape — `ni`'s keyed angle stays on `ni` (the
+    /// segment the user keyed), and N's fresh slot is
+    /// 0.0 = rest (RM19 §4.2, documented there).
+    ///
+    /// Refusals spend no snapshot and return false: no
+    /// such figure or node, the figure is locked, or
+    /// `ni` is the root (it has no segment to split). A
+    /// successful split spends exactly one snapshot
+    /// labelled "Insert segment node", selects the new
+    /// node (the `add_segment` precedent — the created
+    /// node becomes the selection) and returns true.
+    pub fn insert_segment_between(&mut self, ni: usize) -> bool {
+        let fi = self.selected_figure;
+        let Some(fig) = self.project.figures.get(fi) else {
+            self.status = "Select a figure first.".into();
+            return false;
+        };
+        if ni >= fig.def.nodes.len() {
+            self.status = "Select a segment first.".into();
+            return false;
+        }
+        if fig.locked {
+            self.status = "Figure is locked — unlock it in the figures list.".into();
+            return false;
+        }
+        let def = &fig.def;
+        let Some(parent) = def.nodes[ni].parent else {
+            self.status = "The root has no segment to split.".into();
+            return false;
+        };
+        // Validate-first: every value the write needs is
+        // read from the def as it stands, before the
+        // snapshot is spent.
+        let new_index = def.nodes.len();
+        let half = def.nodes[ni].length / 2.0;
+        let rest = def.nodes[ni].rest_angle;
+        let node_name = def.nodes[ni].name.clone();
+        let new_name = format!("segment {new_index}");
+        self.snapshot_labeled("Insert segment node");
+        let def = &mut self.project.figures[fi].def;
+        def.nodes.push(NodeDef {
+            min_angle: None,
+            max_angle: None,
+            name: new_name.clone(),
+            parent: Some(parent),
+            length: half,
+            rest_angle: rest,
+            head: false,
+            bend: 1.0,
+            thickness: 5.0,
+            color: None,
+            ik_end: false,
+            shape: crate::model::Shape::Line,
+            style: crate::model::NodeStyle::default(),
+            media: None,
+        });
+        let node = &mut def.nodes[ni];
+        node.parent = Some(new_index);
+        node.length = half;
+        node.rest_angle = 0.0;
+        // Slot extension (§4.0's append case): one fresh
+        // slot at the appended position per frame row —
+        // angles exactly like `add_segment` (a pose row
+        // that exists grows; absent figures have no row
+        // to grow), bends likewise where a bend row
+        // exists (reads are absence-guarded, so a row
+        // that stays short still reads 0.0 = straight).
+        for frame in &mut self.project.frames {
+            if let Some(pose) = frame.poses.get_mut(fi) {
+                pose.angles.push(0.0);
+            }
+            if let Some(row) = frame.bends.get_mut(fi) {
+                row.push(0.0);
+            }
+        }
+        self.selected_node = Some(new_index);
+        self.status = format!("Segment split — {new_name} inserted above {node_name}.");
+        true
+    }
+
+    /// Deep-copy the subtree rooted at `ni` of the
+    /// selected figure, appended in pre-order with fresh
+    /// indices (Roadmap Wave 2, W2-24 — RM19 §4.3, the
+    /// IA-RM19-5 signature). Appending moves no existing
+    /// index, so the §4.0 remap is the identity on the
+    /// old figure: parents, pose angles, frame bends and
+    /// graph channels of existing nodes are byte-untouched.
+    /// Inside the clone, parent links remap through the
+    /// old→new map; the clone root's parent is `ni`'s own
+    /// parent — an external reference, deliberately NOT
+    /// remapped — so the copy lands as a sibling subtree.
+    /// The clone root is named `"{name} copy"`; descendants
+    /// keep their names (name uniqueness is not an engine
+    /// invariant, RM19 §4.3). Node defs are deep-cloned
+    /// whole — segment media, joint limits, shapes and
+    /// styles ride along; a media entry names a project
+    /// asset by index, and that external reference stays
+    /// pointing at the same asset.
+    ///
+    /// The clone starts at rest: each frame row gains
+    /// one 0.0 angle slot and one 0.0 bend slot per
+    /// cloned node, absence-guarded like
+    /// [`EditorCore::insert_segment_between`].
+    /// Duplicating posed angles was considered and
+    /// rejected by the design — a duplicated rig part
+    /// starts at rest; duplicating animation is the
+    /// pose/clip tools' job. Graph channels are NOT
+    /// cloned (§4.0/§4.3): a channel keyed on the
+    /// original keeps driving the original. Figure
+    /// states carry no node index (frame→clip) and are
+    /// untouched.
+    ///
+    /// Refusals spend no snapshot and return false: no
+    /// such figure or node, the figure is locked, or
+    /// `ni` is the root (its parent — the clone root's
+    /// anchor — does not exist, and a second root in one
+    /// def is not a legal rig). A successful duplicate
+    /// spends exactly one snapshot labelled "Duplicate
+    /// subtree", moves the selection to the clone root
+    /// (RM19 §4.3) and returns true.
+    pub fn duplicate_subtree(&mut self, ni: usize) -> bool {
+        let fi = self.selected_figure;
+        let Some(fig) = self.project.figures.get(fi) else {
+            self.status = "Select a figure first.".into();
+            return false;
+        };
+        if ni >= fig.def.nodes.len() {
+            self.status = "Select a segment first.".into();
+            return false;
+        }
+        if fig.locked {
+            self.status = "Figure is locked — unlock it in the figures list.".into();
+            return false;
+        }
+        let def = &fig.def;
+        if def.nodes[ni].parent.is_none() {
+            self.status = "The root cannot be duplicated.".into();
+            return false;
+        }
+        // Validate-first: the clone set, the old→new map
+        // and the cloned defs are all computed from the
+        // def as it stands, before the snapshot is spent.
+        let members = Self::subtree_members(def, ni);
+        let base = def.nodes.len();
+        let map: std::collections::HashMap<usize, usize> = members
+            .iter()
+            .enumerate()
+            .map(|(k, &old)| (old, base + k))
+            .collect();
+        let mut clones: Vec<NodeDef> = Vec::with_capacity(members.len());
+        for &old in &members {
+            let mut node = def.nodes[old].clone();
+            if old == ni {
+                // The clone root: anchored on the
+                // original's parent (external, unmapped)
+                // and named as a copy.
+                node.name = format!("{} copy", node.name);
+            } else {
+                // An internal link: the parent is always
+                // another member (a subtree is closed
+                // under children), so the map always hits.
+                node.parent = node.parent.and_then(|p| map.get(&p).copied());
+            }
+            clones.push(node);
+        }
+        let count = clones.len();
+        let clone_root = base; // `ni` is first in pre-order.
+        self.snapshot_labeled("Duplicate subtree");
+        self.project.figures[fi].def.nodes.extend(clones);
+        for frame in &mut self.project.frames {
+            if let Some(pose) = frame.poses.get_mut(fi) {
+                let len = pose.angles.len();
+                pose.angles.resize(len + count, 0.0);
+            }
+            if let Some(row) = frame.bends.get_mut(fi) {
+                let len = row.len();
+                row.resize(len + count, 0.0);
+            }
+        }
+        self.selected_node = Some(clone_root);
+        self.status = format!(
+            "Subtree duplicated ({count} segment{}).",
+            if count == 1 { "" } else { "s" }
+        );
+        true
+    }
+
+    /// Remap every node-indexed store of figure `fi`
+    /// through `map` (Roadmap Wave 2, W2-25 — RM19
+    /// §4.0's shared helper for the ops that REMOVE or
+    /// REORDER nodes): `map[old]` is the node's new
+    /// index, or `None` when the node is being removed.
+    /// The caller owns `def.nodes` itself (the physical
+    /// removal and the parent rewrite — parents are
+    /// definition data, removed in the same breath);
+    /// this helper owns everything that POINTS at
+    /// nodes, so the stores can never drift apart
+    /// again:
+    ///
+    /// - pose angles (`frames[].poses[fi].angles`):
+    ///   rebuilt through the map — slots naming removed
+    ///   nodes drop out, survivors land at their new
+    ///   positions, and a short/stale row stays aligned
+    ///   because a missing slot rebuilds as 0.0 only
+    ///   where a surviving node needs one (the read side
+    ///   treats a missing slot as rest, the same value —
+    ///   see `bends_at`'s convention);
+    /// - frame bends (`frames[].bends[fi]`): rebuilt
+    ///   identically (a missing slot reads as 0.0 =
+    ///   straight);
+    /// - graph channels of THIS figure: Angle/Length/
+    ///   Bend targets remap through the map; a channel
+    ///   targeting a removed node, or one whose stored
+    ///   index is out of range entirely (stale data),
+    ///   is DROPPED and counted — never left dangling
+    ///   (§4.0's rule). RootX/RootY channels and other
+    ///   figures' channels pass untouched.
+    ///
+    /// Figure states (`FigureInstance::states`) carry
+    /// no node index — `StateKey` is frame→clip
+    /// addressed (verified at build, W2-24 §2) — and a
+    /// figure's IK ends ride `NodeDef::ik_end` in the
+    /// def itself, so neither needs a row here.
+    /// `core.selected_node` is the caller's to remap
+    /// (it lives on the core, not the project). Returns
+    /// the number of dropped channels, for the status
+    /// count.
+    fn remap_node_indices(
+        project: &mut crate::model::Project,
+        fi: usize,
+        map: &[Option<usize>],
+    ) -> usize {
+        // Rebuild one node-indexed row through the map:
+        // position `new` takes old slot `map`⁻¹(new);
+        // an old slot past the row's end (a short/stale
+        // row) or past the map leaves the value 0.0,
+        // which every reader of these rows already
+        // treats as the slot's neutral value.
+        fn rebuild(row: &[f32], map: &[Option<usize>]) -> Vec<f32> {
+            let new_len = map.iter().filter(|m| m.is_some()).count();
+            let mut out = vec![0.0f32; new_len];
+            for (old, m) in map.iter().enumerate() {
+                if let (Some(new), Some(v)) = (m, row.get(old)) {
+                    out[*new] = *v;
+                }
+            }
+            out
+        }
+        for frame in &mut project.frames {
+            if let Some(pose) = frame.poses.get_mut(fi) {
+                pose.angles = rebuild(&pose.angles, map);
+            }
+            if let Some(row) = frame.bends.get_mut(fi) {
+                let rebuilt = rebuild(row, map);
+                *row = rebuilt;
+            }
+        }
+        let mut dropped = 0usize;
+        project.channels.retain_mut(|ch| {
+            if ch.figure != fi {
+                return true;
+            }
+            let target = match &mut ch.target {
+                crate::graph::ChannelTarget::Angle(t)
+                | crate::graph::ChannelTarget::Length(t)
+                | crate::graph::ChannelTarget::Bend(t) => t,
+                _ => return true,
+            };
+            match map.get(*target).copied().flatten() {
+                Some(new) => {
+                    *target = new;
+                    true
+                }
+                None => {
+                    dropped += 1;
+                    false
+                }
+            }
+        });
+        dropped
+    }
+
+    /// Delete the subtree rooted at `ni` of the
+    /// selected figure (Roadmap Wave 2, W2-25 — RM19
+    /// §4.4, the IA-RM19-5 signature). This is the
+    /// index-shifting op: removing nodes moves every
+    /// later index down, so the removal runs the full
+    /// §4.0 table through the one shared helper
+    /// [`EditorCore::remap_node_indices`] — parents
+    /// (rewritten as the nodes are removed), pose
+    /// angles, frame bends and this figure's graph
+    /// channels all move together; channels into the
+    /// deleted subtree are dropped and counted on the
+    /// status line, never left dangling. Segment media
+    /// ride inside the removed `NodeDef`s; media on
+    /// surviving segments keep pointing at their
+    /// segments because they ARE their segments' data.
+    /// Figure states carry no node index (frame→clip)
+    /// and pass untouched. The selection remaps with
+    /// everything else: a surviving selection follows
+    /// its node, a deleted one clears. This op
+    /// supersedes `delete_segment`'s leaf-only refusal
+    /// for panel use; `delete_segment` itself stays for
+    /// MCP compat.
+    ///
+    /// Refusals spend no snapshot and return false: no
+    /// such figure or node, the figure is locked, or
+    /// `ni` is the root (deleting the root would clear
+    /// the whole figure — that is the figure list's
+    /// delete, not a rig op). A successful delete
+    /// spends exactly one snapshot labelled "Delete
+    /// subtree" and returns true.
+    pub fn delete_subtree(&mut self, ni: usize) -> bool {
+        let fi = self.selected_figure;
+        let Some(fig) = self.project.figures.get(fi) else {
+            self.status = "Select a figure first.".into();
+            return false;
+        };
+        if ni >= fig.def.nodes.len() {
+            self.status = "Select a segment first.".into();
+            return false;
+        }
+        if fig.locked {
+            self.status = "Figure is locked — unlock it in the figures list.".into();
+            return false;
+        }
+        if fig.def.nodes[ni].parent.is_none() {
+            self.status = "The root cannot be deleted.".into();
+            return false;
+        }
+        // Validate-first: the member set and the
+        // old→new map are computed from the def as it
+        // stands, before the snapshot is spent.
+        let members = Self::subtree_members(&fig.def, ni);
+        let old_len = fig.def.nodes.len();
+        let mut removed = vec![false; old_len];
+        for &m in &members {
+            removed[m] = true;
+        }
+        let mut map: Vec<Option<usize>> = vec![None; old_len];
+        let mut next = 0usize;
+        for old in 0..old_len {
+            if !removed[old] {
+                map[old] = Some(next);
+                next += 1;
+            }
+        }
+        let count = members.len();
+        self.snapshot_labeled("Delete subtree");
+        // Physical removal, highest index first so the
+        // lower indices the map was built against stay
+        // valid until their own removal; then every
+        // surviving parent rewrites through the map (a
+        // survivor's parent is always a survivor — a
+        // subtree is closed under children — and a
+        // malformed out-of-range parent degrades to a
+        // root rather than dangling).
+        let mut descending = members.clone();
+        descending.sort_unstable_by(|a, b| b.cmp(a));
+        let def = &mut self.project.figures[fi].def;
+        for &old in &descending {
+            def.nodes.remove(old);
+        }
+        for node in def.nodes.iter_mut() {
+            if let Some(p) = node.parent {
+                node.parent = map.get(p).copied().flatten();
+            }
+        }
+        let dropped_channels = Self::remap_node_indices(&mut self.project, fi, &map);
+        self.selected_node = self
+            .selected_node
+            .and_then(|sel| map.get(sel).copied().flatten());
+        self.status = if dropped_channels > 0 {
+            format!(
+                "Subtree deleted ({count} segment{}, {dropped_channels} graph channel{} removed).",
+                if count == 1 { "" } else { "s" },
+                if dropped_channels == 1 { "" } else { "s" }
+            )
+        } else {
+            format!(
+                "Subtree deleted ({count} segment{}).",
+                if count == 1 { "" } else { "s" }
+            )
+        };
+        true
+    }
+
+    /// The mirror image of a node name under RM19
+    /// §4.5's token-exact swap: whole space-separated
+    /// tokens `left ↔ right`, `Left ↔ Right`,
+    /// `LEFT ↔ RIGHT` and the single letters
+    /// `L ↔ R` / `l ↔ r` swap; a token ENDING in
+    /// `_l ↔ _r`, `_L ↔ _R` or `-l ↔ -r` swaps its
+    /// suffix. Anything else is left alone — a node
+    /// named "elbow" or "flare" must not change.
+    fn mirror_node_name(name: &str) -> String {
+        name.split(' ')
+            .map(|tok| match tok {
+                "left" => "right".to_string(),
+                "right" => "left".to_string(),
+                "Left" => "Right".to_string(),
+                "Right" => "Left".to_string(),
+                "LEFT" => "RIGHT".to_string(),
+                "RIGHT" => "LEFT".to_string(),
+                "L" => "R".to_string(),
+                "R" => "L".to_string(),
+                "l" => "r".to_string(),
+                "r" => "l".to_string(),
+                _ => {
+                    let mut out = tok.to_string();
+                    for (suffix, swapped) in [
+                        ("_l", "_r"),
+                        ("_r", "_l"),
+                        ("_L", "_R"),
+                        ("_R", "_L"),
+                        ("-l", "-r"),
+                        ("-r", "-l"),
+                    ] {
+                        if let Some(stem) = tok.strip_suffix(suffix) {
+                            out = format!("{stem}{swapped}");
+                            break;
+                        }
+                    }
+                    out
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Mirror the subtree rooted at `ni` of the
+    /// selected figure across the figure's vertical
+    /// axis (Roadmap Wave 2, W2-25 — RM19 §4.5, the
+    /// IA-RM19-5 signature). **No node index moves**
+    /// — like reparent, the op edits in place, so the
+    /// §4.0 remap table does not engage; what changes
+    /// is the mirrored content of the subtree's own
+    /// slots:
+    ///
+    /// - geometry, per node in the subtree:
+    ///   `rest_angle = norm_deg(−rest_angle)` — the
+    ///   model's angle convention is relative and
+    ///   signed, so negation IS reflection across the
+    ///   vertical through the subtree root's parent
+    ///   joint, composed: negating every relative
+    ///   angle in the subtree mirrors the world pose
+    ///   about the vertical line through the subtree
+    ///   root's position, and the subtree root's own
+    ///   negation swings it to the mirrored side of
+    ///   its parent. Rest angles are re-solved in the
+    ///   only sense a reflection needs — each relative
+    ///   rest negates, so the FK composition lands the
+    ///   subtree's rest pose mirrored exactly;
+    /// - `NodeDef::bend = −bend` (the IK bend-side
+    ///   sign flips with the limb), joint limits swap
+    ///   (`min ↔ −max`: the arc reflects with the
+    ///   joint);
+    /// - animation, for the subtree's nodes only:
+    ///   pose angles negated in every frame
+    ///   (absence-guarded), frame bends negated
+    ///   (absence-guarded), Angle channels' key values
+    ///   AND tangents negated (a mirrored curve is the
+    ///   honest mirror); Length/Bend channels
+    ///   untouched (a length has no side; frame bends
+    ///   themselves carry the bend mirror);
+    /// - names swap token-exactly (`left ↔ right`,
+    ///   `_l ↔ _r`, … — see
+    ///   [`EditorCore::mirror_node_name`]); unmatched
+    ///   names are left alone, the geometry still
+    ///   mirrors;
+    /// - a subtree segment's image media has its
+    ///   `flip` toggled (a mirrored segment's image
+    ///   must mirror too — Wave Y media semantics);
+    ///   text media and the image's remaining
+    ///   transform ride unchanged.
+    ///
+    /// Refusals spend no snapshot and return false:
+    /// no such figure or node, the figure is locked,
+    /// or `ni` is the root (the root is the figure's
+    /// mirror axis — mirroring it would mirror the
+    /// whole figure, a figure-level op this is not).
+    /// A successful mirror spends exactly one snapshot
+    /// labelled "Mirror subtree" and returns true.
+    pub fn mirror_subtree(&mut self, ni: usize) -> bool {
+        let fi = self.selected_figure;
+        let Some(fig) = self.project.figures.get(fi) else {
+            self.status = "Select a figure first.".into();
+            return false;
+        };
+        if ni >= fig.def.nodes.len() {
+            self.status = "Select a segment first.".into();
+            return false;
+        }
+        if fig.locked {
+            self.status = "Figure is locked — unlock it in the figures list.".into();
+            return false;
+        }
+        if fig.def.nodes[ni].parent.is_none() {
+            self.status = "The root cannot be mirrored.".into();
+            return false;
+        }
+        // Validate-first: membership and the mirrored
+        // names are computed from the def as it stands,
+        // before the snapshot is spent.
+        let members = Self::subtree_members(&fig.def, ni);
+        let count = members.len();
+        let mut in_subtree = vec![false; fig.def.nodes.len()];
+        for &m in &members {
+            in_subtree[m] = true;
+        }
+        let names: Vec<String> = members
+            .iter()
+            .map(|&m| Self::mirror_node_name(&fig.def.nodes[m].name))
+            .collect();
+        self.snapshot_labeled("Mirror subtree");
+        let def = &mut self.project.figures[fi].def;
+        for (k, &m) in members.iter().enumerate() {
+            let node = &mut def.nodes[m];
+            node.rest_angle = crate::model::norm_deg(-node.rest_angle);
+            node.bend = -node.bend;
+            // The limit arc reflects with the joint:
+            // the old ceiling becomes the mirrored
+            // floor.
+            let (min, max) = (node.min_angle, node.max_angle);
+            node.min_angle = max.map(|v| -v);
+            node.max_angle = min.map(|v| -v);
+            node.name = names[k].clone();
+            if let Some(crate::model::SegmentMedia::Image { flip, .. }) = &mut node.media {
+                *flip = !*flip;
+            }
+        }
+        for frame in &mut self.project.frames {
+            if let Some(pose) = frame.poses.get_mut(fi) {
+                for &m in &members {
+                    if let Some(a) = pose.angles.get_mut(m) {
+                        *a = -*a;
+                    }
+                }
+            }
+            if let Some(row) = frame.bends.get_mut(fi) {
+                for &m in &members {
+                    if let Some(b) = row.get_mut(m) {
+                        *b = -*b;
+                    }
+                }
+            }
+        }
+        for ch in &mut self.project.channels {
+            if ch.figure != fi {
+                continue;
+            }
+            if let crate::graph::ChannelTarget::Angle(t) = ch.target {
+                if in_subtree.get(t) == Some(&true) {
+                    for key in &mut ch.keys {
+                        key.value = -key.value;
+                        key.in_tan = -key.in_tan;
+                        key.out_tan = -key.out_tan;
+                    }
+                }
+            }
+        }
+        self.status = format!(
+            "Subtree mirrored ({count} segment{}).",
+            if count == 1 { "" } else { "s" }
+        );
+        true
+    }
+
+    /// The shared validation head of the four node-flag
+    /// setters below (Roadmap Wave 2, W2-26 — RM19 §5 /
+    /// IA-RM19-7): figure present, node present, figure
+    /// unlocked, in the sibling rig ops' refusal order
+    /// (W2-23/24/25). Returns the node's name for the
+    /// caller's status, or posts the refusal and returns
+    /// `None` — a refusal spends no snapshot.
+    fn node_flag_target(&mut self, fi: usize, ni: usize) -> Option<String> {
+        let Some(fig) = self.project.figures.get(fi) else {
+            self.status = "Select a figure first.".into();
+            return None;
+        };
+        let Some(node) = fig.def.nodes.get(ni) else {
+            self.status = "Select a segment first.".into();
+            return None;
+        };
+        if fig.locked {
+            self.status = "Figure is locked — unlock it in the figures list.".into();
+            return None;
+        }
+        Some(node.name.clone())
+    }
+
+    /// Rename node `ni` of figure `fi` (Roadmap Wave 2,
+    /// W2-26 — RM19 §5 / IA-RM19-7): the segment
+    /// inspector's Node name field. The raw text is
+    /// trimmed, as the figure rename trims; an empty
+    /// result is refused ("Segment name cannot be
+    /// empty." — the figure rename's sentence, segment
+    /// form). A real change spends exactly one snapshot
+    /// labelled "Rename segment"; renaming to the name
+    /// the node already carries spends nothing and still
+    /// reports success (the `rename_selected_figure`
+    /// discipline). Refusals (no such figure or node,
+    /// locked figure, empty name) spend nothing and
+    /// return false.
+    pub fn set_node_name(&mut self, fi: usize, ni: usize, raw: &str) -> bool {
+        let Some(_) = self.node_flag_target(fi, ni) else {
+            return false;
+        };
+        let name = raw.trim();
+        if name.is_empty() {
+            self.status = "Segment name cannot be empty.".into();
+            return false;
+        }
+        if self.project.figures[fi].def.nodes[ni].name != name {
+            self.snapshot_labeled("Rename segment");
+            self.project.figures[fi].def.nodes[ni].name = name.to_string();
+        }
+        self.status = format!("Segment {ni} renamed to \"{name}\".");
+        true
+    }
+
+    /// Set or clear node `ni`'s head flag on figure `fi`
+    /// (Roadmap Wave 2, W2-26 — RM19 §5 / IA-RM19-7):
+    /// the segment inspector's Head toggle. Multiple
+    /// heads are legal data (the constructors make one;
+    /// this setter does not police it — RM19 §5), so
+    /// there is no op-specific refusal. A real change
+    /// spends exactly one snapshot labelled "Segment
+    /// head"; writing the value the flag already carries
+    /// spends nothing and still reports the state.
+    /// Refusals (no such figure or node, locked figure)
+    /// spend nothing and return false.
+    pub fn set_node_head(&mut self, fi: usize, ni: usize, on: bool) -> bool {
+        let Some(name) = self.node_flag_target(fi, ni) else {
+            return false;
+        };
+        if self.project.figures[fi].def.nodes[ni].head != on {
+            self.snapshot_labeled("Segment head");
+            self.project.figures[fi].def.nodes[ni].head = on;
+        }
+        self.status = if on {
+            format!("{name} is the head.")
+        } else {
+            format!("{name} is not the head.")
+        };
+        true
+    }
+
+    /// Set or clear node `ni`'s IK-end flag on figure
+    /// `fi` (Roadmap Wave 2, W2-26 — RM19 §5 /
+    /// IA-RM19-7): the segment inspector's IK end
+    /// toggle. Turning the flag ON refuses when the node
+    /// has no grandparent — the two-bone solver's actual
+    /// precondition, the same `has_grandparent` test
+    /// `begin_drag_at` uses to pick the IK drag kind —
+    /// with the standing sentence "IK needs a chain of
+    /// two segments above this joint." Turning it OFF is
+    /// always allowed. A real change spends exactly one
+    /// snapshot labelled "Segment IK end"; writing the
+    /// value the flag already carries spends nothing and
+    /// still reports the state. Refusals (no such figure
+    /// or node, locked figure, the chain refusal) spend
+    /// nothing and return false.
+    pub fn set_node_ik_end(&mut self, fi: usize, ni: usize, on: bool) -> bool {
+        let Some(name) = self.node_flag_target(fi, ni) else {
+            return false;
+        };
+        if on {
+            let fig = &self.project.figures[fi];
+            let has_grandparent = fig.def.nodes[ni]
+                .parent
+                .and_then(|par| fig.def.nodes.get(par))
+                .and_then(|par| par.parent)
+                .is_some();
+            if !has_grandparent {
+                self.status = "IK needs a chain of two segments above this joint.".into();
+                return false;
+            }
+        }
+        if self.project.figures[fi].def.nodes[ni].ik_end != on {
+            self.snapshot_labeled("Segment IK end");
+            self.project.figures[fi].def.nodes[ni].ik_end = on;
+        }
+        self.status = if on {
+            format!("{name} is an IK end.")
+        } else {
+            format!("{name} is not an IK end.")
+        };
+        true
+    }
+
+    /// Set node `ni`'s IK bend side on figure `fi`
+    /// (Roadmap Wave 2, W2-26 — RM19 §5 / IA-RM19-7):
+    /// the segment inspector's Bend side −/+ control.
+    /// `NodeDef::bend` is a sign by convention (model.rs:
+    /// "+1 / -1"), so the write is exactly ±1.0, taken
+    /// from `sign`'s sign; a zero or non-finite sign is
+    /// refused ("Bend side must be − or +."). A real
+    /// change spends exactly one snapshot labelled
+    /// "Segment bend side"; writing the side the node
+    /// already carries spends nothing and still reports
+    /// the state. Refusals (no such figure or node,
+    /// locked figure, bad sign) spend nothing and return
+    /// false. This writes the DEF's preferred bend side
+    /// only — no frame's stored bend is touched (that is
+    /// the Bend stepper row's `Frame.bends` quantity).
+    pub fn set_node_bend_side(&mut self, fi: usize, ni: usize, sign: f32) -> bool {
+        let Some(name) = self.node_flag_target(fi, ni) else {
+            return false;
+        };
+        if !sign.is_finite() || sign == 0.0 {
+            self.status = "Bend side must be − or +.".into();
+            return false;
+        }
+        let target = if sign < 0.0 { -1.0 } else { 1.0 };
+        if self.project.figures[fi].def.nodes[ni].bend != target {
+            self.snapshot_labeled("Segment bend side");
+            self.project.figures[fi].def.nodes[ni].bend = target;
+        }
+        self.status = format!(
+            "{name} bend side set to {}.",
+            if target > 0.0 { "+1" } else { "-1" }
+        );
+        true
+    }
+
     /// The segment length range every length door clamps
     /// with (Roadmap Wave 1, RM3 — F-3): these bounds used
     /// to live as inline literals inside `adjust_length`,
@@ -2095,6 +3135,37 @@ impl EditorCore {
         }
     }
 
+    /// Seek the playhead to a FRACTIONAL frame time — the
+    /// sub-frame scrub (Roadmap Wave 2, W2-40). The playhead
+    /// lands exactly where the scrub dropped it, inside the
+    /// frame `current` names: **`current` stays the authoring
+    /// frame, `current == floor(playhead)`, the same relation
+    /// `advance_play` maintains** — every authoring op in this
+    /// core keys on `current`, so an edit made mid-scrub lands
+    /// on the frame the playhead is inside, never on a
+    /// fractional frame of its own. Like `goto` this is
+    /// session state: no snapshot, no status line.
+    ///
+    /// The domain is `[0, n)`: frame time `n` is the end of
+    /// the timeline (the beat walk's codomain tops out below
+    /// it), so the clamp stops a hair short of it; the final
+    /// frame's interior stays reachable. A non-finite time or
+    /// an empty project refuses silently, like a `goto` past
+    /// the end. Whether the stage actually SHOWS the
+    /// in-between pose at this position is `display_frame`'s
+    /// decision (the project's tween-playback flag), not the
+    /// seek's: the playhead is fractional after a scrub
+    /// regardless of that view preference.
+    pub fn seek_fractional(&mut self, frame_time: f32) {
+        let n = self.project.frames.len();
+        if n == 0 || !frame_time.is_finite() {
+            return;
+        }
+        let t = frame_time.clamp(0.0, n as f32 - 0.001);
+        self.playhead = t;
+        self.current = (t.floor() as usize).min(n - 1);
+    }
+
     pub fn advance(&mut self) {
         if !self.project.frames.is_empty() {
             self.current = (self.current + 1) % self.project.frames.len();
@@ -2153,10 +3224,152 @@ impl EditorCore {
         self.current = (self.playhead.floor() as usize).min(n - 1);
     }
 
-    /// Frame time the canvas should draw: fractional while playing
-    /// with tween playback on, otherwise the authored frame.
+    /// Advance the playhead by wall-clock seconds, ping-pong
+    /// style (Roadmap Wave 2, W2-40): travel runs forward to
+    /// the end of the loop window, REVERSES, travels back to
+    /// its start, reverses again — continuously, never
+    /// wrapping and never stopping. The shell's poll calls
+    /// this instead of [`EditorCore::advance_play`] while the
+    /// ping-pong loop mode is on; the mode itself is shell
+    /// state (see `rune_sec::playback_controls`), exactly as
+    /// the loop on/off policy is — this op is only the
+    /// mechanics, beside the forward op it mirrors.
+    ///
+    /// The walk is the same one clock `advance_play` walks
+    /// (RM7 / F-6): the tick's beats are measured on the
+    /// project's duration-weighted beat line, inside the same
+    /// loop window (the `loop_range`'s beat span, clamped as
+    /// `advance_play` clamps it, or the whole timeline's).
+    /// Reflection happens in beats: the position is unfolded
+    /// onto a triangle wave of period `2 × span` — phase
+    /// `[0, span]` travels forward from the window's start,
+    /// `(span, 2·span)` travels back from its end — stepped
+    /// by the tick, then folded back into the window, which
+    /// sets both the new playhead and [`EditorCore::
+    /// play_reverse`]. A tick larger than the window (a
+    /// one-frame loop at a coarse rate) folds correctly in
+    /// one step; no iteration is involved. Overshoot past a
+    /// bound is preserved as travel back into the window —
+    /// the mirror of `advance_play`'s fold preserving the
+    /// fractional remainder — so the bounce loses no time.
+    ///
+    /// A playhead parked OUTSIDE the window (a `goto` beyond
+    /// the range) is first driven toward it: forward when
+    /// below the window, backward when above, entering
+    /// without a teleport; only travel inside the window
+    /// reflects. Direction survives seeks (see
+    /// `play_reverse`), so bouncing resumes where it left
+    /// off. A tick that is not finite and positive moves
+    /// nothing, the forward op's guard. An empty project, or
+    /// a window with no beat span, stands still.
+    pub fn advance_ping_pong(&mut self, dt_secs: f32) {
+        let n = self.project.frames.len();
+        if n == 0 {
+            return;
+        }
+        if !dt_secs.is_finite() || dt_secs <= 0.0 {
+            return;
+        }
+        let (fold_start, fold_end) = match self.loop_range {
+            Some((a, b)) => {
+                // The same defensive clamp `advance_play`
+                // applies: frames may have been deleted since
+                // the range was set.
+                let b = b.min(n - 1);
+                let a = a.min(b);
+                (
+                    self.project.beats_at_frame_time(a as f32),
+                    self.project.beats_at_frame_time((b + 1) as f32),
+                )
+            }
+            None => (0.0, self.project.timeline_beats()),
+        };
+        let span = fold_end - fold_start;
+        if span <= 0.0 {
+            return;
+        }
+        let step = dt_secs * self.project.fps.max(1.0);
+        let mut beats = self.project.beats_at_frame_time(self.playhead);
+        // Outside the window: aim at it first, entering
+        // monotonically this tick; a step that reaches into
+        // the window falls through to the fold below with
+        // the direction of entry (and is not stepped twice).
+        let mut stepped = false;
+        if beats < fold_start {
+            self.play_reverse = false;
+            beats += step;
+            stepped = true;
+            if beats < fold_start {
+                self.playhead = self.project.frame_time_at_beats(beats);
+                self.current = (self.playhead.floor() as usize).min(n - 1);
+                return;
+            }
+        } else if beats > fold_end {
+            self.play_reverse = true;
+            beats -= step;
+            stepped = true;
+            if beats > fold_end {
+                self.playhead = self.project.frame_time_at_beats(beats);
+                self.current = (self.playhead.floor() as usize).min(n - 1);
+                return;
+            }
+        }
+        // Unfold onto the triangle wave: forward travel is
+        // phase [0, span], backward travel is (span, 2·span)
+        // measured back from the window's end.
+        let rel = beats - fold_start;
+        let mut phase = if self.play_reverse {
+            2.0 * span - rel
+        } else {
+            rel
+        };
+        if !stepped {
+            phase += step;
+        }
+        phase = phase.rem_euclid(2.0 * span);
+        let (offset, reverse) = if phase <= span {
+            (phase, false)
+        } else {
+            (2.0 * span - phase, true)
+        };
+        self.play_reverse = reverse;
+        // A landing exactly on the far bound commits a hair
+        // inside it: `frame_time_at_beats(fold_end)` is the
+        // START of the frame after a loop range (and clamps
+        // to the last frame's start on a whole timeline), so
+        // the un-nudged value would flash a frame outside the
+        // window for that one tick. The nudge is in beats
+        // (a ten-thousandth of a frame period at duration
+        // 1.0) — no visible position changes.
+        let commit = if offset >= span {
+            fold_end - 0.0001
+        } else {
+            fold_start + offset
+        };
+        self.playhead = self.project.frame_time_at_beats(commit);
+        self.current = (self.playhead.floor() as usize).min(n - 1);
+    }
+
+    /// Frame time the canvas should draw: the fractional
+    /// playhead while playing with tween playback on,
+    /// otherwise the authored frame.
+    ///
+    /// Roadmap Wave 2 (W2-40): "while playing" is now "while
+    /// the playhead sits between frames" — with tween
+    /// playback on, a fractional playhead shows its
+    /// interpolated pose whether playback put it there (a
+    /// pause mid-frame now HOLDS the in-between instead of
+    /// snapping back to the authored frame) or a sub-frame
+    /// scrub did ([`EditorCore::seek_fractional`]). That is
+    /// the one honest rule: the tween flag governs whether
+    /// in-betweens render at all, and every fractional
+    /// position renders the same way. With tween off the
+    /// authored frame shows, exactly as before, however the
+    /// playhead got between frames. Every playhead writer
+    /// keeps `current == floor(playhead)`, so an integer
+    /// playhead renders identically under both branches.
     pub fn display_frame(&self) -> f32 {
-        if self.playing && self.project.tween_playback {
+        if self.project.tween_playback && (self.playing || self.playhead.fract() != 0.0) {
             self.playhead
         } else {
             self.current as f32
@@ -2546,6 +3759,152 @@ impl EditorCore {
         );
     }
 
+    /// How far (stage units) a path point may sit from the
+    /// straight line between its neighbours and still count
+    /// as lying ON that line (Roadmap Wave 2, W2-36): below
+    /// this, deleting the point would change nothing the eye
+    /// can see, so [`Self::delete_path_point`] refuses
+    /// instead of spending an undo step on a no-op. Sub-unit
+    /// on purpose: a genuine corner, however small, is a
+    /// point the user authored.
+    pub const PATH_POINT_STRAIGHT_EPS: f32 = 0.05;
+
+    /// The root the path would pass through at `frame` if
+    /// figure `fi`'s point there were deleted: the midpoint
+    /// of the neighbouring frames' roots (a frame's two
+    /// neighbours are equidistant in time, so the
+    /// re-interpolation is the plain midpoint). `None` when
+    /// the point has no pair of neighbours to interpolate
+    /// between — the first or last frame, an out-of-range
+    /// frame or figure, or a frame where the figure has no
+    /// pose. Pure: the read-side half of
+    /// [`Self::delete_path_point`], shared with the stage
+    /// and panel guards that mirror it.
+    pub fn path_point_reinterpolation(&self, frame: usize, fi: usize) -> Option<V2> {
+        if frame == 0 {
+            return None;
+        }
+        let prev = self.project.frames.get(frame - 1)?.poses.get(fi)?.root;
+        // The point itself must exist to be deletable.
+        self.project.frames.get(frame)?.poses.get(fi)?;
+        let next = self.project.frames.get(frame + 1)?.poses.get(fi)?.root;
+        Some([(prev[0] + next[0]) / 2.0, (prev[1] + next[1]) / 2.0])
+    }
+
+    /// Insert a motion-path point for figure `fi` in the
+    /// segment after frame `after` (Roadmap Wave 2, W2-36):
+    /// a NEW frame lands at `after + 1`, splitting the
+    /// segment — the dense model's only way to add a point
+    /// between two frames. Every figure's pose in the new
+    /// frame is the `t`-lerp of its poses in the two split
+    /// frames (a figure present on only one side is carried
+    /// from that side), and figure `fi`'s root is then set
+    /// to `root` — the point on the segment the user
+    /// pressed, so the split itself does not move the path;
+    /// the new point is there to be dragged afterwards.
+    /// The new frame copies frame `after`'s duration and
+    /// carries no bends (the `add_frame` /
+    /// `insert_inbetween` precedents). Frame-indexed data
+    /// remaps through [`Self::remap_after_frame_insert`]
+    /// (playhead, loop range, camera keys — the paste
+    /// rule); collections that remap does not cover follow
+    /// the standing paste precedent and are not shifted.
+    /// Exactly one undo step. The playhead lands on the
+    /// new frame, whose point the pose drag then owns (the
+    /// current-frame rule). Refusals (false, no snapshot):
+    /// no segment after `after`, `t` outside (0, 1) or
+    /// non-finite, a non-finite `root`, or figure `fi`
+    /// missing from either split frame.
+    pub fn insert_path_point(&mut self, after: usize, fi: usize, t: f32, root: V2) -> bool {
+        let valid = after + 1 < self.project.frames.len()
+            && t.is_finite()
+            && t > 0.0
+            && t < 1.0
+            && root.iter().all(|v| v.is_finite())
+            && self
+                .project
+                .frames
+                .get(after)
+                .and_then(|f| f.poses.get(fi))
+                .is_some()
+            && self
+                .project
+                .frames
+                .get(after + 1)
+                .and_then(|f| f.poses.get(fi))
+                .is_some();
+        if !valid {
+            self.status = "No path segment there to split.".into();
+            return false;
+        }
+        let (a, b) = (&self.project.frames[after], &self.project.frames[after + 1]);
+        let len = a.poses.len().max(b.poses.len());
+        let mut poses: Vec<crate::model::Pose> = Vec::with_capacity(len);
+        for g in 0..len {
+            match (a.poses.get(g), b.poses.get(g)) {
+                (Some(pa), Some(pb)) => poses.push(pa.lerp(pb, t)),
+                (Some(pa), None) => poses.push(pa.clone()),
+                (None, Some(pb)) => poses.push(pb.clone()),
+                (None, None) => unreachable!("g is below the longer pose vec"),
+            }
+        }
+        poses[fi].root = root;
+        let duration = a.duration;
+        self.snapshot_labeled("Insert path point");
+        self.project.frames.insert(
+            after + 1,
+            crate::model::Frame { poses, duration, easing: None, bends: Vec::new() },
+        );
+        self.remap_after_frame_insert(after + 1, 1);
+        self.current = after + 1;
+        self.playhead = self.current as f32;
+        self.status = format!("Inserted path point at frame {}.", after + 2);
+        true
+    }
+
+    /// Delete figure `fi`'s motion-path point at `frame`
+    /// (Roadmap Wave 2, W2-36): the frame's root becomes
+    /// [`Self::path_point_reinterpolation`] — the path
+    /// re-interpolates straight through where the point
+    /// was, and the point stops deflecting it. Only the
+    /// root is written: angles, squash and bends at the
+    /// frame are the pose's, not the path point's, and the
+    /// frame itself stays (this is a point delete, not a
+    /// frame delete). Exactly one undo step. Refusals
+    /// (false, no snapshot): the first or last frame (the
+    /// endpoints anchor the path and have no neighbour
+    /// pair), a missing pose, and a point already lying on
+    /// the line between its neighbours within
+    /// [`Self::PATH_POINT_STRAIGHT_EPS`] (deleting it would
+    /// change nothing).
+    pub fn delete_path_point(&mut self, frame: usize, fi: usize) -> bool {
+        if frame == 0 || frame + 1 >= self.project.frames.len() {
+            self.status =
+                "The first and last path points anchor the path and cannot be deleted.".into();
+            return false;
+        }
+        let Some(mid) = self.path_point_reinterpolation(frame, fi) else {
+            self.status = format!("No path point for figure {} at frame {}.", fi + 1, frame + 1);
+            return false;
+        };
+        let cur = self.project.frames[frame].poses[fi].root;
+        let deflection = (cur[0] - mid[0]).hypot(cur[1] - mid[1]);
+        if deflection <= Self::PATH_POINT_STRAIGHT_EPS {
+            self.status = format!(
+                "Frame {}'s path point already lies on the path between its neighbours.",
+                frame + 1
+            );
+            return false;
+        }
+        self.snapshot_labeled("Delete path point");
+        self.project.frames[frame].poses[fi].root = mid;
+        self.status = format!(
+            "Deleted path point at frame {} — the path runs straight through it.",
+            frame + 1
+        );
+        true
+    }
+
     /// Roadmap Wave 1 (RM6, F-5): the current project
     /// revision (see the `revision` field). Paired with a
     /// frame it is the only honest cache key for anything
@@ -2642,6 +4001,398 @@ impl EditorCore {
     }
 
 
+
+    // ---- Camera preset moves (Roadmap Wave 2, W2-39) ----
+    //
+    // A preset move is ONE press = ONE labelled undo step:
+    // a start key pinned with the camera exactly as it stands
+    // at the current frame, and an end key `frames` frames
+    // later carrying the preset's target. The start key's
+    // `easing` carries the segment's timing (W2-32 — the
+    // easing lives on the key the segment LEAVES), so a
+    // preset's smoothness is data, set once here, and every
+    // evaluator (stage, raster, SVG) times the move the same
+    // way. Every value is computed from the camera in effect
+    // and validated BEFORE the snapshot: a refusal spends
+    // nothing. Zoom targets ride the same clamp every other
+    // camera write here uses (0.3..=4.0 — `camera_zoom_by`).
+
+    /// The maximum preset move length, in frames (2 s at
+    /// 24 fps): past this a "preset" is really a hand-built
+    /// shot, and the key list stays readable.
+    pub const CAMERA_PRESET_MAX_FRAMES: usize = 48;
+
+    /// The preset easing vocabulary: the segment timing a
+    /// preset stamps on its start key. `smooth` is the
+    /// default for panel presses (the brief's call — a
+    /// one-press move should not jar); the cycle-button
+    /// vocabulary (`CameraEase::label`) names the rest.
+    /// `hold` is a legal choice — the move then cuts at the
+    /// end frame instead of gliding.
+    pub fn camera_preset_easing(label: &str) -> Option<crate::model::CameraEase> {
+        crate::model::CameraEase::from_label(label)
+    }
+
+    /// Validate a preset request's shared parameters and
+    /// resolve the move's geometry. On `Err` the returned
+    /// string is the user-facing refusal, posted verbatim
+    /// by the callers; nothing has been written and no
+    /// snapshot taken. On `Ok`: `(start_frame, end_frame,
+    /// start(x, y, zoom, angle), end(x, y, zoom, angle))`
+    /// with every number finite and the end zoom clamped.
+    fn camera_preset_span(
+        &self,
+        frames: usize,
+        target: (f32, f32, f32),
+    ) -> Result<(usize, usize, (f32, f32, f32, f32), (f32, f32, f32, f32)), String> {
+        let count = self.project.frames.len();
+        if count == 0 {
+            return Err("No frames to move the camera over.".into());
+        }
+        if frames == 0 {
+            return Err("A camera move needs at least 1 frame.".into());
+        }
+        if frames > Self::CAMERA_PRESET_MAX_FRAMES {
+            return Err(format!(
+                "Camera moves are at most {} frames.",
+                Self::CAMERA_PRESET_MAX_FRAMES
+            ));
+        }
+        let start = self.current;
+        let end = start + frames;
+        if end >= count {
+            return Err(format!(
+                "No room for a {frames}-frame camera move: only {} frame(s) remain.",
+                count - 1 - start
+            ));
+        }
+        let (sx, sy, szoom) = self.camera_here();
+        let sangle = crate::model::norm_deg(self.project.camera_angle_at(start as f32));
+        let (tx, ty, tzoom) = target;
+        if ![sx, sy, szoom, sangle, tx, ty, tzoom].iter().all(|v| v.is_finite()) {
+            return Err("The camera move would not be finite; nothing was written.".into());
+        }
+        let tzoom = tzoom.clamp(0.3, 4.0);
+        Ok((start, end, (sx, sy, szoom, sangle), (tx, ty, tzoom, sangle)))
+    }
+
+    /// Write a validated preset span: ONE labelled snapshot,
+    /// the start key pinned with the camera as it stands
+    /// (its easing becomes `easing` — the segment's timing),
+    /// and the end key carrying the target with the angle
+    /// unchanged and a fresh key's Linear easing (its own
+    /// following segment is untouched business). An existing
+    /// key at either frame is upserted in place — pan/zoom
+    /// replaced, angle fixed up by the explicit stamp (the
+    /// `hold_camera` discipline).
+    fn write_camera_preset(
+        &mut self,
+        span: (usize, usize, (f32, f32, f32, f32), (f32, f32, f32, f32)),
+        easing: crate::model::CameraEase,
+        label: &str,
+        status: String,
+    ) {
+        let (start, end, s, e) = span;
+        self.snapshot_labeled(label);
+        self.project.set_camera_key(start, s.0, s.1, s.2);
+        if let Some(k) = self.project.camera.iter_mut().find(|k| k.frame == start) {
+            k.angle = s.3;
+            k.easing = easing;
+        }
+        self.project.set_camera_key(end, e.0, e.1, e.2);
+        if let Some(k) = self.project.camera.iter_mut().find(|k| k.frame == end) {
+            k.angle = e.3;
+        }
+        self.status = status;
+    }
+
+    /// Push-in preset: zoom ×[`Self::CAMERA_PRESET_ZOOM_FACTOR`]
+    /// over `frames` frames toward the point the camera's centre
+    /// converges on —
+    /// the selected figure's root when a figure is selected
+    /// AND follow is off (under follow the root IS the
+    /// centre every frame, so there is nothing to converge
+    /// on), else the camera centre already in effect. The
+    /// centre moves 3/4 of the way to that target; at the
+    /// full zoom factor the target would leave the frame's
+    /// centre, which reads as a miss, not a push-in. The
+    /// zoom factor is the panel steppers' own `ZOOM_STEP`
+    /// squared (1.25² ≈ 1.56× — two stepper presses of
+    /// travel), stated so the number is a convention of the
+    /// app, not a new magic constant.
+    pub fn camera_push_in(&mut self, frames: usize, easing: crate::model::CameraEase) {
+        let (cx, cy, zoom) = self.camera_here();
+        let (tx, ty) = self.camera_preset_focus().unwrap_or((cx, cy));
+        let target = (
+            cx + (tx - cx) * 0.75,
+            cy + (ty - cy) * 0.75,
+            zoom * Self::CAMERA_PRESET_ZOOM_FACTOR,
+        );
+        match self.camera_preset_span(frames, target) {
+            Ok(span) => {
+                let end = span.1;
+                self.write_camera_preset(
+                    span,
+                    easing,
+                    "Camera push-in",
+                    format!(
+                        "Push-in: zoom {:.2} by frame {}.",
+                        target.2.clamp(0.3, 4.0),
+                        end + 1
+                    ),
+                );
+            }
+            Err(msg) => self.status = msg,
+        }
+    }
+
+    /// Pull-out preset: the push-in's mirror — zoom
+    /// ÷`CAMERA_PRESET_ZOOM_FACTOR`, centre easing 3/4 of
+    /// the way back toward the stage centre (the wide
+    /// shot's home). From a camera already centred on the
+    /// stage this is a pure zoom-out.
+    pub fn camera_pull_out(&mut self, frames: usize, easing: crate::model::CameraEase) {
+        let (cx, cy, zoom) = self.camera_here();
+        let (sx, sy) = (self.project.stage[0] / 2.0, self.project.stage[1] / 2.0);
+        let target = (
+            cx + (sx - cx) * 0.75,
+            cy + (sy - cy) * 0.75,
+            zoom / Self::CAMERA_PRESET_ZOOM_FACTOR,
+        );
+        match self.camera_preset_span(frames, target) {
+            Ok(span) => {
+                let end = span.1;
+                self.write_camera_preset(
+                    span,
+                    easing,
+                    "Camera pull-out",
+                    format!(
+                        "Pull-out: zoom {:.2} by frame {}.",
+                        target.2.clamp(0.3, 4.0),
+                        end + 1
+                    ),
+                );
+            }
+            Err(msg) => self.status = msg,
+        }
+    }
+
+    /// Pan preset: the centre travels `dir` stage-widths
+    /// horizontally (`dir` ±1; the distance is the visible
+    /// width at the current zoom — stage_w / zoom — so a
+    /// pan always crosses exactly one screenful, at any
+    /// zoom), zoom and angle unchanged. `dir` is taken by
+    /// its sign; 0 refuses.
+    pub fn camera_pan(&mut self, dir: i32, frames: usize, easing: crate::model::CameraEase) {
+        if dir == 0 {
+            self.status = "A pan needs a direction.".into();
+            return;
+        }
+        let (cx, cy, zoom) = self.camera_here();
+        let step = self.project.stage[0] / zoom.max(0.05) * dir.signum() as f32;
+        let target = (cx + step, cy, zoom);
+        match self.camera_preset_span(frames, target) {
+            Ok(span) => {
+                let end = span.1;
+                let name = if dir > 0 { "Pan right" } else { "Pan left" };
+                self.write_camera_preset(
+                    span,
+                    easing,
+                    name,
+                    format!("{name} by frame {}.", end + 1),
+                );
+            }
+            Err(msg) => self.status = msg,
+        }
+    }
+
+    /// Truck preset: the centre travels `dir` stage-heights
+    /// vertically (the visible height at the current zoom,
+    /// stage_h / zoom — one screenful), zoom and angle
+    /// unchanged. In a 2.5D stage this is the honest
+    /// vertical dolly: the background and figures translate
+    /// together, with no parallax claim. `dir` +1 moves the
+    /// centre DOWN-stage (the view travels up); −1 up-stage.
+    pub fn camera_truck(&mut self, dir: i32, frames: usize, easing: crate::model::CameraEase) {
+        if dir == 0 {
+            self.status = "A truck needs a direction.".into();
+            return;
+        }
+        let (cx, cy, zoom) = self.camera_here();
+        let step = self.project.stage[1] / zoom.max(0.05) * dir.signum() as f32;
+        let target = (cx, cy + step, zoom);
+        match self.camera_preset_span(frames, target) {
+            Ok(span) => {
+                let end = span.1;
+                let name = if dir > 0 { "Truck down" } else { "Truck up" };
+                self.write_camera_preset(
+                    span,
+                    easing,
+                    name,
+                    format!("{name} by frame {}.", end + 1),
+                );
+            }
+            Err(msg) => self.status = msg,
+        }
+    }
+
+    /// Arc preset — the honest 2D orbit: the centre swings
+    /// around the focus point (see
+    /// [`EditorCore::camera_preset_focus`]) by `dir` × 30°,
+    /// keeping the centre-to-focus distance, so the subject
+    /// stays framed while the background sweeps — the move
+    /// a 2D camera can truthfully call an arc. It is NOT a
+    /// 3D orbit: no viewpoint orbits the subject, nothing
+    /// parallaxes, and the figures do not turn. The camera
+    /// ANGLE is deliberately untouched: rotating the frame
+    /// as well would make it a roll, a different move.
+    /// Refuses (status-only, no snapshot) when there is no
+    /// usable focus — follow off and no valid selection, or
+    /// the camera already centred on the focus (a zero
+    /// radius has no arc).
+    pub fn camera_arc(&mut self, dir: i32, frames: usize, easing: crate::model::CameraEase) {
+        if dir == 0 {
+            self.status = "An arc needs a direction.".into();
+            return;
+        }
+        let Some((fx, fy)) = self.camera_preset_focus() else {
+            self.status = "Select a figure to arc around first.".into();
+            return;
+        };
+        let (cx, cy, zoom) = self.camera_here();
+        let (dx, dy) = (cx - fx, cy - fy);
+        if dx * dx + dy * dy < 1.0 {
+            self.status = "The camera is already centred on the figure; an arc needs an offset.".into();
+            return;
+        }
+        let a = (30.0f32 * dir.signum() as f32).to_radians();
+        let (sin, cos) = a.sin_cos();
+        let target = (fx + dx * cos - dy * sin, fy + dx * sin + dy * cos, zoom);
+        match self.camera_preset_span(frames, target) {
+            Ok(span) => {
+                let end = span.1;
+                let name = if dir > 0 { "Arc right" } else { "Arc left" };
+                self.write_camera_preset(
+                    span,
+                    easing,
+                    name,
+                    format!("{name} around the selected figure by frame {}.", end + 1),
+                );
+            }
+            Err(msg) => self.status = msg,
+        }
+    }
+
+    /// Handheld-shake preset (the board's "Camera shake"):
+    /// a deterministic damped jitter AROUND the camera in
+    /// effect, authored as real keys — a start key plus one
+    /// key every 2 frames over `frames` frames at the
+    /// current frame, offsets from the closed-form
+    /// `camera_shake_offset` (seeded by the start frame, so
+    /// the same press at the same frame reproduces the same
+    /// shake, and re-pressing REPLACES rather than stacks).
+    /// Amplitude `amp` is in stage units (the panel offers
+    /// 6 ≈ a subtle hand-held tremor at stage scale). The
+    /// move ends at rest (the final key is the unshaken
+    /// camera), every key is Linear — the jitter is in the
+    /// keys, not the timing — and the whole burst is ONE
+    /// labelled undo step. Zoom and angle never move.
+    /// Existing keys INSIDE the span are replaced (that is
+    /// what authoring a shake over them means); keys
+    /// outside are untouched.
+    pub fn camera_shake(&mut self, frames: usize, amp: f32) {
+        let count = self.project.frames.len();
+        if count == 0 {
+            self.status = "No frames to shake the camera over.".into();
+            return;
+        }
+        if frames < 4 {
+            self.status = "A shake needs at least 4 frames.".into();
+            return;
+        }
+        if frames > Self::CAMERA_PRESET_MAX_FRAMES {
+            self.status = format!(
+                "Camera moves are at most {} frames.",
+                Self::CAMERA_PRESET_MAX_FRAMES
+            );
+            return;
+        }
+        if !amp.is_finite() || amp <= 0.0 {
+            self.status = "Shake amplitude must be a positive number of stage units.".into();
+            return;
+        }
+        let start = self.current;
+        let end = start + frames;
+        if end >= count {
+            self.status = format!(
+                "No room for a {frames}-frame shake: only {} frame(s) remain.",
+                count - 1 - start
+            );
+            return;
+        }
+        let (cx, cy, zoom) = self.camera_here();
+        let angle = crate::model::norm_deg(self.project.camera_angle_at(start as f32));
+        self.snapshot_labeled("Camera shake");
+        let seed = start as u32;
+        let mut f = start;
+        loop {
+            let (ox, oy) = Self::camera_shake_offset(seed, f - start, frames, amp);
+            self.project.set_camera_key(f, cx + ox, cy + oy, zoom);
+            if let Some(k) = self.project.camera.iter_mut().find(|k| k.frame == f) {
+                k.angle = angle;
+                k.easing = crate::model::CameraEase::Linear;
+            }
+            if f >= end {
+                break;
+            }
+            f = (f + 2).min(end);
+        }
+        self.status = format!("Handheld shake over frames {}–{}.", start + 1, end + 1);
+    }
+
+    /// The shake's offset at `step` frames into a
+    /// `frames`-long burst (closed form, the vfx.rs
+    /// determinism discipline — the same inputs always give
+    /// the same offset, on every surface): two incommensurate
+    /// sine pairs phased by a per-burst seed, damped by
+    /// (1 − step/frames)² so the burst settles, and exactly
+    /// (0, 0) at both ends — the camera starts and lands at
+    /// rest. Pure — unit-testable without a core.
+    pub fn camera_shake_offset(seed: u32, step: usize, frames: usize, amp: f32) -> (f32, f32) {
+        if frames == 0 || step == 0 || step >= frames {
+            return (0.0, 0.0);
+        }
+        let t = step as f32 / frames as f32;
+        let damp = (1.0 - t) * (1.0 - t);
+        let ph = (seed % 360) as f32;
+        let ox = amp
+            * damp
+            * (0.7 * (t * 25.13 + ph).sin() + 0.3 * (t * 61.0 + ph * 1.7).sin());
+        let oy = amp * 0.7 * damp * (0.7 * (t * 21.99 + ph * 0.6).sin() + 0.3 * (t * 53.0 + ph).sin());
+        (ox, oy)
+    }
+
+    /// The point preset moves converge on / swing around:
+    /// the selected figure's root at the current frame —
+    /// `centre_on_selection`'s target — or `None` when the
+    /// selection is not a real figure OR follow is on (under
+    /// follow the camera already tracks the followed figure;
+    /// a preset focus would fight it). Pure read.
+    pub fn camera_preset_focus(&self) -> Option<(f32, f32)> {
+        if self.project.camera_follow.is_some() {
+            return None;
+        }
+        let pose = self.project.poses_at(self.current as f32).get(self.selected_figure)?;
+        Some(pose.root)
+    }
+
+    /// The push-in / pull-out zoom travel, as a factor: the
+    /// panel steppers' `ZOOM_STEP` (1.25) squared ≈ 1.5625×.
+    pub const CAMERA_PRESET_ZOOM_FACTOR: f32 = 1.5625;
+
+    /// The panel's standing preset length, in frames
+    /// (1 s at 24 fps; ≈2 s at the demo's 12 fps).
+    pub const CAMERA_PRESET_DEFAULT_FRAMES: usize = 24;
 
     /// Rotate the camera at the current frame (wave 6): upserts a
     /// camera key carrying the existing pan/zoom plus the new angle.
@@ -6190,6 +7941,60 @@ impl EditorCore {
         true
     }
 
+    /// Wave 2 (W2-30, P-10): restore figure `fi`'s pose on
+    /// timeline frame `frame` to its rest (setup) pose —
+    /// the restore half of the setup-pose round trip whose
+    /// capture half is [`EditorCore::set_rest_from_pose`].
+    /// The root position is kept; the written pose is
+    /// `FigureDef::rest_pose(current root)` exactly — the
+    /// stored rest angles verbatim and the squash back at
+    /// (1, 1) — so a capture → pose-freely → restore trip
+    /// returns the frame pose to the setup pose
+    /// field-for-field, never an approximation. One
+    /// labelled snapshot ("Reset pose") on a real change;
+    /// refusals (unknown figure, no pose on the frame)
+    /// and the already-rest no-op take none and the no-op
+    /// leaves the status line untouched — the capture
+    /// op's discipline, so the round trip's two halves
+    /// spend undo steps identically. The pose panel's
+    /// Reset pose, the figure inspector's Setup-section
+    /// reset row and the MCP `reset_pose` tool all ride
+    /// this op, so the surfaces cannot drift apart.
+    pub fn reset_pose_to_rest(&mut self, fi: usize, frame: usize) -> bool {
+        if fi >= self.project.figures.len() {
+            self.status = "No such figure.".into();
+            return false;
+        }
+        let rest = {
+            let Some(cur) = self
+                .project
+                .frames
+                .get(frame)
+                .and_then(|f| f.poses.get(fi))
+            else {
+                self.status = format!(
+                    "Figure {} has no pose on frame {}.",
+                    fi + 1,
+                    frame + 1
+                );
+                return false;
+            };
+            let rest = self.project.figures[fi].def.rest_pose(cur.root);
+            if cur.angles == rest.angles && cur.sx == rest.sx && cur.sy == rest.sy {
+                return false;
+            }
+            rest
+        };
+        self.snapshot_labeled("Reset pose");
+        self.project.frames[frame].poses[fi] = rest;
+        self.status = format!(
+            "Figure {} reset to its rest pose on frame {}.",
+            fi + 1,
+            frame + 1
+        );
+        true
+    }
+
     /// Wave 10: cycle a clip's loop mode — Loop → PingPong →
     /// Once → Loop — as one undo step. `model::poses_at` honours
     /// the mode when a figure plays the clip back.
@@ -6913,6 +8718,8 @@ impl EditorCore {
         crate::model::Pose {
             root: baked.first().map(|b| b.xy).unwrap_or([0.0, 0.0]),
             angles: Self::fig3_relative_angles(fig, baked),
+            sx: 1.0,
+            sy: 1.0,
         }
     }
 
@@ -7764,6 +9571,82 @@ pub fn tool_get_editor_settings(core: &mut EditorCore, _args: &Value) -> Result<
     }))
 }
 
+// TOOL ENTRY SPEC (integrator: register in mcp_tools::tools()):
+//   Tool {
+//       name: "camera_move_preset",
+//       description: "Author a preset camera move at the current frame (the camera panel's Moves row): 'preset' is one of push-in, pull-out, pan-left, pan-right, truck-up, truck-down, arc-left, arc-right, shake. Non-shake presets write a start key (the camera as it stands, stamped with 'easing') and an end key 'frames' frames later; shake writes a deterministic damped key burst and ignores 'easing'. frames defaults to 24, range 1..=48 (shake needs >= 4); easing is one of linear | smooth | ease-in | ease-out | hold, default smooth. Exactly one undo step; a refused move (no room, bad arguments) spends nothing.",
+//       schema: obj_schema(
+//           json!({
+//               "preset": { "type": "string", "enum": ["push-in", "pull-out", "pan-left", "pan-right", "truck-up", "truck-down", "arc-left", "arc-right", "shake"] },
+//               "frames": { "type": "integer" },
+//               "easing": { "type": "string", "enum": ["linear", "smooth", "ease-in", "ease-out", "hold"] }
+//           }),
+//           &["preset"],
+//       ),
+//       handler: crate::editor::tool_camera_move_preset,
+//   }
+// MCP.md row (registry catalogue, beside `camera_zoom_by`):
+//   | `camera_move_preset` | Author a preset camera move at the current frame (the camera panel's Moves row): 'preset' is push-in, pull-out, pan-left, pan-right, truck-up, truck-down, arc-left, arc-right or shake. Non-shake presets write a start key (the camera as it stands, stamped with 'easing') and an end key 'frames' frames later; shake writes a deterministic damped key burst and ignores 'easing'. frames defaults to 24, range 1..=48 (shake >= 4); easing linear | smooth | ease-in | ease-out | hold, default smooth. One undo step; refusals spend nothing. | `preset` | `frames`, `easing` |
+/// MCP handler: a camera-panel preset move (Roadmap
+/// Wave 2, W2-39 — the preset core ops live with the
+/// camera ops above). The handler is a thin dispatch:
+/// every argument is parsed and validated BEFORE the
+/// core op runs, and the op itself validates before its
+/// snapshot, so a refusal — unknown preset, bad easing
+/// label, out-of-range frames, no room on the timeline —
+/// is an Err with no undo step and no write.
+///
+/// Discipline: exactly one undo step per applied move
+/// (the core op's own), matching the panel press.
+pub fn tool_camera_move_preset(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let preset = eds_req_str(args, "preset")?;
+    let frames = match eds_get(args, "frames") {
+        None => EditorCore::CAMERA_PRESET_DEFAULT_FRAMES,
+        Some(v) => {
+            let f = eds_req_f32(args, "frames")?;
+            if f < 0.0 || f.fract() != 0.0 || f > usize::MAX as f32 {
+                return Err("argument 'frames' must be a non-negative integer".into());
+            }
+            f as usize
+        }
+    };
+    let easing = match eds_get(args, "easing") {
+        None => crate::model::CameraEase::Smooth,
+        Some(_) => {
+            let label = eds_req_str(args, "easing")?;
+            EditorCore::camera_preset_easing(label).ok_or_else(|| {
+                "argument 'easing' must be one of: linear, smooth, ease-in, ease-out, hold"
+                    .to_string()
+            })?
+        }
+    };
+    let depth = core.undo_depth();
+    match preset {
+        "push-in" => core.camera_push_in(frames, easing),
+        "pull-out" => core.camera_pull_out(frames, easing),
+        "pan-left" => core.camera_pan(-1, frames, easing),
+        "pan-right" => core.camera_pan(1, frames, easing),
+        "truck-up" => core.camera_truck(-1, frames, easing),
+        "truck-down" => core.camera_truck(1, frames, easing),
+        "arc-left" => core.camera_arc(-1, frames, easing),
+        "arc-right" => core.camera_arc(1, frames, easing),
+        "shake" => core.camera_shake(frames, 6.0),
+        other => return Err(format!("unknown camera preset '{other}'")),
+    }
+    if core.undo_depth() == depth {
+        // The op refused and said why in the status line
+        // (the `tool_delete_node` precedent).
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "preset": preset,
+        "from_frame": core.current,
+        "frames": frames,
+        "status": core.status,
+    }))
+}
+
 // ---------------------------------------------------------------------
 // Wave P (P23): subtitle ops — the EditorCore half of board
 // contract 1. The data, the style, the layout maths and the
@@ -8046,6 +9929,775 @@ impl EditorCore {
         self.project.subtitle_style = style;
         self.status = "Subtitle style updated.".to_string();
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------
+// Roadmap Wave 2 (W2-11): chapter ops — the EditorCore half
+// of P-15's episode structure. The data and its one
+// validation rule live in `model.rs` (`Chapter`); these are
+// the editing ops over `Project::chapters`, in the house op
+// style the subtitle ops above established:
+//
+// * A refused op (bad range, empty title, no such chapter,
+//   a move to the chapter's own position) changes nothing
+//   and takes NO snapshot — it only sets `status`, in the
+//   failure voice ("… failed: …").
+// * A successful mutation snapshots exactly once (one undo
+//   step, labelled for the History panel), then writes.
+// * The list is NEVER re-sorted: its order is the episode
+//   order. `chapter_add` appends; `chapter_move` is the
+//   reorder. Ranges are attributes, not sort keys.
+// * Frame numbers are NOT clamped to the timeline (the cue
+//   posture): a chapter may be authored past the last
+//   frame, and `end_frame` may equal the frame count.
+// * Deleting a chapter removes the chapter ONLY — frames,
+//   cues and every other collection are untouched. A
+//   chapter is structure, not content.
+// * Success is reported on `status` with 1-based chapter
+//   and frame numbers.
+// ---------------------------------------------------------------------
+
+impl EditorCore {
+    /// All chapters, in episode order.
+    pub fn chapters(&self) -> &[crate::model::Chapter] {
+        &self.project.chapters
+    }
+
+    /// How many chapters the project carries.
+    pub fn chapter_count(&self) -> usize {
+        self.project.chapters.len()
+    }
+
+    /// The chapter covering `frame` (an authored frame
+    /// index): the first in episode order whose half-open
+    /// range holds it, or `None` in a gap.
+    pub fn chapter_at(&self, frame: usize) -> Option<&crate::model::Chapter> {
+        self.project.chapter_at(frame)
+    }
+
+    /// The episode-order index of the chapter covering
+    /// `frame`, when one does.
+    pub fn chapter_index_at(&self, frame: usize) -> Option<usize> {
+        self.project.chapter_index_at(frame)
+    }
+
+    /// Append a chapter titled `title` over
+    /// `[start_frame, end_frame)` at the END of the episode
+    /// order. One undo step. The stored title is the
+    /// trimmed argument. Returns the new chapter's index
+    /// (always the last position), or `None` when refused
+    /// (invalid range or empty title) — a refusal changes
+    /// nothing and takes no snapshot.
+    pub fn chapter_add(
+        &mut self,
+        start_frame: usize,
+        end_frame: usize,
+        title: &str,
+    ) -> Option<usize> {
+        if let Err(reason) = crate::model::Chapter::validate(start_frame, end_frame, title) {
+            self.status = format!("Chapter add failed: {reason}.");
+            return None;
+        }
+        self.snapshot_labeled("Add chapter");
+        self.project.chapters.push(crate::model::Chapter {
+            title: title.trim().to_string(),
+            start_frame,
+            end_frame,
+        });
+        let index = self.project.chapters.len() - 1;
+        self.status = format!(
+            "Chapter {} added at frame {}.",
+            index + 1,
+            start_frame + 1
+        );
+        Some(index)
+    }
+
+    /// Rename chapter `index` (validated first) to the
+    /// trimmed `title`. One undo step. Returns false —
+    /// changing nothing and taking no snapshot — when there
+    /// is no such chapter or the title is empty.
+    pub fn chapter_rename(&mut self, index: usize, title: &str) -> bool {
+        if self.project.chapters.get(index).is_none() {
+            self.status = format!("Chapter rename failed: no chapter {}.", index + 1);
+            return false;
+        }
+        if title.trim().is_empty() {
+            self.status = "Chapter rename failed: title is empty.".to_string();
+            return false;
+        }
+        let title = title.trim().to_string();
+        self.snapshot_labeled("Rename chapter");
+        self.project.chapters[index].title = title.clone();
+        self.status = format!("Chapter {} renamed to {title}.", index + 1);
+        true
+    }
+
+    /// Assign chapter `index` a new frame range
+    /// `[start_frame, end_frame)` (validated first, in the
+    /// chapter's own rule). The chapter keeps its position
+    /// in the episode order — ranges are attributes, never
+    /// sort keys. One undo step. Returns false — changing
+    /// nothing and taking no snapshot — when there is no
+    /// such chapter or the range is invalid.
+    pub fn chapter_set_range(
+        &mut self,
+        index: usize,
+        start_frame: usize,
+        end_frame: usize,
+    ) -> bool {
+        let Some(title) = self.project.chapters.get(index).map(|c| c.title.clone()) else {
+            self.status = format!("Chapter range failed: no chapter {}.", index + 1);
+            return false;
+        };
+        if let Err(reason) = crate::model::Chapter::validate(start_frame, end_frame, &title) {
+            self.status = format!("Chapter range failed: {reason}.");
+            return false;
+        }
+        self.snapshot_labeled("Set chapter range");
+        self.project.chapters[index].start_frame = start_frame;
+        self.project.chapters[index].end_frame = end_frame;
+        self.status = format!(
+            "Chapter {} now spans frames {}-{}.",
+            index + 1,
+            start_frame + 1,
+            end_frame
+        );
+        true
+    }
+
+    /// Move chapter `index` to position `to_index` in the
+    /// episode order (both validated first) — the reorder
+    /// op. One undo step. A move to the chapter's own
+    /// position is a no-op: it reports, returns false and
+    /// spends no snapshot (the bulk ops' no-change
+    /// discipline). Returns false likewise when either
+    /// index names no chapter.
+    pub fn chapter_move(&mut self, index: usize, to_index: usize) -> bool {
+        if self.project.chapters.get(index).is_none() {
+            self.status = format!("Chapter move failed: no chapter {}.", index + 1);
+            return false;
+        }
+        if self.project.chapters.get(to_index).is_none() {
+            self.status = format!("Chapter move failed: no chapter {}.", to_index + 1);
+            return false;
+        }
+        if index == to_index {
+            self.status = format!(
+                "Chapter {} is already at position {}.",
+                index + 1,
+                to_index + 1
+            );
+            return false;
+        }
+        self.snapshot_labeled("Move chapter");
+        let chapter = self.project.chapters.remove(index);
+        self.project.chapters.insert(to_index, chapter);
+        self.status = format!(
+            "Chapter moved to position {}.",
+            to_index + 1
+        );
+        true
+    }
+
+    /// Delete chapter `index` (validated first). One undo
+    /// step. The chapter ONLY is removed: frames, cues and
+    /// all other content are untouched — a chapter is
+    /// structure, not content. Returns false — changing
+    /// nothing and taking no snapshot — when there is no
+    /// such chapter.
+    pub fn chapter_delete(&mut self, index: usize) -> bool {
+        if self.project.chapters.get(index).is_none() {
+            self.status = format!("Chapter delete failed: no chapter {}.", index + 1);
+            return false;
+        }
+        self.snapshot_labeled("Delete chapter");
+        self.project.chapters.remove(index);
+        self.status = format!("Chapter {} deleted.", index + 1);
+        true
+    }
+}
+
+// ---------------------------------------------------------------------
+// Roadmap Wave 2 (W2-05): stored-guide ops — the EditorCore
+// half of rulers + stored guides. The data and its one
+// validation rule live in `model.rs` (`StoredGuide`); these
+// are the editing ops over `Project::stored_guides`, in the
+// house op style the subtitle/chapter ops established:
+//
+// * A refused op (non-finite position, no such guide)
+//   changes nothing and takes NO snapshot — it only sets
+//   `status`, in the failure voice ("… failed: …").
+// * A successful mutation snapshots exactly once (one undo
+//   step, labelled for the History panel), then writes.
+//   The stage's guide drag session obeys the same rule by
+//   construction: its moves write nothing, and its release
+//   lands exactly one of these ops.
+// * The list is NEVER re-sorted: its order is creation
+//   order. `stored_guide_add` appends; positions are
+//   attributes, never sort keys (the chapter rule).
+// * Positions are NOT clamped to the stage (the chapter /
+//   cue posture): a guide may sit outside the stage rect.
+// * Deleting a guide removes the guide ONLY — a guide is
+//   annotation, not content.
+// * Success is reported on `status` with the 1-based guide
+//   number and the stored coordinate.
+// ---------------------------------------------------------------------
+
+impl EditorCore {
+    /// All stored guides, in creation order.
+    pub fn stored_guides(&self) -> &[crate::model::StoredGuide] {
+        &self.project.stored_guides
+    }
+
+    /// How many stored guides the project carries.
+    pub fn stored_guide_count(&self) -> usize {
+        self.project.stored_guides.len()
+    }
+
+    /// Append a stored guide on `axis` at stage coordinate
+    /// `position` at the END of the creation order. One
+    /// undo step. Returns the new guide's index (always
+    /// the last position), or `None` when refused
+    /// (non-finite position) — a refusal changes nothing
+    /// and takes no snapshot.
+    pub fn stored_guide_add(
+        &mut self,
+        axis: crate::model::GuideAxis,
+        position: f32,
+    ) -> Option<usize> {
+        if let Err(reason) = crate::model::StoredGuide::validate(position) {
+            self.status = format!("Guide add failed: {reason}.");
+            return None;
+        }
+        self.snapshot_labeled("Add guide");
+        self.project.stored_guides.push(crate::model::StoredGuide {
+            axis,
+            position,
+        });
+        let index = self.project.stored_guides.len() - 1;
+        self.status = format!("Guide {} added at {position}.", index + 1);
+        Some(index)
+    }
+
+    /// Move guide `index` to stage coordinate `position`
+    /// (validated first, in the guide's own rule). The
+    /// guide keeps its axis and its creation-order
+    /// position — only the coordinate changes. One undo
+    /// step. A move to the guide's CURRENT coordinate is
+    /// a no-op: it reports, returns false and spends no
+    /// snapshot (the chapter-move discipline — this is
+    /// what makes a click on a guide, or a drag that
+    /// returns to its start, free). Returns false likewise
+    /// when there is no such guide or the position is
+    /// non-finite.
+    pub fn stored_guide_move(&mut self, index: usize, position: f32) -> bool {
+        let Some(guide) = self.project.stored_guides.get(index) else {
+            self.status = format!("Guide move failed: no guide {}.", index + 1);
+            return false;
+        };
+        if let Err(reason) = crate::model::StoredGuide::validate(position) {
+            self.status = format!("Guide move failed: {reason}.");
+            return false;
+        }
+        if guide.position == position {
+            self.status = format!("Guide {} is already at {position}.", index + 1);
+            return false;
+        }
+        self.snapshot_labeled("Move guide");
+        self.project.stored_guides[index].position = position;
+        self.status = format!("Guide {} moved to {position}.", index + 1);
+        true
+    }
+
+    /// Delete guide `index` (validated first). One undo
+    /// step. The guide ONLY is removed: figures, frames
+    /// and every other collection are untouched — a guide
+    /// is annotation, not content. Returns false —
+    /// changing nothing and taking no snapshot — when
+    /// there is no such guide.
+    pub fn stored_guide_delete(&mut self, index: usize) -> bool {
+        if self.project.stored_guides.get(index).is_none() {
+            self.status = format!("Guide delete failed: no guide {}.", index + 1);
+            return false;
+        }
+        self.snapshot_labeled("Delete guide");
+        self.project.stored_guides.remove(index);
+        self.status = format!("Guide {} deleted.", index + 1);
+        true
+    }
+
+    /// Delete EVERY stored guide. One undo step however
+    /// many guides there are (the bulk-op shape: the
+    /// gesture is one action). Returns the number removed.
+    /// With no guides stored this is a reported no-op:
+    /// it returns 0 and spends no snapshot.
+    pub fn stored_guide_clear(&mut self) -> usize {
+        let n = self.project.stored_guides.len();
+        if n == 0 {
+            self.status = "No guides to clear.".to_string();
+            return 0;
+        }
+        self.snapshot_labeled("Clear guides");
+        self.project.stored_guides.clear();
+        self.status = if n == 1 {
+            "Cleared 1 guide.".to_string()
+        } else {
+            format!("Cleared {n} guides.")
+        };
+        n
+    }
+}
+
+#[cfg(test)]
+mod stored_guide_ops_tests {
+    use super::*;
+
+    fn guide(
+        axis: crate::model::GuideAxis,
+        position: f32,
+    ) -> crate::model::StoredGuide {
+        crate::model::StoredGuide { axis, position }
+    }
+
+    /// The whole project as its snapshot JSON — the exact
+    /// bytes `snapshot()` would store. `Project` has no
+    /// `PartialEq`, so this is how "untouched" is asserted
+    /// (the house pattern, from the chapter ops tests).
+    fn project_json(core: &EditorCore) -> String {
+        serde_json::to_string(&core.project).unwrap()
+    }
+
+    #[test]
+    fn add_appends_in_creation_order_and_never_sorts() {
+        use crate::model::GuideAxis::*;
+        let mut core = EditorCore::new();
+        assert_eq!(core.stored_guide_add(Vertical, 480.0), Some(0));
+        assert_eq!(core.stored_guide_add(Horizontal, 100.0), Some(1));
+        // A smaller coordinate does NOT jump the queue:
+        // positions are attributes, not sort keys.
+        assert_eq!(core.stored_guide_add(Vertical, 40.0), Some(2));
+        assert_eq!(
+            core.stored_guides(),
+            &[
+                guide(Vertical, 480.0),
+                guide(Horizontal, 100.0),
+                guide(Vertical, 40.0),
+            ]
+        );
+        assert_eq!(core.stored_guide_count(), 3);
+    }
+
+    #[test]
+    fn each_successful_mutation_takes_exactly_one_undo_step() {
+        use crate::model::GuideAxis::*;
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        core.stored_guide_add(Vertical, 480.0);
+        core.stored_guide_add(Horizontal, 200.0);
+        assert!(core.stored_guide_move(0, 512.0));
+        assert!(core.stored_guide_delete(1));
+        assert_eq!(core.undo_depth(), depth + 4, "one step per mutation");
+        // Undo walks the mutations back one at a time and
+        // restores the pre-add list verbatim.
+        core.undo();
+        assert_eq!(core.stored_guide_count(), 2, "delete undone");
+        core.undo();
+        assert_eq!(core.stored_guides()[0].position, 480.0, "move undone");
+    }
+
+    #[test]
+    fn refused_ops_change_nothing_and_take_no_snapshot() {
+        use crate::model::GuideAxis::*;
+        let mut core = EditorCore::new();
+        core.stored_guide_add(Vertical, 480.0);
+        let before = project_json(&core);
+        let depth = core.undo_depth();
+        assert_eq!(core.stored_guide_add(Vertical, f32::NAN), None);
+        assert_eq!(core.stored_guide_add(Horizontal, f32::INFINITY), None);
+        assert!(!core.stored_guide_move(0, f32::NAN));
+        assert!(!core.stored_guide_move(7, 10.0), "no such guide");
+        assert!(!core.stored_guide_delete(7), "no such guide");
+        assert_eq!(project_json(&core), before, "refusals write nothing");
+        assert_eq!(core.undo_depth(), depth, "refusals spend nothing");
+        assert!(core.status.contains("failed"), "status: {}", core.status);
+    }
+
+    #[test]
+    fn move_to_the_current_coordinate_spends_nothing() {
+        use crate::model::GuideAxis::*;
+        let mut core = EditorCore::new();
+        core.stored_guide_add(Vertical, 480.0);
+        let depth = core.undo_depth();
+        assert!(!core.stored_guide_move(0, 480.0));
+        assert_eq!(core.undo_depth(), depth);
+        assert!(core.status.contains("already at"), "status: {}", core.status);
+    }
+
+    #[test]
+    fn positions_are_not_clamped_to_the_stage() {
+        use crate::model::GuideAxis::*;
+        let mut core = EditorCore::new();
+        // Off-stage coordinates are stored verbatim (a
+        // margin guide), on either side of either axis.
+        assert_eq!(core.stored_guide_add(Vertical, -40.0), Some(0));
+        assert_eq!(core.stored_guide_add(Horizontal, 5000.0), Some(1));
+        assert_eq!(core.stored_guides()[0].position, -40.0);
+        assert_eq!(core.stored_guides()[1].position, 5000.0);
+    }
+
+    #[test]
+    fn delete_removes_the_guide_and_nothing_else() {
+        use crate::model::GuideAxis::*;
+        let mut core = EditorCore::new();
+        core.stored_guide_add(Vertical, 480.0);
+        let frames = core.project.frames.len();
+        let figures = core.project.figures.len();
+        assert!(core.stored_guide_delete(0));
+        assert_eq!(core.stored_guide_count(), 0);
+        assert_eq!(core.project.frames.len(), frames);
+        assert_eq!(core.project.figures.len(), figures);
+    }
+
+    #[test]
+    fn clear_is_one_step_and_an_empty_clear_spends_nothing() {
+        use crate::model::GuideAxis::*;
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        assert_eq!(core.stored_guide_clear(), 0);
+        assert_eq!(core.undo_depth(), depth, "empty clear is free");
+        core.stored_guide_add(Vertical, 1.0);
+        core.stored_guide_add(Vertical, 2.0);
+        core.stored_guide_add(Horizontal, 3.0);
+        let depth = core.undo_depth();
+        assert_eq!(core.stored_guide_clear(), 3);
+        assert_eq!(core.undo_depth(), depth + 1, "one step for the bulk delete");
+        assert_eq!(core.stored_guide_count(), 0);
+    }
+
+    #[test]
+    fn nearest_guide_measures_on_the_perpendicular_axis() {
+        use crate::model::GuideAxis::*;
+        let mut core = EditorCore::new();
+        core.stored_guide_add(Vertical, 480.0);
+        core.stored_guide_add(Horizontal, 200.0);
+        core.stored_guide_add(Vertical, 500.0);
+        let p = &core.project;
+        // A vertical guide's distance ignores y entirely.
+        assert_eq!(p.nearest_stored_guide([484.0, 9999.0], 13.0), Some(0));
+        // The nearer of two same-axis guides wins.
+        assert_eq!(p.nearest_stored_guide([497.0, 0.0], 13.0), Some(2));
+        // A horizontal guide answers on y.
+        assert_eq!(p.nearest_stored_guide([0.0, 190.0], 13.0), Some(1));
+        // Outside tolerance: nothing.
+        assert_eq!(p.nearest_stored_guide([300.0, 300.0], 13.0), None);
+    }
+
+    #[test]
+    fn old_format_project_loads_with_no_guides() {
+        // A full current serialisation with the
+        // `stored_guides` key removed loads identically
+        // apart from the empty list (the chapter pin's
+        // shape): the serde default absorbs the field, no
+        // format bump.
+        let mut core = EditorCore::new();
+        core.stored_guide_add(crate::model::GuideAxis::Vertical, 480.0);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&project_json(&core)).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("stored_guides")
+            .expect("the key was written");
+        let loaded: crate::model::Project =
+            serde_json::from_value(value).unwrap();
+        assert!(loaded.stored_guides.is_empty());
+        assert_eq!(loaded.format_version, core.project.format_version);
+        // The minimal file loads too.
+        let minimal: crate::model::Project =
+            serde_json::from_str("{}").unwrap();
+        assert!(minimal.stored_guides.is_empty());
+    }
+
+    #[test]
+    fn guides_round_trip_and_guide_fields_default() {
+        use crate::model::GuideAxis::*;
+        let mut core = EditorCore::new();
+        core.stored_guide_add(Vertical, 480.0);
+        core.stored_guide_add(Horizontal, -12.5);
+        let json = project_json(&core);
+        let loaded: crate::model::Project =
+            serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.stored_guides, core.project.stored_guides);
+        // Byte-exact re-serialisation.
+        assert_eq!(serde_json::to_string(&loaded).unwrap(), json);
+        // A `{}` guide loads on per-field defaults:
+        // vertical at 0 (the Default axis/coordinate).
+        let g: crate::model::StoredGuide =
+            serde_json::from_str("{}").unwrap();
+        assert_eq!(g, guide(Vertical, 0.0));
+    }
+
+    #[test]
+    fn validate_refuses_only_non_finite_positions() {
+        assert!(crate::model::StoredGuide::validate(0.0).is_ok());
+        assert!(crate::model::StoredGuide::validate(-1.0e6).is_ok());
+        assert!(crate::model::StoredGuide::validate(f32::NAN).is_err());
+        assert!(crate::model::StoredGuide::validate(f32::INFINITY).is_err());
+        assert!(crate::model::StoredGuide::validate(f32::NEG_INFINITY).is_err());
+    }
+
+    #[test]
+    fn endpoints_span_the_stage_and_handles_sit_on_the_ruler_edges() {
+        use crate::model::GuideAxis::*;
+        let stage = [960.0, 720.0];
+        let v = guide(Vertical, 480.0);
+        assert_eq!(v.endpoints(stage), Some(([480.0, 0.0], [480.0, 720.0])));
+        assert_eq!(v.handle(stage), Some([480.0, 0.0]), "top edge");
+        let h = guide(Horizontal, 200.0);
+        assert_eq!(h.endpoints(stage), Some(([0.0, 200.0], [960.0, 200.0])));
+        assert_eq!(h.handle(stage), Some([0.0, 200.0]), "left edge");
+        // A non-finite stored guide is inert at read.
+        let bad = guide(Vertical, f32::NAN);
+        assert_eq!(bad.endpoints(stage), None);
+        assert_eq!(bad.handle(stage), None);
+    }
+}
+
+#[cfg(test)]
+mod chapter_ops_tests {
+    use super::*;
+
+    fn chapter(start_frame: usize, end_frame: usize, title: &str) -> crate::model::Chapter {
+        crate::model::Chapter {
+            title: title.to_string(),
+            start_frame,
+            end_frame,
+        }
+    }
+
+    /// The whole project as its snapshot JSON — the exact
+    /// bytes `snapshot()` would store. `Project` has no
+    /// `PartialEq`, so this is how "untouched" is asserted
+    /// (the house pattern, from the subtitle ops tests).
+    fn project_json(core: &EditorCore) -> String {
+        serde_json::to_string(&core.project).unwrap()
+    }
+
+    fn titles(core: &EditorCore) -> Vec<&str> {
+        core.chapters().iter().map(|c| c.title.as_str()).collect()
+    }
+
+    #[test]
+    fn add_appends_in_episode_order_and_never_sorts() {
+        let mut core = EditorCore::new();
+        // Ranges deliberately added out of frame order: the
+        // list keeps AUTHORING order — order is narrative,
+        // ranges are attributes.
+        assert_eq!(core.chapter_add(24, 48, "Finale"), Some(0));
+        assert_eq!(core.chapter_add(0, 12, "Cold open"), Some(1));
+        assert_eq!(core.chapter_add(12, 24, "Middle"), Some(2));
+        assert_eq!(titles(&core), ["Finale", "Cold open", "Middle"]);
+        assert_eq!(core.chapter_count(), 3);
+        // Titles are stored trimmed.
+        assert_eq!(core.chapter_add(48, 60, "  Coda  "), Some(3));
+        assert_eq!(core.chapters()[3].title, "Coda");
+        assert!(core.status.contains("added at frame 49"), "{}", core.status);
+    }
+
+    #[test]
+    fn each_successful_mutation_takes_exactly_one_undo_step() {
+        let mut core = EditorCore::new();
+        assert_eq!(core.undo_depth(), 0);
+        core.chapter_add(0, 12, "One");
+        assert_eq!(core.undo_depth(), 1);
+        core.chapter_add(12, 24, "Two");
+        assert_eq!(core.undo_depth(), 2);
+        core.chapter_rename(0, "Opening");
+        assert_eq!(core.undo_depth(), 3);
+        core.chapter_set_range(1, 12, 30);
+        assert_eq!(core.undo_depth(), 4);
+        core.chapter_move(1, 0);
+        assert_eq!(core.undo_depth(), 5);
+        core.chapter_delete(0);
+        assert_eq!(core.undo_depth(), 6);
+        // Undo restores the pre-delete list verbatim,
+        // ranges and order alike.
+        core.undo();
+        assert_eq!(
+            core.chapters(),
+            [chapter(12, 30, "Two"), chapter(0, 12, "Opening")]
+        );
+    }
+
+    #[test]
+    fn refused_ops_change_nothing_and_take_no_snapshot() {
+        let mut core = EditorCore::new();
+        core.chapter_add(0, 12, "Kept");
+        let before = project_json(&core);
+        let depth = core.undo_depth();
+
+        assert_eq!(core.chapter_add(12, 12, "empty range"), None);
+        assert_eq!(core.chapter_add(13, 12, "inverted"), None);
+        assert_eq!(core.chapter_add(12, 24, "   "), None);
+        assert!(!core.chapter_rename(9, "ghost"));
+        assert!(!core.chapter_rename(0, "  "));
+        assert!(!core.chapter_set_range(9, 0, 4));
+        assert!(!core.chapter_set_range(0, 4, 4));
+        assert!(!core.chapter_move(9, 0));
+        assert!(!core.chapter_move(0, 9));
+        assert!(!core.chapter_delete(9));
+
+        assert_eq!(project_json(&core), before);
+        assert_eq!(core.undo_depth(), depth);
+        assert!(core.status.contains("failed"), "{}", core.status);
+    }
+
+    #[test]
+    fn rename_trims_and_reports_the_new_title() {
+        let mut core = EditorCore::new();
+        core.chapter_add(0, 12, "Old");
+        assert!(core.chapter_rename(0, "  New name  "));
+        assert_eq!(core.chapters()[0].title, "New name");
+        assert_eq!(core.status, "Chapter 1 renamed to New name.");
+    }
+
+    #[test]
+    fn set_range_keeps_the_chapters_episode_position() {
+        let mut core = EditorCore::new();
+        core.chapter_add(0, 12, "A");
+        core.chapter_add(12, 24, "B");
+        // Widen A past B's whole range: A stays FIRST —
+        // the range is an attribute, never a sort key.
+        assert!(core.chapter_set_range(0, 0, 30));
+        assert_eq!(titles(&core), ["A", "B"]);
+        assert_eq!(core.chapters()[0], chapter(0, 30, "A"));
+        assert_eq!(core.status, "Chapter 1 now spans frames 1-30.");
+    }
+
+    #[test]
+    fn move_reorders_and_a_self_move_spends_nothing() {
+        let mut core = EditorCore::new();
+        core.chapter_add(0, 12, "A");
+        core.chapter_add(12, 24, "B");
+        core.chapter_add(24, 36, "C");
+        let depth = core.undo_depth();
+        // Self-move: a reported no-op, no snapshot.
+        assert!(!core.chapter_move(1, 1));
+        assert_eq!(core.undo_depth(), depth);
+        assert!(core.status.contains("already at position 2"), "{}", core.status);
+        // Real moves land exactly where told, both ways.
+        assert!(core.chapter_move(0, 2));
+        assert_eq!(titles(&core), ["B", "C", "A"]);
+        assert!(core.chapter_move(2, 0));
+        assert_eq!(titles(&core), ["A", "B", "C"]);
+        assert_eq!(core.undo_depth(), depth + 2);
+    }
+
+    #[test]
+    fn delete_removes_the_chapter_and_nothing_else() {
+        let mut core = EditorCore::new();
+        core.subtitle_add(0, 6, "a line", None);
+        let frames_before = core.frame_count();
+        core.chapter_add(0, 12, "A");
+        core.chapter_add(12, 24, "B");
+        assert!(core.chapter_delete(0));
+        assert_eq!(core.chapters(), [chapter(12, 24, "B")]);
+        // Structure, not content: frames and cues untouched.
+        assert_eq!(core.frame_count(), frames_before);
+        assert_eq!(core.subtitle_count(), 1);
+    }
+
+    #[test]
+    fn chapter_at_uses_the_half_open_range_and_episode_order() {
+        let mut core = EditorCore::new();
+        core.chapter_add(0, 12, "A");
+        core.chapter_add(24, 36, "C");
+        // Half-open: live at start, gone at end; the gap
+        // 12..24 belongs to no chapter.
+        assert_eq!(core.chapter_at(0).map(|c| c.title.as_str()), Some("A"));
+        assert_eq!(core.chapter_at(11).map(|c| c.title.as_str()), Some("A"));
+        assert_eq!(core.chapter_at(12), None);
+        assert_eq!(core.chapter_at(23), None);
+        assert_eq!(core.chapter_index_at(24), Some(1));
+        assert_eq!(core.chapter_index_at(35), Some(1));
+        assert_eq!(core.chapter_index_at(36), None);
+        // Overlap resolves to the FIRST chapter in episode
+        // order, whatever its range.
+        core.chapter_add(6, 30, "Overlap");
+        assert_eq!(core.chapter_at(8).map(|c| c.title.as_str()), Some("A"));
+        assert_eq!(core.chapter_at(28).map(|c| c.title.as_str()), Some("C"));
+    }
+
+    #[test]
+    fn ranges_are_not_clamped_to_the_timeline() {
+        let mut core = EditorCore::new();
+        // A chapter authored wholly past the demo timeline
+        // is stored verbatim; it simply never shows until
+        // the timeline grows into it (the cue posture).
+        let frames = core.frame_count();
+        assert_eq!(core.chapter_add(frames + 10, frames + 22, "Future"), Some(0));
+        assert_eq!(core.chapters()[0], chapter(frames + 10, frames + 22, "Future"));
+        assert_eq!(core.chapter_at(frames + 10).map(|c| c.title.as_str()), Some("Future"));
+        // And an end AT the frame count — "to the end" —
+        // is a valid range.
+        assert_eq!(core.chapter_add(0, frames, "Whole"), Some(1));
+    }
+
+    #[test]
+    fn validate_speaks_the_shared_refusal_shapes() {
+        assert_eq!(
+            crate::model::Chapter::validate(4, 4, "x"),
+            Err("end frame 5 must be after start frame 5".to_string())
+        );
+        assert_eq!(
+            crate::model::Chapter::validate(0, 4, "  "),
+            Err("title is empty".to_string())
+        );
+        assert!(crate::model::Chapter::validate(0, 1, "x").is_ok());
+    }
+
+    #[test]
+    fn old_format_project_loads_with_no_chapters() {
+        // The pre-chapters format: a full current
+        // serialisation with the `chapters` key REMOVED
+        // must load identically apart from the empty list —
+        // the serde default absorbs the field, so
+        // format_version stays 1.
+        let mut project = Project::new_demo();
+        project.chapters.push(chapter(0, 2, "One"));
+        let mut value = serde_json::to_value(&project).unwrap();
+        let object = value.as_object_mut().unwrap();
+        assert!(object.remove("chapters").is_some());
+        let text = serde_json::to_string(&value).unwrap();
+        let loaded: Project = serde_json::from_str(&text).unwrap();
+        assert!(loaded.chapters.is_empty());
+        assert_eq!(loaded.name, project.name);
+        assert_eq!(loaded.fps, project.fps);
+        assert_eq!(loaded.frames.len(), project.frames.len());
+        assert_eq!(loaded.format_version, crate::model::FORMAT_VERSION_CURRENT);
+        // The strongest form: a file naming almost nothing
+        // at all still loads, chapters empty.
+        let minimal: Project = serde_json::from_str("{}").unwrap();
+        assert!(minimal.chapters.is_empty());
+    }
+
+    #[test]
+    fn chapters_round_trip_and_chapter_fields_default() {
+        let mut project = Project::new_demo();
+        project.chapters = vec![chapter(0, 12, "Opening"), chapter(12, 24, "Finale")];
+        let text = serde_json::to_string(&project).unwrap();
+        let loaded: Project = serde_json::from_str(&text).unwrap();
+        assert_eq!(loaded.chapters, project.chapters);
+        // Re-serialising the load reproduces the bytes:
+        // nothing is dropped, renamed or re-defaulted.
+        assert_eq!(serde_json::to_string(&loaded).unwrap(), text);
+        // A chapter object missing fields loads on the
+        // per-field defaults (hand-trimmed files stay
+        // loadable, the nested-struct census posture).
+        let bare: crate::model::Chapter = serde_json::from_str("{}").unwrap();
+        assert_eq!(bare, chapter(0, 0, ""));
     }
 }
 
@@ -8425,6 +11077,199 @@ mod wave14_settings_mcp_tests {
         assert_eq!(core.undo_depth(), depth, "refusals take no snapshot");
     }
 
+    // ---- Camera preset moves (Roadmap Wave 2, W2-39) ----
+
+    /// A demo core stretched to `n` frames (the demo's own
+    /// 5 looped) and optionally given a first camera key, so
+    /// a preset move has room and a known start camera.
+    fn preset_core(n: usize, keyed: bool) -> EditorCore {
+        let mut core = clean_core();
+        while core.project.frames.len() < n {
+            let frame = core.project.frames.last().unwrap().clone();
+            core.project.frames.push(frame);
+        }
+        if keyed {
+            core.project
+                .set_camera_key(0, core.project.stage[0] / 2.0, core.project.stage[1] / 2.0, 1.0);
+        }
+        core
+    }
+
+    fn key_at(core: &EditorCore, frame: usize) -> crate::model::CameraKey {
+        core.project
+            .camera
+            .iter()
+            .find(|k| k.frame == frame)
+            .cloned()
+            .unwrap_or_else(|| panic!("no camera key at frame {frame}"))
+Noneeasing: crate::model::CameraEase::Linear,
+    }
+
+    #[test]
+    fn camera_push_in_writes_two_keys_and_one_undo_step() {
+        use crate::model::CameraEase;
+        let mut core = preset_core(60, true);
+        let depth = core.undo_depth();
+        core.camera_push_in(24, CameraEase::Smooth);
+        assert_eq!(core.undo_depth(), depth + 1, "one press, one undo step");
+        assert_eq!(core.undo_label(), Some("Camera push-in"));
+        let a = key_at(&core, 0);
+        let b = key_at(&core, 24);
+        assert_eq!(a.easing, CameraEase::Smooth, "the start key carries the segment timing");
+        assert_eq!(a.zoom, 1.0);
+        assert!((b.zoom - EditorCore::CAMERA_PRESET_ZOOM_FACTOR).abs() < 1e-6);
+        assert_eq!(b.easing, CameraEase::Linear, "the end key keeps a fresh key's easing");
+        // The camera converges toward the demo figure's
+        // root (480, 470): 3/4 of the way from (480, 360).
+        assert!((b.x - 480.0).abs() < 1e-6);
+        assert!((b.y - 442.5).abs() < 0.01, "end y: {}", b.y);
+        // Evaluation rides the start key's easing and the
+        // log-space zoom: the Smooth midpoint is t = 0.5, so
+        // the mid-move zoom is the geometric mean, sqrt(1.5625).
+        let (_, _, mid_zoom) = core.project.camera_at(12.0);
+        assert!((mid_zoom - EditorCore::CAMERA_PRESET_ZOOM_FACTOR.sqrt()).abs() < 0.01);
+        core.undo();
+        assert_eq!(core.project.camera.len(), 1, "undo removes the whole move");
+    }
+
+    #[test]
+    fn camera_preset_refusals_spend_nothing() {
+        use crate::model::CameraEase;
+        let mut core = preset_core(30, true);
+        let depth = core.undo_depth();
+        core.camera_push_in(0, CameraEase::Smooth);
+        assert!(core.status.contains("at least 1 frame"), "status: {}", core.status);
+        core.camera_push_in(49, CameraEase::Smooth);
+        assert!(core.status.contains("at most"), "status: {}", core.status);
+        core.camera_push_in(30, CameraEase::Smooth);
+        assert!(core.status.contains("No room"), "status: {}", core.status);
+        core.camera_pan(0, 12, CameraEase::Smooth);
+        core.camera_arc(0, 12, CameraEase::Smooth);
+        assert_eq!(core.undo_depth(), depth, "refusals take no snapshot");
+        assert_eq!(core.project.camera.len(), 1, "and write no keys");
+    }
+
+    #[test]
+    fn camera_pan_and_truck_move_one_screenful() {
+        use crate::model::CameraEase;
+        let mut core = preset_core(60, true);
+        core.camera_pan(1, 12, CameraEase::Linear);
+        let b = key_at(&core, 12);
+        assert!((b.x - (480.0 + 960.0)).abs() < 0.01, "one stage width at zoom 1: {}", b.x);
+        assert!((b.y - 360.0).abs() < 1e-6, "a pan never moves y");
+        assert!((b.zoom - 1.0).abs() < 1e-6);
+        core.goto(12);
+        core.camera_truck(-1, 12, CameraEase::Linear);
+        let c = key_at(&core, 24);
+        assert!((c.y - (360.0 - 720.0)).abs() < 0.01, "one stage height up: {}", c.y);
+        assert!((c.x - b.x).abs() < 1e-6, "a truck never moves x");
+    }
+
+    #[test]
+    fn camera_pull_out_homes_to_the_stage_centre() {
+        use crate::model::CameraEase;
+        let mut core = preset_core(60, false);
+        core.project.set_camera_key(0, 200.0, 200.0, 2.0);
+        core.camera_pull_out(24, CameraEase::Smooth);
+        let b = key_at(&core, 24);
+        // 3/4 of the way from (200, 200) to the stage centre.
+        assert!((b.x - 410.0).abs() < 0.01, "end x: {}", b.x);
+        assert!((b.y - 320.0).abs() < 0.01, "end y: {}", b.y);
+        assert!((b.zoom - 2.0 / EditorCore::CAMERA_PRESET_ZOOM_FACTOR).abs() < 1e-6);
+    }
+
+    #[test]
+    fn camera_arc_keeps_the_focus_distance() {
+        use crate::model::CameraEase;
+        let mut core = preset_core(60, true);
+        // Offset the camera from the demo figure's root (480, 470).
+        core.project.set_camera_key(0, 280.0, 470.0, 1.0);
+        core.camera_arc(1, 24, CameraEase::Smooth);
+        let b = key_at(&core, 24);
+        let before = ((280.0f32 - 480.0).powi(2) + 0.0f32.powi(2)).sqrt();
+        let after = ((b.x - 480.0).powi(2) + (b.y - 470.0).powi(2)).sqrt();
+        assert!((before - after).abs() < 0.5, "radius kept: {before} vs {after}");
+        assert!((b.x - 280.0).abs() > 1.0, "the centre actually swung");
+        // Dead-centre: no radius, no arc, no snapshot.
+        let mut centred = preset_core(60, true);
+        centred.project.set_camera_key(0, 480.0, 470.0, 1.0);
+        let depth = centred.undo_depth();
+        centred.camera_arc(1, 24, CameraEase::Smooth);
+        assert!(centred.status.contains("already centred"), "status: {}", centred.status);
+        assert_eq!(centred.undo_depth(), depth);
+    }
+
+    #[test]
+    fn camera_shake_is_deterministic_bounded_and_one_step() {
+        let mut core = preset_core(60, true);
+        let depth = core.undo_depth();
+        core.camera_shake(24, 6.0);
+        assert_eq!(core.undo_depth(), depth + 1, "the whole burst is one undo step");
+        assert_eq!(core.project.camera.len(), 13, "keys every 2 frames over 24, plus the start");
+        let a = key_at(&core, 0);
+        let z = key_at(&core, 24);
+        assert!((a.x - 480.0).abs() < 1e-6 && (a.y - 360.0).abs() < 1e-6, "starts at rest");
+        assert!((z.x - 480.0).abs() < 1e-6 && (z.y - 360.0).abs() < 1e-6, "lands at rest");
+        for k in &core.project.camera {
+            assert!((k.x - 480.0).abs() <= 6.0 && (k.y - 360.0).abs() <= 6.0, "bounded by amp");
+            assert!((k.zoom - 1.0).abs() < 1e-6, "a shake never zooms");
+            assert_eq!(k.easing, crate::model::CameraEase::Linear);
+        }
+        // Deterministic: the same press at the same frame
+        // reproduces the same keys (closed form, seeded by
+        // the start frame).
+        let first: Vec<(f32, f32)> = core.project.camera.iter().map(|k| (k.x, k.y)).collect();
+        core.camera_shake(24, 6.0);
+        let second: Vec<(f32, f32)> = core.project.camera.iter().map(|k| (k.x, k.y)).collect();
+        assert_eq!(first, second, "re-pressing replaces, never stacks");
+        // The offset curve itself: rest at both ends, live
+        // in between, and seed-sensitive.
+        assert_eq!(EditorCore::camera_shake_offset(3, 0, 24, 6.0), (0.0, 0.0));
+        assert_eq!(EditorCore::camera_shake_offset(3, 24, 24, 6.0), (0.0, 0.0));
+        let mid = EditorCore::camera_shake_offset(3, 6, 24, 6.0);
+        assert!(mid.0.abs() + mid.1.abs() > 0.1, "the middle of the burst moves: {mid:?}");
+        assert_ne!(
+            EditorCore::camera_shake_offset(3, 6, 24, 6.0),
+            EditorCore::camera_shake_offset(9, 6, 24, 6.0),
+            "a different start frame seeds a different shake"
+        );
+    }
+
+    #[test]
+    fn camera_move_preset_tool_dispatches_and_refuses() {
+        let mut core = preset_core(60, true);
+        let out = tool_camera_move_preset(
+            &mut core,
+            &json!({ "preset": "push-in", "frames": 12 }),
+        )
+        .unwrap();
+        assert_eq!(out["preset"], "push-in");
+        let start = key_at(&core, 0);
+        assert_eq!(
+            start.easing,
+            crate::model::CameraEase::Smooth,
+            "the tool's default easing is the panel's Smooth"
+        );
+        assert!((key_at(&core, 12).zoom - EditorCore::CAMERA_PRESET_ZOOM_FACTOR).abs() < 1e-6);
+        // Omitted frames = the standing default.
+        let out = tool_camera_move_preset(&mut core, &json!({ "preset": "shake" })).unwrap();
+        assert_eq!(out["frames"], EditorCore::CAMERA_PRESET_DEFAULT_FRAMES);
+        // Refusals are errors and spend nothing.
+        let depth = core.undo_depth();
+        assert!(tool_camera_move_preset(&mut core, &json!({ "preset": "orbit" })).is_err());
+        assert!(tool_camera_move_preset(
+            &mut core,
+            &json!({ "preset": "pan-left", "easing": "bounce" })
+        )
+        .is_err());
+        assert!(tool_camera_move_preset(
+            &mut core,
+            &json!({ "preset": "pan-left", "frames": 99 })
+        )
+        .is_err());
+        assert_eq!(core.undo_depth(), depth, "tool refusals take no snapshot");
+    }
+
     #[test]
     fn onion_skin_set_is_session_only_and_reads_back() {
         let mut core = clean_core();
@@ -8456,6 +11301,142 @@ mod wave14_settings_mcp_tests {
     }
 }
 
+// ---------------------------------------------------------------------
+// Roadmap Wave 2 (W2-15): title-card settings ops — the
+// EditorCore half of chapter title cards. The settings
+// data, the card windows/layout and the burn-in
+// composite live in `title_cards.rs`; these are the two
+// editing ops over `Project::title_cards`, in the house
+// op style the chapter ops established:
+//
+// * A no-change call (the switch already in the asked
+//   state, the duration already the sanitised asked
+//   value) reports, returns false and takes NO snapshot
+//   (the chapter-move no-change discipline).
+// * A successful change snapshots exactly once (one
+//   undo step, labelled for the History panel), then
+//   writes, and reports on `status`.
+// * A non-finite duration is refused in the failure
+//   voice ("… failed: …"), changing nothing — the
+//   subtitle-style rule. A finite out-of-range duration
+//   is clamped, not refused (the same rule).
+// ---------------------------------------------------------------------
+
+impl EditorCore {
+    /// The project's title-card settings, as stored.
+    pub fn title_card_settings(&self) -> crate::title_cards::TitleCardSettings {
+        self.project.title_cards
+    }
+
+    /// Turn chapter title cards on or off for exports.
+    /// One undo step on a real change. Returns false —
+    /// changing nothing and taking no snapshot — when
+    /// the switch already reads `enabled`.
+    pub fn title_cards_set_enabled(&mut self, enabled: bool) -> bool {
+        if self.project.title_cards.enabled == enabled {
+            self.status = if enabled {
+                "Title cards are already on.".to_string()
+            } else {
+                "Title cards are already off.".to_string()
+            };
+            return false;
+        }
+        self.snapshot_labeled(if enabled {
+            "Enable title cards"
+        } else {
+            "Disable title cards"
+        });
+        self.project.title_cards.enabled = enabled;
+        self.status = if enabled {
+            "Title cards on: each chapter opens with its card.".to_string()
+        } else {
+            "Title cards off.".to_string()
+        };
+        true
+    }
+
+    /// Set how long each chapter's title card holds, in
+    /// seconds (converted through the project fps at
+    /// read, so the on-screen length survives a
+    /// retime). The stored value is the sanitised one:
+    /// a finite value clamps into the kept range, a
+    /// non-finite one refuses — changing nothing, no
+    /// snapshot. One undo step on a real change.
+    pub fn title_cards_set_duration(&mut self, seconds: f32) -> bool {
+        if !seconds.is_finite() {
+            self.status = "Title card duration failed: duration must be a number.".to_string();
+            return false;
+        }
+        let next = crate::title_cards::TitleCardSettings {
+            duration_seconds: seconds,
+            ..self.project.title_cards
+        }
+        .sanitised();
+        if next == self.project.title_cards {
+            self.status = format!(
+                "Title card duration is already {} s.",
+                next.duration_seconds
+            );
+            return false;
+        }
+        self.snapshot_labeled("Set title card duration");
+        self.project.title_cards = next;
+        self.status = format!("Title card duration: {} s.", next.duration_seconds);
+        true
+    }
+}
+
+#[cfg(test)]
+mod title_card_ops_tests {
+    use super::*;
+
+    fn core_with_chapters() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.chapter_add(24, 96, "The Deep Forest");
+        core.chapter_add(96, 240, "Finale");
+        core
+    }
+
+    #[test]
+    fn enable_and_disable_each_take_exactly_one_undo_step() {
+        let mut core = core_with_chapters();
+        let depth = core.undo_depth();
+        assert!(core.title_cards_set_enabled(true));
+        assert_eq!(core.undo_depth(), depth + 1);
+        assert!(core.project.title_cards.enabled);
+        assert!(core.title_cards_set_enabled(false));
+        assert_eq!(core.undo_depth(), depth + 2);
+        assert!(!core.project.title_cards.enabled);
+        // Undo restores the pre-toggle settings verbatim.
+        core.undo();
+        assert!(core.project.title_cards.enabled);
+    }
+
+    #[test]
+    fn no_change_calls_spend_nothing() {
+        let mut core = core_with_chapters();
+        let depth = core.undo_depth();
+        assert!(!core.title_cards_set_enabled(false), "already off");
+        assert!(!core.title_cards_set_duration(
+            crate::title_cards::TITLE_CARD_DEFAULT_SECONDS
+        ));
+        assert_eq!(core.undo_depth(), depth);
+    }
+
+    #[test]
+    fn duration_clamps_and_a_nonfinite_refuses() {
+        let mut core = core_with_chapters();
+        assert!(core.title_cards_set_duration(100.0));
+        assert_eq!(
+            core.project.title_cards.duration_seconds,
+            crate::title_cards::TITLE_CARD_MAX_SECONDS
+        );
+        let depth = core.undo_depth();
+        assert!(!core.title_cards_set_duration(f32::NAN));
+        assert_eq!(core.undo_depth(), depth, "a refusal spends nothing");
+        assert!(core.status.contains("failed"), "status: {}", core.status);
+    }
+}
 
 // ---------------------------------------------------------------------
 // Session-read MCP handlers (Wave 14, A8)
@@ -8508,6 +11489,1012 @@ pub fn tool_clipboard_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --------------------------------------------------
+    // Reparent (Roadmap Wave 2, W2-23 — RM19 §4.1)
+    // --------------------------------------------------
+
+    /// World rest orientation of node `ni`, recomputed
+    /// test-side straight from the parent chain (a walk,
+    /// not the op's index-order composition), so the
+    /// pins below check the op against an independent
+    /// reading of the same definition.
+    fn chain_world(def: &crate::model::FigureDef, ni: usize) -> f32 {
+        let mut acc = 0.0f32;
+        let mut cur = Some(ni);
+        let mut first = true;
+        while let Some(n) = cur {
+            if first {
+                // A node's own world orientation includes
+                // its own rest angle; the root's is 0
+                // (`evaluate` seeds it so, and the root's
+                // rest angle is inert).
+                first = false;
+            }
+            acc += def.nodes[n].rest_angle;
+            cur = def.nodes[n].parent;
+        }
+        // The root contributed its inert rest angle; the
+        // engine's world orientation for the root is 0.
+        acc - def.nodes[0].rest_angle
+    }
+
+    #[test]
+    fn reparent_refuses_cycles_and_preserves_world_rest() {
+        // RM19 §8's named pin for §4.1.
+        let mut core = EditorCore::new();
+        let before: Vec<f32> = (0..11).map(|i| chain_world(&core.project.figures[0].def, i)).collect();
+        // forearm L (4) onto the chest (1): world rest
+        // re-solves — 302 − 180 = 122 — and the subtree
+        // (just node 4) keeps its world orientation.
+        assert!(core.reparent_node(4, 1));
+        {
+            let def = &core.project.figures[0].def;
+            assert_eq!(def.nodes[4].parent, Some(1));
+            assert!((def.nodes[4].rest_angle - 122.0).abs() < 1e-4);
+            assert!((chain_world(def, 4) - before[4]).abs() < 1e-4);
+        }
+        assert_eq!(core.undo_depth(), 1);
+        // Cycles refuse and spend nothing: onto itself,
+        // and onto a descendant (head is not node 1's
+        // descendant after the move above — node 2 is).
+        assert!(!core.reparent_node(4, 4));
+        assert_eq!(core.status, "That would make the segment its own ancestor.");
+        assert!(!core.reparent_node(1, 2));
+        assert_eq!(core.status, "That would make the segment its own ancestor.");
+        // The root refuses; an out-of-range parent refuses.
+        assert!(!core.reparent_node(0, 1));
+        assert_eq!(core.status, "The root cannot be reparented.");
+        assert!(!core.reparent_node(4, 999));
+        assert_eq!(core.undo_depth(), 1, "refusals spend no snapshot");
+        // Undo restores the pre-reparent def exactly.
+        core.undo();
+        let def = &core.project.figures[0].def;
+        assert_eq!(def.nodes[4].parent, Some(3));
+        assert!((def.nodes[4].rest_angle - 4.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn reparent_keeps_the_whole_subtrees_world_rest() {
+        let mut core = EditorCore::new();
+        let before: Vec<f32> = (0..11).map(|i| chain_world(&core.project.figures[0].def, i)).collect();
+        // upper-arm L (3, subtree 3+4) onto thigh R (9):
+        // both nodes keep their world rest orientations,
+        // lengths never move, and no other node's parent
+        // or rest changes.
+        assert!(core.reparent_node(3, 9));
+        let def = &core.project.figures[0].def;
+        for ni in 0..11 {
+            assert!(
+                (chain_world(def, ni) - before[ni]).abs() < 1e-4,
+                "node {ni} kept its world rest orientation"
+            );
+        }
+        assert_eq!(def.nodes[3].parent, Some(9));
+        assert_eq!(def.nodes[4].parent, Some(3), "children follow untouched");
+        assert!((def.nodes[3].length - 38.0).abs() < 1e-4);
+        assert!((def.nodes[4].length - 34.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn reparent_moves_no_indices_and_no_node_indexed_store() {
+        let mut core = EditorCore::new();
+        let names_before: Vec<String> = core.project.figures[0]
+            .def
+            .nodes
+            .iter()
+            .map(|n| n.name.clone())
+            .collect();
+        let angles_before: Vec<Vec<f32>> = core
+            .project
+            .frames
+            .iter()
+            .map(|f| f.poses.first().map(|p| p.angles.clone()).unwrap_or_default())
+            .collect();
+        assert!(core.reparent_node(7, 1));
+        let def = &core.project.figures[0].def;
+        let names_after: Vec<String> = def.nodes.iter().map(|n| n.name.clone()).collect();
+        assert_eq!(names_before, names_after, "no index moved");
+        let angles_after: Vec<Vec<f32>> = core
+            .project
+            .frames
+            .iter()
+            .map(|f| f.poses.first().map(|p| p.angles.clone()).unwrap_or_default())
+            .collect();
+        assert_eq!(angles_before, angles_after, "poses untouched — no remap needed");
+    }
+
+    #[test]
+    fn legal_parents_exclude_self_and_subtree_in_tree_order() {
+        let def = crate::model::FigureDef::humanoid();
+        // Chest (1): its subtree is 1..=6; the legs and
+        // the root remain, in the tree's pre-order.
+        assert_eq!(EditorCore::legal_parents(&def, 1), vec![0, 7, 8, 9, 10]);
+        // A leaf excludes only itself.
+        assert_eq!(
+            EditorCore::legal_parents(&def, 4),
+            vec![0, 1, 2, 3, 5, 6, 7, 8, 9, 10]
+        );
+        // The root's subtree is the whole figure.
+        assert!(EditorCore::legal_parents(&def, 0).is_empty());
+        assert_eq!(EditorCore::next_legal_parent(&def, 0), None);
+        // A stale index yields nothing, never a panic.
+        assert!(EditorCore::legal_parents(&def, 999).is_empty());
+    }
+
+    #[test]
+    fn cycle_reparent_steps_and_wraps_with_one_snapshot_each() {
+        let mut core = EditorCore::new();
+        core.selected_node = Some(4); // forearm L, parent 3
+        // Candidates for 4: [0,1,2,3,5,6,7,8,9,10] —
+        // after 3 comes 5.
+        assert!(core.cycle_reparent_selected());
+        assert_eq!(core.project.figures[0].def.nodes[4].parent, Some(5));
+        assert_eq!(core.undo_depth(), 1);
+        // Nine more cycles tour the rest of the list —
+        // 6, 7, 8, 9, 10, wrapping to 0, then 1, 2 — and
+        // land back on the starting parent (3): a full
+        // tour of the ten candidates, ten snapshots total.
+        for _ in 0..9 {
+            assert!(core.cycle_reparent_selected());
+        }
+        assert_eq!(core.project.figures[0].def.nodes[4].parent, Some(3));
+        assert_eq!(core.undo_depth(), 10, "one snapshot per reparent");
+        // The tour preserved the world rest orientation
+        // at every stop.
+        let w = chain_world(&core.project.figures[0].def, 4);
+        assert!((w - 302.0).abs() < 1e-3, "world rest held across the tour: {w}");
+    }
+
+    #[test]
+    fn cycle_reparent_refusals_spend_nothing() {
+        let mut core = EditorCore::new();
+        // No selection.
+        assert!(!core.cycle_reparent_selected());
+        assert_eq!(core.status, "Select a segment first.");
+        // The root.
+        core.selected_node = Some(0);
+        assert!(!core.cycle_reparent_selected());
+        assert_eq!(core.status, "The root cannot be reparented.");
+        // A locked figure refuses both doors.
+        core.selected_node = Some(4);
+        core.project.figures[0].locked = true;
+        assert!(!core.cycle_reparent_selected());
+        assert_eq!(
+            core.status,
+            "Figure is locked — unlock it in the figures list."
+        );
+        assert!(!core.reparent_node(4, 1));
+        assert_eq!(core.undo_depth(), 0, "no refusal spent a snapshot");
+    }
+
+    // --------------------------------------------------
+    // Structural ops (Roadmap Wave 2, W2-24 — RM19
+    // §4.2 insert-between + §4.3 duplicate-subtree)
+    // --------------------------------------------------
+
+    /// Joint positions of the rest pose, computed
+    /// test-side from the def alone: the root sits at
+    /// the origin and each joint lands at its parent's
+    /// position plus its segment, directed by the
+    /// chain-composed world rest orientation
+    /// (`chain_world`). An independent reading of the
+    /// same definition `evaluate` uses, so the pins
+    /// below check the ops against the def, not against
+    /// the ops' own helpers.
+    fn rest_positions(def: &crate::model::FigureDef) -> Vec<[f32; 2]> {
+        let mut pos = vec![[0.0f32; 2]; def.nodes.len()];
+        for (i, node) in def.nodes.iter().enumerate() {
+            if let Some(p) = node.parent {
+                let d = crate::model::dir(chain_world(def, i));
+                pos[i] = [
+                    pos[p][0] + d[0] * node.length,
+                    pos[p][1] + d[1] * node.length,
+                ];
+            }
+        }
+        pos
+    }
+
+    #[test]
+    fn insert_segment_between_preserves_the_rest_pose() {
+        // RM19 §8's named pin for §4.2.
+        let mut core = EditorCore::new();
+        let before = rest_positions(&core.project.figures[0].def);
+        // Plant a keyed angle on the segment being split
+        // and a full bend row: the angle must stay on
+        // node 4 (the segment the user keyed), the fresh
+        // slots read as rest/straight.
+        core.project.frames[0].poses[0].angles[4] = 30.0;
+        core.project.frames[0].bends = vec![vec![0.25; 11]];
+        // Split forearm L (4, length 34, rest 4°) under
+        // upper-arm L (3).
+        assert!(core.insert_segment_between(4));
+        assert_eq!(core.undo_depth(), 1, "exactly one snapshot");
+        {
+            let def = &core.project.figures[0].def;
+            assert_eq!(def.nodes.len(), 12);
+            let n = &def.nodes[11];
+            assert_eq!(n.parent, Some(3), "the new node takes ni's parent");
+            assert!((n.length - 17.0).abs() < 1e-4, "half the length");
+            assert!((n.rest_angle - 4.0).abs() < 1e-4, "ni's rest angle");
+            let ni = &def.nodes[4];
+            assert_eq!(ni.parent, Some(11), "ni hangs under the new node");
+            assert!((ni.length - 17.0).abs() < 1e-4, "the other half");
+            assert_eq!(ni.rest_angle, 0.0, "ni continues collinearly");
+        }
+        // Every original joint is exactly where it was;
+        // the new joint sits at the old segment's
+        // midpoint.
+        let after = rest_positions(&core.project.figures[0].def);
+        for i in 0..11 {
+            assert!(
+                (after[i][0] - before[i][0]).abs() < 1e-3
+                    && (after[i][1] - before[i][1]).abs() < 1e-3,
+                "joint {i} kept its rest position"
+            );
+        }
+        let mid = [
+            (before[3][0] + before[4][0]) / 2.0,
+            (before[3][1] + before[4][1]) / 2.0,
+        ];
+        assert!(
+            (after[11][0] - mid[0]).abs() < 1e-3 && (after[11][1] - mid[1]).abs() < 1e-3,
+            "the new joint is the midpoint"
+        );
+        // Slot extension: existing values untouched, the
+        // appended slots are rest (0.0 angle, 0.0 bend).
+        let angles = &core.project.frames[0].poses[0].angles;
+        assert_eq!(angles.len(), 12);
+        assert_eq!(angles[4], 30.0, "the keyed angle stays on ni");
+        assert_eq!(angles[11], 0.0);
+        let bends = &core.project.frames[0].bends[0];
+        assert_eq!(bends.len(), 12);
+        assert_eq!(bends[4], 0.25);
+        assert_eq!(bends[11], 0.0);
+        // The created node is the selection (the
+        // `add_segment` precedent).
+        assert_eq!(core.selected_node, Some(11));
+        // Undo restores the pre-split def exactly.
+        core.undo();
+        let def = &core.project.figures[0].def;
+        assert_eq!(def.nodes.len(), 11);
+        assert_eq!(def.nodes[4].parent, Some(3));
+        assert!((def.nodes[4].length - 34.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn insert_segment_between_refusals_spend_nothing() {
+        let mut core = EditorCore::new();
+        // The root has no segment above it to split.
+        assert!(!core.insert_segment_between(0));
+        assert_eq!(core.status, "The root has no segment to split.");
+        // A stale index refuses.
+        assert!(!core.insert_segment_between(999));
+        assert_eq!(core.status, "Select a segment first.");
+        // A locked figure refuses.
+        core.project.figures[0].locked = true;
+        assert!(!core.insert_segment_between(4));
+        assert_eq!(
+            core.status,
+            "Figure is locked — unlock it in the figures list."
+        );
+        // No figure at all refuses.
+        core.project.figures.clear();
+        assert!(!core.insert_segment_between(4));
+        assert_eq!(core.status, "Select a figure first.");
+        assert_eq!(core.undo_depth(), 0, "no refusal spent a snapshot");
+    }
+
+    #[test]
+    fn duplicate_subtree_appends_without_moving_existing_indices() {
+        // RM19 §8's named pin for §4.3.
+        let mut core = EditorCore::new();
+        let before: Vec<(String, Option<usize>, f32, f32)> = core.project.figures[0]
+            .def
+            .nodes
+            .iter()
+            .map(|n| (n.name.clone(), n.parent, n.length, n.rest_angle))
+            .collect();
+        // Plant keyed angles inside the subtree, a full
+        // bend row, and a graph channel keyed on node 4:
+        // existing stores must come through untouched,
+        // and the channel must NOT be cloned.
+        core.project.frames[0].poses[0].angles[3] = 10.0;
+        core.project.frames[0].poses[0].angles[4] = 20.0;
+        core.project.frames[0].bends = vec![vec![0.5; 11]];
+        core.project.channels.push(crate::graph::Channel {
+            figure: 0,
+            target: crate::graph::ChannelTarget::Angle(4),
+            keys: vec![crate::graph::Key::flat(0.0, 42.0)],
+        });
+        // Duplicate upper-arm L (3): subtree {3, 4}.
+        assert!(core.duplicate_subtree(3));
+        assert_eq!(core.undo_depth(), 1, "exactly one snapshot");
+        assert_eq!(core.status, "Subtree duplicated (2 segments).");
+        {
+            let def = &core.project.figures[0].def;
+            assert_eq!(def.nodes.len(), 13);
+            // The identity remap on the old figure: no
+            // existing node moved or changed.
+            for (i, b) in before.iter().enumerate() {
+                let n = &def.nodes[i];
+                assert_eq!(
+                    &(n.name.clone(), n.parent, n.length, n.rest_angle),
+                    b,
+                    "existing node {i} untouched"
+                );
+            }
+            // The clone, appended in pre-order: its root
+            // is a sibling of the original (same parent —
+            // the external reference is NOT remapped) and
+            // carries the copy name; the descendant keeps
+            // its name and hangs under the clone root.
+            let root = &def.nodes[11];
+            assert_eq!(root.name, format!("{} copy", before[3].0));
+            assert_eq!(root.parent, before[3].1, "clone root is a sibling");
+            assert_eq!(root.length, before[3].2);
+            assert_eq!(root.rest_angle, before[3].3);
+            let child = &def.nodes[12];
+            assert_eq!(child.name, before[4].0, "descendants keep names");
+            assert_eq!(child.parent, Some(11), "internal link remapped");
+            assert_eq!(child.length, before[4].2);
+        }
+        // The clone starts at rest: existing angle/bend
+        // values untouched, fresh slots 0.0.
+        let angles = &core.project.frames[0].poses[0].angles;
+        assert_eq!(angles.len(), 13);
+        assert_eq!(angles[3], 10.0);
+        assert_eq!(angles[4], 20.0);
+        assert_eq!(angles[11], 0.0);
+        assert_eq!(angles[12], 0.0);
+        let bends = &core.project.frames[0].bends[0];
+        assert_eq!(bends.len(), 13);
+        assert_eq!(bends[11], 0.0);
+        assert_eq!(bends[12], 0.0);
+        // Channels are not cloned (§4.3): the one
+        // channel still targets the ORIGINAL node 4.
+        assert_eq!(core.project.channels.len(), 1);
+        assert_eq!(
+            core.project.channels[0].target,
+            crate::graph::ChannelTarget::Angle(4)
+        );
+        // Selection moves to the clone root (§4.3).
+        assert_eq!(core.selected_node, Some(11));
+        // Undo restores the pre-duplicate def exactly.
+        core.undo();
+        assert_eq!(core.project.figures[0].def.nodes.len(), 11);
+    }
+
+    #[test]
+    fn duplicate_subtree_refusals_spend_nothing_and_leaf_clones_one() {
+        let mut core = EditorCore::new();
+        // The root has no parent to anchor a sibling
+        // clone on.
+        assert!(!core.duplicate_subtree(0));
+        assert_eq!(core.status, "The root cannot be duplicated.");
+        // A stale index refuses.
+        assert!(!core.duplicate_subtree(999));
+        assert_eq!(core.status, "Select a segment first.");
+        // A locked figure refuses.
+        core.project.figures[0].locked = true;
+        assert!(!core.duplicate_subtree(4));
+        assert_eq!(
+            core.status,
+            "Figure is locked — unlock it in the figures list."
+        );
+        assert_eq!(core.undo_depth(), 0, "no refusal spent a snapshot");
+        // A leaf duplicates as a one-node subtree.
+        core.project.figures[0].locked = false;
+        assert!(core.duplicate_subtree(2)); // head, parent chest (1)
+        assert_eq!(core.status, "Subtree duplicated (1 segment).");
+        let def = &core.project.figures[0].def;
+        assert_eq!(def.nodes.len(), 12);
+        assert_eq!(def.nodes[11].name, "head copy");
+        assert_eq!(def.nodes[11].parent, Some(1));
+        assert_eq!(core.selected_node, Some(11));
+    }
+
+    // --------------------------------------------------
+    // Structural ops (Roadmap Wave 2, W2-25 — RM19
+    // §4.4 delete-subtree + §4.5 mirror-subtree, over
+    // the §4.0 shared remap helper)
+    // --------------------------------------------------
+
+    #[test]
+    fn delete_subtree_remaps_bends_and_channels() {
+        // RM19 §8's named pin for §4.4, extended to the
+        // full §4.0 table. The fixture: the demo
+        // humanoid, posed/channelled/stated, deleting
+        // the chest subtree {1,2,3,4,5,6} — a mid-tree
+        // subtree. Survivors: 0 (hips), 7..10 (legs),
+        // which become 0..4.
+        let mut core = EditorCore::new();
+        // Posed, distinct per node, so a mis-remap
+        // cannot hide behind equal values.
+        for (i, a) in core.project.frames[0].poses[0].angles.iter_mut().enumerate() {
+            *a = i as f32;
+        }
+        core.project.frames[0].bends = vec![(0..11).map(|i| i as f32 * 0.1).collect()];
+        // A short/stale frame: rows cut to 5 slots.
+        // Survivors past the cut rebuild as 0.0 (the
+        // rows' neutral value).
+        core.project.frames[1].poses[0].angles.truncate(5);
+        core.project.frames[1].bends = vec![vec![0.7; 5]];
+        // Channels: one into the subtree (dropped),
+        // Angle/Length/Bend past the hole (remapped),
+        // a RootY (not node-indexed), and one on a
+        // SECOND figure past its own hole (untouched —
+        // the remap is per-figure).
+        core.project.channels = vec![
+            crate::graph::Channel {
+                figure: 0,
+                target: crate::graph::ChannelTarget::Angle(4),
+                keys: vec![crate::graph::Key::flat(0.0, 1.0)],
+            },
+            crate::graph::Channel {
+                figure: 0,
+                target: crate::graph::ChannelTarget::Angle(9),
+                keys: vec![crate::graph::Key::flat(0.0, 2.0)],
+            },
+            crate::graph::Channel {
+                figure: 0,
+                target: crate::graph::ChannelTarget::Length(8),
+                keys: vec![crate::graph::Key::flat(0.0, 3.0)],
+            },
+            crate::graph::Channel {
+                figure: 0,
+                target: crate::graph::ChannelTarget::Bend(10),
+                keys: vec![crate::graph::Key::flat(0.0, 4.0)],
+            },
+            crate::graph::Channel {
+                figure: 0,
+                target: crate::graph::ChannelTarget::RootY,
+                keys: vec![crate::graph::Key::flat(0.0, 5.0)],
+            },
+            crate::graph::Channel {
+                figure: 1,
+                target: crate::graph::ChannelTarget::Angle(9),
+                keys: vec![crate::graph::Key::flat(0.0, 6.0)],
+            },
+        ];
+        // "Stated": a state key rides the figure —
+        // frame→clip addressed, no node index, so it
+        // must pass through byte-identical.
+        core.project.figures[0].states = vec![crate::model::StateKey {
+            frame: 2,
+            clip: 0,
+            offset: 1,
+            speed: 1.5,
+        }];
+        // A second figure whose def must not move.
+        core.project.figures.push(crate::model::FigureInstance {
+            name: "Beta".into(),
+            color: 0xFFFFFF,
+            def: crate::model::FigureDef::humanoid(),
+            hidden: false,
+            clip: None,
+            states: Vec::new(),
+            locked: false,
+            opacity: 1.0,
+        });
+        // Segment media on a survivor (thigh R) and
+        // inside the subtree (forearm L).
+        core.project.figures[0].def.nodes[9].media =
+            Some(crate::model::SegmentMedia::Text { content: "R".into(), size: 12.0 });
+        core.project.figures[0].def.nodes[4].media =
+            Some(crate::model::SegmentMedia::Text { content: "L".into(), size: 12.0 });
+        // The selection sits on a survivor past the
+        // hole: it must follow its node (9 → 3).
+        core.selected_node = Some(9);
+
+        assert!(core.delete_subtree(1));
+        assert_eq!(core.undo_depth(), 1, "exactly one snapshot");
+        assert_eq!(
+            core.status,
+            "Subtree deleted (6 segments, 1 graph channel removed)."
+        );
+        {
+            let def = &core.project.figures[0].def;
+            assert_eq!(def.nodes.len(), 5);
+            let names: Vec<&str> = def.nodes.iter().map(|n| n.name.as_str()).collect();
+            assert_eq!(names, ["hips", "thigh L", "shin L", "thigh R", "shin R"]);
+            // Parents: the legs hung on the root and
+            // still do; the shins follow their thighs
+            // to the remapped indices.
+            assert_eq!(def.nodes[0].parent, None);
+            assert_eq!(def.nodes[1].parent, Some(0));
+            assert_eq!(def.nodes[2].parent, Some(1));
+            assert_eq!(def.nodes[3].parent, Some(0));
+            assert_eq!(def.nodes[4].parent, Some(3));
+            // Media rides its segment: thigh R's label
+            // is at its new index; the deleted label is
+            // gone with its node.
+            assert!(matches!(
+                &def.nodes[3].media,
+                Some(crate::model::SegmentMedia::Text { content, .. }) if content == "R"
+            ));
+            assert!(def.nodes.iter().all(|n| !matches!(
+                &n.media,
+                Some(crate::model::SegmentMedia::Text { content, .. }) if content == "L"
+            )));
+        }
+        // Angles and bends: the survivors' distinct
+        // values, at their new positions.
+        assert_eq!(
+            core.project.frames[0].poses[0].angles,
+            vec![0.0, 7.0, 8.0, 9.0, 10.0]
+        );
+        let bends = &core.project.frames[0].bends[0];
+        assert_eq!(bends.len(), 5);
+        for (new, old) in [(0usize, 0usize), (1, 7), (2, 8), (3, 9), (4, 10)] {
+            assert!(
+                (bends[new] - old as f32 * 0.1).abs() < 1e-6,
+                "bend slot {new} holds old node {old}'s value"
+            );
+        }
+        // The short frame: survivors 0..=4 were inside
+        // the 5 slots; the legs were past the cut and
+        // rebuild as the neutral 0.0.
+        assert_eq!(
+            core.project.frames[1].poses[0].angles,
+            vec![0.0, 0.0, 0.0, 0.0, 0.0]
+        );
+        assert_eq!(core.project.frames[1].bends[0], vec![0.7, 0.0, 0.0, 0.0, 0.0]);
+        // Channels: the into-subtree one is gone; the
+        // rest of figure 0's remapped (9→3, 8→2, 10→4),
+        // RootY untouched, figure 1's untouched.
+        let targets: Vec<crate::graph::ChannelTarget> =
+            core.project.channels.iter().map(|c| c.target).collect();
+        assert_eq!(
+            targets,
+            vec![
+                crate::graph::ChannelTarget::Angle(3),
+                crate::graph::ChannelTarget::Length(2),
+                crate::graph::ChannelTarget::Bend(4),
+                crate::graph::ChannelTarget::RootY,
+                crate::graph::ChannelTarget::Angle(9),
+            ]
+        );
+        assert_eq!(core.project.channels[4].figure, 1);
+        // States untouched; the second figure's def
+        // untouched; the selection followed its node.
+        assert_eq!(core.project.figures[0].states.len(), 1);
+        assert_eq!(core.project.figures[0].states[0].frame, 2);
+        assert_eq!(core.project.figures[1].def.nodes.len(), 11);
+        assert_eq!(core.selected_node, Some(3));
+        // Undo restores the whole pre-delete figure.
+        core.undo();
+        assert_eq!(core.project.figures[0].def.nodes.len(), 11);
+        assert_eq!(core.project.channels.len(), 6);
+        assert_eq!(core.project.frames[0].poses[0].angles.len(), 11);
+    }
+
+    #[test]
+    fn delete_subtree_leaf_clears_an_inside_selection() {
+        let mut core = EditorCore::new();
+        for (i, a) in core.project.frames[0].poses[0].angles.iter_mut().enumerate() {
+            *a = i as f32;
+        }
+        core.project.channels.push(crate::graph::Channel {
+            figure: 0,
+            target: crate::graph::ChannelTarget::Angle(10),
+            keys: vec![crate::graph::Key::flat(0.0, 5.0)],
+        });
+        core.selected_node = Some(8);
+        // Delete shin L (8) — a leaf: the selection
+        // was inside the subtree, so it clears.
+        assert!(core.delete_subtree(8));
+        assert_eq!(core.status, "Subtree deleted (1 segment).");
+        assert_eq!(core.selected_node, None);
+        let def = &core.project.figures[0].def;
+        assert_eq!(def.nodes.len(), 10);
+        assert_eq!(def.nodes[8].name, "thigh R");
+        assert_eq!(def.nodes[8].parent, Some(0));
+        assert_eq!(def.nodes[9].name, "shin R");
+        assert_eq!(def.nodes[9].parent, Some(8));
+        // The channel past the hole followed its node.
+        assert_eq!(
+            core.project.channels[0].target,
+            crate::graph::ChannelTarget::Angle(9)
+        );
+        assert_eq!(
+            core.project.frames[0].poses[0].angles,
+            vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 9.0, 10.0]
+        );
+        assert_eq!(core.undo_depth(), 1);
+    }
+
+    #[test]
+    fn delete_subtree_refusals_spend_nothing() {
+        let mut core = EditorCore::new();
+        // The root: deleting it would clear the whole
+        // figure — refused.
+        assert!(!core.delete_subtree(0));
+        assert_eq!(core.status, "The root cannot be deleted.");
+        // A stale index refuses.
+        assert!(!core.delete_subtree(999));
+        assert_eq!(core.status, "Select a segment first.");
+        // A locked figure refuses.
+        core.project.figures[0].locked = true;
+        assert!(!core.delete_subtree(1));
+        assert_eq!(
+            core.status,
+            "Figure is locked — unlock it in the figures list."
+        );
+        // No figure at all refuses.
+        core.project.figures.clear();
+        assert!(!core.delete_subtree(1));
+        assert_eq!(core.status, "Select a figure first.");
+        assert_eq!(core.undo_depth(), 0, "no refusal spent a snapshot");
+    }
+
+    #[test]
+    fn remap_node_indices_rebuilds_rows_and_drops_dangling_channels() {
+        // The shared §4.0 helper, exercised directly:
+        // a map removing only node 4.
+        let mut core = EditorCore::new();
+        for (i, a) in core.project.frames[0].poses[0].angles.iter_mut().enumerate() {
+            *a = i as f32;
+        }
+        core.project.frames[0].bends = vec![(0..11).map(|i| i as f32).collect()];
+        core.project.channels = vec![
+            crate::graph::Channel {
+                figure: 0,
+                target: crate::graph::ChannelTarget::Angle(4),
+                keys: vec![crate::graph::Key::flat(0.0, 1.0)],
+            },
+            crate::graph::Channel {
+                figure: 0,
+                target: crate::graph::ChannelTarget::Angle(9),
+                keys: vec![crate::graph::Key::flat(0.0, 2.0)],
+            },
+            // A stale target past the def entirely:
+            // dropped like a removed node's, never left
+            // dangling.
+            crate::graph::Channel {
+                figure: 0,
+                target: crate::graph::ChannelTarget::Angle(999),
+                keys: vec![crate::graph::Key::flat(0.0, 3.0)],
+            },
+        ];
+        let mut map: Vec<Option<usize>> = (0..11).map(Some).collect();
+        map[4] = None;
+        let mut next = 0usize;
+        for m in map.iter_mut() {
+            if m.is_some() {
+                *m = Some(next);
+                next += 1;
+            }
+        }
+        let dropped = EditorCore::remap_node_indices(&mut core.project, 0, &map);
+        assert_eq!(dropped, 2, "the removed node's channel and the stale one");
+        assert_eq!(
+            core.project.frames[0].poses[0].angles,
+            vec![0.0, 1.0, 2.0, 3.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+        );
+        assert_eq!(
+            core.project.frames[0].bends[0],
+            vec![0.0, 1.0, 2.0, 3.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+        );
+        assert_eq!(core.project.channels.len(), 1);
+        assert_eq!(
+            core.project.channels[0].target,
+            crate::graph::ChannelTarget::Angle(8)
+        );
+        // The helper never touches the def itself —
+        // the physical removal is the caller's half of
+        // the contract.
+        assert_eq!(core.project.figures[0].def.nodes.len(), 11);
+    }
+
+    #[test]
+    fn mirror_subtree_flips_bends_angles_and_names() {
+        // RM19 §8's named pin for §4.5.
+        let mut core = EditorCore::new();
+        // Planted state: a keyed angle inside the
+        // subtree and one outside, a bend row, an
+        // Angle channel (mirrored), a Length channel on
+        // the same node (untouched), an Angle channel
+        // outside (untouched), image media inside.
+        core.project.frames[0].poses[0].angles[3] = 25.0;
+        core.project.frames[0].poses[0].angles[7] = 33.0;
+        core.project.frames[0].bends = vec![vec![
+            0.0, 0.0, 0.0, 0.4, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 0.0,
+        ]];
+        core.project.channels = vec![
+            crate::graph::Channel {
+                figure: 0,
+                target: crate::graph::ChannelTarget::Angle(3),
+                keys: vec![crate::graph::Key {
+                    frame: 0.0,
+                    value: 30.0,
+                    in_tan: 2.0,
+                    out_tan: -3.0,
+                    interp: crate::graph::Interp::Hermite,
+                }],
+            },
+            crate::graph::Channel {
+                figure: 0,
+                target: crate::graph::ChannelTarget::Length(3),
+                keys: vec![crate::graph::Key::flat(0.0, 38.0)],
+            },
+            crate::graph::Channel {
+                figure: 0,
+                target: crate::graph::ChannelTarget::Angle(7),
+                keys: vec![crate::graph::Key::flat(0.0, 11.0)],
+            },
+        ];
+        core.project.figures[0].def.nodes[4].media =
+            Some(crate::model::SegmentMedia::Image {
+                asset: 0,
+                offset: [0.0, 0.0],
+                scale: 1.0,
+                angle_offset: 0.0,
+                flip: false,
+                opacity: 1.0,
+            });
+        // A joint limit inside the subtree: the arc
+        // reflects with the joint (min −10/max 40
+        // becomes min −40/max 10).
+        core.project.figures[0].def.nodes[3].min_angle = Some(-10.0);
+        core.project.figures[0].def.nodes[3].max_angle = Some(40.0);
+
+        // Mirror the chest subtree {1,2,3,4,5,6}.
+        assert!(core.mirror_subtree(1));
+        assert_eq!(core.undo_depth(), 1, "exactly one snapshot");
+        assert_eq!(core.status, "Subtree mirrored (6 segments).");
+        {
+            let def = &core.project.figures[0].def;
+            // Names swap token-exactly; unmatched names
+            // (chest, head) are left alone.
+            assert_eq!(def.nodes[1].name, "chest");
+            assert_eq!(def.nodes[2].name, "head");
+            assert_eq!(def.nodes[3].name, "upper-arm R");
+            assert_eq!(def.nodes[4].name, "forearm R");
+            assert_eq!(def.nodes[5].name, "upper-arm L");
+            assert_eq!(def.nodes[6].name, "forearm L");
+            // Rests negate (normalised): 180 → −180,
+            // 118 → −118, 4 → −4, −118 → 118, −4 → 4.
+            assert_eq!(def.nodes[1].rest_angle, -180.0);
+            assert_eq!(def.nodes[3].rest_angle, -118.0);
+            assert_eq!(def.nodes[4].rest_angle, -4.0);
+            assert_eq!(def.nodes[5].rest_angle, 118.0);
+            assert_eq!(def.nodes[6].rest_angle, 4.0);
+            // The def bend-side sign flips with the
+            // limb; nodes outside keep theirs.
+            assert_eq!(def.nodes[4].bend, 1.0);
+            assert_eq!(def.nodes[6].bend, 1.0);
+            assert_eq!(def.nodes[8].bend, 1.0, "outside the subtree: untouched");
+            // The limit arc reflected.
+            assert_eq!(def.nodes[3].min_angle, Some(-40.0));
+            assert_eq!(def.nodes[3].max_angle, Some(10.0));
+            // Other def fields ride unchanged.
+            assert!(def.nodes[2].head);
+            assert!(def.nodes[4].ik_end);
+            // The image media's flip toggled.
+            assert!(matches!(
+                &def.nodes[4].media,
+                Some(crate::model::SegmentMedia::Image { flip: true, .. })
+            ));
+        }
+        // Posed angles and frame bends negate inside
+        // the subtree only.
+        assert_eq!(core.project.frames[0].poses[0].angles[3], -25.0);
+        assert_eq!(core.project.frames[0].poses[0].angles[7], 33.0);
+        assert_eq!(core.project.frames[0].bends[0][3], -0.4);
+        assert_eq!(core.project.frames[0].bends[0][7], 0.2);
+        // The Angle channel's curve mirrored (value
+        // and tangents); Length and outside channels
+        // untouched.
+        let key = &core.project.channels[0].keys[0];
+        assert_eq!(key.value, -30.0);
+        assert_eq!(key.in_tan, -2.0);
+        assert_eq!(key.out_tan, 3.0);
+        assert_eq!(core.project.channels[1].keys[0].value, 38.0);
+        assert_eq!(core.project.channels[2].keys[0].value, 11.0);
+        // Mirroring again restores the original rig:
+        // the op is an involution on this data.
+        assert!(core.mirror_subtree(1));
+        let def = &core.project.figures[0].def;
+        assert_eq!(def.nodes[3].name, "upper-arm L");
+        assert_eq!(def.nodes[3].rest_angle, 118.0);
+        assert_eq!(def.nodes[4].bend, -1.0);
+        assert!(matches!(
+            &def.nodes[4].media,
+            Some(crate::model::SegmentMedia::Image { flip: false, .. })
+        ));
+        assert_eq!(core.project.frames[0].poses[0].angles[3], 25.0);
+        // Undo steps back over the second mirror only.
+        core.undo();
+        assert_eq!(core.project.figures[0].def.nodes[3].name, "upper-arm R");
+    }
+
+    #[test]
+    fn mirror_subtree_leaf_and_refusals() {
+        let mut core = EditorCore::new();
+        // A leaf mirrors as a one-node subtree.
+        assert!(core.mirror_subtree(8)); // shin L
+        assert_eq!(core.status, "Subtree mirrored (1 segment).");
+        let def = &core.project.figures[0].def;
+        assert_eq!(def.nodes[8].name, "shin R");
+        assert_eq!(def.nodes[8].rest_angle, -5.0);
+        assert_eq!(def.nodes[8].bend, -1.0);
+        assert_eq!(core.undo_depth(), 1);
+        // Refusals spend nothing: the root (the
+        // figure's mirror axis), a stale index, a
+        // locked figure, no figure.
+        assert!(!core.mirror_subtree(0));
+        assert_eq!(core.status, "The root cannot be mirrored.");
+        assert!(!core.mirror_subtree(999));
+        assert_eq!(core.status, "Select a segment first.");
+        core.project.figures[0].locked = true;
+        assert!(!core.mirror_subtree(7));
+        assert_eq!(
+            core.status,
+            "Figure is locked — unlock it in the figures list."
+        );
+        core.project.figures.clear();
+        assert!(!core.mirror_subtree(7));
+        assert_eq!(core.status, "Select a figure first.");
+        assert_eq!(core.undo_depth(), 1, "no refusal spent a snapshot");
+    }
+
+    #[test]
+    fn mirror_node_name_swaps_tokens_only() {
+        // Whole-token and suffix swaps; a name that
+        // merely CONTAINS a side word never changes.
+        assert_eq!(EditorCore::mirror_node_name("upper-arm L"), "upper-arm R");
+        assert_eq!(EditorCore::mirror_node_name("forearm R"), "forearm L");
+        assert_eq!(EditorCore::mirror_node_name("hand left"), "hand right");
+        assert_eq!(EditorCore::mirror_node_name("Left foot"), "Right foot");
+        assert_eq!(EditorCore::mirror_node_name("arm_l"), "arm_r");
+        assert_eq!(EditorCore::mirror_node_name("arm_R"), "arm_L");
+        assert_eq!(EditorCore::mirror_node_name("leg-l"), "leg-r");
+        assert_eq!(EditorCore::mirror_node_name("elbow"), "elbow");
+        assert_eq!(EditorCore::mirror_node_name("flare"), "flare");
+        assert_eq!(EditorCore::mirror_node_name("chest"), "chest");
+        assert_eq!(EditorCore::mirror_node_name("segment 4"), "segment 4");
+    }
+
+    #[test]
+    fn node_name_setter_trims_writes_and_spends_once() {
+        // W2-26 (RM19 §5): the Node name setter trims,
+        // writes under exactly one "Rename segment"
+        // snapshot, and spends nothing on a no-change
+        // rename or an empty name.
+        let mut core = EditorCore::new();
+        assert!(core.set_node_name(0, 3, "  bicep L  "));
+        assert_eq!(core.project.figures[0].def.nodes[3].name, "bicep L");
+        assert_eq!(core.status, "Segment 3 renamed to \"bicep L\".");
+        assert_eq!(core.undo_depth(), 1);
+        assert_eq!(core.undo_label(), Some("Rename segment"));
+        // The same name again: success, no second step.
+        assert!(core.set_node_name(0, 3, "bicep L"));
+        assert_eq!(core.undo_depth(), 1, "no-change rename spends nothing");
+        // Empty after trimming refuses and spends nothing.
+        assert!(!core.set_node_name(0, 3, "   "));
+        assert_eq!(core.status, "Segment name cannot be empty.");
+        assert_eq!(core.project.figures[0].def.nodes[3].name, "bicep L");
+        assert_eq!(core.undo_depth(), 1);
+        // Undo restores the constructor's name.
+        core.undo();
+        assert_eq!(core.project.figures[0].def.nodes[3].name, "upper-arm L");
+    }
+
+    #[test]
+    fn node_head_toggle_writes_and_spends_once() {
+        // W2-26 (RM19 §5): the Head toggle writes the
+        // NodeDef flag under one "Segment head" snapshot
+        // per real change; multiple heads are legal data
+        // and the toggle does not police them.
+        let mut core = EditorCore::new();
+        assert!(core.set_node_head(0, 3, true));
+        assert!(core.project.figures[0].def.nodes[3].head);
+        assert_eq!(core.status, "upper-arm L is the head.");
+        assert_eq!(core.undo_depth(), 1);
+        assert_eq!(core.undo_label(), Some("Segment head"));
+        // Node 2 is already the constructor's head: the
+        // figure now carries two heads, which is legal.
+        assert!(core.project.figures[0].def.nodes[2].head);
+        // Writing the carried value spends nothing.
+        assert!(core.set_node_head(0, 3, true));
+        assert_eq!(core.undo_depth(), 1);
+        assert!(core.set_node_head(0, 3, false));
+        assert!(!core.project.figures[0].def.nodes[3].head);
+        assert_eq!(core.status, "upper-arm L is not the head.");
+        assert_eq!(core.undo_depth(), 2);
+    }
+
+    #[test]
+    fn ik_end_toggle_refuses_without_a_grandparent() {
+        // RM19 §8's named pin for §5 (W2-26): turning IK
+        // end ON requires a chain of two segments above
+        // the joint — the chest (parent = the root) and
+        // the root itself refuse with the standing
+        // sentence and spend nothing.
+        let mut core = EditorCore::new();
+        assert!(!core.set_node_ik_end(0, 1, true));
+        assert_eq!(
+            core.status,
+            "IK needs a chain of two segments above this joint."
+        );
+        assert!(!core.set_node_ik_end(0, 0, true));
+        assert_eq!(
+            core.status,
+            "IK needs a chain of two segments above this joint."
+        );
+        assert_eq!(core.undo_depth(), 0, "refusals spend nothing");
+        // upper-arm L (parent chest, grandparent hips)
+        // qualifies: one "Segment IK end" step per change.
+        assert!(core.set_node_ik_end(0, 3, true));
+        assert!(core.project.figures[0].def.nodes[3].ik_end);
+        assert_eq!(core.status, "upper-arm L is an IK end.");
+        assert_eq!(core.undo_depth(), 1);
+        assert_eq!(core.undo_label(), Some("Segment IK end"));
+        assert!(core.set_node_ik_end(0, 3, true));
+        assert_eq!(core.undo_depth(), 1, "no-change write spends nothing");
+        // Turning OFF never needs the chain.
+        assert!(core.set_node_ik_end(0, 3, false));
+        assert!(!core.project.figures[0].def.nodes[3].ik_end);
+        assert_eq!(core.undo_depth(), 2);
+    }
+
+    #[test]
+    fn bend_side_setter_writes_the_sign() {
+        // RM19 §8's named pin for §5 (W2-26): the setter
+        // writes exactly ±1.0 (the field is a sign by
+        // convention), under one "Segment bend side"
+        // snapshot per real change, and never touches a
+        // frame's stored bend.
+        let mut core = EditorCore::new();
+        assert_eq!(core.project.figures[0].def.nodes[3].bend, 1.0);
+        assert!(core.set_node_bend_side(0, 3, -1.0));
+        assert_eq!(core.project.figures[0].def.nodes[3].bend, -1.0);
+        assert_eq!(core.status, "upper-arm L bend side set to -1.");
+        assert_eq!(core.undo_depth(), 1);
+        assert_eq!(core.undo_label(), Some("Segment bend side"));
+        // Any negative sign lands on the same −1.0: no
+        // second step. A zero or non-finite sign refuses.
+        assert!(core.set_node_bend_side(0, 3, -0.25));
+        assert_eq!(core.undo_depth(), 1);
+        assert!(!core.set_node_bend_side(0, 3, 0.0));
+        assert_eq!(core.status, "Bend side must be − or +.");
+        assert!(!core.set_node_bend_side(0, 3, f32::NAN));
+        assert_eq!(core.undo_depth(), 1);
+        assert!(core.set_node_bend_side(0, 3, 1.0));
+        assert_eq!(core.project.figures[0].def.nodes[3].bend, 1.0);
+        assert_eq!(core.undo_depth(), 2);
+        // The def write is not a frame-bend write.
+        assert!(
+            core.project.frames[core.current].bends.is_empty(),
+            "no frame bend table was grown by the def setter"
+        );
+    }
+
+    #[test]
+    fn node_flag_setters_refuse_locked_and_stale() {
+        // W2-26: the four setters share one refusal head
+        // — no figure, no node, locked figure — and a
+        // refusal never spends a snapshot.
+        let mut core = EditorCore::new();
+        assert!(!core.set_node_name(99, 0, "x"));
+        assert_eq!(core.status, "Select a figure first.");
+        assert!(!core.set_node_head(0, 999, true));
+        assert_eq!(core.status, "Select a segment first.");
+        core.project.figures[0].locked = true;
+        assert!(!core.set_node_name(0, 3, "bicep L"));
+        assert!(!core.set_node_head(0, 3, true));
+        assert!(!core.set_node_ik_end(0, 3, true));
+        assert!(!core.set_node_bend_side(0, 3, -1.0));
+        assert_eq!(
+            core.status,
+            "Figure is locked — unlock it in the figures list."
+        );
+        assert_eq!(core.undo_depth(), 0, "locked refusals spend nothing");
+        assert_eq!(core.project.figures[0].def.nodes[3].name, "upper-arm L");
+        assert!(!core.project.figures[0].def.nodes[3].head);
+    }
 
     #[test]
     fn autosave_counter_counts_snapshots_only() {
@@ -11345,6 +15332,256 @@ mod tests {
     }
 
     #[test]
+    fn w2_40_ping_pong_bounces_at_the_timeline_ends() {
+        // Roadmap Wave 2 (W2-40): five uniform frames at
+        // 24 fps — one beat per 1/24 s tick, a 5-beat window.
+        // Steps of 1.5 beats keep every landing off the exact
+        // bounds: forward 0 → 1.5 → 3.0 → 4.5, then the next
+        // step crosses the end (5) and reflects to 4.0
+        // travelling backward, on to 2.5 and 1.0, then the
+        // step crosses the start and reflects to 0.5 forward.
+        let mut core = EditorCore::new();
+        core.project.fps = 24.0;
+        let step = 1.5 / 24.0;
+        core.goto(0);
+        assert!(!core.play_reverse, "a fresh pass travels forward");
+        core.advance_ping_pong(step);
+        assert!((core.playhead - 1.5).abs() < 1e-4, "playhead: {}", core.playhead);
+        assert_eq!(core.current, 1);
+        core.advance_ping_pong(step);
+        assert!((core.playhead - 3.0).abs() < 1e-4, "playhead: {}", core.playhead);
+        core.advance_ping_pong(step);
+        assert!((core.playhead - 4.5).abs() < 1e-4, "playhead: {}", core.playhead);
+        assert!(!core.play_reverse, "still forward inside the last frame");
+        core.advance_ping_pong(step);
+        assert!(
+            (core.playhead - 4.0).abs() < 1e-4,
+            "the overshoot reflects back into the window: {}",
+            core.playhead
+        );
+        assert!(core.play_reverse, "the bounce flips the direction");
+        assert_eq!(core.current, 4);
+        core.advance_ping_pong(step);
+        assert!((core.playhead - 2.5).abs() < 1e-4, "playhead: {}", core.playhead);
+        core.advance_ping_pong(step);
+        assert!((core.playhead - 1.0).abs() < 1e-4, "playhead: {}", core.playhead);
+        core.advance_ping_pong(step);
+        assert!(
+            (core.playhead - 0.5).abs() < 1e-4,
+            "the start bounce reflects the overshoot too: {}",
+            core.playhead
+        );
+        assert!(!core.play_reverse, "forward again after the start bounce");
+        assert_eq!(core.current, 0);
+    }
+
+    #[test]
+    fn w2_40_ping_pong_full_period_returns_to_the_start() {
+        // One full triangle period (2 × the 5-beat window)
+        // returns the playhead to the start travelling
+        // forward — no time is lost at either bounce.
+        let mut core = EditorCore::new();
+        core.project.fps = 24.0;
+        core.goto(0);
+        core.advance_ping_pong(10.0 / 24.0);
+        assert!(core.playhead.abs() < 1e-4, "playhead: {}", core.playhead);
+        assert_eq!(core.current, 0);
+        assert!(!core.play_reverse);
+        // Two periods land the same way.
+        core.advance_ping_pong(20.0 / 24.0);
+        assert!(core.playhead.abs() < 1e-4, "playhead: {}", core.playhead);
+        assert!(!core.play_reverse);
+    }
+
+    #[test]
+    fn w2_40_ping_pong_bounces_inside_the_loop_range() {
+        // The window is the loop range's beat span (frames
+        // 1..=2 = beats 1..3 at uniform durations), not the
+        // whole timeline's.
+        let mut core = EditorCore::new();
+        core.project.fps = 24.0;
+        core.set_loop_range(1, 2);
+        core.goto(1);
+        core.advance_ping_pong(1.5 / 24.0);
+        assert!((core.playhead - 2.5).abs() < 1e-4, "playhead: {}", core.playhead);
+        assert!(!core.play_reverse);
+        core.advance_ping_pong(1.5 / 24.0);
+        // 2.5 + 1.5 crosses the range end (beat 3): reflects
+        // to beat 2.0, travelling backward.
+        assert!((core.playhead - 2.0).abs() < 1e-4, "playhead: {}", core.playhead);
+        assert!(core.play_reverse);
+        assert_eq!(core.current, 2);
+        core.advance_ping_pong(1.5 / 24.0);
+        // Back across the range start (beat 1): reflects to
+        // beat 1.5, forward again.
+        assert!((core.playhead - 1.5).abs() < 1e-4, "playhead: {}", core.playhead);
+        assert!(!core.play_reverse);
+        assert_eq!(core.current, 1);
+    }
+
+    #[test]
+    fn w2_40_ping_pong_walks_durations_on_the_shared_clock() {
+        // The bounce is measured in beats, not frames: with
+        // frame 0 held 4 beats the 5-frame timeline spans
+        // 8 beats, so a 6-beat tick from the top lands 2
+        // beats into the held frame (playhead 0.5), and the
+        // next 6-beat tick crosses the end and reflects to
+        // 4 beats back — 3 beats into the hold (0.75).
+        let mut core = EditorCore::new();
+        core.project.fps = 24.0;
+        core.project.frames[0].duration = 4.0;
+        core.goto(0);
+        core.advance_ping_pong(6.0 / 24.0);
+        assert!((core.playhead - 0.5).abs() < 1e-4, "playhead: {}", core.playhead);
+        assert!(!core.play_reverse);
+        core.advance_ping_pong(6.0 / 24.0);
+        assert!((core.playhead - 0.75).abs() < 1e-4, "playhead: {}", core.playhead);
+        assert!(core.play_reverse, "reflected at the 8-beat end");
+        assert_eq!(core.current, 0);
+    }
+
+    #[test]
+    fn w2_40_ping_pong_enters_the_window_from_outside() {
+        // A playhead parked before the range walks forward
+        // into it (the forward op's behaviour, mirrored);
+        // parked past it, backward. No teleport either way.
+        let mut core = EditorCore::new();
+        core.project.fps = 24.0;
+        core.set_loop_range(2, 3);
+        core.goto(0);
+        core.advance_ping_pong(1.0 / 24.0);
+        assert!((core.playhead - 1.0).abs() < 1e-4, "playhead: {}", core.playhead);
+        assert!(!core.play_reverse);
+        core.advance_ping_pong(1.0 / 24.0);
+        assert!((core.playhead - 2.0).abs() < 1e-4, "entered at the range start");
+        // From past the range: one beat back lands on the
+        // range's last frame, travelling backward.
+        core.goto(4);
+        core.advance_ping_pong(1.0 / 24.0);
+        assert!((core.playhead - 3.0).abs() < 1e-4, "playhead: {}", core.playhead);
+        assert!(core.play_reverse);
+        assert_eq!(core.current, 3);
+    }
+
+    #[test]
+    fn w2_40_ping_pong_stands_still_when_it_cannot_move() {
+        // A non-positive or non-finite tick moves nothing
+        // (the forward op's guard), an empty project is a
+        // no-op, and a single-frame project stays on its
+        // only frame however long it bounces.
+        let mut core = EditorCore::new();
+        core.project.fps = 24.0;
+        core.goto(2);
+        for dt in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            core.advance_ping_pong(dt);
+            assert_eq!(core.current, 2, "dt {dt} must not move the playhead");
+            assert!((core.playhead - 2.0).abs() < 1e-4);
+        }
+        core.project.frames.clear();
+        core.advance_ping_pong(1.0);
+        let mut single = EditorCore::new();
+        single.project.fps = 24.0;
+        single.project.frames.truncate(1);
+        single.advance_ping_pong(3.0 / 24.0);
+        assert_eq!(single.current, 0);
+        single.advance_ping_pong(3.0 / 24.0);
+        assert_eq!(single.current, 0);
+    }
+
+    #[test]
+    fn w2_40_ping_pong_keeps_direction_across_a_seek() {
+        // `goto` does not touch the direction: a seek
+        // mid-bounce keeps travelling the way it was.
+        let mut core = EditorCore::new();
+        core.project.fps = 24.0;
+        core.goto(4);
+        core.advance_ping_pong(1.5 / 24.0);
+        assert!(core.play_reverse, "bounced off the end");
+        core.goto(2);
+        assert!(core.play_reverse, "the seek leaves the direction alone");
+        core.advance_ping_pong(1.0 / 24.0);
+        assert!(
+            (core.playhead - 1.0).abs() < 1e-4,
+            "travel continues backward from the seek: {}",
+            core.playhead
+        );
+    }
+
+    #[test]
+    fn w2_40_seek_fractional_lands_inside_the_authoring_frame() {
+        // The sub-frame scrub's contract: the playhead is
+        // fractional, `current` is its floor — the frame
+        // every authoring op edits.
+        let mut core = EditorCore::new();
+        core.project.fps = 24.0;
+        core.seek_fractional(2.5);
+        assert!((core.playhead - 2.5).abs() < 1e-6, "playhead: {}", core.playhead);
+        assert_eq!(core.current, 2, "current is the frame the playhead is inside");
+        core.seek_fractional(2.999);
+        assert_eq!(core.current, 2);
+        core.seek_fractional(3.0);
+        assert_eq!(core.current, 3, "an exact boundary is the next frame");
+        assert!((core.playhead - 3.0).abs() < 1e-6);
+        // Clamps: before the top to frame 0, past the end to
+        // a hair inside the last frame (frame time n is the
+        // timeline's end, outside the playhead's domain).
+        core.seek_fractional(-4.0);
+        assert_eq!(core.current, 0);
+        assert!(core.playhead.abs() < 1e-6);
+        core.seek_fractional(99.0);
+        assert_eq!(core.current, 4);
+        assert!(core.playhead > 4.9 && core.playhead < 5.0, "playhead: {}", core.playhead);
+        // Refusals: non-finite times and an empty project
+        // leave the playhead where it was.
+        core.seek_fractional(f32::NAN);
+        assert!(core.playhead > 4.9, "a NaN seek is refused");
+        core.project.frames.clear();
+        core.seek_fractional(1.0);
+        assert!(core.playhead > 4.9, "an empty project refuses the seek");
+    }
+
+    #[test]
+    fn w2_40_display_frame_shows_the_in_between_while_parked() {
+        // Tween on + a fractional playhead: the stage shows
+        // the interpolated position, playing or parked
+        // mid-scrub. Tween off: the authored frame, always.
+        let mut core = EditorCore::new();
+        core.project.fps = 24.0;
+        core.project.tween_playback = true;
+        core.seek_fractional(2.5);
+        assert!(!core.playing);
+        assert!(
+            (core.display_frame() - 2.5).abs() < 1e-6,
+            "a parked scrub shows the in-between: {}",
+            core.display_frame()
+        );
+        // An integer playhead renders the same either way.
+        core.goto(2);
+        assert!((core.display_frame() - 2.0).abs() < 1e-6);
+        // Tween off: the authored frame shows even parked
+        // between frames — and the playhead stays fractional
+        // (the flag governs the view, not the position).
+        core.project.tween_playback = false;
+        core.seek_fractional(2.5);
+        assert!((core.display_frame() - 2.0).abs() < 1e-6);
+        assert!((core.playhead - 2.5).abs() < 1e-6);
+        // A pose authored mid-scrub lands on `current`:
+        // the op writes the frame the playhead is inside.
+        let before = core.project.frames[2].poses[0].root;
+        core.project.tween_playback = true;
+        core.seek_fractional(2.5);
+        core.snapshot_labeled("Pose");
+        core.project.frames[core.current].poses[0].root = [before[0] + 10.0, before[1]];
+        assert_eq!(core.current, 2);
+        assert_eq!(core.project.frames[2].poses[0].root[0], before[0] + 10.0);
+        assert_ne!(
+            core.project.frames[3].poses[0].root[0],
+            before[0] + 10.0,
+            "the next frame is untouched by the mid-scrub edit"
+        );
+    }
+
+    #[test]
     fn wave7_shift_frames_moves_block_with_all_frame_data() {
         let mut core = EditorCore::new();
         tag_frames(&mut core);
@@ -11528,6 +15765,70 @@ mod tests {
         );
         assert_eq!(core.project.frames[0].poses[0].root, [0.0, 50.0], "first endpoint kept");
         assert_eq!(core.project.frames[4].poses[0].root, [0.0, 50.0], "last endpoint kept");
+    }
+
+    #[test]
+    fn w2_36_insert_path_point_splits_the_segment_and_remaps() {
+        let mut core = EditorCore::new();
+        for (i, frame) in core.project.frames.iter_mut().enumerate() {
+            frame.poses[0].root = [40.0 * i as f32, 100.0];
+        }
+        core.project.camera = vec![crate::model::CameraKey {
+            frame: 4,
+            x: 0.0,
+            y: 0.0,
+            zoom: 1.0,
+            angle: 0.0,
+            easing: crate::model::CameraEase::Linear,
+        }];
+        let depth = core.undo_depth();
+        // Split segment 1 (frames 2→3 in 1-based terms) at
+        // its midpoint: a new frame lands between them with
+        // the pressed point as its root, one undo step, the
+        // playhead on the new frame, the camera key after
+        // the split shifted with its frame.
+        assert!(core.insert_path_point(1, 0, 0.5, [60.0, 100.0]));
+        assert_eq!(core.project.frames.len(), 6);
+        assert_eq!(core.project.frames[2].poses[0].root, [60.0, 100.0]);
+        assert_eq!(core.project.frames[1].poses[0].root, [40.0, 100.0]);
+        assert_eq!(core.project.frames[3].poses[0].root, [80.0, 100.0]);
+        assert_eq!(core.current, 2, "the playhead lands on the new point");
+        assert_eq!(core.undo_depth(), depth + 1, "one insert, one undo step");
+        assert_eq!(core.project.camera[0].frame, 5, "camera keys remap on insert");
+        // Refusals spend nothing: no segment after the last
+        // frame, and t at a segment end is a point, not a split.
+        assert!(!core.insert_path_point(5, 0, 0.5, [0.0, 0.0]));
+        assert!(!core.insert_path_point(0, 0, 0.0, [0.0, 0.0]));
+        assert!(!core.insert_path_point(0, 99, 0.5, [0.0, 0.0]));
+        assert_eq!(core.project.frames.len(), 6);
+        assert_eq!(core.undo_depth(), depth + 1);
+    }
+
+    #[test]
+    fn w2_36_delete_path_point_reinterpolates_and_refuses_straight_points() {
+        let mut core = EditorCore::new();
+        for (i, frame) in core.project.frames.iter_mut().enumerate() {
+            frame.poses[0].root = [40.0 * i as f32, 100.0];
+        }
+        // A spike at frame 3 (index 2): the point deflects
+        // the path, so it can be deleted — and deleting it
+        // re-interpolates the root to the neighbours'
+        // midpoint, angles untouched, one undo step.
+        core.project.frames[2].poses[0].root = [80.0, 200.0];
+        let angles_before = core.project.frames[2].poses[0].angles.clone();
+        let depth = core.undo_depth();
+        assert!(core.delete_path_point(2, 0));
+        assert_eq!(core.project.frames[2].poses[0].root, [80.0, 100.0]);
+        assert_eq!(core.project.frames[2].poses[0].angles, angles_before);
+        assert_eq!(core.undo_depth(), depth + 1, "one delete, one undo step");
+        // Straight now: deleting again would change nothing
+        // and refuses without spending.
+        assert!(!core.delete_path_point(2, 0));
+        assert!(core.status.contains("already lies on the path"), "{}", core.status);
+        // The endpoints anchor the path and refuse.
+        assert!(!core.delete_path_point(0, 0));
+        assert!(!core.delete_path_point(4, 0));
+        assert_eq!(core.undo_depth(), depth + 1);
     }
 
     #[test]
@@ -13110,10 +17411,14 @@ mod wave14_camera_tests {
                 Pose {
                     root: [100.0, 100.0],
                     angles: vec![0.0; 7],
+                    sx: 1.0,
+                    sy: 1.0,
                 },
                 Pose {
                     root: [500.0, 300.0],
                     angles: vec![0.0; 7],
+                    sx: 1.0,
+                    sy: 1.0,
                 },
             ],
             duration: 1.0,
@@ -13178,6 +17483,7 @@ mod wave14_camera_tests {
             y: 360.0,
             zoom: 1.0,
             angle: 30.0,
+            easing: crate::model::CameraEase::Linear,
         }];
         core.current = 2;
         core.frame_all_figures();
@@ -13238,6 +17544,8 @@ mod wave14_camera_tests {
         core.project.frames[0].poses = vec![Pose {
             root: [200.0, 200.0],
             angles: vec![0.0],
+            sx: 1.0,
+            sy: 1.0,
         }];
         core.frame_all_figures();
         let k = &core.project.camera[0];
@@ -13256,6 +17564,7 @@ mod wave14_camera_tests {
             y: 360.0,
             zoom: 2.0,
             angle: 0.0,
+            easing: crate::model::CameraEase::Linear,
         }];
         core.selected_figure = 1;
         let edits = core.edits_since_autosave();
@@ -13463,6 +17772,8 @@ mod wave_y_p10_tests {
         let short = crate::model::Pose {
             root: [0.0, 0.0],
             angles: vec![0.0; 2],
+            sx: 1.0,
+            sy: 1.0,
         };
         assert!(core
             .project
@@ -13475,6 +17786,170 @@ mod wave_y_p10_tests {
             .set_rest_from_pose(0, &nan, SetRestMode::Absolute)
             .is_none());
         assert_eq!(core.undo_depth(), 0);
+    }
+
+    #[test]
+    fn reset_pose_to_rest_is_one_labelled_step_and_exact() {
+        let mut core = EditorCore::new();
+        // Pose freely: angles off rest AND a squash the
+        // rest pose does not carry.
+        displace_current_pose(&mut core);
+        core.project.frames[0].poses[0].sx = 0.8;
+        core.project.frames[0].poses[0].sy = 1.25;
+        let root = core.project.frames[0].poses[0].root;
+        assert!(core.reset_pose_to_rest(0, 0));
+        assert_eq!(core.undo_depth(), 1, "one snapshot for the restore");
+        assert_eq!(core.undo_label(), Some("Reset pose"));
+        assert!(
+            core.status.contains("reset to its rest pose"),
+            "status: {}",
+            core.status
+        );
+        // Full-structure equality with the setup pose:
+        // the JSON form compares root, angles and scale
+        // together (Pose carries no PartialEq).
+        let stored =
+            serde_json::to_string(&core.project.frames[0].poses[0]).expect("pose serialises");
+        let rest = serde_json::to_string(&core.project.figures[0].def.rest_pose(root))
+            .expect("rest serialises");
+        assert_eq!(stored, rest, "the restore is exact, not approximate");
+        assert_eq!(core.project.frames[0].poses[0].root, root, "the root is kept");
+        core.undo();
+        assert_eq!(
+            core.project.frames[0].poses[0].sx, 0.8,
+            "one undo returns the freed pose"
+        );
+        assert_eq!(core.project.frames[0].poses[0].sy, 1.25);
+    }
+
+    #[test]
+    fn reset_pose_to_rest_refusals_and_no_op_take_no_snapshot() {
+        let mut core = EditorCore::new();
+        // Unknown figure: refusal with a status, no step.
+        assert!(!core.reset_pose_to_rest(9, 0));
+        assert_eq!(core.status, "No such figure.");
+        // No pose on the frame: a frame past the end, and
+        // a figure whose pose row the frame lacks.
+        assert!(!core.reset_pose_to_rest(0, 99));
+        assert!(
+            core.status.contains("has no pose on frame 100"),
+            "status: {}",
+            core.status
+        );
+        core.project.frames[0].poses.clear();
+        assert!(!core.reset_pose_to_rest(0, 0));
+        assert!(
+            core.status.contains("has no pose on frame 1"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.undo_depth(), 0, "refusals spend no step");
+        // Already rest: a silent no-op — no step, no
+        // status churn (the capture op's discipline).
+        let root = core.project.frames[0].poses[0].root;
+        core.project.frames[0].poses[0] = core.project.figures[0].def.rest_pose(root);
+        let status_before = core.status.clone();
+        assert!(!core.reset_pose_to_rest(0, 0));
+        assert_eq!(core.undo_depth(), 0);
+        assert_eq!(core.status, status_before, "no status churn on a no-op");
+    }
+
+    #[test]
+    fn setup_pose_round_trip_capture_free_restore_is_exact() {
+        let mut core = EditorCore::new();
+        let pristine = project_json(&core);
+        // 1. Author a pose and CAPTURE it as the setup
+        // pose (absolute: the timeline keeps the pose,
+        // the rest becomes it).
+        displace_current_pose(&mut core);
+        let captured = core.project.frames[0].poses[0].angles.clone();
+        assert!(core.set_rest_from_pose(0, false));
+        assert_eq!(core.undo_depth(), 1);
+        let rest = core.project.figures[0].def.rest_angles();
+        assert!(
+            rest.iter()
+                .zip(captured.iter())
+                .all(|(a, b)| (norm_deg(*a) - norm_deg(*b)).abs() < 1e-4),
+            "the setup pose is the captured pose, normalised"
+        );
+        // 2. Pose freely — a different pose on the frame.
+        core.project.frames[0].poses[0].angles[2] += 45.0;
+        core.project.frames[0].poses[0].sx = 0.5;
+        let freed =
+            serde_json::to_string(&core.project.frames[0].poses[0]).expect("pose serialises");
+        // 3. RESTORE: the frame pose becomes the setup
+        // pose exactly — full-structure equality.
+        let root = core.project.frames[0].poses[0].root;
+        assert!(core.reset_pose_to_rest(0, 0));
+        assert_eq!(core.undo_depth(), 2, "one step per half of the trip");
+        assert_eq!(
+            serde_json::to_string(&core.project.frames[0].poses[0])
+                .expect("pose serialises"),
+            serde_json::to_string(&core.project.figures[0].def.rest_pose(root))
+                .expect("rest serialises"),
+            "restore returns the captured setup pose exactly"
+        );
+        // 4. The whole trip unwinds through undo: the
+        // freed pose returns, then the pre-capture
+        // project — rest angles included — is identical.
+        core.undo();
+        assert_eq!(
+            serde_json::to_string(&core.project.frames[0].poses[0])
+                .expect("pose serialises"),
+            freed,
+            "undoing the restore returns the freed pose exactly"
+        );
+        core.undo();
+        assert_eq!(
+            project_json(&core),
+            pristine,
+            "undoing the capture restores the old setup pose"
+        );
+    }
+
+    #[test]
+    fn captured_setup_pose_survives_the_save_format_and_restores_after_load() {
+        let mut core = EditorCore::new();
+        displace_current_pose(&mut core);
+        assert!(core.set_rest_from_pose(0, false));
+        let rest = core.project.figures[0].def.rest_angles();
+        // The on-disk form: projects::save writes
+        // to_string_pretty, projects::load reads it back.
+        let text = serde_json::to_string_pretty(&core.project).expect("project serialises");
+        assert!(
+            text.contains("\"rest_angle\""),
+            "the setup angles are on the wire, not derived"
+        );
+        let back: crate::model::Project =
+            serde_json::from_str(&text).expect("project parses back");
+        assert_eq!(
+            back.figures[0].def.rest_angles(),
+            rest,
+            "the captured setup pose is bit-exact through save/load"
+        );
+        // A never-captured project loads with the
+        // constructor's rest untouched — no capture, no
+        // behaviour change.
+        let fresh: crate::model::Project =
+            serde_json::from_str(&serde_json::to_string_pretty(&Project::new_demo()).unwrap())
+                .unwrap();
+        assert_eq!(
+            fresh.figures[0].def.rest_angles(),
+            Project::new_demo().figures[0].def.rest_angles()
+        );
+        // And the loaded project restores exactly.
+        let mut core2 = EditorCore::new();
+        core2.project = back;
+        core2.project.frames[0].poses[0].angles[2] += 45.0;
+        let root = core2.project.frames[0].poses[0].root;
+        assert!(core2.reset_pose_to_rest(0, 0));
+        assert_eq!(
+            serde_json::to_string(&core2.project.frames[0].poses[0])
+                .expect("pose serialises"),
+            serde_json::to_string(&core2.project.figures[0].def.rest_pose(root))
+                .expect("rest serialises"),
+            "restore after load is the loaded setup pose exactly"
+        );
     }
 
     #[test]

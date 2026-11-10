@@ -1017,6 +1017,99 @@ fn clamp_col_width(w: f32, default: f32, min: f32, max: f32) -> f32 {
     }
 }
 
+/// Serde default for [`LayoutPrefs::export_naming`]:
+/// the project-stem template — RM23's naming, the
+/// behaviour every export has shipped since the named
+/// destinations landed, so a file written before the
+/// field existed loads unchanged.
+fn default_export_naming() -> String {
+    "project".to_string()
+}
+
+/// Serde default for [`LayoutPrefs::export_quality`]:
+/// `EncodeQuality`'s Standard level — the exact encode
+/// every export used before quality levels existed
+/// (W2-42), named in that vocabulary's own spelling.
+fn default_export_quality() -> String {
+    "standard".to_string()
+}
+
+/// Sanitise a persisted export-directory value on
+/// load: the directory is a root RELATIVE to the
+/// working directory, so an absolute path or a `..`
+/// component would aim exports anywhere on disk —
+/// those fall back to the empty value (the historical
+/// split `export/` + `out/` roots), as do empty and
+/// `.` values. A clean relative path is kept,
+/// normalised to forward slashes with no trailing
+/// slash. Mirrors the bin-side
+/// `settings_popover::sanitize_export_dir` rule for
+/// rule — the lib cannot call the bin, so the rule
+/// lives in both places and both sides pin it.
+fn sanitize_export_dir_value(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let path = std::path::Path::new(trimmed);
+    if path.is_absolute() {
+        return String::new();
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => {
+                parts.push(part.to_str().unwrap_or_default())
+            }
+            std::path::Component::CurDir => {}
+            _ => return String::new(),
+        }
+    }
+    if parts.iter().any(|p| p.is_empty()) {
+        return String::new();
+    }
+    parts.join("/")
+}
+
+/// Sanitise a persisted export-naming value on load:
+/// the closed template vocabulary (`project`,
+/// `project-date`, `animation`); anything else is the
+/// default template.
+fn sanitize_export_naming_value(raw: &str) -> String {
+    match raw {
+        "project" | "project-date" | "animation" => raw.to_string(),
+        _ => default_export_naming(),
+    }
+}
+
+/// Sanitise a persisted export-quality value on load:
+/// W2-42's closed level vocabulary (`draft`,
+/// `standard`, `master`); anything else is Standard.
+fn sanitize_export_quality_value(raw: &str) -> String {
+    match raw {
+        "draft" | "standard" | "master" => raw.to_string(),
+        _ => default_export_quality(),
+    }
+}
+
+/// Serde default for [`LayoutPrefs::autosave_every`]:
+/// the cadence every build shipped before the
+/// preference existed — one recovery write per 25
+/// snapshot-counted edits (Wave 9), named in the
+/// autosave policy's own constant
+/// ([`crate::autosave::DEFAULT_EVERY`]).
+fn default_autosave_every() -> u64 {
+    crate::autosave::DEFAULT_EVERY
+}
+
+/// Serde default for [`LayoutPrefs::recovery_keep`]:
+/// one generation — the single `.recovery.json` every
+/// build shipped before generations existed
+/// ([`crate::autosave::DEFAULT_KEEP`]).
+fn default_recovery_keep() -> u32 {
+    crate::autosave::DEFAULT_KEEP
+}
+
 /// Serde default for [`LayoutPrefs::lang`]: English, the
 /// UI's long-standing first-run language, so files
 /// written before the field existed load unchanged.
@@ -1061,11 +1154,50 @@ fn deserialize_lang<'de, D: serde::Deserializer<'de>>(
     })
 }
 
+/// One workspace's remembered panel layout (Roadmap
+/// Wave 2, W2-61 — PL-10, RM12's layout-memory design):
+/// the side-column widths, the two columns'
+/// visibility and the timeline's collapsed flag, as
+/// last left in that workspace. Records live in
+/// [`LayoutPrefs::workspace_layouts`], keyed by the
+/// persisted workspace name; the bin-side switch /
+/// startup / write-back logic that fills and applies
+/// them is `rune_sec::workspaces`' layout-memory
+/// section. The legacy global fields stay as the
+/// ACTIVE workspace's mirror, so readers of the
+/// globals (the shell's `column_widths()`, the layout
+/// tools) always see the workspace on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceLayout {
+    pub col_left_w: f32,
+    pub col_right_w: f32,
+    pub show_left: bool,
+    pub show_right: bool,
+    pub timeline_collapsed: bool,
+}
+
+impl WorkspaceLayout {
+    /// This record with its widths clamped to the
+    /// loader's ranges (the [`clamp_col_width`]
+    /// contract: non-finite falls back to the field
+    /// default), so a hand-edited record can never
+    /// squeeze the stage away — the same discipline
+    /// [`load_layout_in`] applies to the globals.
+    pub fn clamped(self) -> WorkspaceLayout {
+        WorkspaceLayout {
+            col_left_w: clamp_col_width(self.col_left_w, default_col_left_w(), 220.0, 420.0),
+            col_right_w: clamp_col_width(self.col_right_w, default_col_right_w(), 240.0, 480.0),
+            ..self
+        }
+    }
+}
+
 /// Window layout preferences persisted across runs: which
 /// workspace was active, whether the dark theme was on, the
 /// UI language, the timeline / sidebar arrangement of the
 /// context-first shell, whether live MCP control starts
-/// with the editor, and the side-column widths. Stored as
+/// with the editor, the side-column widths, and the export defaults (root directory, naming template and
+/// encoder quality, PL-8). Stored as
 /// JSON at `.layout.json` in the projects dir. The newer
 /// fields carry serde defaults so a `.layout.json` written
 /// by an older build still loads.
@@ -1141,6 +1273,38 @@ pub struct LayoutPrefs {
     /// `true` the user's toggle wrote starts the bridge.
     #[serde(default)]
     pub live_mcp: bool,
+    /// Whether the autosave writes recovery snapshots
+    /// (Roadmap Wave 2, W2-63 — PL-8 slice 2). Read by
+    /// the shell's `init` into the core's autosave
+    /// policy ([`crate::autosave::AutosavePrefs`]) and
+    /// written by the Settings card's Autosave toggle
+    /// (load-modify-save; the card's setters also mirror
+    /// the saved policy into the running core, so a
+    /// press applies in-session). Defaults to ON: the
+    /// writer has run unconditionally since Wave 9, and
+    /// a prefs file that predates the field must behave
+    /// as it always did. Off stops every recovery write
+    /// — the cadence and the window-close flush alike.
+    #[serde(default = "default_true")]
+    pub autosave_enabled: bool,
+    /// Snapshot-counted edits between autosaves, the
+    /// cadence `EditorCore::maybe_autosave` honours
+    /// through the core's mirrored policy. Defaults to
+    /// [`default_autosave_every`] (25, the historical
+    /// cadence); clamped to the policy's range on load
+    /// (see [`load_layout_in`]).
+    #[serde(default = "default_autosave_every")]
+    pub autosave_every: u64,
+    /// Recovery snapshot generations retained, the
+    /// live `.recovery.json` included: before each
+    /// autosave write the older snapshots rotate
+    /// (`.recovery.1.json`, `.recovery.2.json`, …) so
+    /// a bad state autosaved over a good one no longer
+    /// destroys the only recovery point. Defaults to
+    /// [`default_recovery_keep`] (1, the historical
+    /// single file); clamped on load.
+    #[serde(default = "default_recovery_keep")]
+    pub recovery_keep: u32,
     /// Width in points of the left column (figures /
     /// library), persisted so the shell's column
     /// arrangement survives a restart. Files written
@@ -1152,9 +1316,58 @@ pub struct LayoutPrefs {
     /// Width in points of the right column (inspector),
     /// the companion to [`LayoutPrefs::col_left_w`]:
     /// defaults to the long-standing fixed width (340)
-    /// and is clamped to 260..=480 on load.
+    /// and is clamped to 240..=480 on load. The lower
+    /// bound was 260 until Roadmap Wave 2 (W2-10,
+    /// stage-share recovery): RM12's design (§4.3.2)
+    /// priced the Animate layout profile at a 240 pt
+    /// right column, which the old bound made
+    /// unreachable; the matching bounds in the
+    /// splitter drag, the shell layout tools and the
+    /// per-workspace record clamp move with this one.
     #[serde(default = "default_col_right_w")]
     pub col_right_w: f32,
+    /// Per-workspace panel-layout memory (Roadmap
+    /// Wave 2, W2-61 — PL-10): `(persisted workspace
+    /// name, layout)` records, one per workspace the
+    /// user has visited under this schema, seeded from
+    /// the legacy globals above on first use (the
+    /// bin-side seeding lives in
+    /// `rune_sec::workspaces`). The globals stay as
+    /// the active workspace's mirror. A prefs file
+    /// that predates the field loads with no records
+    /// and behaves exactly as before until the first
+    /// switch or startup seeds it.
+    #[serde(default)]
+    pub workspace_layouts: Vec<(String, WorkspaceLayout)>,
+    /// The export root directory the user chose as the
+    /// default (Roadmap Wave 2, W2-62 — PL-8): `""`
+    /// keeps the historical split roots (`export/` for
+    /// the primary formats, `out/` for JPEG / APNG);
+    /// any other value is the single relative root
+    /// every export writes under. Stored as a plain
+    /// string so a hand edit reads naturally; sanitised
+    /// on load ([`load_layout_in`]) — absolute paths
+    /// and `..` climbs fall back to `""`. Written by
+    /// the Settings card's Export defaults rows
+    /// (load-modify-save); read by the export panel on
+    /// every press.
+    #[serde(default)]
+    pub export_dir: String,
+    /// The export naming template the user chose as
+    /// the default (W2-62 — PL-8): one of `project`
+    /// (RM23's project stem), `project-date` (stem +
+    /// export date) or `animation` (the pre-RM23 shared
+    /// stem), stored as the template's name.
+    /// Sanitised on load to the closed vocabulary.
+    #[serde(default = "default_export_naming")]
+    pub export_naming: String,
+    /// The encoder quality level the user chose as the
+    /// export default (W2-62 — PL-8; the persistence
+    /// W2-42 deferred here): `EncodeQuality::name()`'s
+    /// spelling — `draft`, `standard` or `master`.
+    /// Sanitised on load to the closed vocabulary.
+    #[serde(default = "default_export_quality")]
+    pub export_quality: String,
 }
 
 impl Default for LayoutPrefs {
@@ -1175,8 +1388,15 @@ impl Default for LayoutPrefs {
             sidebar_visible: true,
             palette_recents: Vec::new(),
             live_mcp: false,
+            autosave_enabled: true,
+            autosave_every: default_autosave_every(),
+            recovery_keep: default_recovery_keep(),
             col_left_w: 300.0,
             col_right_w: 340.0,
+            workspace_layouts: Vec::new(),
+            export_dir: String::new(),
+            export_naming: default_export_naming(),
+            export_quality: default_export_quality(),
         }
     }
 }
@@ -1212,7 +1432,15 @@ pub fn load_layout_in(dir: &Path) -> LayoutPrefs {
     prefs.col_left_w =
         clamp_col_width(prefs.col_left_w, default_col_left_w(), 220.0, 420.0);
     prefs.col_right_w =
-        clamp_col_width(prefs.col_right_w, default_col_right_w(), 260.0, 480.0);
+        clamp_col_width(prefs.col_right_w, default_col_right_w(), 240.0, 480.0);
+    for (_, record) in &mut prefs.workspace_layouts {
+        *record = record.clamped();
+    }
+    prefs.export_dir = sanitize_export_dir_value(&prefs.export_dir);
+    prefs.export_naming = sanitize_export_naming_value(&prefs.export_naming);
+    prefs.export_quality = sanitize_export_quality_value(&prefs.export_quality);
+    prefs.autosave_every = crate::autosave::sanitize_every(prefs.autosave_every);
+    prefs.recovery_keep = crate::autosave::sanitize_keep(prefs.recovery_keep);
     prefs
 }
 
@@ -1272,8 +1500,21 @@ fn salvage_layout(text: &str) -> LayoutPrefs {
         palette_recents: field(obj, "palette_recents")
             .unwrap_or(defaults.palette_recents),
         live_mcp: field(obj, "live_mcp").unwrap_or(defaults.live_mcp),
+        autosave_enabled: field(obj, "autosave_enabled")
+            .unwrap_or(defaults.autosave_enabled),
+        autosave_every: field(obj, "autosave_every")
+            .unwrap_or(defaults.autosave_every),
+        recovery_keep: field(obj, "recovery_keep")
+            .unwrap_or(defaults.recovery_keep),
         col_left_w: field(obj, "col_left_w").unwrap_or(defaults.col_left_w),
         col_right_w: field(obj, "col_right_w").unwrap_or(defaults.col_right_w),
+        workspace_layouts: field(obj, "workspace_layouts")
+            .unwrap_or(defaults.workspace_layouts),
+        export_dir: field(obj, "export_dir").unwrap_or(defaults.export_dir),
+        export_naming: field(obj, "export_naming")
+            .unwrap_or(defaults.export_naming),
+        export_quality: field(obj, "export_quality")
+            .unwrap_or(defaults.export_quality),
     }
 }
 
@@ -2331,8 +2572,15 @@ mod tests {
             sidebar_visible: false,
             palette_recents: Vec::new(),
             live_mcp: false,
+            autosave_enabled: true,
+            autosave_every: 25,
+            recovery_keep: 1,
             col_left_w: 276.0,
             col_right_w: 316.0,
+            workspace_layouts: Vec::new(),
+            export_dir: String::new(),
+            export_naming: "project".to_string(),
+            export_quality: "standard".to_string(),
         };
         save_layout_in(&dir, &prefs);
         // The non-default values are really on disk, not
@@ -2406,7 +2654,9 @@ mod tests {
         let dir = temp_dir("layout-col-clamp");
         // Out-of-range persisted widths (hand-edited or
         // corrupt) are pulled back to the sane range by
-        // the load: left 220..=420, right 260..=480.
+        // the load: left 220..=420, right 240..=480 (the
+        // right minimum was 260 before W2-10's
+        // stage-share recovery — see the field doc).
         std::fs::write(
             dir.join(LAYOUT_FILE),
             "{\"workspace\":\"Draw\",\"dark\":true,\
@@ -2415,7 +2665,7 @@ mod tests {
         .unwrap();
         let prefs = load_layout_in(&dir);
         assert_eq!(prefs.col_left_w, 420.0);
-        assert_eq!(prefs.col_right_w, 260.0);
+        assert_eq!(prefs.col_right_w, 240.0);
         // The other direction clamps the other way.
         std::fs::write(
             dir.join(LAYOUT_FILE),
@@ -2599,8 +2849,15 @@ mod tests {
             sidebar_visible: false,
             palette_recents: Vec::new(),
             live_mcp: false,
+            autosave_enabled: true,
+            autosave_every: 25,
+            recovery_keep: 1,
             col_left_w: 252.0,
             col_right_w: 388.0,
+            workspace_layouts: Vec::new(),
+            export_dir: String::new(),
+            export_naming: "project".to_string(),
+            export_quality: "standard".to_string(),
         };
         save_layout_in(&dir, &prefs);
 

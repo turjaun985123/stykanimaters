@@ -464,7 +464,7 @@ pub fn paste_pose(core: &mut EditorCore, clip: &Option<Pose>) {
     }
     let clip = clip.clone();
     let (fi, fr) = (core.selected_figure, core.current);
-    write_current_pose(core, clip);
+    write_current_pose(core, clip, "Paste pose");
     core.status = format!(
         "Pose pasted onto figure {} on frame {}.",
         fi + 1,
@@ -516,8 +516,8 @@ pub fn copy_pose_to(core: &mut EditorCore, j: usize) {
 /// current-frame pose — the single write path Paste pose and
 /// library Apply share, so both are exactly one undo step.
 /// Callers guard pose existence and angle count first.
-fn write_current_pose(core: &mut EditorCore, pose: Pose) {
-    core.snapshot();
+fn write_current_pose(core: &mut EditorCore, pose: Pose, label: &str) {
+    core.snapshot_labeled(label);
     let (fi, fr) = (core.selected_figure, core.current);
     core.project.frames[fr].poses[fi] = pose;
 }
@@ -570,7 +570,7 @@ pub fn apply_pose_to_all_frames(core: &mut EditorCore, clip: &Option<Pose>) {
     }
     let clip = clip.clone();
     let applied = writable.len();
-    core.snapshot();
+    core.snapshot_labeled("Apply pose to all frames");
     for f in writable {
         core.project.frames[f].poses[fi] = clip.clone();
     }
@@ -593,19 +593,20 @@ pub fn apply_pose_to_all_frames(core: &mut EditorCore, clip: &Option<Pose>) {
 
 /// Reset the selected figure's current-frame pose to its
 /// rest pose (root position kept), as one undo step.
+///
+/// Wave 2 (W2-30, P-10): the work is the core op's now —
+/// this panel door, the figure inspector's Setup-section
+/// reset row and the MCP `reset_pose` tool all ride
+/// [`EditorCore::reset_pose_to_rest`], so the "Reset
+/// pose" label, the refusal statuses and the
+/// already-rest no-op (no step spent — previously this
+/// door spent an unlabelled "Edit" step even on a pose
+/// already at rest) are the op's, identical on every
+/// surface. [`rest_pose_for`] above still names what
+/// the op restores.
 pub fn reset_pose(core: &mut EditorCore) {
-    let Some(rest) = rest_pose_for(core) else {
-        core.status = no_pose_status(core);
-        return;
-    };
-    core.snapshot();
     let (fi, fr) = (core.selected_figure, core.current);
-    core.project.frames[fr].poses[fi] = rest;
-    core.status = format!(
-        "Figure {} reset to its rest pose on frame {}.",
-        fi + 1,
-        fr + 1
-    );
+    core.reset_pose_to_rest(fi, fr);
 }
 
 
@@ -1046,7 +1047,7 @@ fn apply_library_pose_in_mode(
     }
     let pose = if mirrored { mirror_pose(&pose) } else { pose };
     let (fi, fr) = (core.selected_figure + 1, core.current + 1);
-    write_current_pose(core, pose);
+    write_current_pose(core, pose, "Apply library pose");
     core.status = if mirrored {
         format!("Pose '{name}' applied mirrored to figure {fi} on frame {fr}.")
     } else {
@@ -1783,6 +1784,27 @@ mod tests {
     }
 
     #[test]
+    fn reset_pose_panel_door_spends_one_labelled_step_and_no_ops_at_rest() {
+        // Wave 2 (W2-30, P-10): the panel door rides the
+        // core op — its step is labelled "Reset pose"
+        // (before the unification this door spent an
+        // unlabelled "Edit" step), and a press on a pose
+        // already AT the setup pose spends nothing.
+        let mut c = core();
+        c.mirror_selected_pose();
+        let depth = c.undo_depth();
+        reset_pose(&mut c);
+        assert_eq!(c.undo_depth(), depth + 1, "one step for the restore");
+        assert_eq!(c.undo_label(), Some("Reset pose"));
+        reset_pose(&mut c);
+        assert_eq!(
+            c.undo_depth(),
+            depth + 1,
+            "already at the setup pose: no second step"
+        );
+    }
+
+    #[test]
     fn targets_exclude_the_selected_figure() {
         let mut c = core();
         c.add_figure();
@@ -2074,6 +2096,8 @@ mod tests {
         let pose = Pose {
             root: [12.0, -4.0],
             angles: vec![10.0, -25.0, 45.0, 130.5],
+            sx: 1.0,
+            sy: 1.0,
         };
         let mirrored = mirror_pose(&pose);
         assert_eq!(mirrored.root, pose.root);

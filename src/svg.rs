@@ -691,6 +691,15 @@ pub fn write_frame_svg(project: &Project, frame: usize, path: &Path) -> std::io:
     if !live_cues.is_empty() {
         append_subtitles(&mut svg, project, &live_cues);
     }
+    // Roadmap Wave 2 (W2-15): the chapter title card
+    // live at this frame, over the subtitles — the
+    // raster funnels' order. A card-less frame appends
+    // nothing, so card-less projects stay
+    // byte-identical.
+    if let Some(index) = crate::title_cards::title_card_at(project, frame) {
+        append_title_card(&mut svg, project, index, frame);
+    }
+
     svg += "</svg>\n";
     let svg = svg.replace("<!--DEFS-->", &defs);
     std::fs::write(path, svg)
@@ -737,6 +746,38 @@ pub fn write_frame_svg(project: &Project, frame: usize, path: &Path) -> std::io:
 /// included) to spaces, so escaping first would destroy
 /// the line breaks. Each line is then escaped on its own,
 /// as the module header requires of every text emission.
+/// Chapter title card emission (Roadmap Wave 2,
+/// W2-15): the live chapter's plate as a `<rect>` and
+/// its two lines as centre `<text>`, in stage
+/// coordinates like the subtitles (frame furniture —
+/// the camera never moves it). Layout, lines and
+/// alpha are the core's (`title_cards`), so the SVG
+/// card is the raster card.
+fn append_title_card(svg: &mut String, project: &Project, index: usize, frame: usize) {
+    let Some((eyebrow, title)) = crate::title_cards::title_card_lines(project, index) else {
+        return;
+    };
+    let layout = crate::title_cards::title_card_layout(project);
+    let style = project.subtitle_style.sanitised();
+    let alpha = crate::title_cards::title_card_alpha(project, frame as f32);
+    *svg += &format!(
+        "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"{}\" opacity=\"{:.2}\"/>\n",
+        layout.plate[0], layout.plate[1], layout.plate[2], layout.plate[3],
+        hex(style.box_color),
+        crate::title_cards::TITLE_CARD_PLATE_ALPHA * alpha
+    );
+    for (y, size, line) in [
+        (layout.eyebrow_y, layout.eyebrow_size, eyebrow),
+        (layout.title_y, layout.title_size, title),
+    ] {
+        *svg += &format!(
+            "<text x=\"{:.1}\" y=\"{:.1}\" font-family=\"sans-serif\" font-size=\"{:.1}\" fill=\"{}\" opacity=\"{:.2}\" text-anchor=\"middle\" dominant-baseline=\"central\">{}</text>\n",
+            layout.center_x, y, size, hex(style.text_color), alpha,
+            xml_escape(&line)
+        );
+    }
+}
+
 fn append_subtitles(
     svg: &mut String,
     project: &Project,
@@ -2708,6 +2749,8 @@ mod tests {
         let pose = || crate::model::Pose {
             root: [100.0, 100.0],
             angles: vec![0.0, 90.0, 0.0],
+            sx: 1.0,
+            sy: 1.0,
         };
         let mut project = Project::new_demo();
         project.set_camera_key(0, 480.0, 360.0, 1.0);

@@ -361,10 +361,12 @@
 //! GIF) composing format + the core scaled entries,
 //! one Export delivery button, and its honest output
 //! line naming preset, dimensions and destination.
-//! (A Shorts preset is NOT offered: the scaled entries
-//! preserve the staged aspect, and a 9:16 reframe
-//! needs a core crop the export funnel does not have
-//! — IA-RM23-4.) And a third bundle, "Publish
+//! (A Shorts preset (Roadmap Wave 2, W2-43,
+//! IA-RM23-4 landed) crops instead of scaling: the
+//! core entry renders at 1920 tall and cuts the
+//! centred 9:16 window — centred only, no subject
+//! tracking, so the note under the delivery line says
+//! what the crop keeps.) And a third bundle, "Publish
 //! package": the delivery MP4 (the selected MP4
 //! preset's leg) + the SRT and VTT sidecars from the
 //! subtitle writers + a 1280-wide thumbnail still of
@@ -401,18 +403,73 @@
 //! labels ride IA-RM29-1; until the integrator inserts
 //! them the wire falls back to the key text, the Q7
 //! pattern.
+//!
+//! Roadmap Wave 2 (W2-44) moves the probe itself off
+//! the UI thread (RM29 §7's recorded remainder): the
+//! finish path now only reads the expectations off
+//! the project and queues the probe (`queue_probe`);
+//! a worker thread runs `probe_export` and returns
+//! the plain-data report over a channel, and the
+//! frame tick's drain (`poll_export_job`) stores it —
+//! the same spawn/channel/drain pattern as the export
+//! jobs above, no second job system. While a probe is
+//! in flight the drain reads active, so `main::poll`
+//! keeps the `JOB_WAKE` cadence until the verdict
+//! lands. The probe has no cancel affordance: it is
+//! short, read-only and detached, and D-4's bundle
+//! cancel stays unbuilt — a probe worker that dies
+//! without sending stores a failure report naming the
+//! probe's own stoppage, the export worker-death
+//! discipline one level down. Every landed report
+//! also enters the session probe history
+//! (`xc-qa-history`): the verdict line with the time
+//! it landed and, on failure, the named checks —
+//! session-only, like the reports themselves (RM29
+//! specified no store surface for them).
+//!
+//! Roadmap Wave 2 (W2-64) completes the panel's
+//! feedback surface (PL-11): every jobbed export now
+//! carries a cancel affordance beside its progress
+//! readout, rendered by the one builder
+//! (`cancel_row`) the future stop build rewires. No
+//! stop signal exists today — AC8 designed the core
+//! `StopSignal` as a design only, and decision D-4
+//! leaves its build (and the class-C wording around
+//! a stopped bundle, AC8's Q1/Q2) to a user ruling —
+//! so the affordance renders disabled-honest for
+//! every job shape: the kit's inert button (no press
+//! handler at all, AT-disabled) plus a visible note
+//! saying the export runs to completion. It is never
+//! a live-looking button that does nothing. The
+//! seam is [`job_cancel`]: when the signal lands,
+//! `ExportJob` gains its clone, `job_cancel` gains
+//! an armed answer, and the exhaustive match in
+//! `cancel_row` is the one place that must give it
+//! a live button. The same seat gives the QA probe
+//! the indeterminate half of the surface: while a
+//! probe is in flight the panel shows one checking
+//! line (`xc-qa-checking`) — a state, not a number,
+//! since the probe exposes no phase contract
+//! (W2-44) — where before it showed the previous
+//! verdicts, or nothing, with no sign a check was
+//! still running. The three new labels ride
+//! IA-W2-64-1 (`export_cancel`,
+//! `export_cancel_unavailable`,
+//! `export_qa_checking`); until the integrator
+//! inserts them the wire falls back to the key
+//! text, the Q7 pattern.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
-use std::time::SystemTime;
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Instant, SystemTime};
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
 use stykanimate_rs::editor::EditorCore;
 
-use crate::chrome_view::btn;
+use crate::chrome_view::{btn, btn_inert};
 use crate::rune_sec::design;
 use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::icon_btn;
@@ -791,11 +848,12 @@ fn bundle_file_targets(kind: BundleKind, project: &stykanimate_rs::model::Projec
 // destinations above. The selection is panel session
 // state (the thread-local idiom of this file), so no
 // `State` field is added; it starts at Project master
-// on every launch. A Shorts preset is deliberately
-// absent: scaling preserves the staged aspect, and
-// nothing in the funnel reframes to 9:16 — offering
-// the chip would promise a crop that does not happen
-// (IA-RM23-4 files the core ask).
+// on every launch. A Shorts preset (Roadmap Wave 2,
+// W2-43, IA-RM23-4 landed) crops instead of scaling:
+// the core entry renders at 1920 tall and cuts the
+// centred 9:16 window — centred only, no subject
+// tracking, so the note under the delivery line says
+// what the crop keeps.
 
 /// One delivery preset: a format plus a scale rule.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -808,6 +866,12 @@ pub enum DeliveryPreset {
     Youtube4k,
     /// GIF at half scale — the community-post format.
     Gif,
+    /// MP4 reframed to vertical video: the centred 9:16
+    /// crop at 1920 tall (W2-43). Not a scale rule — the
+    /// core Shorts entries own the geometry; the arms
+    /// below that speak of scale answer for the frame
+    /// BEFORE the crop wherever they must answer at all.
+    Shorts,
 }
 
 impl DeliveryPreset {
@@ -819,6 +883,7 @@ impl DeliveryPreset {
             DeliveryPreset::Youtube1080 => "export_preset_youtube_1080",
             DeliveryPreset::Youtube4k => "export_preset_youtube_4k",
             DeliveryPreset::Gif => "export_preset_gif",
+            DeliveryPreset::Shorts => "export_preset_shorts",
         }
     }
 
@@ -834,6 +899,7 @@ impl DeliveryPreset {
             DeliveryPreset::Youtube1080 => "xc-preset-yt1080",
             DeliveryPreset::Youtube4k => "xc-preset-yt4k",
             DeliveryPreset::Gif => "xc-preset-gif",
+            DeliveryPreset::Shorts => "xc-preset-shorts",
         }
     }
 }
@@ -875,6 +941,11 @@ pub fn delivery_scale(project: &stykanimate_rs::model::Project, preset: Delivery
         DeliveryPreset::Youtube1080 => for_height(1080.0),
         DeliveryPreset::Youtube4k => for_height(2160.0),
         DeliveryPreset::Gif => 0.5,
+        // Never consumed as a render scale: the Shorts
+        // entries compute their own (1920/stage_h).
+        // Present so the match stays total;
+        // delivery_dims overrides below.
+        DeliveryPreset::Shorts => 1.0,
     }
 }
 
@@ -884,6 +955,15 @@ pub fn delivery_scale(project: &stykanimate_rs::model::Project, preset: Delivery
 /// numbers, computed from the same scale the export
 /// will use, so the two can never disagree.
 pub fn delivery_dims(project: &stykanimate_rs::model::Project, preset: DeliveryPreset) -> (u32, u32) {
+    if matches!(preset, DeliveryPreset::Shorts) {
+        // The core geometry is the dims: the crop window
+        // of the 1920-tall reframe (W2-43). An unusable
+        // stage announces (0, 0) — the press then refuses
+        // with the core's own error, never a fake size.
+        return stykanimate_rs::export::shorts_geometry(project)
+            .map(|g| g.crop)
+            .unwrap_or((0, 0));
+    }
     let scale = delivery_scale(project, preset);
     let dim = |v: f32| -> u32 {
         if v.is_finite() && v > 0.0 {
@@ -905,6 +985,7 @@ pub fn delivery_file_name(stem: &str, preset: DeliveryPreset) -> String {
         DeliveryPreset::Youtube1080 => format!("{stem}-1080p.mp4"),
         DeliveryPreset::Youtube4k => format!("{stem}-4k.mp4"),
         DeliveryPreset::Gif => format!("{stem}.gif"),
+        DeliveryPreset::Shorts => format!("{stem}-shorts.mp4"),
     }
 }
 
@@ -930,6 +1011,33 @@ pub fn delivery_text(core: &EditorCore, preset: DeliveryPreset) -> String {
             "{dest}",
             &format!("./{}", display_name(&delivery_dest(core, preset))),
         )
+}
+
+/// The Delivery section's chapter line (Roadmap Wave 2,
+/// W2-18): when the project carries chapters an MP4
+/// preset will embed, name the count before the press.
+/// The markers ride every full MP4 export automatically
+/// (the core embeds them — `export::embed_mp4_chapters`),
+/// so this is a readout, not a control, and there is
+/// deliberately no "chapters" preset chip: a preset is a
+/// format × scale point, and a chip implying the other
+/// presets lack markers would be a false distinction.
+/// `None` when no chapter will embed — the section then
+/// renders exactly as it did before. The count comes
+/// from the core's own resolution
+/// (`export::chapter_span_count`), so the line and the
+/// export can never disagree. The wording is the
+/// `export_delivery_chapters` catalogue template
+/// (IA-W2-18-3) with the count as its slot.
+pub fn delivery_chapters_text(core: &EditorCore) -> Option<String> {
+    let count = stykanimate_rs::export::chapter_span_count(&core.project);
+    if count == 0 {
+        return None;
+    }
+    Some(
+        i18n_wire::tr(core, "export_delivery_chapters")
+            .replace("{count}", &count.to_string()),
+    )
 }
 
 /// One format row's guidance note with its real destination
@@ -965,7 +1073,7 @@ pub const PUBLISH_MEMBERS: [&str; 4] = ["MP4", "SRT", "VTT", "thumbnail"];
 /// selected preset when it is an MP4 preset, the
 /// master when the GIF preset is selected.
 pub fn publish_mp4_preset(preset: DeliveryPreset) -> DeliveryPreset {
-    if preset.is_gif() {
+    if preset.is_gif() || matches!(preset, DeliveryPreset::Shorts) {
         DeliveryPreset::Master
     } else {
         preset
@@ -1424,6 +1532,74 @@ fn run_bundle(s: &mut State, kind: BundleKind) {
 /// heartbeat's cadence.
 pub const JOB_WAKE: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// The fewest seconds between two recorded timing
+/// samples (a phase's terminal event always records —
+/// see [`PhaseTiming::record`]).
+const PHASE_SAMPLE_MIN_INTERVAL_SECS: f64 = 0.25;
+
+/// The most timing samples a slot keeps. At the
+/// minimum interval that spans ~128 s of phase; past
+/// it the annex decimates (keeps every second sample)
+/// rather than dropping the phase's early history, so
+/// the whole-phase rate keeps its full span (the
+/// decimation is lossy about the middle, never about
+/// the ends' neighbourhood — see `record`).
+const PHASE_SAMPLE_MAX: usize = 512;
+
+/// A phase slot's timing annex (Roadmap Wave 2,
+/// W2-50): when each stored event arrived, and the
+/// count it carried — the measured evidence the ETA
+/// estimator (the phase-ETA section below) reads.
+/// Times are slot-arrival times of contract events:
+/// render events are delivered synchronously by the
+/// render loop itself, encode events by the encode's
+/// drainer thread as ffmpeg reports them, bundle
+/// events by the core tracker — so an arrival time is
+/// the event's production time plus at most a pipe's
+/// lag, which is the honest basis the ETA line names
+/// ("the rate measured so far"). The annex is
+/// session-only by construction: it lives and dies
+/// inside the running job's slots, and no rate is
+/// ever carried between jobs — a rate measured on one
+/// project says nothing honest about another.
+#[derive(Default)]
+struct PhaseTiming {
+    /// The first stored event's arrival: every
+    /// sample's elapsed is measured from it, so the
+    /// first sample sits at 0.0 by construction.
+    origin: Option<Instant>,
+    /// (elapsed seconds, done) per recorded sample,
+    /// oldest first, monotonic in both coordinates —
+    /// every contract's stream is strictly advancing,
+    /// and `record` refuses a regressive count rather
+    /// than learn from one.
+    samples: Vec<(f64, usize)>,
+}
+
+impl PhaseTiming {
+    /// Record one stored event's arrival. Thinned to
+    /// [`PHASE_SAMPLE_MIN_INTERVAL_SECS`] (the
+    /// contracts can fire per frame) except the
+    /// terminal event, which always records so the
+    /// phase's measured span ends at its true end.
+    fn record(&mut self, done: usize, finished: bool, now: Instant) {
+        let origin = *self.origin.get_or_insert(now);
+        let elapsed = now.duration_since(origin).as_secs_f64();
+        if let Some(&(last_t, last_done)) = self.samples.last() {
+            if done < last_done {
+                return;
+            }
+            if !finished && elapsed - last_t < PHASE_SAMPLE_MIN_INTERVAL_SECS {
+                return;
+            }
+        }
+        if self.samples.len() >= PHASE_SAMPLE_MAX {
+            self.samples = self.samples.iter().step_by(2).copied().collect();
+        }
+        self.samples.push((elapsed, done));
+    }
+}
+
 /// One progress slot — a phase's, or a bundle job's
 /// (Wave Z, Z8) — shared between the contract callback
 /// (the only writer) and the UI thread (reader). The
@@ -1433,28 +1609,59 @@ pub const JOB_WAKE: std::time::Duration = std::time::Duration::from_millis(100);
 /// number the contract delivered. `seen` separates
 /// "this phase has not reported yet" (the readout shows
 /// no number for it) from a reported zero.
+///
+/// Roadmap Wave 2 (W2-50) adds the timing annex
+/// (`timing`, [`PhaseTiming`]): the one companion fact
+/// a delivered number gains is WHEN it arrived. The
+/// snapshot below stays verbatim — the annex feeds
+/// only the phase-ETA line, whose own section owns
+/// the estimate wording and its honesty rules.
 #[derive(Default)]
 pub struct PhaseProgress {
     done: AtomicUsize,
     total: AtomicUsize,
     finished: AtomicBool,
     seen: AtomicBool,
+    timing: Mutex<PhaseTiming>,
 }
 
 impl PhaseProgress {
     fn store_render(&self, ev: stykanimate_rs::export::RenderProgressEvent) {
+        self.store_render_at(ev, Instant::now());
+    }
+
+    /// `store_render` at an explicit arrival time —
+    /// the seam the timing pins drive, so no pin ever
+    /// sleeps or reads a wall clock for its evidence.
+    fn store_render_at(
+        &self,
+        ev: stykanimate_rs::export::RenderProgressEvent,
+        now: Instant,
+    ) {
         self.done.store(ev.rendered_frames, Ordering::SeqCst);
         self.total.store(ev.total_frames, Ordering::SeqCst);
         self.finished.store(ev.finished, Ordering::SeqCst);
+        self.record_timing(ev.rendered_frames, ev.finished, now);
         // Written last: a reader that sees `seen` also
         // sees this event's numbers.
         self.seen.store(true, Ordering::SeqCst);
     }
 
     fn store_encode(&self, ev: stykanimate_rs::export::EncodeProgressEvent) {
+        self.store_encode_at(ev, Instant::now());
+    }
+
+    /// `store_encode` at an explicit arrival time (see
+    /// `store_render_at`).
+    fn store_encode_at(
+        &self,
+        ev: stykanimate_rs::export::EncodeProgressEvent,
+        now: Instant,
+    ) {
         self.done.store(ev.encoded_frames, Ordering::SeqCst);
         self.total.store(ev.total_frames, Ordering::SeqCst);
         self.finished.store(ev.finished, Ordering::SeqCst);
+        self.record_timing(ev.encoded_frames, ev.finished, now);
         self.seen.store(true, Ordering::SeqCst);
     }
 
@@ -1467,10 +1674,44 @@ impl PhaseProgress {
     /// backwards, so the slot needs no arithmetic of its
     /// own.
     fn store_bundle(&self, ev: stykanimate_rs::export::BundleProgressEvent) {
+        self.store_bundle_at(ev, Instant::now());
+    }
+
+    /// `store_bundle` at an explicit arrival time (see
+    /// `store_render_at`).
+    fn store_bundle_at(
+        &self,
+        ev: stykanimate_rs::export::BundleProgressEvent,
+        now: Instant,
+    ) {
         self.done.store(ev.completed_frames, Ordering::SeqCst);
         self.total.store(ev.total_frames, Ordering::SeqCst);
         self.finished.store(ev.finished, Ordering::SeqCst);
+        self.record_timing(ev.completed_frames, ev.finished, now);
         self.seen.store(true, Ordering::SeqCst);
+    }
+
+    /// Feed the timing annex one stored event (W2-50).
+    /// A poisoned annex lock drops the sample rather
+    /// than fail the export — the callback discipline
+    /// the contracts themselves promise their
+    /// observers.
+    fn record_timing(&self, done: usize, finished: bool, now: Instant) {
+        if let Ok(mut timing) = self.timing.lock() {
+            timing.record(done, finished, now);
+        }
+    }
+
+    /// The slot's recorded timing samples, oldest
+    /// first: (seconds since the phase's first stored
+    /// event, frames done at that event). The ETA
+    /// estimator's whole input, beside the snapshot's
+    /// total.
+    pub fn eta_samples(&self) -> Vec<(f64, usize)> {
+        match self.timing.lock() {
+            Ok(timing) => timing.samples.clone(),
+            Err(_) => Vec::new(),
+        }
     }
 
     /// The slot's current contents, by value.
@@ -1757,6 +1998,18 @@ fn run_job(
         )
         .map(ExportJobResult::Mp4),
         JobKind::Mp4Preset(preset) => {
+            if matches!(preset, DeliveryPreset::Shorts) {
+                // The Shorts reframe (W2-43): the core
+                // entry owns the render scale and the
+                // crop; the job's hooks ride along.
+                return stykanimate_rs::export::export_mp4_shorts_with_progress(
+                    project,
+                    dest,
+                    Some(&encode_cb),
+                    Some(&render_cb),
+                )
+                .map(ExportJobResult::Mp4);
+            }
             stykanimate_rs::export::export_mp4_scaled_with_progress(
                 project,
                 dest,
@@ -1970,7 +2223,7 @@ fn run_bundle_job(
             if result.is_err() {
                 failed.push(ExportOp::Svg);
             }
-            let result = export::export_spritesheet(
+            let result = export::export_spritesheet_pack(
                 project,
                 &dest.join(
                     file_name_for(ExportOp::Spritesheet, &project_stem(project))
@@ -2206,8 +2459,22 @@ fn start_delivery_job(s: &mut State, preset: DeliveryPreset) -> bool {
 /// (`JOB_WAKE`) alive. A worker that dies without
 /// sending (a panic in the export) finishes the job as
 /// a failure in the op's voice — never as a success and
-/// never silently dropped.
+/// never silently dropped. W2-44: a landed QA probe
+/// report also asks for a redraw, and a probe in
+/// flight also reads active (see `poll_qa_probes`).
 pub fn poll_export_job(s: &mut State) -> (bool, bool) {
+    // The probe side is drained first; a probe queued
+    // by this very tick's finish (below) is picked up
+    // by the active check and drained on the next
+    // tick — the worker needs the time anyway.
+    let qa_redraw = poll_qa_probes();
+    let (redraw, active) = poll_export_job_drain(s);
+    (redraw || qa_redraw, active || qa_probe_active())
+}
+
+/// The export-job half of the frame-tick drain (see
+/// `poll_export_job` for the whole contract).
+fn poll_export_job_drain(s: &mut State) -> (bool, bool) {
     let received = match s.export_job.as_ref() {
         None => return (false, false),
         Some(job) => job.outcome.try_recv(),
@@ -2292,7 +2559,7 @@ fn finish_export_job(s: &mut State, job: &ExportJob, result: ExportJobOutcome) {
         clear_residue();
         if !failed.iter().any(|f| *f == "MP4") {
             let dest = job.dest.join(&mp4_name);
-            probe_and_store(&s.core.project, &dest, None, true);
+            queue_probe(&s.core.project, &dest, None, true);
         }
         return;
     }
@@ -2326,7 +2593,7 @@ fn finish_export_job(s: &mut State, job: &ExportJob, result: ExportJobOutcome) {
                     let dest = job
                         .dest
                         .join(file_name_for(member, &stem).expect("video member is a file format"));
-                    probe_and_store(&s.core.project, &dest, None, audio_possible);
+                    queue_probe(&s.core.project, &dest, None, audio_possible);
                 }
             }
         }
@@ -2431,15 +2698,17 @@ fn finish_export_job(s: &mut State, job: &ExportJob, result: ExportJobOutcome) {
     }
     // RM29: on success the residue of any earlier failed
     // sequence is stale — clear it — and a finished
-    // MP4/WebM is probed: the QA report is stored as its
+    // MP4/WebM is probed: the QA report lands as its
     // own record beside the recap (never a rewrite of
-    // the status or the recap above). The full WebM is
-    // the one path whose audio is not expected.
+    // the status or the recap above). W2-44: the probe
+    // is queued onto a worker here; its report is
+    // stored when the frame tick drains it. The full
+    // WebM is the one path whose audio is not expected.
     if !job_failed {
         clear_residue();
         if matches!(op, ExportOp::Mp4 | ExportOp::Webm) {
             let audio_possible = !matches!(job.kind, JobKind::WebmFull);
-            probe_and_store(&s.core.project, &job.dest, job.kind.range(), audio_possible);
+            queue_probe(&s.core.project, &job.dest, job.kind.range(), audio_possible);
         }
     }
 }
@@ -2504,16 +2773,27 @@ fn bundle_progress_line(core: &EditorCore, snap: PhaseSnapshot) -> String {
 /// bundle count is a separate core contract, so a
 /// bundle job shows no phase line and a phase job no
 /// bundle line.
+///
+/// Roadmap Wave 2 (W2-50) appends one more line when
+/// a phase is actively reporting: the phase ETA
+/// (`eta_line`, the section below) — the readout's
+/// only computed number, worded as the estimate it
+/// is, with its measured basis named in the line.
 pub fn job_lines(core: &EditorCore, job: &ExportJob) -> Vec<(&'static str, String)> {
     if let Some(kind) = job.kind.bundle_kind() {
         let bundle = job.bundle.snapshot();
-        if bundle.seen {
-            return vec![("xc-progress-bundle", bundle_progress_line(core, bundle))];
+        let mut lines = if bundle.seen {
+            vec![("xc-progress-bundle", bundle_progress_line(core, bundle))]
+        } else {
+            vec![(
+                "xc-progress-working",
+                i18n_wire::tr(core, "export_progress_working").replace("{name}", kind.name()),
+            )]
+        };
+        if let Some(eta) = eta_line(core, job) {
+            lines.push(eta);
         }
-        return vec![(
-            "xc-progress-working",
-            i18n_wire::tr(core, "export_progress_working").replace("{name}", kind.name()),
-        )];
+        return lines;
     }
     if job.kind.publish() {
         // A publish package (RM23) reads its bundle
@@ -2522,13 +2802,19 @@ pub fn job_lines(core: &EditorCore, job: &ExportJob) -> Vec<(&'static str, Strin
         // the package's own name on the working line
         // (slot data, like `BundleKind::name()`).
         let bundle = job.bundle.snapshot();
-        if bundle.seen {
-            return vec![("xc-progress-bundle", bundle_progress_line(core, bundle))];
+        let mut lines = if bundle.seen {
+            vec![("xc-progress-bundle", bundle_progress_line(core, bundle))]
+        } else {
+            vec![(
+                "xc-progress-working",
+                i18n_wire::tr(core, "export_progress_working")
+                    .replace("{name}", "publish package"),
+            )]
+        };
+        if let Some(eta) = eta_line(core, job) {
+            lines.push(eta);
         }
-        return vec![(
-            "xc-progress-working",
-            i18n_wire::tr(core, "export_progress_working").replace("{name}", "publish package"),
-        )];
+        return lines;
     }
     let mut lines = Vec::new();
     let render = job.render.snapshot();
@@ -2546,7 +2832,425 @@ pub fn job_lines(core: &EditorCore, job: &ExportJob) -> Vec<(&'static str, Strin
                 .replace("{name}", job.kind.op().name()),
         ));
     }
+    if let Some(eta) = eta_line(core, job) {
+        lines.push(eta);
+    }
     lines
+}
+
+// ---- Phase ETAs (Roadmap Wave 2, W2-50) ----
+// Per-phase remaining-time estimates for the running
+// job's readout. The phase lines above report each
+// phase's own counts and never merge them — rightly:
+// the phases' costs differ wildly, so a single
+// percentage would lie by omission early and late.
+// What a long export's animator actually waits on is
+// time, and time is what this section estimates —
+// per phase, from that phase's own measured
+// throughput (the timing annex on each slot: when
+// each contract event arrived and the count it
+// carried), under three honesty rules:
+//
+// - An estimate is quoted only from measured
+//   evidence: a span of at least `ETA_MIN_SPAN_SECS`
+//   seconds across which at least `ETA_MIN_ADVANCE`
+//   frames advanced. Before that the line says the
+//   estimate is still forming ("estimating…") — it
+//   never fills the gap with a guess dressed as a
+//   number.
+// - When the recent window's rate and the whole
+//   phase's rate disagree by more than
+//   `ETA_BRACKET_RATIO`, both ends are shown: the
+//   bracket IS the two measured rates' remaining
+//   times, not a padding invented around one of
+//   them. Displayed times are quantised to 5-second
+//   steps, bracket ends rounded outward, so the
+//   display never claims second precision or a
+//   narrower bracket than measured.
+// - The claim is scoped to its phase in the line's
+//   own wording, exactly as the encode line's
+//   finished sentence claims only the encode: a video
+//   job in its render phase says the encoding still
+//   follows unestimated, and phases the pipeline
+//   runs with no contract at all (an MP4's audio
+//   mux, the chapter embed) are never estimated —
+//   see `EtaPhase`.
+//
+// The estimate is a pure function of the annex's
+// samples and the snapshot's total, so the pins
+// below drive it with synthetic sequences at
+// injected times; nothing here sleeps, and no rate
+// survives the job that measured it.
+
+/// One measured phase of an export job, as the ETA
+/// line names it. The set is closed and small
+/// because the progress contracts are: a job's frames
+/// are counted by exactly three contracts (render,
+/// encode, bundle), each owning exactly one slot on
+/// `ExportJob`. Steps the pipeline runs WITHOUT a
+/// contract — an MP4's audio mux and chapter embed,
+/// after the encode terminal — are deliberately
+/// absent: there is no measured rate to estimate
+/// them from, and inventing one would be fake
+/// precision. The ETA line's claim is scoped to its
+/// phase by its wording instead.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EtaPhase {
+    Render,
+    Encode,
+    Bundle,
+}
+
+impl EtaPhase {
+    /// Every phase the readout can estimate, in
+    /// pipeline order.
+    pub const ALL: [EtaPhase; 3] =
+        [EtaPhase::Render, EtaPhase::Encode, EtaPhase::Bundle];
+}
+
+/// The phases a job runs, in pipeline order — the
+/// readout's census of the pipeline's measured
+/// stages, per job shape: sequence exports measure
+/// only their render loop; video exports measure
+/// render then encode (their mux / chapter-embed
+/// tail is unmeasured — see `EtaPhase`); bundle-
+/// shaped jobs measure the one bundle contract.
+/// Pinned per shape by
+/// `job_phases_match_the_pipelines_measured_stages`.
+pub fn job_phases(kind: JobKind) -> &'static [EtaPhase] {
+    match kind {
+        JobKind::PngFull | JobKind::PngRange(..) | JobKind::JpegFull | JobKind::JpegRange(..) => {
+            &[EtaPhase::Render]
+        }
+        JobKind::Mp4Full
+        | JobKind::Mp4Range(..)
+        | JobKind::WebmFull
+        | JobKind::WebmRange(..)
+        | JobKind::Mp4Preset(_) => &[EtaPhase::Render, EtaPhase::Encode],
+        JobKind::BundleImages | JobKind::BundleVideo | JobKind::BundlePublish => {
+            &[EtaPhase::Bundle]
+        }
+    }
+}
+
+/// The slot a phase's contract writes — the phase /
+/// slot / event-type correspondence the census pin
+/// holds (`job_phases_match_the_pipelines_measured_stages`).
+fn phase_slot(job: &ExportJob, phase: EtaPhase) -> &PhaseProgress {
+    match phase {
+        EtaPhase::Render => &job.render,
+        EtaPhase::Encode => &job.encode,
+        EtaPhase::Bundle => &job.bundle,
+    }
+}
+
+/// The phase currently running, if any: the LAST
+/// phase in the job's table whose slot has reported
+/// and not finished (the phases are sequential, so a
+/// later phase reporting means the earlier ones are
+/// done). Between phases — render finished, encode
+/// not yet reported — and after the last measured
+/// phase finishes (the unmeasured mux tail), there
+/// is no active phase and the readout shows no ETA
+/// line: the gap is stated by the line's absence,
+/// not papered over with a stale estimate.
+fn active_phase(job: &ExportJob) -> Option<EtaPhase> {
+    job_phases(job.kind).iter().rev().copied().find(|&phase| {
+        let snap = phase_slot(job, phase).snapshot();
+        snap.seen && !snap.finished
+    })
+}
+
+/// The shortest measured span (seconds of delivered
+/// events) a rate may be computed over. Below it, a
+/// rate is two timestamps and a hope.
+pub const ETA_MIN_SPAN_SECS: f64 = 2.0;
+
+/// The fewest frames that must have advanced across
+/// a measured span before a rate is quoted — one or
+/// two frames of evidence would swing the estimate
+/// by whole minutes either way.
+pub const ETA_MIN_ADVANCE: usize = 4;
+
+/// The trailing window (seconds of delivered events)
+/// the recent rate is measured over, when the phase
+/// has run that long.
+pub const ETA_WINDOW_SECS: f64 = 10.0;
+
+/// How far apart the recent and whole-phase
+/// remaining estimates may be (as a ratio) before
+/// both ends are shown instead of one number.
+pub const ETA_BRACKET_RATIO: f64 = 1.25;
+
+/// What the estimator can honestly say about a
+/// phase's remaining time.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum EtaEstimate {
+    /// No quotable rate yet: too few samples, too
+    /// short a span, too little advance — or no work
+    /// left to estimate. The line says the estimate
+    /// is still forming; it never invents a number.
+    Estimating,
+    /// Remaining time derived from measured rates:
+    /// `point_secs` is the single number quoted when
+    /// the rates agree (the recent window's estimate
+    /// when there is one — the freshest evidence);
+    /// `low_secs` / `high_secs` are the two rates'
+    /// remaining times, and `bracketed` says they
+    /// disagreed enough to show both.
+    Remaining {
+        point_secs: f64,
+        low_secs: f64,
+        high_secs: f64,
+        bracketed: bool,
+    },
+}
+
+/// A rate (frames per second) over one sample span,
+/// when the span is long enough and advanced enough
+/// to quote. A regressive or frozen span yields no
+/// rate rather than a division by ~zero dressed as
+/// an estimate.
+fn eta_span_rate(from: (f64, usize), to: (f64, usize)) -> Option<f64> {
+    let dt = to.0 - from.0;
+    let dd = to.1.checked_sub(from.1)?;
+    if dt >= ETA_MIN_SPAN_SECS && dd >= ETA_MIN_ADVANCE {
+        Some(dd as f64 / dt)
+    } else {
+        None
+    }
+}
+
+/// Estimate a phase's remaining time from its timing
+/// samples (oldest first: seconds since the phase's
+/// first stored event, frames done) and its total.
+/// Pure: the pins drive it with synthetic sequences
+/// at injected times.
+pub fn estimate_eta(samples: &[(f64, usize)], total: usize) -> EtaEstimate {
+    let Some(&last) = samples.last() else {
+        return EtaEstimate::Estimating;
+    };
+    if total == 0 || last.1 >= total {
+        // Nothing left to estimate (the terminal is
+        // in flight; the outcome replaces the readout
+        // on the same tick).
+        return EtaEstimate::Estimating;
+    }
+    let remaining = (total - last.1) as f64;
+    let overall = eta_span_rate(samples[0], last);
+    // The recent window's rate: from the first sample
+    // inside the trailing window to the last. When
+    // the whole span fits the window this IS the
+    // overall rate (the same two points), and when
+    // the window holds only the last sample the span
+    // is a point and yields no rate.
+    let window_start = last.0 - ETA_WINDOW_SECS;
+    let recent = samples
+        .iter()
+        .position(|s| s.0 >= window_start)
+        .and_then(|i| eta_span_rate(samples[i], last));
+    match (overall, recent) {
+        (Some(all), Some(win)) => {
+            let rem_all = remaining / all;
+            let rem_win = remaining / win;
+            let low = rem_all.min(rem_win);
+            let high = rem_all.max(rem_win);
+            EtaEstimate::Remaining {
+                point_secs: rem_win,
+                low_secs: low,
+                high_secs: high,
+                bracketed: high > low * ETA_BRACKET_RATIO,
+            }
+        }
+        (Some(rate), None) | (None, Some(rate)) => {
+            let rem = remaining / rate;
+            EtaEstimate::Remaining {
+                point_secs: rem,
+                low_secs: rem,
+                high_secs: rem,
+                bracketed: false,
+            }
+        }
+        (None, None) => EtaEstimate::Estimating,
+    }
+}
+
+/// How a displayed ETA value rounds to the 5-second
+/// display quantum: a bracket's ends round OUTWARD
+/// (low down, high up) so the shown bracket is never
+/// narrower than the measured one; a point rounds to
+/// nearest.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum EtaRound {
+    Down,
+    Nearest,
+    Up,
+}
+
+/// Seconds → the readout's time text: quantised to
+/// whole 5-second steps (an estimate never displays
+/// second precision it does not have), formatted
+/// m:ss — the stats view's duration shape. A
+/// positive value never displays as 0:00.
+fn eta_time_text(secs: f64, round: EtaRound) -> String {
+    let steps = secs / 5.0;
+    let steps = match round {
+        EtaRound::Down => steps.floor(),
+        EtaRound::Nearest => steps.round(),
+        EtaRound::Up => steps.ceil(),
+    };
+    let mut total = (steps.max(0.0) * 5.0) as u64;
+    if secs > 0.0 && total == 0 {
+        total = 5;
+    }
+    format!("{}:{:02}", total / 60, total % 60)
+}
+
+/// The name the ETA line gives its phase. Render and
+/// encode take catalogue labels; the bundle slot
+/// takes the same slot-data name the working line
+/// interpolates (`BundleKind::name()`, the publish
+/// package's standing literal) — data, not a label
+/// site, exactly as in `job_lines`.
+fn eta_phase_name(core: &EditorCore, job: &ExportJob, phase: EtaPhase) -> String {
+    match phase {
+        EtaPhase::Render => i18n_wire::tr(core, "export_phase_render"),
+        EtaPhase::Encode => i18n_wire::tr(core, "export_phase_encode"),
+        EtaPhase::Bundle => {
+            if job.kind.publish() {
+                "publish package".to_string()
+            } else if let Some(kind) = job.kind.bundle_kind() {
+                kind.name().to_string()
+            } else {
+                "bundle".to_string()
+            }
+        }
+    }
+}
+
+/// The running job's ETA line, with its element key
+/// — or nothing, when no phase is actively reporting
+/// (before the first event, between phases, in the
+/// unmeasured tail, or with no work left). The
+/// line's wording scopes its claim to the phase and
+/// names the measured basis; a video job still in
+/// its render phase additionally names the encoding
+/// that follows unestimated, so the render figure is
+/// not read as the job's total.
+fn eta_line(core: &EditorCore, job: &ExportJob) -> Option<(&'static str, String)> {
+    let phase = active_phase(job)?;
+    let slot = phase_slot(job, phase);
+    let snap = slot.snapshot();
+    if !snap.seen || snap.finished || snap.total == 0 || snap.done >= snap.total {
+        return None;
+    }
+    let phase_name = eta_phase_name(core, job, phase);
+    let mut line = match estimate_eta(&slot.eta_samples(), snap.total) {
+        EtaEstimate::Estimating => i18n_wire::tr(core, "export_eta_estimating")
+            .replace("{phase}", &phase_name),
+        EtaEstimate::Remaining {
+            point_secs,
+            low_secs,
+            high_secs,
+            bracketed,
+        } => {
+            let low = eta_time_text(low_secs, EtaRound::Down);
+            let high = eta_time_text(high_secs, EtaRound::Up);
+            if bracketed && low != high {
+                i18n_wire::tr(core, "export_eta_range")
+                    .replace("{phase}", &phase_name)
+                    .replace("{low}", &low)
+                    .replace("{high}", &high)
+            } else {
+                i18n_wire::tr(core, "export_eta_about")
+                    .replace("{phase}", &phase_name)
+                    .replace("{time}", &eta_time_text(point_secs, EtaRound::Nearest))
+            }
+        }
+    };
+    if phase == EtaPhase::Render && job_phases(job.kind).contains(&EtaPhase::Encode) {
+        line.push(' ');
+        line.push_str(&i18n_wire::tr(core, "export_eta_then_encode"));
+    }
+    Some(("xc-progress-eta", line))
+}
+
+// ---- Cancel chrome (Roadmap Wave 2, W2-64 — PL-11) ----
+// The StopSignal-ready half of the feedback surface.
+// AC8 designed the core stop signal (a clonable flag
+// the funnels poll at named observation points) as a
+// DESIGN ONLY seat, and decision D-4 leaves the build
+// — plus the class-C recap sentence for a stopped
+// bundle and the readout rule between press and
+// effect (AC8's Q1/Q2) — to a user ruling that has
+// not been taken. Until it is, NO stop signal reaches
+// any export worker: dropping `State::export_job`
+// stops nothing (the worker owns its project clone
+// and runs to completion), and the progress contracts
+// are observe-only by type, so no honest live Cancel
+// can exist. What this section builds is the chrome
+// the signal will plug into, in its disabled-honest
+// form: the seam below is the single question the
+// panel asks, and `cancel_row` is the single place
+// that renders the answer.
+
+/// Can the running job be stopped from the panel?
+/// The panel asks this one question per job; the
+/// stop build (D-4 ruled, AC8's design) answers it
+/// differently by adding the armed case here — at
+/// which point `cancel_row`'s exhaustive match stops
+/// compiling until the armed case gets its live
+/// button, so the chrome and the signal cannot drift
+/// apart.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum JobCancel {
+    /// No stop signal reaches the worker: the job
+    /// runs to completion whatever the user does.
+    /// The affordance renders inert with its reason
+    /// stated beside it — never as a live-looking
+    /// button that does nothing.
+    Unavailable,
+}
+
+/// The cancel question for the running job (W2-64).
+/// Today the answer is `Unavailable` for every job
+/// shape — single-format, delivery, bundle and
+/// publish alike: `ExportJob` holds no signal clone
+/// because the core signal does not exist yet (AC8
+/// §2's `StopSignal` is a design, D-4 gates its
+/// build). When it lands, the job will carry the
+/// clone AC8 §6 prescribes and this function returns
+/// the armed case for it.
+pub fn job_cancel(_job: &ExportJob) -> JobCancel {
+    JobCancel::Unavailable
+}
+
+/// The running job's cancel row: the affordance
+/// itself plus, in the unavailable state, the reason
+/// as a visible line beside it (a panel-local note —
+/// never written to `core.status`, so no class-C
+/// surface carries it). Mounted under the progress
+/// lines for every job shape, so the surface is the
+/// same whether the job is a single format, a
+/// delivery preset, a bundle or the publish package.
+pub fn cancel_row(core: &EditorCore, job: &ExportJob, t: &Theme) -> El {
+    match job_cancel(job) {
+        JobCancel::Unavailable => row()
+            .gap(8.0)
+            .center_y()
+            .child(btn_inert(
+                "xc-cancel",
+                &i18n_wire::tr(core, "export_cancel"),
+                t,
+            ))
+            .child(
+                text(i18n_wire::tr(core, "export_cancel_unavailable"))
+                    .font(type_::LABEL)
+                    .color(t.text_secondary)
+                    .wrap()
+                    .grow(1.0),
+            ),
+    }
 }
 
 // ---- Post-export QA probe (Roadmap Wave 1, RM29 / P-16) ----
@@ -3088,6 +3792,1430 @@ pub fn probe_export(path: &Path, expect: &QaExpectations) -> QaReport {
     qa_verdict(&format!("./{}", display_name(path)), expect, &m)
 }
 
+// ---- Episode QA probe (Roadmap Wave 2, W2-20 / P-16) ----
+// The episode layer over RM29's probe: the same file,
+// read against the whole project rather than one export
+// window. RM29 answers "did this export survive" (a
+// stream exists, the mix is not silent, one cue burned
+// in); this layer answers the questions an episode QA
+// pass asks — silent STRETCHES inside an otherwise
+// sounding mix, black and frozen stretches, every
+// chapter's title card, the MP4's chapter markers
+// against the markers the export promised (W2-18), and
+// the cues' own timing sanity against the timeline.
+// Nothing here forks RM29: expectations ride
+// `qa_expectations`, the stream probe is
+// `probe_video_file`, the cue spot-check is
+// `burn_in_ink`, and the metering is `audio_stats` over
+// the same ffmpeg decode. What is new is the stretch /
+// marker / card measurement family and a report of
+// NAMED checks, each Pass / Fail / Unmeasured with its
+// evidence — Unmeasured is a first-class outcome, never
+// a silent pass: a check that could not measure says so.
+// Threshold discipline (roadmap D-9): every threshold
+// is a named parameter in `EpisodeQaParams` with its
+// default stated, and the subtitle reading-speed figure
+// is REPORTED against its reference parameter, never
+// judged — the roadmap has not set that threshold.
+
+/// Default minimum length of a silent stretch (audio
+/// expected) that the silence-stretch check fails on:
+/// two seconds of dropped mix inside an episode whose
+/// project carries sound.
+pub const EPISODE_SILENCE_MIN_SECS: f32 = 2.0;
+
+/// Default minimum length of a black stretch that the
+/// black-stretch check fails on. A real fade crosses
+/// black briefly; two seconds of it mid-episode is a
+/// finding, not a transition.
+pub const EPISODE_BLACK_MIN_SECS: f32 = 2.0;
+
+/// Default minimum length of a frozen stretch (sampled
+/// frames bit-identical at the scan's scale) that the
+/// frozen-stretch check fails on. Held frames are a
+/// legitimate stick-figure device, so the bar sits
+/// above the black/silence bars.
+pub const EPISODE_FROZEN_MIN_SECS: f32 = 3.0;
+
+/// Default spacing of the episode frame scan. Every
+/// sampled frame costs one bounded ffmpeg decode; half
+/// a second resolves the stretch bars above with
+/// margin.
+pub const EPISODE_FRAME_INTERVAL_SECS: f32 = 0.5;
+
+/// Cap on sampled frames per episode scan — past it
+/// the effective interval widens so a long episode's
+/// probe stays bounded, and the widened interval is
+/// what the stretch maths uses.
+pub const EPISODE_FRAME_SAMPLE_MAX: usize = 240;
+
+/// Default tolerance between a chapter marker's start
+/// in the file and the start the export promised.
+pub const EPISODE_CHAPTER_TOL_SECS: f32 = 0.5;
+
+/// The reading-speed reference the cue-timing check
+/// reports the episode's fastest cue against. A
+/// REPORTING reference only (roadmap D-9): no cue
+/// fails on reading speed until the roadmap sets a
+/// threshold.
+pub const EPISODE_CPS_REFERENCE: f32 = 17.0;
+
+/// How many cues the subtitle spot-check decodes ink
+/// for at most; more cues are sampled evenly across
+/// the episode and the report says how many of how
+/// many were checked.
+pub const EPISODE_CUE_SPOT_MAX: usize = 12;
+
+/// The audio scan's metering window: peak per 50 ms
+/// window decides whether that window is silent.
+const EPISODE_AUDIO_WINDOW_SECS: f32 = 0.05;
+
+/// Every threshold the episode verdict applies, with
+/// the defaults the constants above state. A caller
+/// (a future panel surface, an MCP tool) may pass its
+/// own; the verdict names the values it applied in the
+/// evidence it returns.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EpisodeQaParams {
+    /// Peak at or below this counts as silence (the
+    /// RM29 constant by default).
+    pub silence_peak: f32,
+    /// Silent stretches at or above this fail.
+    pub silence_min_secs: f32,
+    /// Mean luma at or below this counts as black (the
+    /// RM29 constant by default).
+    pub black_luma: f32,
+    /// Black stretches at or above this fail.
+    pub black_min_secs: f32,
+    /// Frozen stretches at or above this fail.
+    pub frozen_min_secs: f32,
+    /// Requested spacing of the frame scan.
+    pub frame_interval_secs: f32,
+    /// Chapter-start tolerance.
+    pub chapter_tol_secs: f32,
+    /// Reading-speed reporting reference — never a
+    /// verdict (D-9).
+    pub cps_reference: f32,
+    /// Ink pixels a spot-check must find (the RM29
+    /// constant by default).
+    pub ink_min: usize,
+}
+
+impl Default for EpisodeQaParams {
+    fn default() -> Self {
+        EpisodeQaParams {
+            silence_peak: QA_SILENCE_PEAK,
+            silence_min_secs: EPISODE_SILENCE_MIN_SECS,
+            black_luma: QA_BLACK_LUMA,
+            black_min_secs: EPISODE_BLACK_MIN_SECS,
+            frozen_min_secs: EPISODE_FROZEN_MIN_SECS,
+            frame_interval_secs: EPISODE_FRAME_INTERVAL_SECS,
+            chapter_tol_secs: EPISODE_CHAPTER_TOL_SECS,
+            cps_reference: EPISODE_CPS_REFERENCE,
+            ink_min: QA_INK_MIN,
+        }
+    }
+}
+
+/// One chapter marker the export promised, resolved
+/// from the very FFMETADATA document W2-18 embeds
+/// (`export::ffmetadata_chapters`), so the probe checks
+/// the file against the exporter's own resolution —
+/// first-match shadowing, gap handling and the final
+/// chapter's run to the episode end included, never a
+/// second resolution that could drift from it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EpisodeChapterExpectation {
+    pub title: String,
+    pub start_secs: f32,
+    pub end_secs: f32,
+}
+
+/// One chapter title card the episode should show: the
+/// chapter (0-based, for the report), its verbatim
+/// title, and the ink spot-check target — the middle of
+/// the card's window (`title_cards::title_card_window`,
+/// clamped to the timeline) in the subtitle style's
+/// text colour.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EpisodeCardExpectation {
+    pub chapter: usize,
+    pub title: String,
+    pub at_secs: f32,
+    pub text_rgb: [u8; 3],
+}
+
+/// The project-side facts about one subtitle cue the
+/// episode verdict judges or reports: its authored
+/// range, its character count, and its reading speed
+/// on the shared duration-weighted clock (RM7) —
+/// `chars / seconds`, 0 when the range is empty (the
+/// range itself is the timing check's business).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EpisodeCueFact {
+    pub index: usize,
+    pub start_frame: usize,
+    pub end_frame: usize,
+    pub chars: usize,
+    pub cps: f32,
+}
+
+/// What a finished EPISODE export was supposed to be:
+/// RM29's full-window expectations plus the episode
+/// layer's own — chapter markers, title cards, and the
+/// cue facts. `cue_targets` indexes `cue_facts`: the
+/// cues the subtitle spot-check decodes ink for.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EpisodeExpectations {
+    pub qa: QaExpectations,
+    pub fps: f32,
+    pub total_frames: usize,
+    pub chapters: Vec<EpisodeChapterExpectation>,
+    pub title_cards_enabled: bool,
+    pub cards: Vec<EpisodeCardExpectation>,
+    pub cue_facts: Vec<EpisodeCueFact>,
+    pub cue_targets: Vec<usize>,
+}
+
+/// Parse the FFMETADATA document `ffmetadata_chapters`
+/// produces back into chapter expectations. Pure.
+/// Titles come back unescaped (the format's backslash
+/// rule reversed), so they compare verbatim against
+/// both the project and the file. A document with no
+/// chapter blocks parses to an empty list.
+pub fn parse_ffmetadata_chapters(doc: &str) -> Vec<EpisodeChapterExpectation> {
+    fn unescape(value: &str) -> String {
+        let mut out = String::with_capacity(value.len());
+        let mut chars = value.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\\' {
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+    let mut chapters = Vec::new();
+    let mut current: Option<(u64, u64, String)> = None;
+    for line in doc.lines() {
+        let line = line.trim();
+        if line == "[CHAPTER]" {
+            if let Some((start, end, title)) = current.take() {
+                chapters.push(EpisodeChapterExpectation {
+                    title,
+                    start_secs: start as f32 / 1000.0,
+                    end_secs: end as f32 / 1000.0,
+                });
+            }
+            current = Some((0, 0, String::new()));
+        } else if let Some((start, end, title)) = &mut current {
+            if let Some(v) = line.strip_prefix("START=") {
+                *start = v.trim().parse().unwrap_or(0);
+            } else if let Some(v) = line.strip_prefix("END=") {
+                *end = v.trim().parse().unwrap_or(0);
+            } else if let Some(v) = line.strip_prefix("title=") {
+                *title = unescape(v);
+            }
+        }
+    }
+    if let Some((start, end, title)) = current.take() {
+        chapters.push(EpisodeChapterExpectation {
+            title,
+            start_secs: start as f32 / 1000.0,
+            end_secs: end as f32 / 1000.0,
+        });
+    }
+    chapters
+}
+
+/// Build the episode expectations for one finished
+/// full-timeline export of `project`. Pure apart from
+/// the clip-file stats `qa_expectations` already reads.
+pub fn episode_expectations(
+    project: &stykanimate_rs::model::Project,
+) -> EpisodeExpectations {
+    let qa = qa_expectations(project, None, true);
+    let total_frames = project.frames.len();
+    let chapters = stykanimate_rs::export::ffmetadata_chapters(project)
+        .map(|doc| parse_ffmetadata_chapters(&doc))
+        .unwrap_or_default();
+    // Title cards: one spot-check per chapter whose
+    // card window falls inside the timeline, aimed at
+    // the window's middle frame — the frame the card's
+    // own alpha rule shows at full strength.
+    let style = project.subtitle_style.sanitised();
+    let text_rgb = [
+        ((style.text_color >> 16) & 0xFF) as u8,
+        ((style.text_color >> 8) & 0xFF) as u8,
+        (style.text_color & 0xFF) as u8,
+    ];
+    let mut cards = Vec::new();
+    if project.title_cards.enabled {
+        for index in 0..project.chapters.len() {
+            let Some((start, end)) =
+                stykanimate_rs::title_cards::title_card_window(project, index)
+            else {
+                continue;
+            };
+            let end = end.min(total_frames);
+            if end <= start || start >= total_frames {
+                continue;
+            }
+            cards.push(EpisodeCardExpectation {
+                chapter: index,
+                title: project.chapters[index].title.clone(),
+                at_secs: project.seconds_at_frame_time(((start + end) / 2) as f32),
+                text_rgb,
+            });
+        }
+    }
+    // Cue facts for every cue; the spot-check targets
+    // are all of them up to the cap, sampled evenly
+    // beyond it, and only cues whose midpoint frame
+    // falls inside the timeline (a cue past the end is
+    // the timing check's finding, not an ink target).
+    let cue_facts: Vec<EpisodeCueFact> = project
+        .subtitles
+        .iter()
+        .enumerate()
+        .map(|(index, cue)| {
+            let secs = project.seconds_at_frame_time(cue.end_frame as f32)
+                - project.seconds_at_frame_time(cue.start_frame as f32);
+            let chars = cue.text.chars().count();
+            EpisodeCueFact {
+                index,
+                start_frame: cue.start_frame,
+                end_frame: cue.end_frame,
+                chars,
+                cps: if secs > 0.0 { chars as f32 / secs } else { 0.0 },
+            }
+        })
+        .collect();
+    let in_timeline: Vec<usize> = cue_facts
+        .iter()
+        .filter(|f| f.end_frame > f.start_frame && (f.start_frame + f.end_frame) / 2 < total_frames)
+        .map(|f| f.index)
+        .collect();
+    let cue_targets = if in_timeline.len() <= EPISODE_CUE_SPOT_MAX {
+        in_timeline
+    } else {
+        let mut picked: Vec<usize> = (0..EPISODE_CUE_SPOT_MAX)
+            .map(|i| {
+                in_timeline
+                    [((i * (in_timeline.len() - 1)) as f32 / (EPISODE_CUE_SPOT_MAX - 1) as f32).round() as usize]
+            })
+            .collect();
+        picked.dedup();
+        picked
+    };
+    EpisodeExpectations {
+        qa,
+        fps: project.fps,
+        total_frames,
+        chapters,
+        title_cards_enabled: project.title_cards.enabled,
+        cards,
+        cue_facts,
+        cue_targets,
+    }
+}
+
+/// One chapter marker as the produced file carries it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EpisodeFileChapter {
+    pub title: String,
+    pub start_secs: f32,
+    pub end_secs: f32,
+}
+
+/// Parse `ffprobe -show_chapters -of json` output.
+/// Pure. `None` on unparseable output (the caller reads
+/// absence as Unmeasured, not as "no chapters" — a
+/// chapterless file parses to an empty list).
+pub fn parse_ffprobe_chapters_json(text: &str) -> Option<Vec<EpisodeFileChapter>> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let mut chapters = Vec::new();
+    if let Some(list) = value.get("chapters").and_then(|c| c.as_array()) {
+        for chapter in list {
+            let secs = |key: &str| {
+                chapter
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f32>().ok())
+                    .unwrap_or(0.0)
+            };
+            chapters.push(EpisodeFileChapter {
+                title: chapter
+                    .get("tags")
+                    .and_then(|t| t.get("title"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                start_secs: secs("start_time"),
+                end_secs: secs("end_time"),
+            });
+        }
+    }
+    Some(chapters)
+}
+
+/// Read a produced file's chapter track with the
+/// system `ffprobe`. `None` when ffprobe is missing,
+/// fails, or its output does not parse.
+pub fn probe_file_chapters(path: &Path) -> Option<Vec<EpisodeFileChapter>> {
+    let output = std::process::Command::new("ffprobe")
+        .args(["-v", "quiet", "-print_format", "json", "-show_chapters"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_ffprobe_chapters_json(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The episode audio scan: the whole-file peak and RMS
+/// (RM29's metering, `audio_stats`) plus every silent
+/// stretch — maximal runs of metering windows whose
+/// peak sits at or below the silence line, as
+/// `(start_secs, end_secs)`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EpisodeAudioScan {
+    pub peak: f32,
+    pub rms: f32,
+    pub silence_stretches: Vec<(f32, f32)>,
+}
+
+/// Scan decoded mono samples for level and silent
+/// stretches. Pure, so the stretch maths is pinnable
+/// without a file. Window boundaries quantise stretch
+/// edges to the metering window (50 ms).
+pub fn audio_scan(samples: &[f32], sample_rate: u32, silence_peak: f32) -> EpisodeAudioScan {
+    let (peak, rms) = audio_stats(samples);
+    let mut stretches = Vec::new();
+    if sample_rate > 0 && !samples.is_empty() {
+        let window = ((sample_rate as f32 * EPISODE_AUDIO_WINDOW_SECS).round() as usize).max(1);
+        let window_secs = window as f32 / sample_rate as f32;
+        let mut run_start: Option<usize> = None;
+        let windows = samples.chunks(window).len();
+        for (i, chunk) in samples.chunks(window).enumerate() {
+            let silent = chunk.iter().all(|s| s.abs() <= silence_peak);
+            if silent && run_start.is_none() {
+                run_start = Some(i);
+            } else if !silent {
+                if let Some(start) = run_start.take() {
+                    stretches.push((start as f32 * window_secs, i as f32 * window_secs));
+                }
+            }
+        }
+        if let Some(start) = run_start {
+            stretches.push((start as f32 * window_secs, windows as f32 * window_secs));
+        }
+    }
+    EpisodeAudioScan {
+        peak,
+        rms,
+        silence_stretches: stretches,
+    }
+}
+
+/// Decode a produced file's audio to mono samples with
+/// the system `ffmpeg` — the same decode
+/// `decode_audio_stats` meters, kept whole for the
+/// stretch scan. `None` when there is nothing
+/// decodable.
+pub fn decode_audio_samples(path: &Path) -> Option<(Vec<f32>, u32)> {
+    let tmp = qa_temp_path("epaudio", "wav");
+    let status = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-i"])
+        .arg(path)
+        .args(["-vn", "-ac", "1", "-ar", "44100"])
+        .arg(&tmp)
+        .status()
+        .ok()?;
+    let samples = if status.success() {
+        stykanimate_rs::audio_edit::read_wav(&tmp.to_string_lossy())
+            .ok()
+            .map(|wav| (wav.samples, wav.sample_rate))
+    } else {
+        None
+    };
+    let _ = std::fs::remove_file(&tmp);
+    samples
+}
+
+/// FNV-1a over a decoded gray frame — the frozen
+/// scan's fingerprint. Two samples of an unchanging
+/// picture hash alike; any visible change rehashes.
+fn frame_fingerprint(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// One sampled frame of the episode scan: when it was
+/// taken (the middle of the interval it stands for),
+/// its mean luma, and its fingerprint.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EpisodeFrameSample {
+    pub at_secs: f32,
+    pub luma: f32,
+    pub fingerprint: u64,
+}
+
+/// Decode one frame of a produced file small and gray
+/// and measure it — one episode-scan sample, in
+/// `frame_luma_at`'s decode shape plus the fingerprint.
+fn episode_frame_sample_at(path: &Path, at_secs: f32) -> Option<EpisodeFrameSample> {
+    let tmp = qa_temp_path("epframe", "gray");
+    let status = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-ss"])
+        .arg(format!("{at_secs:.3}"))
+        .arg("-i")
+        .arg(path)
+        .args(["-frames:v", "1", "-vf", "scale=64:36", "-f", "rawvideo", "-pix_fmt", "gray"])
+        .arg(&tmp)
+        .status()
+        .ok()?;
+    let bytes = if status.success() {
+        std::fs::read(&tmp).ok()
+    } else {
+        None
+    };
+    let _ = std::fs::remove_file(&tmp);
+    let bytes = bytes?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let sum: u64 = bytes.iter().map(|b| *b as u64).sum();
+    Some(EpisodeFrameSample {
+        at_secs,
+        luma: sum as f32 / bytes.len() as f32 / 255.0,
+        fingerprint: frame_fingerprint(&bytes),
+    })
+}
+
+/// Sample frames across a produced file at the
+/// requested interval (widened past the sample cap),
+/// returning the samples and the effective interval
+/// the stretch maths must use. Undecodable samples are
+/// skipped, as in RM29's black scan.
+pub fn episode_frame_samples(
+    path: &Path,
+    duration_secs: f32,
+    interval_secs: f32,
+) -> (Vec<EpisodeFrameSample>, f32) {
+    if duration_secs <= 0.0 || interval_secs <= 0.0 {
+        return (Vec::new(), interval_secs);
+    }
+    let wanted = (duration_secs / interval_secs).ceil() as usize;
+    let count = wanted.clamp(1, EPISODE_FRAME_SAMPLE_MAX);
+    let interval = duration_secs / count as f32;
+    let mut out = Vec::new();
+    for i in 0..count {
+        let t = interval * (i as f32 + 0.5);
+        if let Some(sample) = episode_frame_sample_at(path, t) {
+            out.push(sample);
+        }
+    }
+    (out, interval)
+}
+
+/// Count pixels within tolerance of `colour` in the
+/// MIDDLE half of an RGB frame — the title-card
+/// spot-check's ink counter (a card is centred on the
+/// stage, where `band_ink_count`'s edge bands do not
+/// look). Pure; the tolerance is `band_ink_count`'s.
+pub fn centre_ink_count(rgb: &[u8], width: usize, height: usize, colour: [u8; 3]) -> usize {
+    if width == 0 || height == 0 || rgb.len() < width * height * 3 {
+        return 0;
+    }
+    let mut count = 0;
+    for y in (height / 4)..(3 * height / 4).max(height / 4 + 1) {
+        for x in 0..width {
+            let i = (y * width + x) * 3;
+            let d = (rgb[i] as i32 - colour[0] as i32).abs()
+                + (rgb[i + 1] as i32 - colour[1] as i32).abs()
+                + (rgb[i + 2] as i32 - colour[2] as i32).abs();
+            if d <= 72 {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// The title-card spot-check measurement: decode the
+/// card-window midpoint frame at 480 pt wide and count
+/// text-colour ink in the centre band, in
+/// `burn_in_ink`'s decode shape. `None` when the frame
+/// does not decode.
+pub fn card_ink_at(
+    path: &Path,
+    at_secs: f32,
+    text_rgb: [u8; 3],
+    aspect: (u32, u32),
+) -> Option<usize> {
+    if aspect.0 == 0 || aspect.1 == 0 {
+        return None;
+    }
+    let width = 480usize;
+    let height = ((width as f32 * aspect.1 as f32 / aspect.0 as f32) / 2.0).round() as usize * 2;
+    if height == 0 {
+        return None;
+    }
+    let tmp = qa_temp_path("epcard", "rgb");
+    let status = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-ss"])
+        .arg(format!("{at_secs:.3}"))
+        .arg("-i")
+        .arg(path)
+        .args(["-frames:v", "1", "-vf"])
+        .arg(format!("scale={width}:{height}"))
+        .args(["-f", "rawvideo", "-pix_fmt", "rgb24"])
+        .arg(&tmp)
+        .status()
+        .ok()?;
+    let bytes = if status.success() {
+        std::fs::read(&tmp).ok()
+    } else {
+        None
+    };
+    let _ = std::fs::remove_file(&tmp);
+    let bytes = bytes?;
+    Some(centre_ink_count(&bytes, width, height, text_rgb))
+}
+
+/// Everything the episode probe measured about one
+/// file, before the verdict: the verdict is a pure
+/// function of this plus the expectations and params,
+/// so the whole decision matrix needs no files.
+/// `cue_ink` / `card_ink` run parallel to the
+/// expectations' `cue_targets` / `cards`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EpisodeMeasurements {
+    pub probe: Option<VideoProbe>,
+    pub audio_scan: Option<EpisodeAudioScan>,
+    pub frame_samples: Vec<EpisodeFrameSample>,
+    pub frame_interval_secs: f32,
+    pub file_chapters: Option<Vec<EpisodeFileChapter>>,
+    pub cue_ink: Vec<Option<usize>>,
+    pub card_ink: Vec<Option<usize>>,
+}
+
+impl Default for EpisodeMeasurements {
+    fn default() -> Self {
+        EpisodeMeasurements {
+            probe: None,
+            audio_scan: None,
+            frame_samples: Vec::new(),
+            frame_interval_secs: EPISODE_FRAME_INTERVAL_SECS,
+            file_chapters: None,
+            cue_ink: Vec::new(),
+            card_ink: Vec::new(),
+        }
+    }
+}
+
+/// One named episode check's outcome. `Unmeasured` is
+/// first-class: the check could not measure, which the
+/// report states instead of passing silently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EpisodeCheckStatus {
+    Pass,
+    Fail,
+    Unmeasured,
+}
+
+/// One named episode check: what it asked, how it
+/// answered, and the evidence — measured values, the
+/// parameter values applied, and timestamps for every
+/// stretch it names.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EpisodeCheck {
+    pub name: &'static str,
+    pub status: EpisodeCheckStatus,
+    pub evidence: String,
+}
+
+/// One probed episode's report: the named checks, the
+/// roll-up (failed iff any check failed — Unmeasured
+/// never fails and never passes a check, it is listed),
+/// and a counted summary line of detector data.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EpisodeQaReport {
+    pub dest: String,
+    pub checks: Vec<EpisodeCheck>,
+    pub passed: bool,
+    pub summary: String,
+}
+
+fn episode_check(
+    name: &'static str,
+    status: EpisodeCheckStatus,
+    evidence: String,
+) -> EpisodeCheck {
+    EpisodeCheck {
+        name,
+        status,
+        evidence,
+    }
+}
+
+/// Maximal runs of consecutive frame samples matching
+/// `pred`, as `(start_secs, end_secs)` spans — each
+/// sample stands for the interval centred on it.
+fn sample_runs(
+    samples: &[EpisodeFrameSample],
+    interval: f32,
+    pred: impl Fn(&EpisodeFrameSample) -> bool,
+) -> Vec<(f32, f32)> {
+    let mut runs = Vec::new();
+    let mut start: Option<f32> = None;
+    let mut last: f32 = 0.0;
+    for sample in samples {
+        if pred(sample) {
+            if start.is_none() {
+                start = Some(sample.at_secs - interval / 2.0);
+            }
+            last = sample.at_secs + interval / 2.0;
+        } else if let Some(s) = start.take() {
+            runs.push((s, last));
+        }
+    }
+    if let Some(s) = start {
+        runs.push((s, last));
+    }
+    runs
+}
+
+/// The episode verdict — pure. Every check names
+/// itself, states its evidence, and applies only the
+/// thresholds `params` carries; reading speed is
+/// reported against its reference and judged by
+/// nothing (D-9).
+pub fn episode_qa_verdict(
+    dest: &str,
+    expect: &EpisodeExpectations,
+    m: &EpisodeMeasurements,
+    params: &EpisodeQaParams,
+) -> EpisodeQaReport {
+    let mut checks: Vec<EpisodeCheck> = Vec::new();
+    // The cue-timing check is project-side: it judges
+    // even when the file cannot be read at all.
+    let timing = episode_cue_timing_check(expect, params);
+    let Some(probe) = &m.probe else {
+        checks.push(episode_check(
+            "probe",
+            EpisodeCheckStatus::Fail,
+            "the produced file could not be probed".to_string(),
+        ));
+        for name in [
+            "duration",
+            "frame-count",
+            "audio",
+            "silence-stretches",
+            "black-stretches",
+            "frozen-stretches",
+            "subtitles",
+            "title-cards",
+            "chapters",
+        ] {
+            checks.push(episode_check(
+                name,
+                EpisodeCheckStatus::Unmeasured,
+                "the produced file could not be probed".to_string(),
+            ));
+        }
+        checks.push(timing);
+        return episode_report(dest, checks);
+    };
+
+    // Duration and frame count: RM29's tolerances, as
+    // named episode checks.
+    let duration_tol = (expect.qa.duration_secs * 0.15).max(0.75);
+    if (probe.duration_secs - expect.qa.duration_secs).abs() > duration_tol {
+        checks.push(episode_check(
+            "duration",
+            EpisodeCheckStatus::Fail,
+            format!(
+                "file runs {:.1}s, the project is {:.1}s ({} frames at {:.0} fps)",
+                probe.duration_secs, expect.qa.duration_secs, expect.total_frames, expect.fps
+            ),
+        ));
+    } else {
+        checks.push(episode_check(
+            "duration",
+            EpisodeCheckStatus::Pass,
+            format!(
+                "file {:.1}s vs project {:.1}s ({} frames at {:.0} fps)",
+                probe.duration_secs, expect.qa.duration_secs, expect.total_frames, expect.fps
+            ),
+        ));
+    }
+    match (probe.frames, expect.qa.frames) {
+        (Some(got), Some(want)) => {
+            let tol = ((want as f32 * 0.05).ceil() as u64).max(2);
+            if got.abs_diff(want as u64) > tol {
+                checks.push(episode_check(
+                    "frame-count",
+                    EpisodeCheckStatus::Fail,
+                    format!("file holds {got} frames, the project samples {want}"),
+                ));
+            } else {
+                checks.push(episode_check(
+                    "frame-count",
+                    EpisodeCheckStatus::Pass,
+                    format!("{got} frames vs {want} sampled from the project"),
+                ));
+            }
+        }
+        _ => checks.push(episode_check(
+            "frame-count",
+            EpisodeCheckStatus::Unmeasured,
+            "the container carries no frame count and no rate to derive one".to_string(),
+        )),
+    }
+
+    // Audio level: present, expected, and not silent.
+    if !probe.has_audio {
+        if expect.qa.audio_expected {
+            checks.push(episode_check(
+                "audio",
+                EpisodeCheckStatus::Fail,
+                "audio stream missing though the project expects audio".to_string(),
+            ));
+        } else {
+            checks.push(episode_check(
+                "audio",
+                EpisodeCheckStatus::Pass,
+                "no audio stream; none expected".to_string(),
+            ));
+        }
+    } else {
+        match &m.audio_scan {
+            None => {
+                if expect.qa.audio_expected {
+                    checks.push(episode_check(
+                        "audio",
+                        EpisodeCheckStatus::Fail,
+                        "audio could not be decoded".to_string(),
+                    ));
+                } else {
+                    checks.push(episode_check(
+                        "audio",
+                        EpisodeCheckStatus::Unmeasured,
+                        "an audio stream is present but could not be decoded; none was expected"
+                            .to_string(),
+                    ));
+                }
+            }
+            Some(scan) => {
+                if expect.qa.audio_expected && scan.peak <= params.silence_peak {
+                    checks.push(episode_check(
+                        "audio",
+                        EpisodeCheckStatus::Fail,
+                        format!("audio is silent (peak {})", fmt_db(scan.peak)),
+                    ));
+                } else {
+                    checks.push(episode_check(
+                        "audio",
+                        EpisodeCheckStatus::Pass,
+                        format!(
+                            "peak {} · RMS {}{}",
+                            fmt_db(scan.peak),
+                            fmt_db(scan.rms),
+                            if expect.qa.audio_expected {
+                                ""
+                            } else {
+                                " (no audio expected; stream present)"
+                            }
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    // Silent stretches inside the mix.
+    if !expect.qa.audio_expected {
+        checks.push(episode_check(
+            "silence-stretches",
+            EpisodeCheckStatus::Unmeasured,
+            "no audio expected of this export — stretches not judged".to_string(),
+        ));
+    } else {
+        match &m.audio_scan {
+            None => checks.push(episode_check(
+                "silence-stretches",
+                EpisodeCheckStatus::Unmeasured,
+                "audio could not be decoded".to_string(),
+            )),
+            Some(scan) => {
+                let bad: Vec<(f32, f32)> = scan
+                    .silence_stretches
+                    .iter()
+                    .copied()
+                    .filter(|(a, b)| b - a >= params.silence_min_secs)
+                    .collect();
+                if bad.is_empty() {
+                    let longest = scan
+                        .silence_stretches
+                        .iter()
+                        .map(|(a, b)| b - a)
+                        .fold(0.0f32, f32::max);
+                    checks.push(episode_check(
+                        "silence-stretches",
+                        EpisodeCheckStatus::Pass,
+                        format!(
+                            "no silent stretch of {:.1}s or more (longest {:.1}s)",
+                            params.silence_min_secs, longest
+                        ),
+                    ));
+                } else {
+                    let (a, b) = bad[0];
+                    checks.push(episode_check(
+                        "silence-stretches",
+                        EpisodeCheckStatus::Fail,
+                        format!(
+                            "audio silent from {:.1}s to {:.1}s ({:.1}s, at the {:.1}s parameter){}",
+                            a,
+                            b,
+                            b - a,
+                            params.silence_min_secs,
+                            if bad.len() > 1 {
+                                format!("; {} such stretches", bad.len())
+                            } else {
+                                String::new()
+                            }
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    // Black and frozen stretches in the frame scan.
+    if m.frame_samples.is_empty() {
+        for name in ["black-stretches", "frozen-stretches"] {
+            checks.push(episode_check(
+                name,
+                EpisodeCheckStatus::Unmeasured,
+                "no frames could be sampled from the file".to_string(),
+            ));
+        }
+    } else {
+        let black_runs: Vec<(f32, f32)> =
+            sample_runs(&m.frame_samples, m.frame_interval_secs, |s| {
+                s.luma <= params.black_luma
+            })
+            .into_iter()
+            .filter(|(a, b)| b - a >= params.black_min_secs)
+            .collect();
+        if black_runs.is_empty() {
+            let darkest = m
+                .frame_samples
+                .iter()
+                .map(|s| s.luma)
+                .fold(1.0f32, f32::min);
+            checks.push(episode_check(
+                "black-stretches",
+                EpisodeCheckStatus::Pass,
+                format!(
+                    "no black stretch of {:.1}s or more across {} samples (darkest sample luma {:.2})",
+                    params.black_min_secs,
+                    m.frame_samples.len(),
+                    darkest
+                ),
+            ));
+        } else {
+            let (a, b) = black_runs[0];
+            checks.push(episode_check(
+                "black-stretches",
+                EpisodeCheckStatus::Fail,
+                format!(
+                    "black frames from {:.1}s to {:.1}s ({:.1}s, at the {:.1}s parameter){}",
+                    a,
+                    b,
+                    b - a,
+                    params.black_min_secs,
+                    if black_runs.len() > 1 {
+                        format!("; {} such stretches", black_runs.len())
+                    } else {
+                        String::new()
+                    }
+                ),
+            ));
+        }
+        if m.frame_samples.len() < 2 {
+            checks.push(episode_check(
+                "frozen-stretches",
+                EpisodeCheckStatus::Unmeasured,
+                "fewer than two frames could be sampled".to_string(),
+            ));
+        } else {
+            let mut frozen: Vec<(f32, f32)> = Vec::new();
+            let mut run_start = 0usize;
+            for i in 1..=m.frame_samples.len() {
+                if i == m.frame_samples.len()
+                    || m.frame_samples[i].fingerprint != m.frame_samples[i - 1].fingerprint
+                {
+                    if i - run_start >= 2 {
+                        frozen.push((
+                            m.frame_samples[run_start].at_secs - m.frame_interval_secs / 2.0,
+                            m.frame_samples[i - 1].at_secs + m.frame_interval_secs / 2.0,
+                        ));
+                    }
+                    run_start = i;
+                }
+            }
+            let bad: Vec<(f32, f32)> = frozen
+                .into_iter()
+                .filter(|(a, b)| b - a >= params.frozen_min_secs)
+                .collect();
+            if bad.is_empty() {
+                checks.push(episode_check(
+                    "frozen-stretches",
+                    EpisodeCheckStatus::Pass,
+                    format!(
+                        "no frozen stretch of {:.1}s or more across {} samples",
+                        params.frozen_min_secs,
+                        m.frame_samples.len()
+                    ),
+                ));
+            } else {
+                let (a, b) = bad[0];
+                checks.push(episode_check(
+                    "frozen-stretches",
+                    EpisodeCheckStatus::Fail,
+                    format!(
+                        "picture frozen from {:.1}s to {:.1}s ({:.1}s, at the {:.1}s parameter){}",
+                        a,
+                        b,
+                        b - a,
+                        params.frozen_min_secs,
+                        if bad.len() > 1 {
+                            format!("; {} such stretches", bad.len())
+                        } else {
+                            String::new()
+                        }
+                    ),
+                ));
+            }
+        }
+    }
+
+    // Subtitle presence (per-cue burn-in spot-checks)
+    // and coverage, reported as a measured fact.
+    let coverage = episode_cue_coverage(expect);
+    if expect.cue_facts.is_empty() {
+        checks.push(episode_check(
+            "subtitles",
+            EpisodeCheckStatus::Pass,
+            "the project carries no cues — no burn-in expected".to_string(),
+        ));
+    } else if expect.cue_targets.is_empty() {
+        checks.push(episode_check(
+            "subtitles",
+            EpisodeCheckStatus::Unmeasured,
+            format!(
+                "every cue lies outside the timeline — no in-file spot-check possible; coverage {:.0}% of the episode",
+                coverage * 100.0
+            ),
+        ));
+    } else {
+        let measured: Vec<usize> = m.cue_ink.iter().copied().flatten().collect();
+        if measured.is_empty() {
+            checks.push(episode_check(
+                "subtitles",
+                EpisodeCheckStatus::Unmeasured,
+                format!(
+                    "cue frames could not be decoded; coverage {:.0}% of the episode",
+                    coverage * 100.0
+                ),
+            ));
+        } else {
+            let missing: Vec<usize> = expect
+                .cue_targets
+                .iter()
+                .zip(m.cue_ink.iter())
+                .filter(|(_, ink)| matches!(ink, Some(v) if *v < params.ink_min))
+                .map(|(fact_idx, _)| expect.cue_facts[*fact_idx].index)
+                .collect();
+            if missing.is_empty() {
+                checks.push(episode_check(
+                    "subtitles",
+                    EpisodeCheckStatus::Pass,
+                    format!(
+                        "burn-in present at {}/{} spot-checked cues; coverage {:.0}% of the episode",
+                        measured.len(),
+                        expect.cue_targets.len(),
+                        coverage * 100.0
+                    ),
+                ));
+            } else {
+                checks.push(episode_check(
+                    "subtitles",
+                    EpisodeCheckStatus::Fail,
+                    format!(
+                        "subtitle burn-in missing at cue {} ({} of {} spot-checked cues missing); coverage {:.0}% of the episode",
+                        missing[0] + 1,
+                        missing.len(),
+                        expect.cue_targets.len(),
+                        coverage * 100.0
+                    ),
+                ));
+            }
+        }
+    }
+    checks.push(timing);
+
+    // Title cards, where the settings demand them.
+    if !expect.title_cards_enabled {
+        checks.push(episode_check(
+            "title-cards",
+            EpisodeCheckStatus::Pass,
+            "title cards are off in the project settings — none expected".to_string(),
+        ));
+    } else if expect.cards.is_empty() {
+        checks.push(episode_check(
+            "title-cards",
+            if expect.chapters.is_empty() {
+                EpisodeCheckStatus::Pass
+            } else {
+                EpisodeCheckStatus::Unmeasured
+            },
+            if expect.chapters.is_empty() {
+                "no chapters — no cards expected".to_string()
+            } else {
+                "no card window falls inside the episode".to_string()
+            },
+        ));
+    } else {
+        let measured: Vec<usize> = m.card_ink.iter().copied().flatten().collect();
+        if measured.is_empty() {
+            checks.push(episode_check(
+                "title-cards",
+                EpisodeCheckStatus::Unmeasured,
+                "card frames could not be decoded".to_string(),
+            ));
+        } else {
+            let missing: Vec<&EpisodeCardExpectation> = expect
+                .cards
+                .iter()
+                .zip(m.card_ink.iter())
+                .filter(|(_, ink)| matches!(ink, Some(v) if *v < params.ink_min))
+                .map(|(card, _)| card)
+                .collect();
+            if missing.is_empty() {
+                checks.push(episode_check(
+                    "title-cards",
+                    EpisodeCheckStatus::Pass,
+                    format!(
+                        "title cards present for {}/{} chapters",
+                        measured.len(),
+                        expect.cards.len()
+                    ),
+                ));
+            } else {
+                let card = missing[0];
+                checks.push(episode_check(
+                    "title-cards",
+                    EpisodeCheckStatus::Fail,
+                    format!(
+                        "title card missing for chapter {} (\"{}\") at {:.1}s ({} of {} chapters missing)",
+                        card.chapter + 1,
+                        card.title,
+                        card.at_secs,
+                        missing.len(),
+                        expect.cards.len()
+                    ),
+                ));
+            }
+        }
+    }
+
+    // Chapter markers: the file's track against the
+    // markers the export promised.
+    match &m.file_chapters {
+        None => checks.push(episode_check(
+            "chapters",
+            EpisodeCheckStatus::Unmeasured,
+            "the file's chapter track could not be read".to_string(),
+        )),
+        Some(file_chapters) => {
+            if expect.chapters.is_empty() {
+                checks.push(episode_check(
+                    "chapters",
+                    EpisodeCheckStatus::Pass,
+                    format!(
+                        "no chapter markers expected; the file carries {}",
+                        file_chapters.len()
+                    ),
+                ));
+            } else if file_chapters.len() != expect.chapters.len() {
+                checks.push(episode_check(
+                    "chapters",
+                    EpisodeCheckStatus::Fail,
+                    format!(
+                        "{} chapter markers in the file, {} expected",
+                        file_chapters.len(),
+                        expect.chapters.len()
+                    ),
+                ));
+            } else {
+                let mut problem: Option<String> = None;
+                for (i, (want, got)) in expect
+                    .chapters
+                    .iter()
+                    .zip(file_chapters.iter())
+                    .enumerate()
+                {
+                    if got.title != want.title {
+                        problem = Some(format!(
+                            "chapter {} is titled \"{}\", expected \"{}\"",
+                            i + 1,
+                            got.title,
+                            want.title
+                        ));
+                        break;
+                    }
+                    if (got.start_secs - want.start_secs).abs() > params.chapter_tol_secs {
+                        problem = Some(format!(
+                            "chapter {} starts at {:.1}s, expected {:.1}s",
+                            i + 1,
+                            got.start_secs,
+                            want.start_secs
+                        ));
+                        break;
+                    }
+                }
+                match problem {
+                    Some(p) => checks.push(episode_check(
+                        "chapters",
+                        EpisodeCheckStatus::Fail,
+                        p,
+                    )),
+                    None => checks.push(episode_check(
+                        "chapters",
+                        EpisodeCheckStatus::Pass,
+                        format!(
+                            "{} chapter markers, titles verbatim, starts within {:.1}s",
+                            expect.chapters.len(),
+                            params.chapter_tol_secs
+                        ),
+                    )),
+                }
+            }
+        }
+    }
+
+    episode_report(dest, checks)
+}
+
+/// The fraction of the episode's timeline any cue
+/// covers (ranges clamped to the timeline, overlaps
+/// merged) — a reported fact, judged by nothing.
+fn episode_cue_coverage(expect: &EpisodeExpectations) -> f32 {
+    if expect.total_frames == 0 {
+        return 0.0;
+    }
+    let mut spans: Vec<(usize, usize)> = expect
+        .cue_facts
+        .iter()
+        .map(|f| (f.start_frame, f.end_frame.min(expect.total_frames)))
+        .filter(|(a, b)| b > a)
+        .collect();
+    spans.sort_unstable();
+    let mut covered = 0usize;
+    let mut open: Option<(usize, usize)> = None;
+    for (a, b) in spans {
+        match open {
+            Some((oa, ob)) if a <= ob => open = Some((oa, ob.max(b))),
+            Some((oa, ob)) => {
+                covered += ob - oa;
+                open = Some((a, b));
+            }
+            None => open = Some((a, b)),
+        }
+    }
+    if let Some((oa, ob)) = open {
+        covered += ob - oa;
+    }
+    covered as f32 / expect.total_frames as f32
+}
+
+/// The cue-timing check: boundary sanity judged,
+/// reading speed and overlaps reported as facts
+/// (D-9 — no threshold verdict on either).
+fn episode_cue_timing_check(
+    expect: &EpisodeExpectations,
+    params: &EpisodeQaParams,
+) -> EpisodeCheck {
+    let mut problems: Vec<String> = Vec::new();
+    for fact in &expect.cue_facts {
+        if fact.end_frame <= fact.start_frame {
+            problems.push(format!(
+                "cue {} has an empty range (frames {}–{})",
+                fact.index + 1,
+                fact.start_frame + 1,
+                fact.end_frame
+            ));
+        } else if fact.start_frame >= expect.total_frames {
+            problems.push(format!(
+                "cue {} starts past the episode end (frame {} of {})",
+                fact.index + 1,
+                fact.start_frame + 1,
+                expect.total_frames
+            ));
+        } else if fact.end_frame > expect.total_frames {
+            problems.push(format!(
+                "cue {} runs past the episode end (ends at frame {} of {})",
+                fact.index + 1,
+                fact.end_frame,
+                expect.total_frames
+            ));
+        }
+    }
+    let mut facts: Vec<String> = Vec::new();
+    if let Some(fastest) = expect
+        .cue_facts
+        .iter()
+        .filter(|f| f.end_frame > f.start_frame)
+        .max_by(|a, b| a.cps.partial_cmp(&b.cps).unwrap_or(std::cmp::Ordering::Equal))
+    {
+        facts.push(format!(
+            "fastest cue {} reads {:.1} chars/s against the {:.1} reference — reported, not judged (roadmap D-9)",
+            fastest.index + 1,
+            fastest.cps,
+            params.cps_reference
+        ));
+    }
+    let overlaps = expect
+        .cue_facts
+        .iter()
+        .filter(|a| {
+            expect
+                .cue_facts
+                .iter()
+                .any(|b| b.index > a.index && b.start_frame < a.end_frame && a.start_frame < b.end_frame)
+        })
+        .count();
+    if overlaps > 0 {
+        facts.push(format!("{overlaps} cue(s) overlap another cue"));
+    }
+    let evidence = match (problems.is_empty(), facts.is_empty()) {
+        (true, true) => "every cue sits inside the timeline".to_string(),
+        (true, false) => facts.join("; "),
+        (false, true) => problems.join("; "),
+        (false, false) => format!("{}; {}", problems.join("; "), facts.join("; ")),
+    };
+    episode_check(
+        "cue-timing",
+        if problems.is_empty() {
+            EpisodeCheckStatus::Pass
+        } else {
+            EpisodeCheckStatus::Fail
+        },
+        evidence,
+    )
+}
+
+/// Roll named checks into the report: failed iff any
+/// check failed; the summary counts each outcome.
+fn episode_report(dest: &str, checks: Vec<EpisodeCheck>) -> EpisodeQaReport {
+    let count = |status: EpisodeCheckStatus| {
+        checks.iter().filter(|c| c.status == status).count()
+    };
+    let (passed_n, failed_n, unmeasured_n) = (
+        count(EpisodeCheckStatus::Pass),
+        count(EpisodeCheckStatus::Fail),
+        count(EpisodeCheckStatus::Unmeasured),
+    );
+    EpisodeQaReport {
+        dest: dest.to_string(),
+        passed: failed_n == 0,
+        summary: format!(
+            "{} checks · {} passed · {} failed · {} unmeasured",
+            checks.len(),
+            passed_n,
+            failed_n,
+            unmeasured_n
+        ),
+        checks,
+    }
+}
+
+/// Probe one finished episode export end to end: the
+/// expectations off the project, then the measurements
+/// — RM29's stream probe, the audio stretch scan, the
+/// frame stretch scan, the chapter track, and the cue
+/// and card ink spot-checks. Gathering is best-effort
+/// per measurement; the verdict decides what absence
+/// means. Panel surfacing rides the W2-44 worker
+/// pattern — filed as an integrator action, not built
+/// here.
+pub fn probe_episode(
+    path: &Path,
+    project: &stykanimate_rs::model::Project,
+    params: &EpisodeQaParams,
+) -> EpisodeQaReport {
+    let expect = episode_expectations(project);
+    let probe = probe_video_file(path);
+    let mut m = EpisodeMeasurements {
+        probe: probe.clone(),
+        ..Default::default()
+    };
+    if let Some(p) = &probe {
+        if p.has_audio {
+            m.audio_scan = decode_audio_samples(path)
+                .map(|(samples, rate)| audio_scan(&samples, rate, params.silence_peak));
+        }
+        if p.has_video {
+            let (samples, interval) =
+                episode_frame_samples(path, p.duration_secs, params.frame_interval_secs);
+            m.frame_samples = samples;
+            m.frame_interval_secs = interval;
+            let aspect = (p.width, p.height);
+            m.cue_ink = expect
+                .cue_targets
+                .iter()
+                .map(|fact_idx| {
+                    let fact = &expect.cue_facts[*fact_idx];
+                    let burn = QaBurnIn {
+                        at_secs: project.seconds_at_frame_time(
+                            ((fact.start_frame + fact.end_frame) / 2) as f32,
+                        ),
+                        text_rgb: {
+                            let rgb = project.subtitle_style.sanitised().text_color;
+                            [
+                                ((rgb >> 16) & 0xFF) as u8,
+                                ((rgb >> 8) & 0xFF) as u8,
+                                (rgb & 0xFF) as u8,
+                            ]
+                        },
+                        position: project.subtitle_style.sanitised().position,
+                    };
+                    burn_in_ink(path, &burn, aspect)
+                })
+                .collect();
+            m.card_ink = expect
+                .cards
+                .iter()
+                .map(|card| card_ink_at(path, card.at_secs, card.text_rgb, aspect))
+                .collect();
+        }
+        m.file_chapters = probe_file_chapters(path);
+    }
+    episode_qa_verdict(&format!("./{}", display_name(path)), &expect, &m, params)
+}
+
 /// The panel line for one report: the pass/fail
 /// template (IA-RM29-1) with the measured facts — and,
 /// on failure, the named failures — as its details
@@ -3124,15 +5252,157 @@ pub fn qa_reports() -> Vec<QaReport> {
     QA_REPORTS.with(|slot| slot.borrow().clone())
 }
 
-/// Probe a just-finished export and store its report,
-/// replacing any earlier report for the same
-/// destination. Runs only when the destination file is
-/// actually there: a job whose worker claimed success
-/// for a file that does not exist is the worker-death
-/// case, which the finish path already reports as a
-/// failure — the probe's silence there is not a pass,
-/// it is absence, and no report is stored.
-fn probe_and_store(
+/// How many landed verdicts the session probe
+/// history keeps; the oldest fall off the end. The
+/// per-destination reports (`QA_REPORTS`) are the
+/// current state; the history is the running record,
+/// so it is allowed to be longer — but not unbounded.
+pub const QA_HISTORY_MAX: usize = 20;
+
+/// One landed probe verdict in the session history:
+/// the report plus the moment its drain stored it —
+/// the moment the verdict became known, which is the
+/// only timestamp the probe can honestly carry (the
+/// file's own mtime is Recent exports' business).
+#[derive(Clone, Debug, PartialEq)]
+pub struct QaHistoryEntry {
+    pub report: QaReport,
+    pub at: SystemTime,
+}
+
+/// A probe running on its worker (W2-44): the
+/// destination in the display shape `probe_export`
+/// reports it under (kept so a dead worker's failure
+/// report names the same destination), and the
+/// channel the worker sends its one report back on.
+/// The worker owns the destination path and the
+/// expectations — both plain data, read off the
+/// project on the UI thread before the spawn, so the
+/// worker never touches shell state.
+struct QaJob {
+    dest: String,
+    outcome: mpsc::Receiver<QaReport>,
+}
+
+thread_local! {
+    /// Probes in flight, in queue order. Session
+    /// state in the panel's thread-local idiom, like
+    /// the reports they land in: no `State` field, so
+    /// no census moves.
+    static QA_JOBS: RefCell<Vec<QaJob>> = RefCell::new(Vec::new());
+    /// The session probe history, oldest first,
+    /// capped at `QA_HISTORY_MAX` (see `store_report`).
+    static QA_HISTORY: RefCell<Vec<QaHistoryEntry>> = RefCell::new(Vec::new());
+}
+
+/// The session probe history, oldest first.
+pub fn qa_history() -> Vec<QaHistoryEntry> {
+    QA_HISTORY.with(|slot| slot.borrow().clone())
+}
+
+/// One history line: the landing time (the panel's
+/// `YYYY-MM-DD HH:MM` UTC shape, `home_panel`'s
+/// formatter) plus the verdict line itself — so a
+/// failure's named checks ride along verbatim, and
+/// the only new words are the verdict templates'
+/// own, exactly as on the `xc-qa` lines.
+pub fn qa_history_line(core: &EditorCore, entry: &QaHistoryEntry) -> String {
+    format!(
+        "{} · {}",
+        crate::rune_sec::home_panel::format_modified(Some(entry.at)),
+        qa_line(core, &entry.report)
+    )
+}
+
+/// Store one landed report: it replaces any earlier
+/// report for the same destination in `QA_REPORTS`
+/// and is appended to the session history, stamped
+/// with the landing time; the history's oldest
+/// entries fall off past `QA_HISTORY_MAX`.
+fn store_report(report: QaReport) {
+    QA_REPORTS.with(|slot| {
+        let mut reports = slot.borrow_mut();
+        reports.retain(|r| r.dest != report.dest);
+        reports.push(report.clone());
+    });
+    QA_HISTORY.with(|slot| {
+        let mut history = slot.borrow_mut();
+        history.push(QaHistoryEntry {
+            report,
+            at: SystemTime::now(),
+        });
+        if history.len() > QA_HISTORY_MAX {
+            let excess = history.len() - QA_HISTORY_MAX;
+            history.drain(..excess);
+        }
+    });
+}
+
+/// Is a QA probe still running on its worker? While
+/// one is, `poll_export_job` reads active, so the
+/// shell keeps the `JOB_WAKE` cadence until the
+/// verdict lands.
+pub fn qa_probe_active() -> bool {
+    QA_JOBS.with(|slot| !slot.borrow().is_empty())
+}
+
+/// Drain every landed probe report into the store
+/// (see `store_report`). Returns true when at least
+/// one report landed — the repaint signal. A worker
+/// that dies without sending (a panic inside the
+/// probe) lands a failure report naming the probe's
+/// own stoppage, mirroring the export drain's
+/// worker-death discipline: never a pass, never
+/// silently dropped. There is deliberately no
+/// cancellation: a probe is short, read-only and
+/// detached (D-4's cancel stays unbuilt).
+fn poll_qa_probes() -> bool {
+    let mut landed: Vec<QaReport> = Vec::new();
+    QA_JOBS.with(|slot| {
+        let mut jobs = slot.borrow_mut();
+        let mut i = 0;
+        while i < jobs.len() {
+            match jobs[i].outcome.try_recv() {
+                Ok(report) => {
+                    jobs.remove(i);
+                    landed.push(report);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    let job = jobs.remove(i);
+                    landed.push(QaReport {
+                        dest: job.dest,
+                        passed: false,
+                        failures: vec![
+                            "the QA probe stopped before reporting a result".to_string()
+                        ],
+                        details: "unprobed".to_string(),
+                    });
+                }
+                Err(mpsc::TryRecvError::Empty) => i += 1,
+            }
+        }
+    });
+    let any = !landed.is_empty();
+    for report in landed {
+        store_report(report);
+    }
+    any
+}
+
+/// Queue a probe of a just-finished export on a
+/// worker thread (W2-44; RM29 ran it inline on the
+/// finish path). The expectations are read off the
+/// project HERE, on the caller's thread at finish
+/// time — the same project state RM29 read — and the
+/// worker runs `probe_export` over plain data and
+/// sends the report back; `poll_qa_probes` stores it.
+/// Queues only when the destination file is actually
+/// there: a job whose worker claimed success for a
+/// file that does not exist is the worker-death case,
+/// which the finish path already reports as a
+/// failure — the probe's absence there is not a pass,
+/// and no probe is queued.
+fn queue_probe(
     project: &stykanimate_rs::model::Project,
     dest: &Path,
     window: Option<(usize, usize)>,
@@ -3142,11 +5412,17 @@ fn probe_and_store(
         return;
     }
     let expect = qa_expectations(project, window, audio_possible);
-    let report = probe_export(dest, &expect);
-    QA_REPORTS.with(|slot| {
-        let mut reports = slot.borrow_mut();
-        reports.retain(|r| r.dest != report.dest);
-        reports.push(report);
+    let (tx, rx) = mpsc::channel::<QaReport>();
+    let path = dest.to_path_buf();
+    QA_JOBS.with(|slot| {
+        slot.borrow_mut().push(QaJob {
+            dest: format!("./{}", display_name(dest)),
+            outcome: rx,
+        })
+    });
+    std::thread::spawn(move || {
+        let report = probe_export(&path, &expect);
+        let _ = tx.send(report);
     });
 }
 
@@ -3356,7 +5632,7 @@ fn export_sheet_action(s: &mut State) {
     match range {
         Some((a, b)) => {
             let _ = std::fs::create_dir_all(&dir);
-            match stykanimate_rs::export::export_sheet_range(&s.core.project, a, b, &path) {
+            match stykanimate_rs::export::export_sheet_range_pack(&s.core.project, a, b, &path) {
                 Ok(n) => {
                     s.core.status = format!(
                         "Exported {n}-frame spritesheet (frames {}–{}) to {}",
@@ -3368,7 +5644,7 @@ fn export_sheet_action(s: &mut State) {
                 Err(e) => s.core.status = format!("Spritesheet export failed: {e}"),
             }
         }
-        None => match stykanimate_rs::export::export_spritesheet(&s.core.project, &path) {
+        None => match stykanimate_rs::export::export_spritesheet_pack(&s.core.project, &path) {
             Ok(n) => {
                 s.core.status = format!("Exported {n}-frame spritesheet.")
             }
@@ -4470,6 +6746,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         DeliveryPreset::Youtube1080,
         DeliveryPreset::Youtube4k,
         DeliveryPreset::Gif,
+        DeliveryPreset::Shorts,
     ] {
         preset_row = preset_row.child(btn(
             p.key(),
@@ -4522,6 +6799,35 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             .w_full(),
         );
     }
+    if matches!(preset, DeliveryPreset::Shorts) {
+        // The reframing note (W2-43, IA-W2-43-1 (i)):
+        // shown only while Shorts is selected, so the
+        // user reads what the centred crop keeps before
+        // pressing Export delivery.
+        delivery = delivery.child(
+            text(i18n_wire::tr(core, "export_note_shorts"))
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .wrap()
+                .w_full(),
+        );
+    }
+    if !preset.is_gif() {
+        // The chapter line (W2-18): MP4 presets embed the
+        // project's chapter markers; the GIF preset makes
+        // no MP4, so the line belongs to the MP4 presets
+        // only. Absent entirely when nothing will embed.
+        if let Some(line) = delivery_chapters_text(core) {
+            delivery = delivery.child(
+                text(line)
+                    .key("xc-delivery-chapters")
+                    .font(type_::LABEL)
+                    .color(t.text_secondary)
+                    .wrap()
+                    .w_full(),
+            );
+        }
+    }
     panel = panel.child(delivery);
 
     if !s.export_recap.is_empty() {
@@ -4549,6 +6855,24 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         );
     }
 
+    // The in-flight QA probe (W2-64): while a probe
+    // worker is still running, one indeterminate line
+    // says so — the probe exposes no phase contract
+    // (W2-44), so the line claims a state, never a
+    // number. Before this seat the panel showed the
+    // previous verdicts (or nothing) with no sign a
+    // check was still running.
+    if qa_probe_active() {
+        panel = panel.child(
+            text(i18n_wire::tr(core, "export_qa_checking"))
+                .key("xc-qa-checking")
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .wrap()
+                .w_full(),
+        );
+    }
+
     // The post-export QA records (RM29): one line per
     // probed export, under the recap they sit beside —
     // the probe's verdict, never a rewrite of the recap.
@@ -4573,6 +6897,32 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             );
         }
         panel = panel.child(qa);
+    }
+
+    // The session probe history (W2-44): every landed
+    // verdict with the time it landed, newest first.
+    // The `xc-qa` lines above hold only the latest
+    // verdict per destination; this is the running
+    // record — including verdicts a re-export has
+    // since replaced up there — so a failure that was
+    // later fixed still shows it happened, and when.
+    let history = qa_history();
+    if !history.is_empty() {
+        let mut hist = col().key("xc-qa-history").gap(2.0);
+        for entry in history.iter().rev() {
+            hist = hist.child(
+                text(qa_history_line(core, entry))
+                    .font(type_::LABEL)
+                    .color(if entry.report.passed {
+                        t.text_secondary
+                    } else {
+                        Severity::Error.color(t)
+                    })
+                    .wrap()
+                    .w_full(),
+            );
+        }
+        panel = panel.child(hist);
     }
 
     // The failed sequence's residue (RM29): how many
@@ -4616,6 +6966,12 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
                     .w_full(),
             );
         }
+        // The cancel affordance (W2-64): one row under
+        // the lines, present for every job shape while
+        // the job runs — disabled-honest today (see
+        // `cancel_row`), the StopSignal-ready chrome
+        // for the D-4 build.
+        progress = progress.child(cancel_row(core, job, t));
         panel = panel.child(progress);
     }
 
@@ -5834,11 +8190,29 @@ mod tests {
         assert_eq!((render.done, render.total), (2, 5));
         assert_eq!((encode.done, encode.total), (1, 9));
         let lines = job_lines(&s.core, job);
-        assert_eq!(lines.len(), 2);
+        // Roadmap Wave 2 (W2-50): a third line rides
+        // under the two phase lines — the phase ETA
+        // for the active phase (the encode, the later
+        // phase reporting), estimated from that
+        // phase's own slot only. The separation this
+        // pin exists for is intact: the ETA merges no
+        // counts and reads no other slot. Its text
+        // expectation is built from the catalogue the
+        // code reads, so it holds before and after
+        // IA-W2-50-1's splice lands the keys.
+        assert_eq!(lines.len(), 3);
         assert_eq!(lines[0].0, "xc-progress-render");
         assert_eq!(lines[0].1, render_progress_line(&s.core, render));
         assert_eq!(lines[1].0, "xc-progress-encode");
         assert_eq!(lines[1].1, encode_progress_line(&s.core, encode));
+        assert_eq!(lines[2].0, "xc-progress-eta");
+        assert_eq!(
+            lines[2].1,
+            crate::rune_sec::i18n_wire::tr(&s.core, "export_eta_estimating").replace(
+                "{phase}",
+                &crate::rune_sec::i18n_wire::tr(&s.core, "export_phase_encode"),
+            )
+        );
         release_tx.send(()).expect("worker listening");
         poll_until_finished(&mut s);
     }
@@ -6128,13 +8502,26 @@ mod tests {
         let bundle = job.bundle.snapshot();
         assert_eq!((bundle.done, bundle.total, bundle.seen), (3, 8, true));
         assert_eq!(job.render.snapshot().done, 2);
-        // The readout is exactly the one bundle line,
-        // built from the bundle snapshot — no phase
-        // line, no merged figure.
+        // The readout is the bundle line, built from
+        // the bundle snapshot — no phase line, no
+        // merged figure — plus (Roadmap Wave 2,
+        // W2-50) the bundle slot's own ETA line under
+        // it, estimated from the bundle slot's samples
+        // alone: the stray render store surfaces
+        // nowhere, not even in the estimate. The text
+        // expectation is built from the catalogue the
+        // code reads, so it holds before and after
+        // IA-W2-50-1's splice.
         let lines = job_lines(&s.core, job);
-        assert_eq!(lines.len(), 1);
+        assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].0, "xc-progress-bundle");
         assert_eq!(lines[0].1, bundle_progress_line(&s.core, bundle));
+        assert_eq!(lines[1].0, "xc-progress-eta");
+        assert_eq!(
+            lines[1].1,
+            crate::rune_sec::i18n_wire::tr(&s.core, "export_eta_estimating")
+                .replace("{phase}", "images bundle")
+        );
         release_tx.send(()).expect("worker listening");
         poll_until_finished(&mut s);
     }
@@ -6168,7 +8555,7 @@ mod tests {
         // variable at the readout's render site,
         // so no gate extractor pattern — a key literal
         // in a `.key()` call, a helper-call literal,
-        // a `key:` field — captures them: the four line
+        // a `key:` field — captures them: the line
         // keys ride OUTSIDE the phase_j_checks counter
         // by design, disclosed in that script's floor
         // ledger at every ratchet since Wave W. The
@@ -6180,6 +8567,16 @@ mod tests {
         // join the artefact silently — it fails here
         // until it is named in the ledger and in this
         // set deliberately.
+        //
+        // Roadmap Wave 2 (W2-50): the fifth key IS
+        // named, deliberately — `xc-progress-eta`,
+        // the phase-ETA line `job_lines` appends
+        // while a phase is actively reporting (the
+        // MP4 and bundle scenarios below produce it
+        // in its estimating form). It rides outside
+        // the gate counter by the same F6 mechanism
+        // as the other four; IA-W2-50-2 carries the
+        // ledger disclosure for the gate script.
         let core = EditorCore::new();
         let mk = |kind: JobKind| {
             let (_tx, rx) = mpsc::channel::<ExportJobOutcome>();
@@ -6241,10 +8638,422 @@ mod tests {
             vec![
                 "xc-progress-bundle",
                 "xc-progress-encode",
+                "xc-progress-eta",
                 "xc-progress-render",
                 "xc-progress-working",
             ]
         );
+    }
+
+    // ---- Phase ETAs (Roadmap Wave 2, W2-50) ----
+    // The estimator is a pure function of synthetic
+    // samples; the annex pins drive the `store_*_at`
+    // seam with injected arrival times. No pin sleeps
+    // and none reads a wall clock for its evidence.
+
+    /// A job built directly over fresh slots (the AC9
+    /// pin's construction), for ETA readout scenarios.
+    fn eta_job(kind: JobKind) -> ExportJob {
+        let (_tx, rx) = mpsc::channel::<ExportJobOutcome>();
+        ExportJob {
+            kind,
+            dest: PathBuf::from("out-test"),
+            render: Arc::new(PhaseProgress::default()),
+            encode: Arc::new(PhaseProgress::default()),
+            bundle: Arc::new(PhaseProgress::default()),
+            outcome: rx,
+            shown_render: PhaseSnapshot::default(),
+            shown_encode: PhaseSnapshot::default(),
+            shown_bundle: PhaseSnapshot::default(),
+        }
+    }
+
+    fn render_ev(
+        done: usize,
+        total: usize,
+        finished: bool,
+    ) -> stykanimate_rs::export::RenderProgressEvent {
+        stykanimate_rs::export::RenderProgressEvent {
+            rendered_frames: done,
+            total_frames: total,
+            finished,
+        }
+    }
+
+    fn encode_ev(
+        done: usize,
+        total: usize,
+        finished: bool,
+    ) -> stykanimate_rs::export::EncodeProgressEvent {
+        stykanimate_rs::export::EncodeProgressEvent {
+            encoded_frames: done,
+            total_frames: total,
+            finished,
+        }
+    }
+
+    fn bundle_ev(
+        done: usize,
+        total: usize,
+        finished: bool,
+    ) -> stykanimate_rs::export::BundleProgressEvent {
+        stykanimate_rs::export::BundleProgressEvent {
+            completed_frames: done,
+            total_frames: total,
+            finished,
+        }
+    }
+
+    #[test]
+    fn eta_estimator_stays_estimating_without_a_measured_rate() {
+        // No samples at all.
+        assert_eq!(estimate_eta(&[], 100), EtaEstimate::Estimating);
+        // One sample: a point, not a rate.
+        assert_eq!(estimate_eta(&[(0.0, 1)], 100), EtaEstimate::Estimating);
+        // Plenty of advance over too short a span: a
+        // fast phase's rate is not quotable from 1.5 s
+        // of evidence.
+        assert_eq!(
+            estimate_eta(&[(0.0, 0), (1.5, 60)], 100),
+            EtaEstimate::Estimating
+        );
+        // A long span that barely advanced: two or
+        // three frames of evidence would swing the
+        // estimate by whole minutes either way.
+        assert_eq!(
+            estimate_eta(&[(0.0, 0), (6.0, 3)], 100),
+            EtaEstimate::Estimating
+        );
+        // No work left: the terminal is in flight and
+        // there is nothing to estimate.
+        assert_eq!(
+            estimate_eta(&[(0.0, 0), (6.0, 100)], 100),
+            EtaEstimate::Estimating
+        );
+        // A zero total (an empty project's terminal
+        // shape) never divides.
+        assert_eq!(estimate_eta(&[(0.0, 0), (6.0, 0)], 0), EtaEstimate::Estimating);
+    }
+
+    #[test]
+    fn eta_estimator_quotes_a_steady_rate_as_a_point() {
+        // 5 frames/s throughout: the overall and
+        // window rates agree, so one number — the
+        // remaining 80 frames at 5/s.
+        let est = estimate_eta(&[(0.0, 0), (2.0, 10), (4.0, 20), (6.0, 30)], 110);
+        assert_eq!(
+            est,
+            EtaEstimate::Remaining {
+                point_secs: 16.0,
+                low_secs: 16.0,
+                high_secs: 16.0,
+                bracketed: false,
+            }
+        );
+    }
+
+    #[test]
+    fn eta_estimator_brackets_when_the_rate_moves() {
+        // Accelerating: 60 frames in 14 s overall, but
+        // 40 of them in the last 4 s of the window —
+        // the window says 8 s left, the whole phase
+        // ~18.7 s; both ends are shown and the point
+        // is the recent estimate.
+        let est = estimate_eta(&[(0.0, 0), (10.0, 20), (14.0, 60)], 140);
+        let (point, low, high, bracketed) = match est {
+            EtaEstimate::Remaining {
+                point_secs,
+                low_secs,
+                high_secs,
+                bracketed,
+            } => (point_secs, low_secs, high_secs, bracketed),
+            other => panic!("expected a remaining estimate, got {other:?}"),
+        };
+        assert!(bracketed);
+        assert_eq!(point, 8.0);
+        assert_eq!(low, 8.0);
+        assert!((high - 80.0 / (60.0 / 14.0)).abs() < 1e-9);
+        // Decelerating: the mirror image — the recent
+        // rate is the slow one, so the point is the
+        // bracket's high end.
+        let est = estimate_eta(&[(0.0, 0), (4.0, 40), (14.0, 60)], 140);
+        let (point, low, high, bracketed) = match est {
+            EtaEstimate::Remaining {
+                point_secs,
+                low_secs,
+                high_secs,
+                bracketed,
+            } => (point_secs, low_secs, high_secs, bracketed),
+            other => panic!("expected a remaining estimate, got {other:?}"),
+        };
+        assert!(bracketed);
+        assert_eq!(point, 40.0);
+        assert_eq!(high, 40.0);
+        assert!((low - 80.0 / (60.0 / 14.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn eta_estimator_collapses_close_rates_to_the_recent_point() {
+        // Overall ~4.71 frames/s (21.2 s left), recent
+        // window 4 frames/s (25 s left): within the
+        // bracket ratio, so one number — the recent
+        // (freshest) estimate, with the ends kept for
+        // the record.
+        let est = estimate_eta(&[(0.0, 0), (10.0, 50), (14.0, 66)], 166);
+        let (point, low, high, bracketed) = match est {
+            EtaEstimate::Remaining {
+                point_secs,
+                low_secs,
+                high_secs,
+                bracketed,
+            } => (point_secs, low_secs, high_secs, bracketed),
+            other => panic!("expected a remaining estimate, got {other:?}"),
+        };
+        assert!(!bracketed);
+        assert_eq!(point, 25.0);
+        assert_eq!(high, 25.0);
+        assert!((low - 100.0 / (66.0 / 14.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn eta_time_text_quantises_to_five_seconds_and_rounds_outward() {
+        assert_eq!(eta_time_text(16.0, EtaRound::Nearest), "0:15");
+        assert_eq!(eta_time_text(18.0, EtaRound::Nearest), "0:20");
+        assert_eq!(eta_time_text(61.0, EtaRound::Down), "1:00");
+        assert_eq!(eta_time_text(61.0, EtaRound::Up), "1:05");
+        assert_eq!(eta_time_text(125.0, EtaRound::Nearest), "2:05");
+        // A positive estimate never reads 0:00.
+        assert_eq!(eta_time_text(2.0, EtaRound::Down), "0:05");
+        assert_eq!(eta_time_text(0.0, EtaRound::Nearest), "0:00");
+    }
+
+    #[test]
+    fn eta_samples_are_thinned_anchored_and_keep_the_terminal() {
+        let slot = PhaseProgress::default();
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
+        slot.store_render_at(render_ev(1, 10, false), at(0));
+        // 100 ms later: inside the thinning interval,
+        // so no sample — the count itself still lands
+        // in the snapshot; only the annex thins.
+        slot.store_render_at(render_ev(2, 10, false), at(100));
+        assert_eq!(slot.snapshot().done, 2);
+        slot.store_render_at(render_ev(3, 10, false), at(300));
+        // The terminal records even inside the
+        // interval, so the measured span ends at the
+        // phase's true end.
+        slot.store_render_at(render_ev(10, 10, true), at(350));
+        let samples = slot.eta_samples();
+        assert_eq!(samples.len(), 3);
+        assert_eq!(samples[0], (0.0, 1));
+        assert_eq!(samples[1].1, 3);
+        assert!((samples[1].0 - 0.3).abs() < 1e-6);
+        assert_eq!(samples[2].1, 10);
+        assert!((samples[2].0 - 0.35).abs() < 1e-6);
+        // A regressive count is refused: the annex
+        // never learns backwards. (No contract
+        // regresses; the guard keeps a broken one
+        // from poisoning the rates.)
+        let slot = PhaseProgress::default();
+        slot.store_render_at(render_ev(5, 10, false), at(0));
+        slot.store_render_at(render_ev(4, 10, false), at(1000));
+        assert_eq!(slot.eta_samples().len(), 1);
+    }
+
+    #[test]
+    fn job_phases_match_the_pipelines_measured_stages() {
+        // The census: every job shape's measured
+        // phases, in pipeline order. A new job shape
+        // extends `job_phases`' match (the compiler
+        // insists) and this table in the same commit;
+        // a new measured pipeline phase adds a
+        // contract, a slot and an `EtaPhase` — and
+        // fails here until the table learns it.
+        let cases: [(JobKind, &[EtaPhase]); 12] = [
+            (JobKind::PngFull, &[EtaPhase::Render]),
+            (JobKind::PngRange(0, 9), &[EtaPhase::Render]),
+            (JobKind::JpegFull, &[EtaPhase::Render]),
+            (JobKind::JpegRange(0, 9), &[EtaPhase::Render]),
+            (JobKind::Mp4Full, &[EtaPhase::Render, EtaPhase::Encode]),
+            (JobKind::Mp4Range(0, 9), &[EtaPhase::Render, EtaPhase::Encode]),
+            (JobKind::WebmFull, &[EtaPhase::Render, EtaPhase::Encode]),
+            (JobKind::WebmRange(0, 9), &[EtaPhase::Render, EtaPhase::Encode]),
+            (
+                JobKind::Mp4Preset(DeliveryPreset::Master),
+                &[EtaPhase::Render, EtaPhase::Encode],
+            ),
+            (JobKind::BundleImages, &[EtaPhase::Bundle]),
+            (JobKind::BundleVideo, &[EtaPhase::Bundle]),
+            (JobKind::BundlePublish, &[EtaPhase::Bundle]),
+        ];
+        for (kind, phases) in cases {
+            assert_eq!(job_phases(kind), phases, "phases for {kind:?}");
+        }
+        assert_eq!(
+            EtaPhase::ALL,
+            [EtaPhase::Render, EtaPhase::Encode, EtaPhase::Bundle]
+        );
+        // Each phase's slot is its own: storing the
+        // phase's contract event through `phase_slot`
+        // marks exactly that phase seen — and, while
+        // unfinished, active.
+        for phase in EtaPhase::ALL {
+            let kind = match phase {
+                EtaPhase::Render => JobKind::PngFull,
+                EtaPhase::Encode => JobKind::Mp4Full,
+                EtaPhase::Bundle => JobKind::BundleVideo,
+            };
+            let job = eta_job(kind);
+            match phase {
+                EtaPhase::Render => {
+                    phase_slot(&job, phase).store_render(render_ev(1, 10, false))
+                }
+                EtaPhase::Encode => {
+                    phase_slot(&job, phase).store_encode(encode_ev(1, 10, false))
+                }
+                EtaPhase::Bundle => {
+                    phase_slot(&job, phase).store_bundle(bundle_ev(1, 10, false))
+                }
+            }
+            assert!(phase_slot(&job, phase).snapshot().seen);
+            for other in EtaPhase::ALL {
+                if other != phase && job_phases(kind).contains(&other) {
+                    assert!(
+                        !phase_slot(&job, other).snapshot().seen,
+                        "{other:?} must stay unseen when {phase:?} reports"
+                    );
+                }
+            }
+            assert_eq!(active_phase(&job), Some(phase));
+        }
+    }
+
+    #[test]
+    fn job_lines_carry_the_eta_line_with_phase_and_basis_named() {
+        // The ETA line's catalogue keys ride
+        // IA-W2-50-1's splice (the Q7 pattern, like the
+        // progress-labels pin above): until the keys
+        // land, `tr` falls back to the key text and
+        // the text assertions below fail by design;
+        // the key/structure assertions hold either way.
+        let core = EditorCore::new();
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + std::time::Duration::from_secs(s);
+
+        // A video job mid-render: 20 frames in 4 s
+        // since the first event → 5 frames/s → ~15 s
+        // left for rendering, and the line names the
+        // unestimated encoding that follows.
+        let job = eta_job(JobKind::Mp4Full);
+        job.render.store_render_at(render_ev(1, 100, false), at(0));
+        job.render.store_render_at(render_ev(21, 100, false), at(4));
+        let lines = job_lines(&core, &job);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].0, "xc-progress-render");
+        assert_eq!(lines[1].0, "xc-progress-eta");
+        assert_eq!(
+            lines[1].1,
+            "Rendering time left: about 0:15 (at the rate measured so far) Encoding follows and is not estimated yet."
+        );
+
+        // The same render in a sequence job: no
+        // encoding follows, and the line does not
+        // claim one.
+        let job = eta_job(JobKind::PngFull);
+        job.render.store_render_at(render_ev(1, 100, false), at(0));
+        job.render.store_render_at(render_ev(21, 100, false), at(4));
+        let lines = job_lines(&core, &job);
+        assert_eq!(
+            lines[1].1,
+            "Rendering time left: about 0:15 (at the rate measured so far)"
+        );
+
+        // Encode active: the render terminal is
+        // stored and the encode's own samples drive
+        // its line — with no follow note, the encode
+        // being the last measured phase.
+        let job = eta_job(JobKind::Mp4Full);
+        job.render.store_render_at(render_ev(100, 100, true), at(0));
+        job.encode.store_encode_at(encode_ev(1, 100, false), at(0));
+        job.encode.store_encode_at(encode_ev(21, 100, false), at(4));
+        let lines = job_lines(&core, &job);
+        let eta = lines
+            .iter()
+            .find(|(k, _)| *k == "xc-progress-eta")
+            .expect("eta line present");
+        assert_eq!(
+            eta.1,
+            "Encoding time left: about 0:15 (at the rate measured so far)"
+        );
+
+        // Before a quotable rate exists, the line says
+        // the estimate is still forming, in the active
+        // phase's name.
+        let job = eta_job(JobKind::PngFull);
+        job.render.store_render_at(render_ev(1, 100, false), at(0));
+        let lines = job_lines(&core, &job);
+        assert_eq!(lines[1].0, "xc-progress-eta");
+        assert_eq!(lines[1].1, "Rendering time left: estimating…");
+
+        // No events yet: no ETA line at all — the
+        // working line stands alone.
+        let job = eta_job(JobKind::PngFull);
+        let lines = job_lines(&core, &job);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].0, "xc-progress-working");
+
+        // A bundle job estimates over its one combined
+        // count, named by the bundle's slot-data name.
+        let job = eta_job(JobKind::BundleVideo);
+        job.bundle.store_bundle_at(bundle_ev(1, 100, false), at(0));
+        job.bundle.store_bundle_at(bundle_ev(21, 100, false), at(4));
+        let lines = job_lines(&core, &job);
+        assert_eq!(lines[0].0, "xc-progress-bundle");
+        assert_eq!(
+            lines[1].1,
+            "video bundle time left: about 0:15 (at the rate measured so far)"
+        );
+    }
+
+    #[test]
+    fn every_job_shape_reads_cancel_unavailable_until_a_signal_lands() {
+        // W2-64: the cancel seam's standing answer. No
+        // stop signal exists (AC8's `StopSignal` is a
+        // design only; D-4 leaves its build to a user
+        // ruling), so every job shape — single-format,
+        // delivery preset, bundle, publish package —
+        // reads `Unavailable`, the state `cancel_row`
+        // renders as the inert button plus its reason
+        // note. When a signal lands, this pin is
+        // amended in the same commit that arms it,
+        // never before.
+        let mut s = crate::init();
+        for (kind, result) in [
+            (JobKind::PngFull, Ok(ExportJobResult::Frames(0))),
+            (
+                JobKind::Mp4Preset(DeliveryPreset::Master),
+                Err("test outcome".to_string()),
+            ),
+            (
+                JobKind::BundleImages,
+                Ok(ExportJobResult::Bundle(Vec::new())),
+            ),
+            (
+                JobKind::BundlePublish,
+                Ok(ExportJobResult::Publish(Vec::new())),
+            ),
+        ] {
+            let release = blocked_job(&mut s, kind, result);
+            let job = s.export_job.as_ref().expect("job running");
+            assert_eq!(job_cancel(job), JobCancel::Unavailable, "{kind:?}");
+            // The row itself constructs under both
+            // themes — construction is the assertable
+            // level for element internals.
+            let _ = cancel_row(&s.core, job, &rune::tok::theme(true));
+            let _ = cancel_row(&s.core, job, &rune::tok::theme(false));
+            release.send(()).expect("worker listening");
+            poll_until_finished(&mut s);
+        }
     }
 
     #[test]
@@ -6353,6 +9162,15 @@ mod tests {
         );
         assert_eq!(delivery_file_name("demo", DeliveryPreset::Youtube4k), "demo-4k.mp4");
         assert_eq!(delivery_file_name("demo", DeliveryPreset::Gif), "demo.gif");
+        // Roadmap Wave 2 (W2-43, IA-W2-43-1): the Shorts
+        // preset's dims are the core crop window of the
+        // 1920-tall reframe over the 960x720 demo stage
+        // (full frame 2560x1920, window 1080 wide).
+        assert_eq!(delivery_dims(&project, DeliveryPreset::Shorts), (1080, 1920));
+        assert_eq!(
+            delivery_file_name("demo", DeliveryPreset::Shorts),
+            "demo-shorts.mp4"
+        );
         // A stage with no usable height falls back to
         // the unscaled render rather than a NaN scale.
         let mut flat = named_project("Demo");
@@ -6391,6 +9209,10 @@ mod tests {
                 "export_overwrite_note",
                 "Heads up: {dest} already exists — the export will ask for a second press before overwriting it.",
             ),
+            (
+                "export_delivery_chapters",
+                "Chapter markers: {count} will be embedded in the MP4.",
+            ),
         ] {
             assert!(
                 crate::rune_sec::i18n_wire::key_in_table(key),
@@ -6407,6 +9229,43 @@ mod tests {
         assert_eq!(
             delivery_text(&core, DeliveryPreset::Master),
             "Delivery: Project master — 960×720 → ./export/untitled.mp4"
+        );
+    }
+
+    #[test]
+    fn delivery_chapters_line_counts_the_embeddable_chapters() {
+        // Roadmap Wave 2, W2-18: the chapterless demo
+        // shows no line at all; with chapters authored,
+        // the line names the count the core's own
+        // resolution will embed — a chapter fully
+        // shadowed by an earlier one (first match owns
+        // its frames) does not inflate the count. The
+        // composed sentence resolves through the
+        // `export_delivery_chapters` template, so like
+        // the pin above it passes once IA-W2-18-3 lands
+        // (the Q7 pattern).
+        let mut core = EditorCore::new();
+        assert_eq!(delivery_chapters_text(&core), None);
+        core.project.chapters = vec![
+            stykanimate_rs::model::Chapter {
+                title: "One".to_string(),
+                start_frame: 0,
+                end_frame: 3,
+            },
+            stykanimate_rs::model::Chapter {
+                title: "Shadowed".to_string(),
+                start_frame: 1,
+                end_frame: 2,
+            },
+            stykanimate_rs::model::Chapter {
+                title: "Two".to_string(),
+                start_frame: 3,
+                end_frame: 5,
+            },
+        ];
+        assert_eq!(
+            delivery_chapters_text(&core).unwrap(),
+            "Chapter markers: 2 will be embedded in the MP4."
         );
     }
 
@@ -6492,6 +9351,11 @@ mod tests {
         // leg: it falls back to the master name.
         let gif_targets = publish_targets(&core, DeliveryPreset::Gif);
         assert_eq!(gif_targets[0], targets[0]);
+        // Roadmap Wave 2 (W2-43, IA-W2-43-1): the Shorts
+        // selection names the master leg too — a package
+        // carries a landscape MP4 master by definition.
+        let shorts_targets = publish_targets(&core, DeliveryPreset::Shorts);
+        assert_eq!(shorts_targets[0], targets[0]);
         // A height preset names the MP4 member with
         // its suffix.
         let hd_targets = publish_targets(&core, DeliveryPreset::Youtube1080);
@@ -6939,6 +9803,833 @@ mod tests {
         );
     }
 
+    // ---- Episode QA probe (Roadmap Wave 2, W2-20 / P-16) ----
+
+    fn episode_check_named<'a>(report: &'a EpisodeQaReport, name: &str) -> &'a EpisodeCheck {
+        report
+            .checks
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("no {name} check in {report:?}"))
+    }
+
+    fn episode_expectations_fixture() -> EpisodeExpectations {
+        EpisodeExpectations {
+            qa: QaExpectations {
+                duration_secs: 6.0,
+                frames: Some(144),
+                audio_expected: true,
+                burn_in: None,
+            },
+            fps: 24.0,
+            total_frames: 144,
+            chapters: vec![
+                EpisodeChapterExpectation {
+                    title: "Opening".to_string(),
+                    start_secs: 0.0,
+                    end_secs: 3.0,
+                },
+                EpisodeChapterExpectation {
+                    title: "Finale".to_string(),
+                    start_secs: 3.0,
+                    end_secs: 6.0,
+                },
+            ],
+            title_cards_enabled: true,
+            cards: vec![
+                EpisodeCardExpectation {
+                    chapter: 0,
+                    title: "Opening".to_string(),
+                    at_secs: 1.25,
+                    text_rgb: [255, 255, 255],
+                },
+                EpisodeCardExpectation {
+                    chapter: 1,
+                    title: "Finale".to_string(),
+                    at_secs: 4.25,
+                    text_rgb: [255, 255, 255],
+                },
+            ],
+            cue_facts: vec![EpisodeCueFact {
+                index: 0,
+                start_frame: 24,
+                end_frame: 120,
+                chars: 19,
+                cps: 4.75,
+            }],
+            cue_targets: vec![0],
+        }
+    }
+
+    fn episode_measurements_healthy() -> EpisodeMeasurements {
+        EpisodeMeasurements {
+            probe: Some(VideoProbe {
+                duration_secs: 6.0,
+                has_video: true,
+                has_audio: true,
+                frames: Some(144),
+                width: 320,
+                height: 180,
+            }),
+            audio_scan: Some(EpisodeAudioScan {
+                peak: 0.5,
+                rms: 0.35,
+                silence_stretches: vec![(2.0, 2.5)],
+            }),
+            frame_samples: (0..12)
+                .map(|i| EpisodeFrameSample {
+                    at_secs: 0.25 + 0.5 * i as f32,
+                    luma: 0.3,
+                    fingerprint: 1000 + i as u64,
+                })
+                .collect(),
+            frame_interval_secs: 0.5,
+            file_chapters: Some(vec![
+                EpisodeFileChapter {
+                    title: "Opening".to_string(),
+                    start_secs: 0.0,
+                    end_secs: 3.0,
+                },
+                EpisodeFileChapter {
+                    title: "Finale".to_string(),
+                    start_secs: 3.0,
+                    end_secs: 6.0,
+                },
+            ]),
+            cue_ink: vec![Some(500)],
+            card_ink: vec![Some(900), Some(900)],
+        }
+    }
+
+    #[test]
+    fn episode_verdict_passes_a_healthy_episode() {
+        let report = episode_qa_verdict(
+            "./export/ep.mp4",
+            &episode_expectations_fixture(),
+            &episode_measurements_healthy(),
+            &EpisodeQaParams::default(),
+        );
+        assert!(report.passed, "checks: {:?}", report.checks);
+        assert!(
+            report.checks.iter().all(|c| c.status == EpisodeCheckStatus::Pass),
+            "checks: {:?}",
+            report.checks
+        );
+        assert!(report.summary.contains("0 failed"), "{}", report.summary);
+        assert!(report.summary.contains("0 unmeasured"), "{}", report.summary);
+    }
+
+    #[test]
+    fn episode_verdict_names_each_planted_defect() {
+        let params = EpisodeQaParams::default();
+        let expect = episode_expectations_fixture();
+        // A silent stretch inside a sounding mix: the
+        // level check still passes (the peak is real),
+        // the stretch check fails by name and span.
+        let mut m = episode_measurements_healthy();
+        m.audio_scan.as_mut().expect("scan").silence_stretches = vec![(2.0, 6.0)];
+        let report = episode_qa_verdict("./ep.mp4", &expect, &m, &params);
+        assert!(!report.passed);
+        assert_eq!(
+            episode_check_named(&report, "audio").status,
+            EpisodeCheckStatus::Pass
+        );
+        let stretch = episode_check_named(&report, "silence-stretches");
+        assert_eq!(stretch.status, EpisodeCheckStatus::Fail);
+        assert!(
+            stretch.evidence.contains("silent from 2.0s to 6.0s"),
+            "{}",
+            stretch.evidence
+        );
+        // A black stretch: samples 6..12 dark (3.0s–6.0s).
+        let mut m = episode_measurements_healthy();
+        for s in &mut m.frame_samples[6..] {
+            s.luma = 0.0;
+        }
+        let report = episode_qa_verdict("./ep.mp4", &expect, &m, &params);
+        let black = episode_check_named(&report, "black-stretches");
+        assert_eq!(black.status, EpisodeCheckStatus::Fail);
+        assert!(
+            black.evidence.contains("black frames from 3.0s to 6.0s"),
+            "{}",
+            black.evidence
+        );
+        assert_eq!(
+            episode_check_named(&report, "frozen-stretches").status,
+            EpisodeCheckStatus::Pass
+        );
+        // A frozen stretch: samples 4..12 identical
+        // (2.0s–6.0s) under a lit picture.
+        let mut m = episode_measurements_healthy();
+        for s in &mut m.frame_samples[4..] {
+            s.fingerprint = 42;
+        }
+        let report = episode_qa_verdict("./ep.mp4", &expect, &m, &params);
+        let frozen = episode_check_named(&report, "frozen-stretches");
+        assert_eq!(frozen.status, EpisodeCheckStatus::Fail);
+        assert!(
+            frozen.evidence.contains("frozen from 2.0s to 6.0s"),
+            "{}",
+            frozen.evidence
+        );
+        // Missing chapter markers.
+        let mut m = episode_measurements_healthy();
+        m.file_chapters = Some(Vec::new());
+        let report = episode_qa_verdict("./ep.mp4", &expect, &m, &params);
+        let chapters = episode_check_named(&report, "chapters");
+        assert_eq!(chapters.status, EpisodeCheckStatus::Fail);
+        assert!(
+            chapters.evidence.contains("0 chapter markers in the file, 2 expected"),
+            "{}",
+            chapters.evidence
+        );
+        // A mistitled marker fails on the title, a
+        // mistimed one on the start.
+        let mut m = episode_measurements_healthy();
+        m.file_chapters.as_mut().expect("chapters")[1].title = "End".to_string();
+        let report = episode_qa_verdict("./ep.mp4", &expect, &m, &params);
+        let chapters = episode_check_named(&report, "chapters");
+        assert_eq!(chapters.status, EpisodeCheckStatus::Fail);
+        assert!(chapters.evidence.contains("\"End\""), "{}", chapters.evidence);
+        // A missing title card, named by chapter.
+        let mut m = episode_measurements_healthy();
+        m.card_ink = vec![Some(0), Some(900)];
+        let report = episode_qa_verdict("./ep.mp4", &expect, &m, &params);
+        let cards = episode_check_named(&report, "title-cards");
+        assert_eq!(cards.status, EpisodeCheckStatus::Fail);
+        assert!(
+            cards.evidence.contains("chapter 1 (\"Opening\")"),
+            "{}",
+            cards.evidence
+        );
+        // A missing burn-in at the spot-checked cue.
+        let mut m = episode_measurements_healthy();
+        m.cue_ink = vec![Some(0)];
+        let report = episode_qa_verdict("./ep.mp4", &expect, &m, &params);
+        assert_eq!(
+            episode_check_named(&report, "subtitles").status,
+            EpisodeCheckStatus::Fail
+        );
+        // Duration and frame-count drift.
+        let mut m = episode_measurements_healthy();
+        m.probe.as_mut().expect("probe").duration_secs = 9.0;
+        m.probe.as_mut().expect("probe").frames = Some(20);
+        let report = episode_qa_verdict("./ep.mp4", &expect, &m, &params);
+        assert_eq!(
+            episode_check_named(&report, "duration").status,
+            EpisodeCheckStatus::Fail
+        );
+        assert_eq!(
+            episode_check_named(&report, "frame-count").status,
+            EpisodeCheckStatus::Fail
+        );
+    }
+
+    #[test]
+    fn episode_verdict_reports_reading_speed_without_judging_it() {
+        // D-9: a very fast cue is a reported fact, never
+        // a verdict — the roadmap has set no threshold.
+        let mut expect = episode_expectations_fixture();
+        expect.cue_facts[0].cps = 42.0;
+        expect.cue_facts[0].chars = 168;
+        let report = episode_qa_verdict(
+            "./ep.mp4",
+            &expect,
+            &episode_measurements_healthy(),
+            &EpisodeQaParams::default(),
+        );
+        let timing = episode_check_named(&report, "cue-timing");
+        assert_eq!(timing.status, EpisodeCheckStatus::Pass);
+        assert!(timing.evidence.contains("42.0 chars/s"), "{}", timing.evidence);
+        assert!(timing.evidence.contains("not judged"), "{}", timing.evidence);
+        assert!(report.passed);
+    }
+
+    #[test]
+    fn episode_verdict_catches_a_cue_past_the_episode_end() {
+        let mut expect = episode_expectations_fixture();
+        expect.cue_facts[0].end_frame = 200;
+        let report = episode_qa_verdict(
+            "./ep.mp4",
+            &expect,
+            &episode_measurements_healthy(),
+            &EpisodeQaParams::default(),
+        );
+        let timing = episode_check_named(&report, "cue-timing");
+        assert_eq!(timing.status, EpisodeCheckStatus::Fail);
+        assert!(
+            timing.evidence.contains("runs past the episode end"),
+            "{}",
+            timing.evidence
+        );
+        assert!(!report.passed);
+    }
+
+    #[test]
+    fn episode_verdict_unmeasured_is_first_class() {
+        let params = EpisodeQaParams::default();
+        let expect = episode_expectations_fixture();
+        // Decodes that never landed: the level check
+        // fails (audio was expected — RM29's rule),
+        // everything downstream of the missing
+        // measurements is Unmeasured, not passed.
+        let mut m = episode_measurements_healthy();
+        m.audio_scan = None;
+        m.frame_samples = Vec::new();
+        m.file_chapters = None;
+        m.cue_ink = vec![None];
+        m.card_ink = vec![None, None];
+        let report = episode_qa_verdict("./ep.mp4", &expect, &m, &params);
+        assert_eq!(
+            episode_check_named(&report, "audio").status,
+            EpisodeCheckStatus::Fail
+        );
+        for name in [
+            "silence-stretches",
+            "black-stretches",
+            "frozen-stretches",
+            "subtitles",
+            "title-cards",
+            "chapters",
+        ] {
+            assert_eq!(
+                episode_check_named(&report, name).status,
+                EpisodeCheckStatus::Unmeasured,
+                "{name} should be Unmeasured"
+            );
+        }
+        // An unprobeable file: one probe failure, the
+        // file checks Unmeasured, and the project-side
+        // cue-timing check still judges.
+        let report = episode_qa_verdict(
+            "./ep.mp4",
+            &expect,
+            &EpisodeMeasurements::default(),
+            &params,
+        );
+        assert!(!report.passed);
+        assert_eq!(
+            episode_check_named(&report, "probe").status,
+            EpisodeCheckStatus::Fail
+        );
+        assert_eq!(
+            episode_check_named(&report, "duration").status,
+            EpisodeCheckStatus::Unmeasured
+        );
+        assert_eq!(
+            episode_check_named(&report, "cue-timing").status,
+            EpisodeCheckStatus::Pass
+        );
+    }
+
+    #[test]
+    fn episode_audio_scan_finds_stretches_and_meters() {
+        // 1s of tone, 3s of digital silence, 1s of tone
+        // at a 1 kHz rate (50-sample windows).
+        let mut samples = vec![0.5f32; 1000];
+        samples.extend(vec![0.0f32; 3000]);
+        samples.extend(vec![0.5f32; 1000]);
+        let scan = audio_scan(&samples, 1000, QA_SILENCE_PEAK);
+        assert_eq!(scan.peak, 0.5);
+        assert!((scan.rms - (0.1f32).sqrt()).abs() < 1e-5, "{}", scan.rms);
+        assert_eq!(scan.silence_stretches.len(), 1);
+        let (a, b) = scan.silence_stretches[0];
+        assert!((a - 1.0).abs() < 0.06 && (b - 4.0).abs() < 0.06, "{a}..{b}");
+        // A wholly silent file is one stretch from 0.
+        let scan = audio_scan(&vec![0.0f32; 2000], 1000, QA_SILENCE_PEAK);
+        assert_eq!(scan.silence_stretches.len(), 1);
+        let (a, b) = scan.silence_stretches[0];
+        assert!(a == 0.0 && (b - 2.0).abs() < 0.06, "{a}..{b}");
+        // No samples, no stretches — absence, not a pass
+        // manufactured from nothing.
+        let scan = audio_scan(&[], 44100, QA_SILENCE_PEAK);
+        assert!(scan.silence_stretches.is_empty());
+        assert_eq!(scan.peak, 0.0);
+    }
+
+    #[test]
+    fn episode_ffmetadata_parse_round_trips_titles_and_times() {
+        let mut project = stykanimate_rs::model::Project::new_demo();
+        project.fps = 24.0;
+        let frame = project.frames[0].clone();
+        project.frames = vec![frame; 144];
+        project.chapters = vec![
+            stykanimate_rs::model::Chapter {
+                title: "A; B=C #D \\ E".to_string(),
+                start_frame: 0,
+                end_frame: 72,
+            },
+            stykanimate_rs::model::Chapter {
+                title: "Finale".to_string(),
+                start_frame: 72,
+                end_frame: 144,
+            },
+        ];
+        let doc = stykanimate_rs::export::ffmetadata_chapters(&project)
+            .expect("chapters resolve to a document");
+        let parsed = parse_ffmetadata_chapters(&doc);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].title, "A; B=C #D \\ E");
+        assert_eq!((parsed[0].start_secs, parsed[0].end_secs), (0.0, 3.0));
+        assert_eq!(parsed[1].title, "Finale");
+        assert_eq!((parsed[1].start_secs, parsed[1].end_secs), (3.0, 6.0));
+        assert!(parse_ffmetadata_chapters(";FFMETADATA1\n").is_empty());
+    }
+
+    #[test]
+    fn episode_ffprobe_chapters_json_parses() {
+        let json = r#"{"chapters":[
+            {"id":0,"time_base":"1/1000","start":0,"start_time":"0.000000","end":3000,"end_time":"3.000000","tags":{"title":"Opening"}},
+            {"id":1,"time_base":"1/1000","start":3000,"start_time":"3.000000","end":6000,"end_time":"6.000000","tags":{"title":"Finale"}}
+        ]}"#;
+        let chapters = parse_ffprobe_chapters_json(json).expect("valid output parses");
+        assert_eq!(chapters.len(), 2);
+        assert_eq!(chapters[0].title, "Opening");
+        assert_eq!((chapters[1].start_secs, chapters[1].end_secs), (3.0, 6.0));
+        // A chapterless file parses to an empty list —
+        // absence of markers is a measurement, not an
+        // error.
+        assert_eq!(
+            parse_ffprobe_chapters_json(r#"{"chapters":[]}"#),
+            Some(Vec::new())
+        );
+        assert!(parse_ffprobe_chapters_json("not json").is_none());
+    }
+
+    #[test]
+    fn episode_centre_ink_counts_the_middle_band_only() {
+        // 8×8 frame: white in the centre band counts,
+        // white at the top and bottom edges does not.
+        let (w, h) = (8usize, 8usize);
+        let mut rgb = vec![0u8; w * h * 3];
+        let mut paint = |rgb: &mut Vec<u8>, x: usize, y: usize| {
+            let i = (y * w + x) * 3;
+            rgb[i] = 255;
+            rgb[i + 1] = 255;
+            rgb[i + 2] = 255;
+        };
+        for y in 3..5 {
+            for x in 2..6 {
+                paint(&mut rgb, x, y);
+            }
+        }
+        paint(&mut rgb, 0, 0);
+        paint(&mut rgb, 7, 7);
+        assert_eq!(centre_ink_count(&rgb, w, h, [255, 255, 255]), 8);
+        assert_eq!(centre_ink_count(&rgb, w, h, [255, 0, 0]), 0);
+        assert_eq!(centre_ink_count(&[], w, h, [255, 255, 255]), 0);
+    }
+
+    /// The fixture project: 144 frames at 24 fps (a 6s
+    /// episode), two chapters, title cards on at the
+    /// 2.5s default, one cue over frames 24–120, and an
+    /// unmuted clip whose file exists so audio is
+    /// expected (RM29's placeholder-file precedent).
+    /// Returns the project and the clip path to clean
+    /// up.
+    fn episode_project() -> (stykanimate_rs::model::Project, PathBuf) {
+        let mut project = stykanimate_rs::model::Project::new_demo();
+        project.fps = 24.0;
+        let frame = project.frames[0].clone();
+        project.frames = vec![frame; 144];
+        project.chapters = vec![
+            stykanimate_rs::model::Chapter {
+                title: "Opening".to_string(),
+                start_frame: 0,
+                end_frame: 72,
+            },
+            stykanimate_rs::model::Chapter {
+                title: "Finale".to_string(),
+                start_frame: 72,
+                end_frame: 144,
+            },
+        ];
+        project.title_cards.enabled = true;
+        project.subtitles = vec![stykanimate_rs::subtitles::SubtitleCue {
+            start_frame: 24,
+            end_frame: 120,
+            text: "Hello episode world".to_string(),
+            speaker: None,
+        }];
+        let clip_path = qa_temp_path("epclip", "wav");
+        std::fs::write(&clip_path, b"placeholder").expect("temp clip");
+        project.audio.push(stykanimate_rs::model::AudioClip {
+            path: clip_path.to_string_lossy().into_owned(),
+            start_frame: 0,
+            gain: 1.0,
+            muted: false,
+        });
+        (project, clip_path)
+    }
+
+    #[test]
+    fn episode_expectations_read_the_project() {
+        let (project, clip_path) = episode_project();
+        let expect = episode_expectations(&project);
+        assert!(expect.qa.audio_expected);
+        assert_eq!(expect.total_frames, 144);
+        assert_eq!(expect.qa.duration_secs, 6.0);
+        assert_eq!(
+            expect.qa.frames,
+            Some(stykanimate_rs::export::sampled_frame_total(&project))
+        );
+        // Chapters resolve through the exporter's own
+        // document: ms on the authored clock.
+        assert_eq!(expect.chapters.len(), 2);
+        assert_eq!(expect.chapters[0].title, "Opening");
+        assert_eq!(
+            (expect.chapters[1].start_secs, expect.chapters[1].end_secs),
+            (3.0, 6.0)
+        );
+        // Card targets sit at the windows' middle
+        // frames: [0,60) → frame 30 → 1.25s, [72,132) →
+        // frame 102 → 4.25s.
+        assert!(expect.title_cards_enabled);
+        assert_eq!(expect.cards.len(), 2);
+        assert_eq!(expect.cards[0].at_secs, 1.25);
+        assert_eq!(expect.cards[1].at_secs, 4.25);
+        assert_eq!(expect.cards[0].text_rgb, [255, 255, 255]);
+        // The cue fact: 19 chars over 96 frames (4.0s).
+        assert_eq!(expect.cue_facts.len(), 1);
+        assert_eq!(expect.cue_facts[0].chars, 19);
+        assert!((expect.cue_facts[0].cps - 4.75).abs() < 1e-4);
+        assert_eq!(expect.cue_targets, vec![0]);
+        // Cards off: no targets, and the flag says why.
+        let (mut off, _) = episode_project();
+        off.title_cards.enabled = false;
+        let expect = episode_expectations(&off);
+        assert!(!expect.title_cards_enabled);
+        assert!(expect.cards.is_empty());
+        let _ = std::fs::remove_file(&clip_path);
+    }
+
+    #[test]
+    fn episode_cue_coverage_merges_overlaps_and_clamps() {
+        let mut expect = episode_expectations_fixture();
+        expect.cue_facts = vec![
+            EpisodeCueFact {
+                index: 0,
+                start_frame: 0,
+                end_frame: 72,
+                chars: 1,
+                cps: 0.0,
+            },
+            EpisodeCueFact {
+                index: 1,
+                start_frame: 48,
+                end_frame: 200,
+                chars: 1,
+                cps: 0.0,
+            },
+        ];
+        // [0,72) ∪ [48,144 clamped) = the whole episode.
+        assert_eq!(episode_cue_coverage(&expect), 1.0);
+        expect.cue_facts.truncate(1);
+        assert_eq!(episode_cue_coverage(&expect), 0.5);
+    }
+
+    /// Run ffmpeg over a fixture argument list (RM29's
+    /// real-file precedent: CI installs ffmpeg).
+    fn episode_ffmpeg(args: &[&str]) {
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y"])
+            .args(args)
+            .status()
+            .expect("ffmpeg is installed in CI");
+        assert!(status.success(), "fixture encode failed: {args:?}");
+    }
+
+    /// The moving patch: a solid mid-tone square riding
+    /// an overlay path over a dark blue-grey ground —
+    /// no near-white anywhere (so ink counts read only
+    /// the planted bars), never black, never still.
+    const EP_MOVING: &str =
+        "[0:v][1:v]overlay=x='100+60*sin(t*1.7)':y='60+30*cos(t*1.1)'[bg]";
+    /// The good episode's planted bars: white card bars
+    /// in the centre band over both card windows
+    /// (0–2.5s, 3–5.5s) and a white cue bar in the
+    /// bottom band over the cue's span (1–5s).
+    const EP_BOXES: &str = "[bg]drawbox=x=60:y=76:w=200:h=28:color=white:t=fill:enable='between(t,0,2.5)',drawbox=x=60:y=76:w=200:h=28:color=white:t=fill:enable='between(t,3,5.5)',drawbox=x=40:y=146:w=240:h=20:color=white:t=fill:enable='between(t,1,5)'[v]";
+    /// The same episode with the card bars never drawn.
+    const EP_BOXES_NO_CARD: &str =
+        "[bg]drawbox=x=40:y=146:w=240:h=20:color=white:t=fill:enable='between(t,1,5)'[v]";
+
+    /// Plant the chapter markers into a fixture base
+    /// the way the app's own embed does (a stream-copy
+    /// remux against an FFMETADATA document).
+    fn episode_remux_chapters(dir: &Path, base: &Path) -> PathBuf {
+        let meta = dir.join("chapters.txt");
+        std::fs::write(
+            &meta,
+            ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=3000\ntitle=Opening\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=3000\nEND=6000\ntitle=Finale\n",
+        )
+        .expect("chapter document");
+        let out = dir.join("episode.mp4");
+        episode_ffmpeg(&[
+            "-i",
+            base.to_str().expect("base path"),
+            "-i",
+            meta.to_str().expect("meta path"),
+            "-map",
+            "0",
+            "-map_chapters",
+            "1",
+            "-c",
+            "copy",
+            out.to_str().expect("out path"),
+        ]);
+        out
+    }
+
+    /// The synthetic good episode (or a sibling with
+    /// one planted defect): 6s at 24 fps, 320×180, a
+    /// 440 Hz tone throughout — optionally silenced
+    /// from 2s on — and optionally chapter-marked.
+    fn episode_fixture(
+        tag: &str,
+        boxes: &str,
+        silent_stretch: bool,
+        chapters: bool,
+    ) -> PathBuf {
+        let dir = qa_fixture_dir(tag);
+        let base = dir.join("base.mp4");
+        let audio = if silent_stretch {
+            "[2:a]volume=enable='gte(t,2)':volume=0[a]"
+        } else {
+            "[2:a]anull[a]"
+        };
+        let graph = format!("{EP_MOVING};{boxes};{audio}");
+        episode_ffmpeg(&[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x203040:size=320x180:duration=6:rate=24",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x907040:size=60x40:duration=6:rate=24",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=6",
+            "-filter_complex",
+            graph.as_str(),
+            "-map",
+            "[v]",
+            "-map",
+            "[a]",
+            "-t",
+            "6",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            base.to_str().expect("base path"),
+        ]);
+        if chapters {
+            episode_remux_chapters(&dir, &base)
+        } else {
+            base
+        }
+    }
+
+    #[test]
+    fn episode_probe_passes_the_synthetic_good_episode() {
+        let (project, clip_path) = episode_project();
+        let path = episode_fixture("epgood", EP_BOXES, false, true);
+        let report = probe_episode(&path, &project, &EpisodeQaParams::default());
+        assert!(report.passed, "checks: {:?}", report.checks);
+        assert!(
+            report.checks.iter().all(|c| c.status == EpisodeCheckStatus::Pass),
+            "checks: {:?}",
+            report.checks
+        );
+        let _ = std::fs::remove_file(&clip_path);
+    }
+
+    #[test]
+    fn episode_probe_catches_the_planted_silent_stretch() {
+        let (project, clip_path) = episode_project();
+        let path = episode_fixture("epsilent", EP_BOXES, true, true);
+        let report = probe_episode(&path, &project, &EpisodeQaParams::default());
+        assert!(!report.passed);
+        // The mix sounds (its peak is real) — only the
+        // stretch is the defect.
+        assert_eq!(
+            episode_check_named(&report, "audio").status,
+            EpisodeCheckStatus::Pass
+        );
+        let stretch = episode_check_named(&report, "silence-stretches");
+        assert_eq!(stretch.status, EpisodeCheckStatus::Fail);
+        assert!(
+            stretch.evidence.contains("audio silent from 2."),
+            "{}",
+            stretch.evidence
+        );
+        let _ = std::fs::remove_file(&clip_path);
+    }
+
+    #[test]
+    fn episode_probe_catches_the_planted_black_stretch() {
+        let (project, clip_path) = episode_project();
+        let dir = qa_fixture_dir("epblack");
+        let out = dir.join("episode.mp4");
+        episode_ffmpeg(&[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x203040:size=320x180:duration=3:rate=24",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x907040:size=60x40:duration=3:rate=24",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:size=320x180:duration=3:rate=24",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=6",
+            "-filter_complex",
+            "[0:v][1:v]overlay=x='100+60*sin(t*1.7)':y='60+30*cos(t*1.1)'[a];[a][2:v]concat=n=2:v=1:a=0[v];[3:a]anull[a]",
+            "-map",
+            "[v]",
+            "-map",
+            "[a]",
+            "-t",
+            "6",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            out.to_str().expect("out path"),
+        ]);
+        let report = probe_episode(&out, &project, &EpisodeQaParams::default());
+        let black = episode_check_named(&report, "black-stretches");
+        assert_eq!(black.status, EpisodeCheckStatus::Fail, "{report:?}");
+        assert!(
+            black.evidence.contains("black frames from"),
+            "{}",
+            black.evidence
+        );
+        let _ = std::fs::remove_file(&clip_path);
+    }
+
+    #[test]
+    fn episode_probe_catches_the_planted_frozen_stretch() {
+        let (project, clip_path) = episode_project();
+        let dir = qa_fixture_dir("epfrozen");
+        let out = dir.join("episode.mp4");
+        episode_ffmpeg(&[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x203040:size=320x180:duration=2:rate=24",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x907040:size=60x40:duration=2:rate=24",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x203040:size=320x180:duration=4:rate=24",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x907040:size=60x40:duration=4:rate=24",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=6",
+            "-filter_complex",
+            "[0:v][1:v]overlay=x='100+60*sin(t*1.7)':y='60+30*cos(t*1.1)'[a];[2:v][3:v]overlay=x=120:y=70[b];[a][b]concat=n=2:v=1:a=0[v];[4:a]anull[a]",
+            "-map",
+            "[v]",
+            "-map",
+            "[a]",
+            "-t",
+            "6",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            out.to_str().expect("out path"),
+        ]);
+        let report = probe_episode(&out, &project, &EpisodeQaParams::default());
+        let frozen = episode_check_named(&report, "frozen-stretches");
+        assert_eq!(frozen.status, EpisodeCheckStatus::Fail, "{report:?}");
+        assert!(
+            frozen.evidence.contains("picture frozen from"),
+            "{}",
+            frozen.evidence
+        );
+        // The frozen picture is lit — the black check is
+        // not the one that fires.
+        assert_eq!(
+            episode_check_named(&report, "black-stretches").status,
+            EpisodeCheckStatus::Pass
+        );
+        let _ = std::fs::remove_file(&clip_path);
+    }
+
+    #[test]
+    fn episode_probe_catches_missing_chapter_markers() {
+        let (project, clip_path) = episode_project();
+        let path = episode_fixture("epnochapters", EP_BOXES, false, false);
+        let report = probe_episode(&path, &project, &EpisodeQaParams::default());
+        let chapters = episode_check_named(&report, "chapters");
+        assert_eq!(chapters.status, EpisodeCheckStatus::Fail);
+        assert!(
+            chapters.evidence.contains("0 chapter markers in the file, 2 expected"),
+            "{}",
+            chapters.evidence
+        );
+        let _ = std::fs::remove_file(&clip_path);
+    }
+
+    #[test]
+    fn episode_probe_catches_a_missing_title_card() {
+        let (project, clip_path) = episode_project();
+        let path = episode_fixture("epnocard", EP_BOXES_NO_CARD, false, true);
+        let report = probe_episode(&path, &project, &EpisodeQaParams::default());
+        let cards = episode_check_named(&report, "title-cards");
+        assert_eq!(cards.status, EpisodeCheckStatus::Fail, "{report:?}");
+        assert!(
+            cards.evidence.contains("title card missing for chapter 1"),
+            "{}",
+            cards.evidence
+        );
+        // The cue bar is still drawn — subtitles pass.
+        assert_eq!(
+            episode_check_named(&report, "subtitles").status,
+            EpisodeCheckStatus::Pass
+        );
+        let _ = std::fs::remove_file(&clip_path);
+    }
+
+    #[test]
+    fn episode_probe_catches_a_cue_past_the_episode_end() {
+        let (mut project, clip_path) = episode_project();
+        project.subtitles[0].end_frame = 200;
+        let path = episode_fixture("epcuepast", EP_BOXES, false, true);
+        let report = probe_episode(&path, &project, &EpisodeQaParams::default());
+        let timing = episode_check_named(&report, "cue-timing");
+        assert_eq!(timing.status, EpisodeCheckStatus::Fail);
+        assert!(
+            timing.evidence.contains("runs past the episode end"),
+            "{}",
+            timing.evidence
+        );
+        let _ = std::fs::remove_file(&clip_path);
+    }
+
     #[test]
     fn sequence_residue_counts_only_frame_files() {
         let dir = qa_fixture_dir("residue");
@@ -7039,6 +10730,160 @@ mod tests {
         assert_eq!(
             qa_line(&core, &fail),
             "QA failed — audio is silent (peak -inf dB) — 2.0s · 48 frames"
+        );
+    }
+
+    // ---- QA probe worker + history (W2-44) ----
+
+    /// Drain probe reports until none are in flight —
+    /// bounded, so a broken drain fails the pin instead
+    /// of hanging the suite.
+    fn drain_probes() {
+        for _ in 0..2000 {
+            poll_qa_probes();
+            if !qa_probe_active() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("QA probe did not land");
+    }
+
+    #[test]
+    fn queued_probe_lands_through_the_drain_not_the_finish_path() {
+        // The healthy real-file fixture, probed through
+        // the worker path end to end: queueing stores
+        // nothing (the finish path no longer probes
+        // inline); the drain lands the verdict in both
+        // the per-destination reports and the history.
+        let path = lavfi_mp4("worker", "sine=frequency=440:duration=1");
+        let core = EditorCore::new();
+        queue_probe(&core.project, &path, None, true);
+        assert!(qa_probe_active());
+        assert!(
+            qa_reports().iter().all(|r| !r.dest.ends_with("probe.mp4")),
+            "no report may be stored before the drain runs"
+        );
+        drain_probes();
+        assert!(!qa_probe_active());
+        assert!(
+            qa_reports().iter().any(|r| r.dest.ends_with("probe.mp4")),
+            "the drained verdict is stored"
+        );
+        assert!(
+            qa_history()
+                .iter()
+                .any(|e| e.report.dest.ends_with("probe.mp4")),
+            "and enters the session history"
+        );
+    }
+
+    #[test]
+    fn panel_constructs_while_a_probe_is_in_flight() {
+        // W2-64: the in-flight probe's checking line is
+        // part of the panel's construction — while a
+        // probe runs, the panel builds (both themes)
+        // with the line's branch taken; once the drain
+        // lands the verdict, it builds with it gone.
+        // The line claims a state, never a number: the
+        // probe exposes no phase contract (W2-44).
+        let s = crate::init();
+        let path = lavfi_mp4("checking", "sine=frequency=440:duration=1");
+        queue_probe(&s.core.project, &path, None, true);
+        assert!(qa_probe_active());
+        let _ = export_panel(&s, &rune::tok::theme(true));
+        let _ = export_panel(&s, &rune::tok::theme(false));
+        drain_probes();
+        assert!(!qa_probe_active());
+        let _ = export_panel(&s, &rune::tok::theme(true));
+    }
+
+    #[test]
+    fn poll_export_job_stays_active_while_a_probe_is_in_flight() {
+        // The shell-facing contract: the same tick that
+        // drains the export job drains the probes, and
+        // reads active until the verdict lands — so an
+        // otherwise idle window keeps waking and the
+        // QA line repaints when it arrives.
+        let mut s = crate::init();
+        let path = lavfi_mp4("poll", "sine=frequency=440:duration=1");
+        queue_probe(&s.core.project, &path, None, true);
+        for _ in 0..2000 {
+            let (_redraw, active) = poll_export_job(&mut s);
+            if !active {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            qa_reports().iter().any(|r| r.dest.ends_with("probe.mp4")),
+            "the verdict landed through poll_export_job"
+        );
+        assert_eq!(poll_export_job(&mut s), (false, false));
+    }
+
+    #[test]
+    fn dead_probe_worker_lands_a_named_failure() {
+        // A probe worker that dies without sending is
+        // the export worker-death case one level down:
+        // the drain stores a failure naming the probe's
+        // own stoppage — never a pass, never silence.
+        let (_tx, rx) = mpsc::channel::<QaReport>();
+        drop(_tx);
+        QA_JOBS.with(|slot| {
+            slot.borrow_mut().push(QaJob {
+                dest: "./export/dead.mp4".to_string(),
+                outcome: rx,
+            })
+        });
+        assert!(poll_qa_probes());
+        let report = qa_reports()
+            .into_iter()
+            .find(|r| r.dest == "./export/dead.mp4")
+            .expect("the death report is stored");
+        assert!(!report.passed);
+        assert!(
+            report.failures.iter().any(|f| f.contains("QA probe stopped")),
+            "failures: {:?}",
+            report.failures
+        );
+    }
+
+    #[test]
+    fn qa_history_caps_stamps_and_names_the_failing_check() {
+        // The history keeps the newest QA_HISTORY_MAX
+        // verdicts, oldest dropped; each line carries
+        // the landing stamp and, on failure, the named
+        // check — the history view's whole content.
+        for i in 0..QA_HISTORY_MAX + 3 {
+            store_report(QaReport {
+                dest: format!("./export/h{i}.mp4"),
+                passed: true,
+                failures: Vec::new(),
+                details: "1.0s · 10 frames".to_string(),
+            });
+        }
+        let history = qa_history();
+        assert_eq!(history.len(), QA_HISTORY_MAX);
+        assert_eq!(history[0].report.dest, "./export/h3.mp4");
+        assert_eq!(
+            history[QA_HISTORY_MAX - 1].report.dest,
+            format!("./export/h{}.mp4", QA_HISTORY_MAX + 2)
+        );
+        let core = EditorCore::new();
+        let entry = QaHistoryEntry {
+            report: QaReport {
+                dest: "./export/x.mp4".to_string(),
+                passed: false,
+                failures: vec!["audio stream missing".to_string()],
+                details: "2.0s · 48 frames".to_string(),
+            },
+            at: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+        };
+        let line = qa_history_line(&core, &entry);
+        assert!(
+            line.starts_with("2023-11-14 22:13 · QA failed — audio stream missing"),
+            "{line}"
         );
     }
 }

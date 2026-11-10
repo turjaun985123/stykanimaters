@@ -1184,7 +1184,7 @@ fn toggle_selected_hidden(s: &mut State) {
     let Some(i) = valid_selection(s.fx_selected, s.core.project.fx_clips.len()) else {
         return;
     };
-    s.core.snapshot();
+    s.core.snapshot_labeled(if s.core.project.fx_clips[i].hidden { "Show FX clip" } else { "Hide FX clip" });
     let entry = &mut s.core.project.fx_clips[i];
     entry.hidden = !entry.hidden;
     let hidden = entry.hidden;
@@ -2807,6 +2807,7 @@ mod tests {
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
             sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            migration_panel: rune_sec::migration_prompt::initial_state(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
@@ -2822,12 +2823,15 @@ mod tests {
             subtitle_selected: None,
             pose_clipboard: None,
             workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            setup_mode_before_build: false,
             guides: false,
             show_left: true,
             show_right: true,
+            stage_focus_restore: None,
             key_clipboard: None,
             key_follow_graph: false,
             key_sel: Default::default(),
+            keyframe_tools: Default::default(),
             help_panel: Default::default(),
             camera_panel: Default::default(),
             segment_numbers: Default::default(),
@@ -2841,6 +2845,11 @@ mod tests {
             particle_selected: None,
             guides_frustum: true,
             guides_safe: true,
+            guides_golden: false,
+            guides_diagonals: false,
+            guides_stored: true,
+            rulers: false,
+            limit_arcs: false,
             onion_ui: Default::default(),
             last_frame: 0,
             pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),

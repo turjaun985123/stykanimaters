@@ -183,7 +183,7 @@ pub fn paste_keys(
         })
         .collect();
 
-    core.snapshot();
+    core.snapshot_labeled("Paste graph keys");
     let channel = &mut core.project.channels[channel_index];
     // Clear the neighbourhood of every pasted key BEFORE
     // inserting any of them, so pasted keys can never remove
@@ -275,7 +275,7 @@ pub fn duplicate_channel_to_figure(
         }
     }
     let key_count = source.keys.len();
-    core.snapshot();
+    core.snapshot_labeled("Duplicate graph channel");
     let mut copy = source;
     copy.figure = to_figure;
     core.project.channels.push(copy);
@@ -321,7 +321,7 @@ pub fn delete_channel(core: &mut EditorCore, channel_index: usize) -> bool {
     };
     let label = target_label(channel.target);
     let key_count = channel.keys.len();
-    core.snapshot();
+    core.snapshot_labeled("Delete graph channel");
     core.project.channels.remove(channel_index);
     core.status = format!(
         "Deleted graph channel {} ({}, {} key(s)).",
@@ -387,7 +387,7 @@ pub fn delete_keys_in_range(
         core.status = format!("No keys to clear in frames {range}.");
         return 0;
     }
-    core.snapshot();
+    core.snapshot_labeled("Delete graph keys");
     core.project.channels[index]
         .keys
         .retain(|k| !(from..=to).contains(&k.frame));
@@ -444,7 +444,7 @@ pub fn set_key_interp(
         return false;
     }
     let label = target_label(channel.target);
-    core.snapshot();
+    core.snapshot_labeled("Key interpolation");
     core.project.channels[channel_index].keys[key_index].interp = interp;
     core.status = format!(
         "Key {} on {} interpolation set to {}.",
@@ -526,7 +526,7 @@ pub fn shift_keys(core: &mut EditorCore, channel_index: usize, delta: f32) -> bo
         return false;
     }
     let count = channel.keys.len();
-    core.snapshot();
+    core.snapshot_labeled("Shift graph keys");
     for k in &mut core.project.channels[channel_index].keys {
         k.frame += delta;
     }
@@ -612,7 +612,7 @@ pub fn fill_keys_in_range(
         return 0;
     }
     let count = missing.len();
-    core.snapshot();
+    core.snapshot_labeled("Fill graph keys");
     let channel = &mut core.project.channels[channel_index];
     for f in missing {
         channel.keys.push(Key {
@@ -980,7 +980,7 @@ pub fn remove_key_at(core: &mut EditorCore, channel_index: usize, frame: f32) ->
         core.status = format!("No key at frame {} to delete.", frame_label(frame + 1.0));
         return false;
     }
-    core.snapshot();
+    core.snapshot_labeled("Remove graph key");
     let removed = core.project.channels[channel_index].remove_key(frame);
     if removed {
         core.status = format!("Deleted graph key at frame {}.", frame_label(frame + 1.0));
@@ -1038,7 +1038,7 @@ pub fn move_key_at(
         return false;
     };
     let value = to_value.unwrap_or(key.value);
-    core.snapshot();
+    core.snapshot_labeled("Move graph key");
     let moved = core.project.channels[channel_index].move_key(from_frame, to_frame, value);
     if moved {
         core.status = format!(
@@ -1088,7 +1088,7 @@ pub fn set_key_tangents_at(
         return false;
     }
     let label = target_label(channel.target);
-    core.snapshot();
+    core.snapshot_labeled("Set key tangents");
     let set = core.project.channels[channel_index].set_tangents(frame, in_tan, out_tan);
     if set {
         core.status = format!(
@@ -1172,7 +1172,7 @@ pub fn delete_keys_in_range_at(
         core.status = format!("No keys to clear in frames {range}.");
         return 0;
     }
-    core.snapshot();
+    core.snapshot_labeled("Delete graph keys");
     core.project.channels[channel_index]
         .keys
         .retain(|k| !(from..=to).contains(&k.frame));
@@ -1219,7 +1219,7 @@ pub fn clear_channel_keys_at(core: &mut EditorCore, channel_index: usize) -> usi
     }
     let label = target_label(channel.target);
     let n = channel.keys.len();
-    core.snapshot();
+    core.snapshot_labeled("Clear graph keys");
     core.project.channels[channel_index].keys.clear();
     core.status = format!("Cleared {n} graph key(s) from channel {} ({label}).", channel_index + 1);
     n
@@ -1252,7 +1252,7 @@ pub fn tool_graph_reduce_keys(core: &mut EditorCore, args: &Value) -> Result<Val
     if tolerance < 0.0 {
         return Err("argument 'tolerance' must not be negative".into());
     }
-    core.snapshot();
+    core.snapshot_labeled("Reduce graph keys");
     let removed = crate::graph::reduce_keys(&mut core.project.channels[idx], tolerance);
     core.status = format!("Reduced graph channel: removed {removed} key(s).");
     Ok(json!({
@@ -1271,7 +1271,7 @@ pub fn tool_graph_mirror_channel(core: &mut EditorCore, args: &Value) -> Result<
         None => gk_opt_f32(args, "center")?,
     }
     .unwrap_or_else(|| (core.project.frames.len().saturating_sub(1)) as f32 / 2.0);
-    core.snapshot();
+    core.snapshot_labeled("Mirror graph channel");
     let ch = &mut core.project.channels[idx];
     crate::graph::mirror_keys_time(&mut ch.keys, centre);
     ch.sort_keys();
@@ -1290,7 +1290,7 @@ pub fn tool_graph_scale_channel(core: &mut EditorCore, args: &Value) -> Result<V
     let idx = gk_check_channel(core, gk_req_usize(args, "channel")?)?;
     let factor = gk_req_f32(args, "factor")?;
     let pivot = gk_opt_f32(args, "pivot")?.unwrap_or(0.0);
-    core.snapshot();
+    core.snapshot_labeled("Scale graph channel");
     let ch = &mut core.project.channels[idx];
     crate::graph::scale_key_values(&mut ch.keys, factor, pivot);
     let keys = ch.keys.len();
@@ -1311,7 +1311,7 @@ pub fn tool_graph_tangent_preset_channel(
 ) -> Result<Value, String> {
     let idx = gk_check_channel(core, gk_req_usize(args, "channel")?)?;
     let preset = gk_parse_preset(gk_req_str(args, "preset")?)?;
-    core.snapshot();
+    core.snapshot_labeled("Tangent preset");
     let ch = &mut core.project.channels[idx];
     ch.sort_keys();
     let angular = matches!(ch.target, ChannelTarget::Angle(_));
@@ -1344,7 +1344,7 @@ pub fn key_all_channels_at(core: &mut EditorCore, frame: f32) -> usize {
         core.status = "No graph channels to key.".into();
         return 0;
     }
-    core.snapshot();
+    core.snapshot_labeled("Key all channels");
     for ch in &mut core.project.channels {
         let value = ch.value_at(frame);
         ch.add_key(frame, value);

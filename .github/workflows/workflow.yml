@@ -138,3 +138,5 @@ jobs:
           python3 scripts/subtitle_census.py --self-test
           python3 scripts/home_thumbnail_probe.py --self-test
           python3 scripts/verdict_aggregate.py --self-test
+          python3 scripts/snapshot_diff.py --self-test
+          python3 scripts/perf_budget.py --self-test

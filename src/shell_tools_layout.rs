@@ -42,7 +42,8 @@
 //!   re-reads them from `load_layout()` on every pass
 //!   (`column_widths()`, `src/main.rs:830`), and the
 //!   draggable splitters write them by load-modify-save
-//!   with clamps 220..=420 (left) and 260..=480 (right)
+//!   with clamps 220..=420 (left) and 240..=480 (right;
+//!   the right minimum was 260 before W2-10)
 //!   (`src/main.rs:1148-1152`, `:1161-1165`; the same
 //!   bounds clamp on load in `shell.rs`). The tool's
 //!   applier performs the identical load-modify-save and
@@ -106,7 +107,7 @@
 //!   `{"section": name, "collapsed": collapsed}`.
 //! * `shell_set_column_widths`: load-modify-save the
 //!   layout prefs with the drag clamps applied (left
-//!   220..=420, right 260..=480), then reply from a
+//!   220..=420, right 240..=480), then reply from a
 //!   FRESH `load_layout()`:
 //!   `{"left": w, "right": w}` — the read-back widths.
 //! * `shell_set_timeline`: write the shell's
@@ -219,9 +220,15 @@ pub const WORKSPACE_SECTIONS: [(&str, &[&str]); 8] = [
 
 /// Column-width clamps, identical to the splitter
 /// drags' and the prefs load clamps (see module doc).
+/// The right minimum was 260 until Roadmap Wave 2
+/// (W2-10, stage-share recovery): RM12's design
+/// (§4.3.2) priced the Animate layout profile at a
+/// 240 pt right column, so every copy of the bound
+/// moves together — this constant, the load clamp in
+/// `shell.rs` and the per-workspace record clamp.
 pub const COL_LEFT_MIN: f32 = 220.0;
 pub const COL_LEFT_MAX: f32 = 420.0;
-pub const COL_RIGHT_MIN: f32 = 260.0;
+pub const COL_RIGHT_MIN: f32 = 240.0;
 pub const COL_RIGHT_MAX: f32 = 480.0;
 
 // ---------------------------------------------------------------------
@@ -374,7 +381,7 @@ pub fn tool_shell_set_section(s: &mut State, args: &Value) -> Result<Value, Stri
 //
 //   Tool {
 //       name: "shell_set_column_widths",
-//       description: "Set the left and/or right panel column widths in points — the draggable splitters, by target width. At least one of 'left' / 'right' is required. Widths persist in the layout prefs exactly as a drag does (load-modify-save) and are clamped to 220-420 (left) / 260-480 (right); the reply reports the widths read back after the save, so a clamped request truthfully reports the clamped value. No undo step. Live endpoint only.",
+//       description: "Set the left and/or right panel column widths in points — the draggable splitters, by target width. At least one of 'left' / 'right' is required. Widths persist in the layout prefs exactly as a drag does (load-modify-save) and are clamped to 220-420 (left) / 240-480 (right); the reply reports the widths read back after the save, so a clamped request truthfully reports the clamped value. No undo step. Live endpoint only.",
 //       schema: obj_schema(
 //           json!({
 //               "left": { "type": "number" },
@@ -388,7 +395,7 @@ pub fn tool_shell_set_section(s: &mut State, args: &Value) -> Result<Value, Stri
 // MCP.md ROW SPEC: for the shell-control table, after
 // the `shell_set_section` row:
 //
-//   | `shell_set_column_widths` | Set the side-column widths (the splitters, by target). At least one of `left` / `right`; clamped to 220–420 / 260–480 and persisted via the layout prefs; the reply reports the read-back widths. No undo step. Live endpoint only. | `left`?, `right`? | — |
+//   | `shell_set_column_widths` | Set the side-column widths (the splitters, by target). At least one of `left` / `right`; clamped to 220–420 / 240–480 and persisted via the layout prefs; the reply reports the read-back widths. No undo step. Live endpoint only. | `left`?, `right`? | — |
 /// Parse + validate a `shell_set_column_widths` call
 /// (the pure half of the handler — see
 /// [`parse_set_section`]).

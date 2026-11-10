@@ -210,6 +210,126 @@ LANE FLOORS (Wave T, T11 — analytic, same discipline)
   Block-rect agreement takes the stage rect's own
   tolerance: max drift <= 1.0 pt across the pair.
 
+WAVE 2 EXPANSION (W2-79) — four legs over evidence the
+original census never read. All four are FAIL-SOFT IN
+THE INSTRUMENT'S OWN IDIOM: a leg whose evidence is
+absent reports "not run" with the reason and gates
+nothing (the lane leg's crop-mode precedent), and a
+leg only fails when evidence is present AND contradicts
+itself or the seeded plants. On artifacts predating
+the Wave 2 surfaces (the Wave AC closing artifact is
+the regression baseline) every pre-existing check's
+verdict is unchanged and the new legs report not-run
+or pass on the evidence that already exists (the
+seeded lane labels, below).
+
+  * BAND CLAIMS (W2-45): the stage subtitle pass now
+    partitions each band between the bitmap prim stream
+    and a shaped-tile element layer, per band, on the
+    style's font claim (`subtitle_band_shaped`). The
+    tree dumps carry the partition: a claimed band
+    leaves a `stage-subtitle-line-{i}` element (under a
+    `stage-subtitle-layer` container) in the scene's
+    tree. This leg reads the three seeded trees and
+    reports each scene's claim; when any tree carries
+    the layer, the claims must AGREE across the seeded
+    scenes (same default style, all Latin single-line
+    cues — a claim is a property of the machine's fonts
+    and the style, never of the anchor or the credit).
+    The claim also recalibrates the speaker leg: the
+    SPAN GATE above is a BITMAP derivation (4-unit
+    cells). Under the shaped renderer the painted span
+    is font metrics, and the same gate would fail an
+    honest shaped line — so when the speaker band is
+    claimed, the span gate is replaced by a
+    same-renderer control: the credited line must span
+    at least SHAPED_SPAN_RATIO x the populated cue's
+    painted span, measured this run through the same
+    face XOR (25 uncredited chars; the speaker text
+    uncredited would run ~22/25 of it, credited ~28/25,
+    so the ratio discriminates the prefix's presence
+    with margin on both sides; the integrator ratchets
+    the factor from the first shaped CI run, the
+    standing floor discipline). The composition itself
+    is then proven at the data level by the label leg
+    below. DIFF_FLOOR / FACE_FLOOR stay in force under
+    both renderers: they are presence floors with an
+    order of magnitude of headroom, but their analytic
+    census was bitmap ink — the first shaped run's
+    measured values are the ratchet input, named here
+    so a future floor failure is attributed to the
+    renderer change before anything else.
+  * LABEL + DIALOGUE LEG (W2-17, W2-12): the tree
+    dumps carry the lane blocks' label TEXT (a text
+    element under each block), which the pixel legs
+    never read. The seeded labels are gated
+    byte-for-byte against the scenes' known plants —
+    populated: the raw cue text; speaker: the credited
+    composition `NOVA: ` + text — pinning
+    `block_label`'s composition at the data level (the
+    pixel lane leg proves the labels DIFFER and carry
+    ink; this proves WHAT they say). Where a tree
+    carries W2-12's dialogue lane, each
+    `dialogue-line-{i}` must sit exactly on its
+    `subtitle-cue-{i}` block (line_rect IS cue_rect —
+    the delegation, gated at the lane leg's own 1.0 pt
+    tolerance) and read exactly as it (line_label IS
+    block_label). Each `dialogue-chapter-{j}` segment
+    must carry its title text; each line's geometric
+    chapter (the first segment whose x-span holds the
+    line's left edge — `chapter_index_at`'s
+    first-in-episode-order rule read off the shared
+    span algebra) is REPORTED, not gated. When a band
+    of >= 3 segments lets one fill be identified as
+    the odd one out, the odd segment must be the
+    playhead's chapter: the segment first containing
+    the parked frame's chip x (the parked frame is
+    read from the lane header's `Frame n / m` text) —
+    header, chip geometry and segment fill are three
+    independent dump facts that must agree.
+  * SRT ANNOUNCEMENT LEG (W2-17): SRT exports/imports
+    announce their dropped speaker credits in the
+    panel status sentence (`... speaker credit(s) not
+    written (SRT has no speaker syntax).` on export,
+    `... dropped ...` on import), and the MCP SRT
+    export reply carries `speakers_dropped`, present
+    only when above zero. No headless surface performs
+    an SRT action today, so in current artifacts this
+    leg finds nothing and reports not run — but it
+    scans every tree dump's texts plus mcp-probe.txt
+    when present, so the day a scene or the probe
+    exercises SRT the announcement becomes gated
+    evidence: an announced count is at least 1 (both
+    surfaces only speak when credits were dropped);
+    an EXPORT announcement in a seeded tree must
+    equal that scene's planted credited-cue count
+    (export is read-only — the dump's project is the
+    exported project); the MCP field must be above
+    zero whenever present. The import sentence's
+    count is the REPLACED list's loss, whose ground
+    truth is not in the post-import dump, so it is
+    reported, not equated.
+  * AUDIO-TREE LEG (W2-15, W2-16): tree-audio-open.json
+    (an optional input — the Audio workspace's tree)
+    carries two panel surfaces. The title-card
+    section (W2-15): its chapter rows
+    (`title-card-row-{i}`, labels `{n}. {title} —
+    frames {a}–{b}`) must be numbered in episode
+    order with increasing ranges, its preview caption
+    IS the expectation line — reported verbatim, and
+    in its "Shows for ... from frame ..." form the
+    stated frame and the previewed title must match
+    the row they belong to; when the dialogue band
+    was also read, the two surfaces' chapter titles
+    must agree title for title. The timing assistant
+    (W2-16): its proposal lines and the selected
+    cue's CPS readout are reported verbatim — CPS is
+    REPORTED, NEVER JUDGED (decision D-9: no
+    threshold verdict exists to gate on) — and the
+    one structural fact is gated: the
+    `{count} suggestion(s)` line must equal the
+    number of proposal rows the block shows.
+
 BAND GEOMETRY (stage units, src/subtitles.rs constants)
   SUBTITLE_EDGE_MARGIN = 16, SUBTITLE_BASE_LINE_HEIGHT = 24:
   one line's box spans [edge, edge + 40]. The glyph face sits
@@ -288,6 +408,73 @@ LANE_INK_FLOOR = 100
 SPEAKER_BARE_RUN_UNITS = 348.0
 SPEAKER_CREDITED_RUN_UNITS = 444.0
 SPEAKER_SPAN_GATE_UNITS = 396.0
+
+# Wave 2 expansion (W2-79; derivations in the module
+# docstring's WAVE 2 EXPANSION section). Optional inputs:
+# the top scene's tree (read for the band-claim census),
+# the Audio workspace's tree (title-card + timing
+# surfaces) and the MCP probe transcript (the SRT
+# announcement scan). All are fail-soft: absent inputs
+# report their leg not run.
+TREE_TOP = "tree-subtitles-top.json"
+TREE_AUDIO = "tree-audio-open.json"
+MCP_PROBE_TXT = "mcp-probe.txt"
+
+# The seeded scenes' planted lane labels (scenes.rs's
+# plant_subtitle_cue_as calls): the populated cue is
+# uncredited, so its block label is the raw text; the
+# speaker cue is credited, so its label is the
+# composition `NOVA: ` + text (block_label's shape).
+SEEDED_LABEL_POPULATED = "We walk home before dark."
+SEEDED_LABEL_SPEAKER = "NOVA: The light is still on."
+# The seeded scenes' planted credited-cue counts — the
+# SRT export announcement's ground truth per scene
+# (export does not mutate the project it reads).
+SEEDED_CREDITED = {TREE_SEEDED: 0, TREE_SPEAKER: 1}
+
+# Shaped-route span control: the credited line must
+# span at least this fraction of the populated cue's
+# painted span in the same run (same renderer, same
+# font size). Credited ~28/25 = 1.12, uncredited
+# ~22/25 = 0.88; 0.95 sits between with margin.
+SHAPED_SPAN_RATIO = 0.95
+
+# Shaped-claim element keys (stage_text.rs, W2-45):
+# the layer container is a counted literal, the line
+# elements a variable family indexed by band.
+SHAPED_LAYER_KEY = "stage-subtitle-layer"
+SHAPED_LINE_STEM = "stage-subtitle-line-"
+
+# Dialogue lane element keys (dialogue_lane.rs, W2-12).
+DIALOGUE_LANE_KEY = "dialogue-lane"
+DIALOGUE_LINE_STEM = "dialogue-line-"
+DIALOGUE_CHAPTER_STEM = "dialogue-chapter-"
+
+# Title-card section element keys (title_card_panel.rs,
+# W2-15) and the chapter row label's shape:
+# `{n}. {title} — frames {start+1}–{end}`.
+TITLE_CARD_SECTION_KEY = "title-card-section"
+TITLE_CARD_ROW_STEM = "title-card-row-"
+TITLE_CARD_PREVIEW_KEY = "title-card-preview"
+
+import re
+
+SRT_EXPORT_ANNOUNCE_RE = re.compile(
+    r"(\d+) speaker credit\(s\) not written "
+    r"\(SRT has no speaker syntax\)")
+SRT_IMPORT_ANNOUNCE_RE = re.compile(
+    r"(\d+) speaker credit\(s\) dropped "
+    r"\(SRT has no speaker syntax\)")
+MCP_SPEAKERS_DROPPED_RE = re.compile(
+    r'"speakers_dropped"\s*:\s*(\d+)')
+TITLE_CARD_ROW_RE = re.compile(
+    r"^(\d+)\.\s+(.*)\s+—\s+frames\s+(\d+)–(\d+)$")
+TITLE_CARD_SHOWS_RE = re.compile(
+    r"^Shows for ([\d.]+) s from frame (\d+)$")
+TITLE_CARD_EYEBROW_RE = re.compile(r"^CHAPTER (\d+)$")
+PARKED_FRAME_RE = re.compile(r"^Frame (\d+) / (\d+)$")
+ASSIST_PROPOSAL_RE = re.compile(r"^Cue \d+ · .*chars/s$")
+ASSIST_COUNT_RE = re.compile(r"^(\d+) suggestion\(s\)$")
 
 
 # ----------------------------------------------------------------
@@ -480,6 +667,107 @@ def tree_scale(path, img_w):
     if isinstance(declared, (int, float)) and declared > 0:
         return float(declared), "the dump's declared scale"
     return 1.0, "default (no bounds or scale in the dump)"
+
+
+# ----------------------------------------------------------------
+# Tree dumps: element and text readers (Wave 2 expansion)
+# ----------------------------------------------------------------
+
+def load_tree(path):
+    """The parsed tree dump at `path`, or None when it is
+    absent or unreadable. The expansion legs treat every
+    dump beyond the original input set as optional, so a
+    missing dump is a reported not-run, never an error."""
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
+def tree_elements(tree):
+    return (tree or {}).get("elements", []) or []
+
+
+def elements_with_key(tree, key):
+    """All elements carrying exactly `key` (a dump may in
+    principle repeat a key; the census reads the first
+    for geometry and all for families)."""
+    return [el for el in tree_elements(tree) if el.get("key") == key]
+
+
+def element_with_key(tree, key):
+    els = elements_with_key(tree, key)
+    return els[0] if els else None
+
+
+def keyed_family(tree, stem):
+    """{index: element} for the variable key family
+    `stem{i}` (`dialogue-line-0`, `title-card-row-2`, ...)
+    — the function-carried key class the lane block's
+    `subtitle-cue-{i}` belongs to."""
+    out = {}
+    pat = re.compile("^" + re.escape(stem) + r"(\d+)$")
+    for el in tree_elements(tree):
+        m = pat.match(el.get("key") or "")
+        if m:
+            out[int(m.group(1))] = el
+    return out
+
+
+def element_rect(el):
+    rect = (el or {}).get("rect") or []
+    if len(rect) >= 4 and rect[2] > 0 and rect[3] > 0:
+        return tuple(float(v) for v in rect[:4])
+    return None
+
+
+def descendant_text(tree, el):
+    """The text an element presents: its own `text` when
+    it carries one, else the first text-bearing
+    descendant's, in dump order. A lane block's label is
+    a child text element under the block's path; a
+    chapter segment's title likewise."""
+    if el is None:
+        return None
+    if el.get("text"):
+        return el["text"]
+    path = el.get("path") or ""
+    if not path:
+        return None
+    prefix = path + "/"
+    for other in tree_elements(tree):
+        if (other.get("path") or "").startswith(prefix) \
+                and other.get("text"):
+            return other["text"]
+    return None
+
+
+def descendant_texts(tree, el):
+    """Every text under an element (its own first), in
+    dump order — the preview plate's lines (eyebrow,
+    title, caption) are sibling text elements."""
+    out = []
+    if el is None:
+        return out
+    if el.get("text"):
+        out.append(el["text"])
+    path = el.get("path") or ""
+    if path:
+        prefix = path + "/"
+        for other in tree_elements(tree):
+            if (other.get("path") or "").startswith(prefix) \
+                    and other.get("text"):
+                out.append(other["text"])
+    return out
+
+
+def all_texts(tree):
+    """Every text string a dump carries — the SRT
+    announcement scan's haystack (the panel status
+    sentence, when a scene performs an SRT action,
+    lands in the dump as a text element)."""
+    return [el["text"] for el in tree_elements(tree) if el.get("text")]
 
 
 # ----------------------------------------------------------------
@@ -743,6 +1031,51 @@ def run_census(directory):
     check(drawn_h >= MIN_STAGE_H_PX, "drawn stage is tall enough to prove a band",
           f"drawn height {drawn_h:.0f} px < {MIN_STAGE_H_PX}")
 
+    # ---- the band claims (Wave 2 expansion, W2-45):
+    # which renderer painted each seeded scene's band is
+    # recorded in the scene's own tree dump (a claimed
+    # band leaves shaped-tile elements there). Read
+    # before the pair legs: the speaker leg's span gate
+    # depends on the speaker band's claim.
+    claim_trees = {}
+    for scene, tree_name in (("populated", TREE_SEEDED),
+                             ("top", TREE_TOP),
+                             ("speaker", TREE_SPEAKER)):
+        claim_trees[scene] = load_tree(os.path.join(directory, tree_name))
+    band_claims = {}
+    for scene, tree in claim_trees.items():
+        if tree is None:
+            continue
+        band_claims[scene] = {
+            "lines": len(keyed_family(tree, SHAPED_LINE_STEM)),
+            "layer": element_with_key(tree, SHAPED_LAYER_KEY) is not None,
+        }
+    any_claim = any(c["lines"] > 0 or c["layer"]
+                    for c in band_claims.values())
+    if not any_claim:
+        report("band claims: no shaped layer in any seeded tree — "
+               "the bands paint through the bitmap (Pixel) route, "
+               "or the trees predate W2-45; bitmap derivations "
+               "in force")
+    else:
+        for scene in ("populated", "top", "speaker"):
+            c = band_claims.get(scene)
+            if c is not None:
+                report(f"band claims: {scene} tree carries the "
+                       f"shaped layer (container "
+                       f"{'present' if c['layer'] else 'ABSENT'}, "
+                       f"{c['lines']} claimed line element(s))")
+        counts = {c["lines"] for c in band_claims.values()}
+        structure_ok = all(c["layer"] == (c["lines"] > 0)
+                           for c in band_claims.values())
+        check(structure_ok and len(counts) == 1,
+              "shaped band claims agree across the seeded scenes",
+              f"claims={band_claims} — same default style and "
+              f"Latin single-line cues in every seeded scene, so "
+              f"the per-band claim (a font/style property) must "
+              f"be uniform, each claimed band under its layer "
+              f"container")
+
     # ---- the anchor pair (load-bearing).
     d_bottom = diff_count(rows_bottom, rows_top, *bottom_r)
     d_top = diff_count(rows_bottom, rows_top, *top_r)
@@ -753,6 +1086,12 @@ def run_census(directory):
            f"diff top band {d_top}, diff mid-stage {d_mid}")
     report(f"pair text face: bottom-only near-white {f_bottom}, "
            f"top-only near-white {f_top}")
+    _pop_n, pop_min, pop_max = face_xor_extent(rows_bottom, rows_top,
+                                               *bottom_r)
+    pop_span_units = ((pop_max - pop_min + 1) / fit) if _pop_n else 0.0
+    report(f"pair populated face span: {pop_span_units:.0f} stage "
+           f"units (the same-renderer control for the shaped span "
+           f"gate, Wave 2 expansion)")
     check(d_bottom >= DIFF_FLOOR,
           f"bottom band changes when the anchor flips to Top (>= {DIFF_FLOOR})",
           f"diff={d_bottom}")
@@ -803,11 +1142,33 @@ def run_census(directory):
           f"credited cue's text face present in the bottom band "
           f"(>= {FACE_FLOOR})",
           f"face={f_speaker}")
-    check(span_units >= SPEAKER_SPAN_GATE_UNITS,
-          f"speaker prefix widens the credited line past the bare-text "
-          f"span (>= {SPEAKER_SPAN_GATE_UNITS:.0f} units; bare run "
-          f"{SPEAKER_BARE_RUN_UNITS:.0f})",
-          f"span={span_units:.0f} units")
+    # The span gate's derivation is the bitmap renderer's
+    # (4-unit cells). When the speaker band is claimed by
+    # the shaped pipeline (W2-45), the painted span is
+    # font metrics and the bitmap gate would fail an
+    # honest line — gate instead on the same-renderer
+    # control measured this run (Wave 2 expansion).
+    speaker_claimed = band_claims.get("speaker", {}).get("lines", 0) > 0
+    if speaker_claimed:
+        report(f"speaker span gate: the bitmap gate "
+               f"({SPEAKER_SPAN_GATE_UNITS:.0f} units) does not "
+               f"apply — the speaker band is claimed by the shaped "
+               f"pipeline, whose span is font metrics, not 4-unit "
+               f"cells. Measured span {span_units:.0f} units; "
+               f"gating on the same-renderer control instead "
+               f"(populated span {pop_span_units:.0f} units)")
+        check(span_units >= SHAPED_SPAN_RATIO * pop_span_units,
+              f"credited line outspans the same-renderer control "
+              f"under the shaped renderer (>= {SHAPED_SPAN_RATIO:.2f}x "
+              f"the populated cue's painted span)",
+              f"span={span_units:.0f} units, control span="
+              f"{pop_span_units:.0f} units")
+    else:
+        check(span_units >= SPEAKER_SPAN_GATE_UNITS,
+              f"speaker prefix widens the credited line past the bare-text "
+              f"span (>= {SPEAKER_SPAN_GATE_UNITS:.0f} units; bare run "
+              f"{SPEAKER_BARE_RUN_UNITS:.0f})",
+              f"span={span_units:.0f} units")
     check(d_sp_bottom >= DIFF_FLOOR,
           f"credited bottom band differs from the uncredited control "
           f"(>= {DIFF_FLOOR})",
@@ -879,7 +1240,354 @@ def run_census(directory):
                   f"(>= {LANE_INK_FLOOR})",
                   f"ink={ink_spk}")
 
+    # ---- the Wave 2 expansion legs (W2-79): tree-text
+    # and optional-input evidence, each fail-soft (absent
+    # evidence reports not-run and gates nothing).
+    dialogue_leg(directory, check, report)
+    srt_announcement_leg(directory, check, report)
+    audio_tree_leg(directory, check, report)
+
     return lines, failures
+
+
+# ----------------------------------------------------------------
+# Wave 2 expansion legs (W2-79). Each takes the census's
+# check/report closures so its lines join the one
+# transcript; each is fail-soft — evidence absent means
+# a reported not-run, evidence present and contradictory
+# means a failed check.
+# ----------------------------------------------------------------
+
+def dialogue_leg(directory, check, report):
+    """The seeded lane labels (W2-17's composition, read
+    as dump text) and W2-12's dialogue lane: line blocks
+    delegated to the subtitle lane's rects and labels,
+    chapter segments carrying their titles, and the
+    playhead's chapter agreeing across header text,
+    chip geometry and segment fill."""
+    for scene, tree_name, expected_label in (
+            ("populated", TREE_SEEDED, SEEDED_LABEL_POPULATED),
+            ("speaker", TREE_SPEAKER, SEEDED_LABEL_SPEAKER)):
+        tree = load_tree(os.path.join(directory, tree_name))
+        if tree is None:
+            continue
+        block = element_with_key(tree, LANE_BLOCK_KEY)
+        if block is not None:
+            label = descendant_text(tree, block)
+            check(label == expected_label,
+                  f"seeded lane label in the {scene} tree is the "
+                  f"planted composition",
+                  f"label={label!r}, planted={expected_label!r}")
+        if element_with_key(tree, DIALOGUE_LANE_KEY) is None:
+            report(f"dialogue leg ({scene}): not run — no dialogue "
+                   f"lane in {tree_name} (pre-W2-12 tree, or the "
+                   f"lane's data gate closed)")
+            continue
+        lines = keyed_family(tree, DIALOGUE_LINE_STEM)
+        chapters = keyed_family(tree, DIALOGUE_CHAPTER_STEM)
+        report(f"dialogue leg ({scene}): lane present with "
+               f"{len(lines)} line block(s), {len(chapters)} "
+               f"chapter segment(s)")
+        for i in sorted(lines):
+            cue_block = element_with_key(tree, f"subtitle-cue-{i}")
+            if cue_block is None:
+                check(False,
+                      f"dialogue line {i} has its cue block in the "
+                      f"{scene} tree",
+                      "the dialogue lane binds lines to subtitle "
+                      "lane blocks; the block is missing")
+                continue
+            lr, cr = element_rect(lines[i]), element_rect(cue_block)
+            if lr is not None and cr is not None:
+                drift = max(abs(a - b) for a, b in zip(lr, cr))
+                check(drift <= LANE_RECT_DRIFT_MAX,
+                      f"dialogue line {i} sits exactly on its cue "
+                      f"block in the {scene} tree",
+                      f"drift={drift:.1f} pt — line_rect delegates "
+                      f"to cue_rect, so the two lanes cannot "
+                      f"disagree about a line's window")
+            lt = descendant_text(tree, lines[i])
+            ct = descendant_text(tree, cue_block)
+            check(lt == ct,
+                  f"dialogue line {i} reads exactly as its cue "
+                  f"block in the {scene} tree",
+                  f"dialogue={lt!r}, lane={ct!r} — line_label "
+                  f"delegates to block_label")
+        if not chapters:
+            report(f"dialogue leg ({scene}): no chapter band — "
+                   f"no chapters planted in this scene")
+            continue
+        titles = {}
+        missing = []
+        for j in sorted(chapters):
+            titles[j] = descendant_text(tree, chapters[j])
+            if not titles[j]:
+                missing.append(j)
+        check(not missing,
+              f"every dialogue chapter segment carries its title "
+              f"in the {scene} tree",
+              f"segments without a title text: {missing}")
+        report(f"dialogue leg ({scene}): chapter titles "
+               f"{[titles[j] for j in sorted(titles)]}")
+        for i in sorted(lines):
+            lr = element_rect(lines[i])
+            if lr is None:
+                continue
+            holder = None
+            for j in sorted(chapters):
+                sr = element_rect(chapters[j])
+                if sr is not None and sr[0] <= lr[0] < sr[0] + sr[2]:
+                    holder = j
+                    break
+            report(f"dialogue leg ({scene}): line {i} starts in "
+                   f"chapter "
+                   f"{holder if holder is not None else 'a gap'} "
+                   f"by geometry (reported, not gated: the "
+                   f"first-in-episode-order rule read off the "
+                   f"shared span algebra)")
+        # The playhead's chapter: with >= 3 segments the
+        # plain fill repeats, so a distinct fill identifies
+        # the selected segment; it must be the first
+        # segment holding the parked frame's chip x.
+        parked = None
+        for text in all_texts(tree):
+            m = PARKED_FRAME_RE.match(text)
+            if m:
+                parked = int(m.group(1)) - 1
+                break
+        chip_x = None
+        if parked is not None:
+            for el in tree_elements(tree):
+                if (el.get("path") or "").endswith(
+                        f"/timeline-chips/frame-{parked}"):
+                    r = element_rect(el)
+                    if r is not None:
+                        chip_x = r[0]
+                    break
+        if parked is None or chip_x is None or len(chapters) < 3:
+            report(f"dialogue leg ({scene}): playhead-chapter "
+                   f"agreement not run (parked frame "
+                   f"{'unknown' if parked is None else parked}, "
+                   f"chip x "
+                   f"{'unknown' if chip_x is None else chip_x}, "
+                   f"{len(chapters)} segment(s) — the fill "
+                   f"discrimination needs a parked frame, its "
+                   f"chip and >= 3 segments)")
+            continue
+        fills = {}
+        for j in sorted(chapters):
+            fills.setdefault(chapters[j].get("fill"), []).append(j)
+        # The band knows two fills (plain, and the
+        # playhead segment's selected fill), so with
+        # >= 3 segments the selected one — if any — is
+        # the singleton group.
+        distinct = [j for group in fills.values() if len(group) == 1
+                    for j in group] if len(fills) > 1 else []
+        check(len(distinct) <= 1,
+              f"at most one dialogue chapter segment wears a "
+              f"distinct fill in the {scene} tree",
+              f"distinct-filled segments: {distinct} — one "
+              f"playhead has one chapter")
+        holder = None
+        for j in sorted(chapters):
+            sr = element_rect(chapters[j])
+            if sr is not None and sr[0] - 1.0 <= chip_x < sr[0] + sr[2] + 1.0:
+                holder = j
+                break
+        if len(distinct) == 1:
+            check(distinct[0] == holder,
+                  f"the distinct-filled chapter segment is the "
+                  f"playhead's chapter in the {scene} tree",
+                  f"segment {distinct[0]} wears the distinct "
+                  f"fill, but the parked frame {parked} (chip x "
+                  f"{chip_x}) falls in segment {holder}")
+        elif holder is not None:
+            report(f"dialogue leg ({scene}): no segment wears a "
+                   f"distinct fill, yet the parked frame "
+                   f"{parked} falls in segment {holder} — "
+                   f"reported, not gated (the selection fill "
+                   f"may not discriminate in this theme)")
+
+
+def srt_announcement_leg(directory, check, report):
+    """W2-17's counted-and-announced SRT speaker loss.
+    Scans every tree dump's texts and the MCP probe
+    transcript for the two announcement sentences and
+    the reply field; gates what has ground truth (see
+    the docstring's SRT section)."""
+    findings = []
+    try:
+        names = sorted(n for n in os.listdir(directory)
+                       if n.startswith("tree-") and n.endswith(".json"))
+    except Exception:
+        names = []
+    for name in names:
+        tree = load_tree(os.path.join(directory, name))
+        if tree is None:
+            continue
+        for text in all_texts(tree):
+            for kind, rx in (("export", SRT_EXPORT_ANNOUNCE_RE),
+                             ("import", SRT_IMPORT_ANNOUNCE_RE)):
+                m = rx.search(text)
+                if m:
+                    findings.append((name, kind, int(m.group(1))))
+    probe_findings = []
+    probe_path = os.path.join(directory, MCP_PROBE_TXT)
+    if os.path.isfile(probe_path):
+        try:
+            with open(probe_path) as fh:
+                probe_text = fh.read()
+            probe_findings = [int(v) for v in
+                              MCP_SPEAKERS_DROPPED_RE.findall(probe_text)]
+        except Exception:
+            probe_findings = []
+    if not findings and not probe_findings:
+        report("SRT announcement leg: not run — no SRT export or "
+               "import announcement in any tree dump and no "
+               "speakers_dropped in the MCP probe transcript; no "
+               "headless surface performs an SRT action today "
+               "(IA-W2-79-2)")
+        return
+    for name, kind, n in findings:
+        report(f"SRT announcement leg: {name} carries the {kind} "
+               f"announcement with count {n}")
+        check(n >= 1,
+              f"SRT announcements only appear with a count of at "
+              f"least 1 ({name})",
+              f"count={n} — both surfaces write the sentence "
+              f"only when credits were dropped")
+        if kind == "export" and name in SEEDED_CREDITED:
+            check(n == SEEDED_CREDITED[name],
+                  f"SRT export announcement in {name} counts the "
+                  f"scene's credited cues",
+                  f"announced={n}, planted credited="
+                  f"{SEEDED_CREDITED[name]} — export is "
+                  f"read-only, so the count is the exported "
+                  f"project's credited cues")
+    for v in probe_findings:
+        report(f"SRT announcement leg: the MCP probe transcript "
+               f"carries speakers_dropped={v}")
+        check(v >= 1,
+              "MCP speakers_dropped is present only when above "
+              "zero",
+              f"value={v} — the reply gains the field only when "
+              f"the SRT export dropped credits")
+
+
+def audio_tree_leg(directory, check, report):
+    """The Audio workspace tree's subtitle surfaces:
+    W2-15's title-card section (row census + the
+    preview's expectation caption) and W2-16's timing
+    assistant (proposal lines reported — CPS never
+    judged, D-9 — with its count line gated against
+    the rows shown)."""
+    tree = load_tree(os.path.join(directory, TREE_AUDIO))
+    if tree is None:
+        report(f"audio-tree leg: not run — {TREE_AUDIO} absent")
+        return
+    # ---- title cards (W2-15).
+    section = element_with_key(tree, TITLE_CARD_SECTION_KEY)
+    if section is None:
+        report("title-card leg: not run — the audio tree carries "
+               "no title-card section (pre-W2-15 tree, or the "
+               "section did not mount)")
+    else:
+        rows = keyed_family(tree, TITLE_CARD_ROW_STEM)
+        parsed = {}
+        bad = []
+        for i in sorted(rows):
+            label = descendant_text(tree, rows[i])
+            m = TITLE_CARD_ROW_RE.match(label or "")
+            if m:
+                parsed[i] = (int(m.group(1)), m.group(2),
+                             int(m.group(3)), int(m.group(4)))
+            else:
+                bad.append(i)
+        report(f"title-card leg: section present with "
+               f"{len(rows)} chapter row(s)")
+        if rows:
+            ordered = (not bad
+                       and [parsed[i][0] for i in sorted(parsed)]
+                       == list(range(1, len(rows) + 1))
+                       and all(parsed[i][2] <= parsed[i][3]
+                               for i in parsed)
+                       and all(parsed[a][2] < parsed[b][2]
+                               for a, b in zip(sorted(parsed),
+                                               sorted(parsed)[1:])))
+            check(ordered,
+                  "title-card row labels are numbered in episode "
+                  "order with increasing frame ranges",
+                  f"unparseable rows: {bad}, parsed: {parsed}")
+        preview = element_with_key(tree, TITLE_CARD_PREVIEW_KEY)
+        caption = None
+        if preview is not None:
+            for text in descendant_texts(tree, preview):
+                if TITLE_CARD_SHOWS_RE.match(text) or \
+                        text.startswith("Cards are off"):
+                    caption = text
+                    break
+        if caption is not None:
+            report(f"title-card leg: expectation caption: "
+                   f"{caption!r}")
+        if rows and preview is not None:
+            check(caption is not None,
+                  "title-card section carries its expectation "
+                  "caption when chapters are planted",
+                  "rows are present but the preview states no "
+                  "expectation line")
+            m = TITLE_CARD_SHOWS_RE.match(caption or "")
+            if m:
+                stated_frame = int(m.group(2))
+                preview_texts = descendant_texts(tree, preview)
+                eyebrow = next(
+                    (int(TITLE_CARD_EYEBROW_RE.match(t).group(1))
+                     for t in preview_texts
+                     if TITLE_CARD_EYEBROW_RE.match(t)), None)
+                titled = [i for i in parsed
+                          if parsed[i][1] in preview_texts]
+                check(bool(titled)
+                      and any(parsed[i][2] == stated_frame
+                              for i in titled)
+                      and (eyebrow is None
+                           or any(parsed[i][0] == eyebrow
+                                  for i in titled)),
+                      "title-card preview caption states the "
+                      "selected chapter's first frame",
+                      f"caption={caption!r}, eyebrow={eyebrow}, "
+                      f"rows={parsed}")
+        # Cross-surface, same tree: the dialogue band in
+        # THIS tree (same project, same run) must title
+        # its chapters exactly as the panel rows do.
+        band = keyed_family(tree, DIALOGUE_CHAPTER_STEM)
+        if band and parsed:
+            band_titles = [descendant_text(tree, band[j])
+                           for j in sorted(band)]
+            row_titles = [parsed[i][1] for i in sorted(parsed)]
+            check(band_titles == row_titles,
+                  "chapter titles agree between the dialogue "
+                  "band and the title-card rows",
+                  f"band={band_titles}, rows={row_titles}")
+    # ---- timing assistant + CPS readouts (W2-16, RM21).
+    texts = all_texts(tree)
+    proposals = [t for t in texts if ASSIST_PROPOSAL_RE.match(t)]
+    cps_lines = [t for t in texts if "chars/s" in t]
+    if not proposals and not cps_lines:
+        report("timing-assistant leg: not run — the audio tree "
+               "shows no proposal or CPS lines (the cue-less "
+               "audio scene plants no cues)")
+        return
+    for t in cps_lines:
+        report(f"timing-assistant leg: readout: {t!r} (CPS "
+               f"reported, never judged — D-9)")
+    count_line = next((t for t in texts if ASSIST_COUNT_RE.match(t)),
+                      None)
+    if count_line is not None:
+        stated = int(ASSIST_COUNT_RE.match(count_line).group(1))
+        check(stated == len(proposals),
+              "timing-assistant count line matches the proposal "
+              "rows shown",
+              f"count line states {stated}, proposal rows "
+              f"shown: {len(proposals)}")
 
 
 def finish(lines, failures, directory):
@@ -1070,10 +1778,119 @@ def _self_test():
         expect((w3, h3) == (W, H) and dec3 == base,
                "decoder: RGB filter-0 round-trips")
 
+        # Wave 2 expansion fixtures (W2-79): the dumps
+        # carry each lane block's label as a text element
+        # under the block; the dialogue lane delegates to
+        # the same rects and labels; the speaker tree
+        # additionally plants a chapter band, the
+        # parked-frame header, the frame chips and an SRT
+        # export announcement in its status text.
+        BLOCK_PATH = "/root/timeline/subtitle-lane/subtitle-cue-0"
+
+        def text_el(path, text):
+            return {"path": path, "key": None, "text": text}
+
+        def dialogue_els(label):
+            return [
+                {"path": "/root/timeline/dialogue-lane",
+                 "key": "dialogue-lane", "rect": [120, 436, 166, 18]},
+                {"path": "/root/timeline/dialogue-lane/dialogue-line-0",
+                 "key": "dialogue-line-0", "rect": list(LANE_BLOCK)},
+                text_el("/root/timeline/dialogue-lane/dialogue-line-0/#0",
+                        label),
+            ]
+
+        def populated_tree():
+            els = list(lane_tree["elements"]) + [
+                text_el(BLOCK_PATH + "/#0",
+                        "We walk home before dark."),
+            ] + dialogue_els("We walk home before dark.")
+            return {"elements": els}
+
+        def speaker_tree(fills=("#101216ff", "#2b6cb0ff", "#101216ff"),
+                         announce=1, dialogue_label=None):
+            label = "NOVA: The light is still on."
+            els = list(lane_tree["elements"]) + [
+                text_el(BLOCK_PATH + "/#0", label),
+                text_el("/root/status",
+                        f"Exported 1 subtitle cue(s) to /tmp/x.srt "
+                        f"— {announce} speaker credit(s) not written "
+                        f"(SRT has no speaker syntax)."),
+                text_el("/root/timeline/subtitle-lane/#0/#2",
+                        "Frame 3 / 5"),
+            ] + dialogue_els(dialogue_label or label)
+            # The planted band: three segments over the
+            # 5-frame timeline at origin 120, pitch 33.2
+            # (the chips below); the parked frame is 2,
+            # inside segment 1 — the one wearing the
+            # distinct (selected) fill.
+            spans = [(120.0, 33.2), (153.2, 66.4), (219.6, 66.4)]
+            for j, (x, w) in enumerate(spans):
+                els.append({
+                    "path": "/root/timeline/dialogue-lane/"
+                            f"dialogue-chapter-{j}",
+                    "key": f"dialogue-chapter-{j}",
+                    "rect": [x, 416, w, 18], "fill": fills[j]})
+                els.append(text_el(
+                    "/root/timeline/dialogue-lane/"
+                    f"dialogue-chapter-{j}/#0",
+                    ["Dawn", "Noon", "Dusk"][j]))
+            for k in range(5):
+                els.append({
+                    "path": "/root/timeline/timeline-chips/"
+                            f"frame-{k}",
+                    "key": None,
+                    "rect": [120.0 + 33.2 * k, 400, 30, 12]})
+            return {"elements": els}
+
+        def write_speaker_tree(**kw):
+            with open(os.path.join(td, TREE_SPEAKER), "w") as fh:
+                json.dump(speaker_tree(**kw), fh)
+
+        with open(os.path.join(td, TREE_SEEDED), "w") as fh:
+            json.dump(populated_tree(), fh)
+        write_speaker_tree()
+
         # The honest set passes.
         _lines, fails = run_census(td)
         expect(not fails, f"census passes on the synthetic honest set "
                           f"(failures: {fails})")
+        expect(any("planted composition" in l for l in _lines),
+               "census gates the seeded lane labels as dump text")
+        expect(any("carries the export announcement" in l
+                   for l in _lines),
+               "census reads the SRT announcement out of the "
+               "speaker tree's status text")
+
+        # A dialogue line whose label drops the credit
+        # (the subtitle lane's keeps it) must fail the
+        # delegation gate.
+        write_speaker_tree(dialogue_label="The light is still on.")
+        _lines, fails = run_census(td)
+        expect(any("reads exactly as its cue block" in f
+                   for f in fails),
+               "census fails when the dialogue line's label drops "
+               "the speaker credit")
+        write_speaker_tree()
+
+        # An SRT announcement counting more credits than
+        # the scene planted must fail the export gate.
+        write_speaker_tree(announce=2)
+        _lines, fails = run_census(td)
+        expect(any("SRT export announcement" in f for f in fails),
+               "census fails when the SRT announcement overcounts "
+               "the dropped credits")
+        write_speaker_tree()
+
+        # The distinct fill on the wrong chapter segment
+        # must fail the playhead agreement.
+        write_speaker_tree(fills=("#2b6cb0ff", "#101216ff",
+                                  "#101216ff"))
+        _lines, fails = run_census(td)
+        expect(any("playhead's chapter" in f for f in fails),
+               "census fails when the distinct fill sits on a "
+               "chapter the playhead is not in")
+        write_speaker_tree()
 
         # A speaker snap whose band face spans only the
         # BARE text's width (the prefix never painted)
@@ -1155,10 +1972,20 @@ def _self_test():
         lane_tree2 = {"scale": 2.0,
                       "accessibility": {"bounds": [0, 0, W, H]},
                       "elements": lane_tree["elements"]}
+        def lane_tree2_labelled(label):
+            return {"scale": 2.0,
+                    "accessibility": {"bounds": [0, 0, W, H]},
+                    "elements": lane_tree2["elements"] + [
+                        {"path": "/root/timeline/subtitle-lane/"
+                                 "subtitle-cue-0/#0",
+                         "key": None, "text": label}]}
+
         with open(os.path.join(td2, TREE_SEEDED), "w") as fh:
-            json.dump(lane_tree2, fh)
+            json.dump(lane_tree2_labelled(
+                "We walk home before dark."), fh)
         with open(os.path.join(td2, TREE_SPEAKER), "w") as fh:
-            json.dump(lane_tree2, fh)
+            json.dump(lane_tree2_labelled(
+                "NOVA: The light is still on."), fh)
         with open(os.path.join(td2, TREE_BASELINE), "w") as fh:
             json.dump(tree2, fh)
 
@@ -1209,6 +2036,193 @@ def _self_test():
                f"capture scale 2 (failures: {fails2})")
         expect(any("capture scale 2.000" in l for l in lines2),
                "census reports the capture scale it converted by")
+
+    # The shaped-claim recalibration (W2-79): the same
+    # seeded scenes with their bands claimed by the
+    # shaped pipeline. The painted spans are font-metric
+    # scale (credited 320 units, under the bitmap gate's
+    # 396), so the bitmap gate would fail them; with the
+    # claim elements in the trees the census must pass
+    # on the same-renderer control, and removing the
+    # claim must restore the bitmap failure.
+    with tempfile.TemporaryDirectory() as td3:
+        def claim_tree(with_claim, label):
+            els = [
+                {"path": "/root", "key": "root",
+                 "rect": [0, 0, W, H]},
+                {"path": "/root/stage", "key": "stage",
+                 "rect": [RECT[0], RECT[1], RECT[2], RECT[3]]},
+                {"path": "/root/timeline/subtitle-lane/subtitle-cue-0",
+                 "key": "subtitle-cue-0", "rect": list(LANE_BLOCK)},
+                {"path": "/root/timeline/subtitle-lane/"
+                         "subtitle-cue-0/#0",
+                 "key": None, "text": label},
+            ]
+            if with_claim:
+                els += [
+                    {"path": "/root/stage/stage-subtitle-layer",
+                     "key": "stage-subtitle-layer",
+                     "rect": [RECT[0], RECT[1], RECT[2], RECT[3]]},
+                    {"path": "/root/stage/stage-subtitle-layer/"
+                             "stage-subtitle-line-0",
+                     "key": "stage-subtitle-line-0",
+                     "rect": [RECT[0], RECT[1], RECT[2], 24]},
+                ]
+            return {"elements": els}
+
+        def write_claim_trees(pop_claim, spk_claim):
+            with open(os.path.join(td3, TREE_SEEDED), "w") as fh:
+                json.dump(claim_tree(pop_claim,
+                                     "We walk home before dark."), fh)
+            with open(os.path.join(td3, TREE_SPEAKER), "w") as fh:
+                json.dump(claim_tree(spk_claim,
+                                     "NOVA: The light is still on."),
+                          fh)
+            with open(os.path.join(td3, TREE_BASELINE), "w") as fh:
+                json.dump(tree, fh)
+
+        bottom3 = build(False, False)
+        paint(bottom3, 220, 360, int(dy1 - band) + 6, int(dy1) - 2,
+              WHITE)
+        paint_lane_label(bottom3, 240)
+        top3 = build(False, True)
+        base3 = build(False, False)
+        spk3 = build(False, False)
+        paint(spk3, 250, 410, int(dy1 - band) + 6, int(dy1) - 2,
+              WHITE)
+        paint_lane_label(spk3, 282)
+        _write_png(os.path.join(td3, SEEDED_BOTTOM_FULL), W, H,
+                   to_rgba(bottom3), color=6)
+        _write_png(os.path.join(td3, SEEDED_TOP_FULL), W, H,
+                   to_rgba(top3), color=6)
+        _write_png(os.path.join(td3, BASELINE_FULL), W, H,
+                   base3, color=2)
+        _write_png(os.path.join(td3, SEEDED_SPEAKER_FULL), W, H,
+                   to_rgba(spk3), color=6)
+
+        # Claims disagreeing across the scenes must fail:
+        # the claim is a font/style property, uniform for
+        # the machine the run happened on.
+        write_claim_trees(True, False)
+        _lines, fails = run_census(td3)
+        expect(any("shaped band claims agree" in f for f in fails),
+               "census fails when the seeded scenes disagree "
+               "about the shaped claim")
+
+        # Uniform claims: the shaped span gate passes on
+        # the same-renderer control (320 >= 0.95 x 280).
+        write_claim_trees(True, True)
+        _lines, fails = run_census(td3)
+        expect(not fails,
+               f"census passes on the shaped-claimed set "
+               f"(failures: {fails})")
+        expect(any("same-renderer control" in l for l in _lines),
+               "census reports the shaped span gate it applied")
+
+        # The same snaps with no claim recorded fall back
+        # to the bitmap span gate — and fail it, proving
+        # the recalibration is what carried the shaped
+        # set.
+        write_claim_trees(False, False)
+        _lines, fails = run_census(td3)
+        expect(any("speaker prefix widens" in f for f in fails),
+               "census fails the bitmap span gate on the "
+               "shaped set when no claim is recorded")
+
+    # The audio-tree leg exercised directly (W2-79): a
+    # synthetic Audio workspace tree carrying the
+    # title-card section and the timing assistant.
+    with tempfile.TemporaryDirectory() as td4:
+        sec = "/root/audio/title-card-section"
+        els = [
+            {"path": sec, "key": "title-card-section",
+             "rect": [0, 0, 300, 200]},
+            {"path": sec + "/title-card-row-0",
+             "key": "title-card-row-0", "rect": [0, 0, 300, 18]},
+            {"path": sec + "/title-card-row-0/#0", "key": None,
+             "text": "1. Dawn — frames 1–24"},
+            {"path": sec + "/title-card-row-1",
+             "key": "title-card-row-1", "rect": [0, 20, 300, 18]},
+            {"path": sec + "/title-card-row-1/#0", "key": None,
+             "text": "2. Dusk — frames 25–48"},
+            {"path": sec + "/title-card-preview",
+             "key": "title-card-preview", "rect": [0, 44, 300, 60]},
+            {"path": sec + "/title-card-preview/#0", "key": None,
+             "text": "CHAPTER 1"},
+            {"path": sec + "/title-card-preview/#1", "key": None,
+             "text": "Dawn"},
+            {"path": sec + "/title-card-preview/#2", "key": None,
+             "text": "Shows for 2.5 s from frame 1"},
+            {"path": "/root/audio/subtitle-assist", "key": None,
+             "text": "Cue 1 · extend to 2.5 s · 24.0 → 17.0 chars/s"},
+            {"path": "/root/audio/subtitle-assist-count",
+             "key": None, "text": "1 suggestion(s)"},
+        ]
+
+        def audio_run(elements):
+            with open(os.path.join(td4, TREE_AUDIO), "w") as fh:
+                json.dump({"elements": elements}, fh)
+            ls, fs = [], []
+
+            def ck(ok, label, detail=""):
+                if not ok:
+                    fs.append(label)
+
+            audio_tree_leg(td4, ck, lambda t: ls.append(t))
+            return ls, fs
+
+        _ls, fs = audio_run(els)
+        expect(not fs,
+               f"audio-tree leg passes on the honest section "
+               f"(failures: {fs})")
+        expect(any("expectation caption" in l for l in _ls),
+               "audio-tree leg reports the title-card expectation "
+               "caption")
+        expect(any("never judged" in l for l in _ls),
+               "audio-tree leg reports CPS without judging it")
+
+        bad = [dict(e) for e in els]
+        bad[8]["text"] = "Shows for 2.5 s from frame 9"
+        _ls, fs = audio_run(bad)
+        expect(any("first frame" in f for f in fs),
+               "audio-tree leg fails when the caption states the "
+               "wrong first frame")
+
+        bad2 = [dict(e) for e in els]
+        bad2[10]["text"] = "2 suggestion(s)"
+        _ls, fs = audio_run(bad2)
+        expect(any("count line matches" in f for f in fs),
+               "audio-tree leg fails when the assist count line "
+               "disagrees with the proposal rows")
+
+    # The MCP speakers_dropped field, exercised directly.
+    with tempfile.TemporaryDirectory() as td5:
+        def srt_run(probe_text):
+            p = os.path.join(td5, MCP_PROBE_TXT)
+            if probe_text is None:
+                if os.path.isfile(p):
+                    os.remove(p)
+            else:
+                with open(p, "w") as fh:
+                    fh.write(probe_text)
+            ls, fs = [], []
+
+            def ck(ok, label, detail=""):
+                if not ok:
+                    fs.append(label)
+
+            srt_announcement_leg(td5, ck, lambda t: ls.append(t))
+            return ls, fs
+
+        _ls, fs = srt_run('{"speakers_dropped": 2}')
+        expect(not fs, "SRT leg passes on a positive "
+                       "speakers_dropped")
+        _ls, fs = srt_run('{"speakers_dropped": 0}')
+        expect(any("present only" in f for f in fs),
+               "SRT leg fails on a zero speakers_dropped field")
+        _ls, fs = srt_run(None)
+        expect(not fs and any("not run" in l for l in _ls),
+               "SRT leg reports not run when no surface speaks")
 
     print("SELF-TEST: " + ("PASS" if not failures else
                            f"FAIL ({len(failures)})"))

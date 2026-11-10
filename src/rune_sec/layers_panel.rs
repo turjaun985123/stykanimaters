@@ -638,7 +638,10 @@ fn layer_row(r: &LayerRow, t: &Theme) -> El {
             &r.name,
             false,
             t,
-            move |s: &mut State| s.core.select_figure(fi),
+            move |s: &mut State| {
+                s.core.select_figure(fi);
+                crate::stage_view::note_character_selected(fi);
+            },
         )
     } else {
         btn(
@@ -646,7 +649,10 @@ fn layer_row(r: &LayerRow, t: &Theme) -> El {
             &r.name,
             false,
             t,
-            move |s: &mut State| s.core.select_figure(fi),
+            move |s: &mut State| {
+                s.core.select_figure(fi);
+                crate::stage_view::note_character_selected(fi);
+            },
         )
     };
     root.child(

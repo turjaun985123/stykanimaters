@@ -25,6 +25,46 @@
 //! (out of the Audio foot) is the X9 gating move priced
 //! in IA-RM21-1 — not built here.
 //!
+//! Roadmap Wave 2 (W2-16) adds the Timing assistant
+//! block under the Timing block: RM21 measured every
+//! cue's reading speed and judged nothing; the
+//! assistant proposes concrete fixes at the author's
+//! own target pace — extend a cue into following dead
+//! air, split a dense cue at a word boundary (verbatim,
+//! always), split + shift the following chain — computed
+//! by the pure engine in `stykanimate_rs::
+//! subtitle_timing`, whose module docs state the whole
+//! model (two adjustable parameters, no hidden
+//! threshold; the D-9 warning-threshold question stays
+//! open and untouched). Proposals are derived state,
+//! recomputed on every render and every apply press, so
+//! a row can never aim at a list that has moved. Each
+//! apply (one proposal, or all of them) rides the core
+//! op `EditorCore::subtitle_timing_apply` (IA-W2-16-2)
+//! as exactly one labelled undo step; the selection and
+//! any open text session stand down after a landed fix,
+//! the shift-all discipline.
+//!
+//! Roadmap Wave 2 (W2-99) closes RM21's named remainder
+//! — the cue-text editor is genuinely multi-line. The
+//! audit (findings2/w2-99.md) read the pinned Rune rev
+//! first: `rune::text_input` is multi-line BY DEFAULT
+//! and the kit's field builder is what forced
+//! single-line, so the editor now rides the kit's
+//! multi-line sibling (`design::text_area`) inside
+//! `rune::auto_grow`'s bounded
+//! scroll box — no stacked per-line fields, no fake
+//! textarea. The keys are the engine's: plain Enter
+//! still applies (the shell's committing-field rule),
+//! Shift+Enter / Option+Enter break the line, and a
+//! hint line under the area says so. The buffer is the
+//! cue's text whole — breaks, blank lines and trailing
+//! spaces ride through Apply byte-for-byte (the op's
+//! one refusal, empty-after-trim, refuses identically
+//! and leaves the session open); the speaker field
+//! stays single-line on purpose, because the model's
+//! speaker rule refuses newlines outright.
+//!
 //! ## The selection join (P32 IA-4)
 //!
 //! The panel and the timeline's subtitle lane share ONE
@@ -129,12 +169,18 @@
 //!   (`subtitles::subtitle_display_lines`), the hex
 //!   readout (`#RRGGBB`) and the bare stepper numbers
 //!   are notation.
-//! * The cue text field is the kit's one field
-//!   construction, which is single-line: a multi-line
-//!   cue's line breaks ride in the buffer verbatim and
-//!   survive an unedited Apply untouched (the unchanged
-//!   check), but the field itself edits the text as one
-//!   line, like every field in this shell.
+//! * The cue text field is the kit's multi-line
+//!   area (W2-99): line breaks are edited AS breaks
+//!   (Shift+Enter / Option+Enter), the buffer holds the
+//!   text whole, and an unedited Apply still spends
+//!   nothing (the unchanged check). Before W2-99 the
+//!   kit's single-line construction edited the text as
+//!   one line and its input sanitiser silently DELETED
+//!   pasted line breaks, joining the lines — the audit
+//!   is in findings2/w2-99.md. The one normalisation
+//!   the multi-line engine itself owns: a pasted CRLF
+//!   pair lands as LF, which is the sidecars' storage
+//!   form anyway.
 //! * Cue frames are NOT clamped to the timeline (the
 //!   core ops' rule): a cue may start or end past the
 //!   last frame, and the end stepper has no upper bound.
@@ -196,11 +242,22 @@
 //! `subtitle-shift-m100` / `subtitle-shift-p100` /
 //! `subtitle-shift-p1s` (shift-all), `subtitle-retime-dn`
 //! / `subtitle-retime-up` / `subtitle-retime-apply`.
+//! Roadmap Wave 2 (W2-16) adds: `subtitle-assist`
+//! (assistant root), `subtitle-assist-target-dn` /
+//! `subtitle-assist-target-up` (target-speed stepper),
+//! `subtitle-assist-min-dn` / `subtitle-assist-min-up`
+//! (minimum-duration stepper), `subtitle-assist-apply-{k}`
+//! (per-proposal apply, k = the proposal's row),
+//! `subtitle-assist-apply-all`.
 //! No existing key is renamed or removed.
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, El, TextEdit};
 use stykanimate_rs::editor::EditorCore;
+use stykanimate_rs::subtitle_timing::{
+    timing_report, Proposal, ProposalKind, TimingParams, TimingReport, DEFAULT_MIN_SECONDS,
+    DEFAULT_TARGET_CPS, MIN_SECONDS_MAX, TARGET_CPS_MAX, TARGET_CPS_MIN,
+};
 use stykanimate_rs::subtitles::{
     nudge_delta_frames, retimed_window, shifted_window, sort_subtitle_cues,
     subtitles_from_srt, subtitles_from_vtt, subtitles_to_srt,
@@ -292,6 +349,19 @@ pub struct SubtitlePanelState {
     /// step to change): it is a claim about the cues'
     /// history, not project data.
     pub retime_from: f32,
+    /// The Timing assistant's target reading speed
+    /// (W2-16), in chars/s: the pace its proposals aim
+    /// for — an author-set model parameter, NOT a
+    /// warning threshold (D-9 untouched: nothing flags
+    /// a cue against it; it only shapes the fixes
+    /// offered). Panel-session state only, like
+    /// `retime_from`: stepping it spends no undo step.
+    pub timing_target_cps: f32,
+    /// The Timing assistant's minimum on-screen time
+    /// (W2-16), in seconds: the floor term of the
+    /// engine's needed-frames formula. Panel-session
+    /// state only.
+    pub timing_min_seconds: f32,
 }
 
 impl SubtitlePanelState {
@@ -304,6 +374,8 @@ impl SubtitlePanelState {
             speaker: TextEdit::new(""),
             speaker_opened: String::new(),
             retime_from: 0.0,
+            timing_target_cps: DEFAULT_TARGET_CPS,
+            timing_min_seconds: DEFAULT_MIN_SECONDS,
         }
     }
 }
@@ -590,6 +662,75 @@ pub fn effective_retime_from(panel: &SubtitlePanelState, project_fps: f32) -> f3
         panel.retime_from
     } else {
         project_fps
+    }
+}
+
+/// The Timing assistant's parameters in force (W2-16):
+/// the panel's stepped values held to the model's
+/// ranges (the engine's `sanitised` backstop — the
+/// steppers already step inside them).
+pub fn timing_params(panel: &SubtitlePanelState) -> TimingParams {
+    TimingParams {
+        target_cps: panel.timing_target_cps,
+        min_seconds: panel.timing_min_seconds,
+    }
+    .sanitised()
+}
+
+/// The Timing assistant's current report over the
+/// project's cues (W2-16), recomputed from the live
+/// list on every call: proposals are derived state,
+/// never stored, so a rendered row and the press that
+/// follows it always speak about the same list (the
+/// handlers-here resolve their targets at press time,
+/// the panel's standing discipline).
+pub fn timing_report_for(core: &EditorCore, panel: &SubtitlePanelState) -> TimingReport {
+    timing_report(core.subtitle_cues(), core.project.fps, &timing_params(panel))
+}
+
+/// One proposal's line (W2-16): the cue it addresses
+/// (1-based, the ops' voice), the fix it makes, and the
+/// measured pace before → after. The skeletons are the
+/// `subtitle_assist_extend` / `subtitle_assist_split` /
+/// `subtitle_assist_split_shift` template keys
+/// (IA-W2-16-3). Every substituted value is a number or
+/// the localised word for a cue — cue TEXT is never
+/// composed into the line, so no slot can be re-scanned
+/// by user data (the `cue_row_label` rule, trivially
+/// satisfied here).
+pub fn assist_proposal_line(core: &EditorCore, proposal: &Proposal) -> String {
+    let cue_word = i18n_wire::tr(core, "subtitle_cue");
+    let index = (proposal.cue_index + 1).to_string();
+    let cps = format!("{:.1}", proposal.cps_before);
+    let after = format!("{:.1}", proposal.cps_after);
+    match proposal.kind {
+        ProposalKind::Extend => {
+            let grown = &proposal.replacement[0];
+            let seconds =
+                (grown.end_frame - grown.start_frame) as f32 / core.project.fps;
+            i18n_wire::tr(core, "subtitle_assist_extend")
+                .replace("{cue}", &cue_word)
+                .replace("{index}", &index)
+                .replace("{seconds}", &format!("{seconds:.1}"))
+                .replace("{cps}", &cps)
+                .replace("{after}", &after)
+        }
+        ProposalKind::Split => {
+            if proposal.shift_following_by > 0 {
+                i18n_wire::tr(core, "subtitle_assist_split_shift")
+                    .replace("{cue}", &cue_word)
+                    .replace("{index}", &index)
+                    .replace("{shift}", &proposal.shift_following_by.to_string())
+                    .replace("{cps}", &cps)
+                    .replace("{after}", &after)
+            } else {
+                i18n_wire::tr(core, "subtitle_assist_split")
+                    .replace("{cue}", &cue_word)
+                    .replace("{index}", &index)
+                    .replace("{cps}", &cps)
+                    .replace("{after}", &after)
+            }
+        }
     }
 }
 
@@ -967,6 +1108,62 @@ pub fn apply_retime(s: &mut State) {
     }
 }
 
+/// Step the Timing assistant's target speed by one
+/// char/s in `dir` (W2-16), held to the model's range
+/// ([`TARGET_CPS_MIN`]..=[`TARGET_CPS_MAX`]). Panel
+/// state only — no undo step, no status: the readout
+/// and the recomputed proposal rows are the feedback.
+pub fn step_timing_target(s: &mut State, dir: i32) {
+    let next = (s.subtitle_panel.timing_target_cps + dir as f32)
+        .clamp(TARGET_CPS_MIN, TARGET_CPS_MAX);
+    s.subtitle_panel.timing_target_cps = next;
+}
+
+/// Step the Timing assistant's minimum on-screen time
+/// by a quarter second in `dir` (W2-16), held to
+/// 0..=[`MIN_SECONDS_MAX`]. Panel state only, like
+/// [`step_timing_target`].
+pub fn step_timing_min(s: &mut State, dir: i32) {
+    let next = (s.subtitle_panel.timing_min_seconds + 0.25 * dir as f32)
+        .clamp(0.0, MIN_SECONDS_MAX);
+    s.subtitle_panel.timing_min_seconds = next;
+}
+
+/// Apply ONE Timing assistant proposal (W2-16): `k`
+/// indexes the report recomputed at press time by the
+/// core op (`EditorCore::subtitle_timing_apply`,
+/// IA-W2-16-2), so the fix applied is the fix the row
+/// showed. Exactly one undo step when a fix lands; the
+/// selection and any open text session stand down after
+/// it (a landed split renumbers the list), the
+/// shift-all discipline. A press against a report that
+/// no longer holds `k` spends nothing — the op reports
+/// and the world stays.
+pub fn apply_timing_proposal(s: &mut State, k: usize) {
+    if s.core
+        .subtitle_timing_apply(&timing_params(&s.subtitle_panel), Some(k))
+        > 0
+    {
+        s.subtitle_selected = None;
+        close_edit(s);
+    }
+}
+
+/// Apply EVERY Timing assistant proposal (W2-16) as
+/// one undo step — the batch twin of
+/// [`apply_timing_proposal`], same stand-down, same
+/// no-change honesty (an all-comfortable list reports
+/// and spends nothing).
+pub fn apply_all_timing_proposals(s: &mut State) {
+    if s.core
+        .subtitle_timing_apply(&timing_params(&s.subtitle_panel), None)
+        > 0
+    {
+        s.subtitle_selected = None;
+        close_edit(s);
+    }
+}
+
 /// Delete the selected cue through
 /// `EditorCore::subtitle_delete` (one undo step) and
 /// clear the selection: the deleted cue's index would
@@ -1242,7 +1439,7 @@ pub fn import_file(s: &mut State, format: SubtitleFileFormat) {
     let credited_after = cues.iter().filter(|c| c.speaker.is_some()).count();
     let dropped = credited_before.saturating_sub(credited_after);
     let count = cues.len();
-    s.core.snapshot();
+    s.core.snapshot_labeled("Import subtitles");
     s.core.project.subtitles = cues;
     s.subtitle_selected = None;
     close_edit(s);
@@ -1276,10 +1473,17 @@ pub fn subtitle_section(s: &State, t: &Theme) -> El {
         .gap(8.0)
         .child(design::section_label(&i18n_wire::tr(core, "subtitles"), t));
     if cues.is_empty() {
-        section = section.child(design::empty_state(
+        // W2-57 (PL-6 completion, IA-RM28-6): the state
+        // offers its filling action — Add cue, the
+        // section's own add, the same handler the Add
+        // button below runs.
+        section = section.child(design::empty_state_action(
             "star",
             &i18n_wire::tr(core, "subtitle_none"),
+            "subtitle-empty-add",
+            &i18n_wire::tr(core, "subtitle_add"),
             t,
+            |s| add_cue(s),
         ));
     } else {
         for (i, cue) in cues.iter().enumerate() {
@@ -1313,6 +1517,7 @@ pub fn subtitle_section(s: &State, t: &Theme) -> El {
     if !cues.is_empty() {
         section = section.child(detail_block(s, t));
         section = section.child(timing_block(s, t));
+        section = section.child(assist_block(s, t));
     }
     section = section.child(style_block(s, t));
     section = section.child(file_block(s, t));
@@ -1388,6 +1593,154 @@ fn timing_block(s: &State, t: &Theme) -> El {
         )
 }
 
+/// How many proposal rows the assistant block gives
+/// their own Apply buttons (W2-16): the first fixes in
+/// cue order. The count line and Apply-all cover the
+/// rest, so a long report cannot grow the card without
+/// bound — every proposal stays reachable, the first
+/// few stay one press away.
+const ASSIST_MAX_ROWS: usize = 6;
+
+/// The Timing assistant block (W2-16): under the Timing
+/// block, mounted when cues exist. RM21 measured every
+/// cue; this block proposes concrete fixes at the
+/// author's own target pace — the model's two
+/// parameters as steppers, one row per proposed fix
+/// with its own Apply, an Apply-all with the count, and
+/// the no-room count when a cue cannot be helped. The
+/// report is recomputed on every render from the live
+/// list, so a row always names the fix its press would
+/// apply. When nothing needs fixing the block says so
+/// in the model's terms (every cue fits the TARGET —
+/// the author's pace, not a judged threshold; D-9
+/// untouched).
+fn assist_block(s: &State, t: &Theme) -> El {
+    let core = &s.core;
+    let report = timing_report_for(core, &s.subtitle_panel);
+    let params = timing_params(&s.subtitle_panel);
+    let mut block = col()
+        .key("subtitle-assist")
+        .w_full()
+        .gap(8.0)
+        .child(design::section_label(
+            &i18n_wire::tr(core, "subtitle_assist"),
+            t,
+        ))
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(
+                    design::section_label(
+                        &i18n_wire::tr(core, "subtitle_assist_target"),
+                        t,
+                    )
+                    .grow(1.0),
+                )
+                .child(btn("subtitle-assist-target-dn", "−", false, t, |s| {
+                    step_timing_target(s, -1)
+                }))
+                .child(design::stepper_value(&format!("{:.0}", params.target_cps), t))
+                .child(btn("subtitle-assist-target-up", "+", false, t, |s| {
+                    step_timing_target(s, 1)
+                })),
+        )
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(
+                    design::section_label(
+                        &i18n_wire::tr(core, "subtitle_assist_min"),
+                        t,
+                    )
+                    .grow(1.0),
+                )
+                .child(btn("subtitle-assist-min-dn", "−", false, t, |s| {
+                    step_timing_min(s, -1)
+                }))
+                .child(design::stepper_value(
+                    &format!("{:.2}", params.min_seconds),
+                    t,
+                ))
+                .child(btn("subtitle-assist-min-up", "+", false, t, |s| {
+                    step_timing_min(s, 1)
+                })),
+        );
+    if report.proposals.is_empty() && report.stuck == 0 {
+        return block.child(
+            text(i18n_wire::tr(core, "subtitle_assist_none"))
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
+    }
+    for (k, proposal) in report.proposals.iter().take(ASSIST_MAX_ROWS).enumerate() {
+        block = block.child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(
+                    text(assist_proposal_line(core, proposal))
+                        .font(type_::LABEL)
+                        .color(t.text_secondary)
+                        .grow(1.0)
+                        .truncate(),
+                )
+                .child(btn(
+                    &format!("subtitle-assist-apply-{k}"),
+                    &i18n_wire::tr(core, "subtitle_assist_apply"),
+                    false,
+                    t,
+                    move |s| apply_timing_proposal(s, k),
+                )),
+        );
+    }
+    if !report.proposals.is_empty() {
+        block = block.child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(btn(
+                    "subtitle-assist-apply-all",
+                    &i18n_wire::tr(core, "subtitle_assist_apply_all"),
+                    false,
+                    t,
+                    |s| apply_all_timing_proposals(s),
+                ))
+                .child(
+                    text(
+                        i18n_wire::tr(core, "subtitle_assist_count")
+                            .replace("{count}", &report.proposals.len().to_string()),
+                    )
+                    .font(type_::LABEL)
+                    .color(t.text_secondary),
+                ),
+        );
+    }
+    if report.stuck > 0 {
+        block = block.child(
+            text(
+                i18n_wire::tr(core, "subtitle_assist_stuck")
+                    .replace("{count}", &report.stuck.to_string()),
+            )
+            .font(type_::LABEL)
+            .color(t.text_secondary),
+        );
+    }
+    block
+}
+
+/// The cue-text area's grow bounds (W2-99): the
+/// multi-line editor opens at least two lines tall
+/// (a one-line box would hide that breaks are
+/// editable at all) and grows with the text to six,
+/// then scrolls inside `rune::auto_grow`'s viewport
+/// with the caret kept in view — a long cue can
+/// never push the detail card open without bound.
+const TEXT_AREA_MIN_LINES: usize = 2;
+/// See [`TEXT_AREA_MIN_LINES`].
+const TEXT_AREA_MAX_LINES: usize = 6;
+
 /// The selected cue's editor: title and range readout,
 /// the cue's text (or the open text session), the
 /// start/end steppers, the playhead placement row and
@@ -1442,9 +1795,19 @@ fn detail_block(s: &State, t: &Theme) -> El {
         );
     if edit_is_live(s) {
         // The open text session: the speaker field over
-        // the cue-text field (Enter applies in either,
-        // like every committing field in the shell) over
-        // the Apply/Cancel row.
+        // the cue-text area (Enter applies in either,
+        // like every committing field in the shell; in
+        // the area Shift+Enter breaks the line instead —
+        // the hint under it teaches the difference) over
+        // the Apply/Cancel row. The speaker field stays
+        // single-line on purpose: the model's speaker
+        // rule refuses a name holding a newline, so a
+        // multi-line speaker field would invite text
+        // its op must refuse. The cue text carries no
+        // such rule — its breaks are structure (W2-16's
+        // split maths treats them as real), so its
+        // editor is the kit's multi-line area (W2-99)
+        // in auto_grow's bounded scroll box.
         block = block
             .child(design::section_label(
                 &i18n_wire::tr(&s.core, "subtitle_speaker"),
@@ -1464,19 +1827,25 @@ fn detail_block(s: &State, t: &Theme) -> El {
                 .on_edit(|s: &mut State| &mut s.subtitle_panel.speaker)
                 .on_submit(|s: &mut State, _tx: &mut rune::Tx| apply_edit(s)),
             )
-            .child(
-                design::text_field(
+            .child(rune::auto_grow(
+                design::text_area(
                     &s.subtitle_panel.text,
                     type_::BODY,
                     s.subtitle_panel.text.focused,
                     t,
                 )
                 .key("subtitle-text-field")
-                .single_line()
                 .w_full()
                 .color(t.text)
                 .on_edit(|s: &mut State| &mut s.subtitle_panel.text)
                 .on_submit(|s: &mut State, _tx: &mut rune::Tx| apply_edit(s)),
+                TEXT_AREA_MIN_LINES,
+                TEXT_AREA_MAX_LINES,
+            ))
+            .child(
+                text(i18n_wire::tr(&s.core, "subtitle_multiline_hint"))
+                    .font(type_::LABEL)
+                    .color(t.text_secondary),
             )
             .child(
                 row()
@@ -2020,6 +2389,10 @@ mod tests {
         assert_eq!(st.text_target, None);
         assert_eq!(st.text_opened, "");
         assert_eq!(st.retime_from, 0.0, "the retime source starts unset");
+        // W2-16: the assistant's parameters start at
+        // the model's defaults.
+        assert_eq!(st.timing_target_cps, DEFAULT_TARGET_CPS);
+        assert_eq!(st.timing_min_seconds, DEFAULT_MIN_SECONDS);
         let st = SubtitlePanelState::default();
         assert_eq!(st.text_target, None);
     }
@@ -2053,6 +2426,28 @@ mod tests {
         assert_eq!(hex_label(0xFFFFFF), "#FFFFFF");
         assert_eq!(hex_label(0x000000), "#000000");
         assert_eq!(hex_label(0xFFD94D), "#FFD94D");
+    }
+
+    #[test]
+    fn row_label_flattens_a_credited_multiline_cue_with_its_prefix() {
+        // Roadmap Wave 2 (W2-17) consistency pin: the
+        // last label combination — credited AND
+        // multi-line. The row's text is the lane label
+        // (`subtitle_lane::block_label`, the renderers'
+        // composition) with its line breaks flattened
+        // to spaces, inside the row template: one cue,
+        // one reading, on every surface.
+        let s = cue_state(Vec::new());
+        let mut credited = cue(0, 24, "one\ntwo");
+        credited.speaker = Some("NOVA".to_string());
+        assert_eq!(cue_row_label(&s.core, &credited), "1–24 · NOVA: one two");
+        assert_eq!(
+            cue_row_label(&s.core, &credited),
+            format!(
+                "1–24 · {}",
+                crate::rune_sec::subtitle_lane::block_label(&credited).replace('\n', " ")
+            )
+        );
     }
 
     #[test]
@@ -2115,7 +2510,7 @@ mod tests {
         // (English) core resolves it to the exact
         // literal it replaced — English rendering is
         // byte-identical to the pre-i18n panel.
-        const LABELS: [(&str, &str); 45] = [
+        const LABELS: [(&str, &str); 52] = [
             ("subtitles", "Subtitles"),
             ("subtitle_none", "No subtitles in this project."),
             ("subtitle_add", "Add cue"),
@@ -2176,6 +2571,27 @@ mod tests {
                 "subtitle_lane_empty",
                 "No subtitles yet — add the first cue from here.",
             ),
+            // Roadmap Wave 2 (W2-16 — IA-W2-16-3): the
+            // Timing assistant block's labels. Like the
+            // RM21 keys above, these resolve only once
+            // the IA lands the keys in the catalogue.
+            ("subtitle_assist", "Timing assistant"),
+            ("subtitle_assist_target", "Target (chars/s)"),
+            ("subtitle_assist_min", "Minimum (s)"),
+            ("subtitle_assist_apply", "Apply"),
+            ("subtitle_assist_apply_all", "Apply all"),
+            (
+                "subtitle_assist_none",
+                "Every cue fits the target speed.",
+            ),
+            // Roadmap Wave 2 (W2-99 — IA-W2-99-1): the
+            // multi-line editor's hint line. Like the
+            // RM21 keys above, it resolves only once
+            // the IA lands the key in the catalogue.
+            (
+                "subtitle_multiline_hint",
+                "Shift+Enter starts a new line; Enter applies.",
+            ),
         ];
         let s = cue_state(Vec::new());
         for (key, english) in LABELS {
@@ -2198,7 +2614,7 @@ mod tests {
         // value); the cue title and colour line
         // compose inline in their views and are
         // pinned by their stored templates here.
-        const TEMPLATES: [(&str, &str); 7] = [
+        const TEMPLATES: [(&str, &str); 12] = [
             ("subtitle_row_label", "{start}–{end} · {text}"),
             ("subtitle_cue_title", "{cue} {index}"),
             (
@@ -2219,6 +2635,26 @@ mod tests {
             (
                 "subtitle_cps_line",
                 "{cps} chars/s · lines {lines}",
+            ),
+            // Roadmap Wave 2 (W2-16 — IA-W2-16-3): the
+            // Timing assistant's proposal lines and its
+            // count lines.
+            (
+                "subtitle_assist_extend",
+                "{cue} {index} · extend to {seconds} s · {cps} → {after} chars/s",
+            ),
+            (
+                "subtitle_assist_split",
+                "{cue} {index} · split · {cps} → {after} chars/s",
+            ),
+            (
+                "subtitle_assist_split_shift",
+                "{cue} {index} · split + shift {shift} f · {cps} → {after} chars/s",
+            ),
+            ("subtitle_assist_count", "{count} suggestion(s)"),
+            (
+                "subtitle_assist_stuck",
+                "{count} cue(s) have no room to grow",
             ),
         ];
         for (key, template) in TEMPLATES {
@@ -2379,6 +2815,80 @@ mod tests {
         assert_eq!(s.core.project.subtitles[0].text, "Rewritten elsewhere");
         assert_eq!(s.subtitle_panel.text_target, None, "the session stood down");
         assert!(s.core.status.contains("Subtitle text edit failed"));
+    }
+
+    #[test]
+    fn multiline_text_round_trips_verbatim_through_the_editor() {
+        // W2-99: the buffer IS the cue's text whole —
+        // line breaks, a blank line and trailing spaces
+        // are content, not formatting. An unedited
+        // multi-line buffer applies for free (the
+        // unchanged check compares the whole string);
+        // an edited one writes back byte-for-byte,
+        // trailing newline included, in one undo step.
+        let original = "First line  \n\nThird line";
+        let mut s = cue_state(vec![cue(0, 24, original)]);
+        s.subtitle_selected = Some(0);
+        begin_edit(&mut s);
+        assert_eq!(s.subtitle_panel.text.text, original);
+        let depth = s.core.undo_depth();
+        apply_edit(&mut s);
+        assert_eq!(s.core.undo_depth(), depth, "unchanged text spends no step");
+        assert_eq!(s.core.project.subtitles[0].text, original);
+
+        begin_edit(&mut s);
+        let edited = "Edited  \n\nlast line\n";
+        s.subtitle_panel.text = TextEdit::new(edited);
+        apply_edit(&mut s);
+        assert_eq!(s.core.undo_depth(), depth + 1, "one step for the rewrite");
+        assert_eq!(
+            s.core.project.subtitles[0].text, edited,
+            "the stored text is the buffer, byte-for-byte"
+        );
+        assert_eq!(s.subtitle_panel.text_target, None, "the session closed");
+    }
+
+    #[test]
+    fn breaks_only_buffer_refuses_and_the_session_stays_open() {
+        // The editor refuses exactly where the model
+        // does: a buffer of spaces and line breaks is
+        // empty after trim (SubtitleCue::validate), so
+        // the op refuses, its status stands, nothing is
+        // written, no step is spent — and the session
+        // stays OPEN so the text can be fixed in place
+        // (apply_edit's documented third guard).
+        let mut s = cue_state(vec![cue(0, 24, "Real text")]);
+        s.subtitle_selected = Some(0);
+        begin_edit(&mut s);
+        s.subtitle_panel.text = TextEdit::new(" \n \n");
+        let depth = s.core.undo_depth();
+        apply_edit(&mut s);
+        assert_eq!(s.core.undo_depth(), depth, "a refused apply spends nothing");
+        assert_eq!(s.core.project.subtitles[0].text, "Real text");
+        assert_eq!(
+            s.subtitle_panel.text_target,
+            Some(0),
+            "the session stays open on an op refusal"
+        );
+        assert!(s.core.status.contains("Subtitle update failed: text is empty"));
+    }
+
+    #[test]
+    fn section_constructs_with_the_editor_open_on_a_multiline_cue() {
+        // W2-99's construction branch (the house
+        // discipline: element trees are not readable
+        // from unit tests, construction is the
+        // assertable level — the presented-tree proof
+        // belongs to CI): the multi-line area and its
+        // auto_grow scroll box build on a cue whose
+        // text carries breaks, under both themes.
+        for dark in [true, false] {
+            let t = rune::tok::theme(dark);
+            let mut s = cue_state(vec![cue(0, 24, "one\ntwo\nthree")]);
+            s.subtitle_selected = Some(0);
+            begin_edit(&mut s);
+            let _ = subtitle_section(&s, &t);
+        }
     }
 
     #[test]
@@ -2721,6 +3231,122 @@ mod tests {
         let mut s = cue_state(Vec::new());
         shift_all(&mut s, 1000);
         assert_eq!(s.core.subtitle_count(), 0);
+    }
+
+    #[test]
+    fn timing_steppers_stay_in_range_and_spend_nothing() {
+        // W2-16: the assistant's parameters are panel
+        // state — stepping them moves no cue and spends
+        // no undo step; the steppers hold the model's
+        // ranges at both ends.
+        let mut s = cue_state(vec![cue(0, 24, "x")]);
+        let depth = s.core.undo_depth();
+        step_timing_target(&mut s, 1);
+        assert_eq!(s.subtitle_panel.timing_target_cps, 18.0);
+        step_timing_target(&mut s, -1);
+        step_timing_target(&mut s, -1);
+        assert_eq!(s.subtitle_panel.timing_target_cps, 16.0);
+        for _ in 0..100 {
+            step_timing_target(&mut s, 1);
+        }
+        assert_eq!(s.subtitle_panel.timing_target_cps, TARGET_CPS_MAX);
+        for _ in 0..100 {
+            step_timing_target(&mut s, -1);
+        }
+        assert_eq!(s.subtitle_panel.timing_target_cps, TARGET_CPS_MIN);
+        step_timing_min(&mut s, 1);
+        assert_eq!(s.subtitle_panel.timing_min_seconds, 1.25);
+        for _ in 0..100 {
+            step_timing_min(&mut s, -1);
+        }
+        assert_eq!(s.subtitle_panel.timing_min_seconds, 0.0);
+        for _ in 0..100 {
+            step_timing_min(&mut s, 1);
+        }
+        assert_eq!(s.subtitle_panel.timing_min_seconds, MIN_SECONDS_MAX);
+        assert_eq!(s.core.undo_depth(), depth, "steppers spend no undo step");
+        assert_eq!(s.core.subtitle_count(), 1, "and move no cue");
+    }
+
+    #[test]
+    fn assist_lines_speak_the_measured_numbers() {
+        // W2-16: an extend proposal's line names the
+        // cue, the fix, the landing duration and the
+        // pace before → after — the model's numbers,
+        // nothing judged. (The template keys resolve
+        // once IA-W2-16-3 lands, the Q7 pattern.)
+        let s = cue_state(vec![
+            cue(0, 24, "aaaa bbbb cccc dddd eeee ffff gggg"),
+            cue(96, 120, "later"),
+        ]);
+        let report = timing_report_for(&s.core, &s.subtitle_panel);
+        assert_eq!(report.proposals.len(), 1);
+        assert_eq!(
+            assist_proposal_line(&s.core, &report.proposals[0]),
+            "Cue 1 · extend to 2.0 s · 34.0 → 17.0 chars/s"
+        );
+        // A comfortable list proposes nothing and the
+        // report is clean (no proposals, nothing stuck).
+        let s = cue_state(vec![cue(0, 48, "aaaa bbbb cccc dddd eeee ffff gggg")]);
+        let report = timing_report_for(&s.core, &s.subtitle_panel);
+        assert!(report.proposals.is_empty());
+        assert_eq!(report.stuck, 0);
+    }
+
+    #[test]
+    fn apply_one_split_spends_exactly_one_step_and_keeps_the_text() {
+        // W2-16: the engine's split + shift fixture at
+        // panel scale — one press, one undo step, the
+        // dialogue rejoined verbatim, the selection
+        // stood down. The handler rides the core op
+        // filed as IA-W2-16-2, so this pin first runs
+        // at integration CI (the RM21 pattern).
+        let text = "aaaa bbbb cccc dddd eeee ffff gggg hhhh";
+        let mut s = cue_state(vec![cue(0, 24, text), cue(40, 64, "next")]);
+        s.subtitle_selected = Some(0);
+        let depth = s.core.undo_depth();
+        apply_timing_proposal(&mut s, 0);
+        assert_eq!(s.core.undo_depth(), depth + 1, "one press, one undo step");
+        assert_eq!(s.core.subtitle_count(), 3);
+        let texts: Vec<&str> = s
+            .core
+            .subtitle_cues()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            ["aaaa bbbb cccc dddd", "eeee ffff gggg hhhh", "next"]
+        );
+        assert_eq!(s.subtitle_selected, None, "the selection stands down");
+    }
+
+    #[test]
+    fn apply_all_spends_one_step_for_the_whole_batch() {
+        // W2-16: two dense cues fixed by one press of
+        // Apply-all cost ONE undo step between them.
+        let text = "aaaa bbbb cccc dddd eeee ffff gggg hhhh";
+        let mut s = cue_state(vec![
+            cue(0, 24, text),
+            cue(40, 64, text),
+            cue(80, 104, "tail"),
+        ]);
+        let depth = s.core.undo_depth();
+        apply_all_timing_proposals(&mut s);
+        assert_eq!(s.core.undo_depth(), depth + 1, "the batch is one step");
+        assert_eq!(s.core.subtitle_count(), 5);
+    }
+
+    #[test]
+    fn apply_with_nothing_to_fix_spends_nothing() {
+        // W2-16: an all-comfortable list reports and
+        // spends nothing — no fake step for a press
+        // that changed nothing.
+        let mut s = cue_state(vec![cue(0, 48, "aaaa bbbb cccc dddd eeee ffff gggg")]);
+        let depth = s.core.undo_depth();
+        apply_all_timing_proposals(&mut s);
+        assert_eq!(s.core.undo_depth(), depth);
+        assert_eq!(s.core.subtitle_count(), 1);
     }
 
     #[test]

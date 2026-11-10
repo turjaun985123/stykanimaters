@@ -427,7 +427,7 @@ pub fn push_stamp_stroke(core: &mut EditorCore, points: Vec<[f32; 2]>, what: &st
     let brush = core.active_brush();
     let color = core.project.figures[core.selected_figure].color;
     let n = points.len();
-    core.snapshot();
+    core.snapshot_labeled(&format!("Draw {what}"));
     core.project.strokes.push(stykanimate_rs::model::Stroke {
         frame: core.current,
         points,
@@ -642,7 +642,7 @@ pub fn step_stamp_rotation(core: &mut EditorCore, params: &mut DrawToolsState, d
 /// [`SIMPLIFY_EPSILON`]. Returns how many strokes were reduced.
 pub fn simplify_current_frame(core: &mut EditorCore) -> usize {
     let frame = core.current;
-    core.snapshot();
+    core.snapshot_labeled("Simplify strokes");
     let reduced =
         stykanimate_rs::draw_ops::simplify_strokes(&mut core.project, frame, SIMPLIFY_EPSILON);
     core.status = format!("Simplified strokes on frame {} ({reduced} reduced).", frame + 1);

@@ -380,7 +380,7 @@ mod tests {
 
     #[test]
     fn parse_workspace_refuses_unknown_names_and_lists_the_valid_set() {
-        for bad in ["", "Build", "Build3D", "animate", "3d", "Animat"] {
+        for bad in ["", "Build3D", "animate", "3d", "Animat"] {
             let err = parse_workspace(bad).expect_err("must refuse");
             assert!(
                 err.contains(&format!("'{bad}'")),

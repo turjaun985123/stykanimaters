@@ -80,7 +80,8 @@
 //! `design::list_row` shells (the kit selected fill
 //! replaces the hand-rolled control-track fill), the
 //! section captions are `design::section_label`, the
-//! empty state is `design::empty_state`, and the gain
+//! empty state is `design::empty_state_action`
+//! (Add clip — W2-57, IA-RM28-6), and the gain
 //! readout is `design::stepper_value`. The DSP buttons
 //! gain the Font Awesome glyphs P13 assigns them —
 //! Tier A: Normalise / per-row Norm (`volume-high`),
@@ -1538,7 +1539,7 @@ fn gain_scrub_write(s: &mut State, db: f32) {
         if gain == current {
             return;
         }
-        s.core.snapshot();
+        s.core.snapshot_labeled("Audio clip gain");
         gesture.press = current;
         gesture.open = true;
     }
@@ -1558,7 +1559,7 @@ fn gain_scrub_finish(s: &mut State, db: f32) {
     if s.audio_panel.gain_scrub.open {
         write_gain_quiet(&mut s.core, i, gain);
     } else if gain != current {
-        s.core.snapshot();
+        s.core.snapshot_labeled("Audio clip gain");
         write_gain_quiet(&mut s.core, i, gain);
     } else {
         return;
@@ -1738,7 +1739,7 @@ fn add_clip_path(s: &mut State, path: String) {
         "Audio clip added at frame {}: {path}",
         s.core.current + 1
     );
-    s.core.snapshot();
+    s.core.snapshot_labeled("Add audio clip");
     s.core.project.audio.push(AudioClip {
         path,
         start_frame: s.core.current,
@@ -2176,10 +2177,17 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
         .child(design::divider(t));
 
     if clips.is_empty() {
-        panel = panel.child(design::empty_state(
+        // W2-57 (PL-6 completion, IA-RM28-6): the state
+        // offers its filling action — Add clip, the
+        // panel's own add, the same handler the header's
+        // Add button runs.
+        panel = panel.child(design::empty_state_action(
             "music",
             &i18n_wire::tr(core, "audio_no_clips"),
+            "audio-empty-add-clip",
+            &i18n_wire::tr(core, "audio_add_clip"),
             t,
+            |s| add_clip(s),
         ));
     } else {
         // Wave 4 (audit D4): probe every clip once per
@@ -2787,13 +2795,16 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
         let files = audio_files_in(std::path::Path::new("audio"));
         let mut list = col().key("audio-browse-list").gap(4.0).w_full();
         if files.is_empty() {
-            list = list.child(
-                text(i18n_wire::tr(core, "audio_browse_empty"))
-                    .font(type_::LABEL)
-                    .color(t.text_secondary)
-                    .wrap()
-                    .w_full(),
-            );
+            // W2-57 (PL-6 completion): the kit empty
+            // state replaces the bare text line — same
+            // catalogue string, no button: no in-app op
+            // puts files in ./audio/ (the rows themselves
+            // are the add path when files exist).
+            list = list.child(design::empty_state(
+                "folder-open",
+                &i18n_wire::tr(core, "audio_browse_empty"),
+                t,
+            ));
         }
         for (i, path) in files.iter().take(BROWSE_CAP).enumerate() {
             let added = path.clone();
@@ -2831,6 +2842,12 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
     // module (`rune_sec::subtitle_panel`); this call is
     // the whole mount.
     panel = panel.child(crate::rune_sec::subtitle_panel::subtitle_section(s, t));
+    // Roadmap Wave 2 (W2-15): the Chapter title cards
+    // section under Subtitles — the episode furniture
+    // lives with the dialogue it titles (the same
+    // reasoning that homed Subtitles here).
+    panel = panel.child(crate::rune_sec::title_card_panel::title_card_section(s, t));
+
 
     panel
 }
@@ -3965,6 +3982,7 @@ mod tests {
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
             sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            migration_panel: rune_sec::migration_prompt::initial_state(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: AudioPanelState::new(),
@@ -3983,12 +4001,15 @@ mod tests {
             toast_now: 0.0,
             last_dark: true,
             workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            setup_mode_before_build: false,
             guides: false,
             show_left: true,
             show_right: true,
+            stage_focus_restore: None,
             key_clipboard: None,
             key_follow_graph: false,
             key_sel: Default::default(),
+            keyframe_tools: Default::default(),
             help_panel: Default::default(),
             camera_panel: Default::default(),
             segment_numbers: Default::default(),
@@ -4002,6 +4023,11 @@ stroke_selected: None,
 particle_selected: None,
 guides_frustum: true,
 guides_safe: true,
+guides_golden: false,
+guides_diagonals: false,
+guides_stored: true,
+rulers: false,
+limit_arcs: false,
 onion_ui: Default::default(),
 last_frame: 0,
 pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),

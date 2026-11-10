@@ -41,7 +41,12 @@
 //!   surface. The prefix is display composition only —
 //!   stored text never carries it — and on disk only
 //!   WebVTT can represent the speaker itself (see the
-//!   converter sections).
+//!   converter sections). Roadmap Wave 2 (W2-17)
+//!   re-audited the whole chain — voice tags, the
+//!   speaker field, the lanes and rows that read a cue
+//!   aloud — and pinned the display composition and
+//!   the cross-surface agreement in the tests below;
+//!   the settlements themselves are unchanged.
 //! * Frame numbers are NOT clamped to the timeline: a cue
 //!   authored past the last frame simply never shows.
 //!   Extending the timeline later can bring it into view.
@@ -1796,5 +1801,116 @@ mod tests {
         assert!(srt.contains("The gate is open."), "the text is verbatim: {srt:?}");
         let imported = subtitles_from_srt(&srt, 24.0).expect("own export re-imports");
         assert_eq!(imported, vec![cue(0, 24, "The gate is open.")]);
+    }
+
+    // -----------------------------------------------------------------
+    // Roadmap Wave 2 (W2-17): the speaker consistency
+    // pass — voice tags <-> speakers <-> the surfaces
+    // that read a cue aloud. The converters' settlements
+    // above are unchanged; what this section adds is
+    // the display composition pinned at home and the
+    // round-trip property stated at the layer a viewer
+    // reads.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn display_lines_prefix_the_speaker_on_the_first_line_only() {
+        // The one composition the stage, the raster
+        // burn-in and the SVG writer all draw through:
+        // the credit prefixes the FIRST line as
+        // `Name: ` and every later line is the stored
+        // text byte for byte — the prefix adds no line,
+        // so a credited cue stacks exactly like its
+        // uncredited twin.
+        let credited = speaker_cue(0, 24, "First line\nSecond line", "Mary Jane");
+        assert_eq!(
+            subtitle_display_lines(&credited),
+            vec![
+                "Mary Jane: First line".to_string(),
+                "Second line".to_string()
+            ]
+        );
+        // Single-line credited: the prefix is the line.
+        let credited = speaker_cue(0, 24, "The gate is open.", "John");
+        assert_eq!(
+            subtitle_display_lines(&credited),
+            vec!["John: The gate is open.".to_string()]
+        );
+        // Uncredited: the stored lines, untouched.
+        let plain = cue(0, 24, "First line\nSecond line");
+        assert_eq!(
+            subtitle_display_lines(&plain),
+            vec!["First line".to_string(), "Second line".to_string()]
+        );
+        // Stored state is never re-validated at read
+        // (the module rule set): a whitespace-only
+        // stored speaker — reachable only from a
+        // hand-edited file — prefixes verbatim, the
+        // same reading the lane and panel compositions
+        // give it.
+        let mut hand_edited = cue(0, 24, "Text.");
+        hand_edited.speaker = Some("  ".to_string());
+        assert_eq!(
+            subtitle_display_lines(&hand_edited),
+            vec!["  : Text.".to_string()]
+        );
+    }
+
+    #[test]
+    fn speaker_credit_survives_the_vtt_round_trip_at_the_display_layer() {
+        // The round trip stated where it is
+        // experienced: a cue list's DISPLAY lines —
+        // credit and text together, as every renderer
+        // draws them — are identical before and after a
+        // WebVTT export -> import. The cue-level
+        // equality is pinned by
+        // `vtt_speaker_round_trip_is_exact`; this pins
+        // that nothing in the chain re-composes what a
+        // viewer reads.
+        let cues = vec![
+            speaker_cue(0, 24, "The gate is open.", "Mary Jane"),
+            cue(24, 48, "Uncredited line."),
+            speaker_cue(48, 96, "First line\nSecond line", "John"),
+        ];
+        let project = project_with(cues.clone());
+        let before: Vec<Vec<String>> = cues.iter().map(subtitle_display_lines).collect();
+        let vtt = subtitles_to_vtt(&project);
+        let imported = subtitles_from_vtt(&vtt, 24.0).expect("own export re-imports");
+        let after: Vec<Vec<String>> = imported.iter().map(subtitle_display_lines).collect();
+        assert_eq!(after, before);
+        // Through SRT the same display lines lose
+        // exactly the credit and nothing else: every
+        // text line survives byte for byte and no
+        // prefix remains.
+        let srt = subtitles_to_srt(&project);
+        let imported = subtitles_from_srt(&srt, 24.0).expect("own export re-imports");
+        let after: Vec<Vec<String>> = imported.iter().map(subtitle_display_lines).collect();
+        let text_only: Vec<Vec<String>> = cues
+            .iter()
+            .map(|c| c.text.lines().map(str::to_string).collect())
+            .collect();
+        assert_eq!(after, text_only);
+    }
+
+    #[test]
+    fn vtt_voice_span_reads_a_padded_name_and_keeps_nested_tags_verbatim() {
+        // A foreign file may pad the voice name inside
+        // its tag; the name goes through
+        // `normalise_speaker` like any offered name, so
+        // the stored credit is the trimmed name.
+        let vtt = "WEBVTT\n\n\
+                   1\n00:00:00.000 --> 00:00:01.000\n<v  Mary Jane >Padded.</v>\n";
+        let imported = subtitles_from_vtt(vtt, 24.0).expect("the padded span imports");
+        assert_eq!(imported, vec![speaker_cue(0, 24, "Padded.", "Mary Jane")]);
+        // Tag-shaped TEXT is text: a credited cue whose
+        // dialogue itself carries a voice-span fragment
+        // round-trips byte for byte — the importer reads
+        // only the payload's own opening tag and its
+        // final close, never an inner pair.
+        let tricky = speaker_cue(0, 24, "He whispered <v Tom>not now</v> twice", "Mary Jane");
+        let project = project_with(vec![tricky.clone()]);
+        let vtt = subtitles_to_vtt(&project);
+        let imported = subtitles_from_vtt(&vtt, 24.0).expect("own export re-imports");
+        assert_eq!(imported, vec![tricky]);
     }
 }

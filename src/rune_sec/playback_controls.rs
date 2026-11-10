@@ -59,6 +59,24 @@
 //!   and pauses instead of letting the playhead wrap. The
 //!   button itself touches no core state and takes no undo
 //!   snapshot.
+//! * **Loop MODE + ping-pong** (Roadmap Wave 2, W2-40) —
+//!   `pb-loop` is now a three-state cycle ([`LoopMode`]:
+//!   Off → Loop → PingPong → Off) through
+//!   [`cycle_loop_mode`]; key, icon and label shape are the
+//!   Phase G toggle's. The mode's ping-pong half lives in
+//!   this module's thread-local (see [`LoopMode`] for why
+//!   no `State` field was added); poll advances through
+//!   `advance_ping_pong` while it is on, the stop check
+//!   treats the mode as looping, and the bounce flips the
+//!   core's travel direction — poll stops the playback
+//!   audio at the end bounce (sound does not play in
+//!   reverse) and restarts it at the start bounce, so each
+//!   forward pass carries its sound. The command palette's
+//!   older "Toggle loop playback" still flips only the
+//!   Phase G flag: with ping-pong on, the mode stays
+//!   PingPong until the panel cycle resyncs it (a palette
+//!   mode-cycle command is filed as a follow-up, not
+//!   built here).
 //! * **Transport icons** (Phase H) — the three transport
 //!   buttons render through `icon_btn` with Font Awesome
 //!   glyphs: `pb-restart` = `backward-step`, `pb-play-range`
@@ -185,12 +203,13 @@
 //!
 //! `State` fields: everything reads `s.core` live
 //! (`project.fps` `model.rs:683`, `loop_range`, `current`,
-//! `project.frames[..].duration`) except the loop toggle,
+//! `project.frames[..].duration`) except the loop cycle,
 //! which reads/writes the shell-level `State::loop_playback`
-//! (integrator-owned, initialised `true`), and the speed
-//! cycle, which reads/writes the shell-level
-//! `State::playback_speed` (integrator-owned, initialised
-//! `1.0`).
+//! (integrator-owned, initialised `true`) plus this
+//! module's ping-pong thread-local (W2-40, see
+//! [`LoopMode`]), and the speed cycle, which reads/writes
+//! the shell-level `State::playback_speed`
+//! (integrator-owned, initialised `1.0`).
 
 use rune::tok::{self, type_, Theme};
 use rune::{row, text, El};
@@ -266,6 +285,151 @@ pub fn fps_text(fps: f32) -> String {
         format!("{} fps", fps as i64)
     } else {
         format!("{fps:.1} fps")
+    }
+}
+
+/// How playback behaves at the end of its window
+/// (Roadmap Wave 2, W2-40): the loop behaviour is a
+/// three-state MODE, not a lone boolean — stop at the end,
+/// wrap to the start (the behaviour every earlier phase
+/// shipped), or ping-pong (reverse at each end and bounce,
+/// continuously). The mode is derived from two pieces of
+/// session state, following the precedents those pieces
+/// already have: the wrap half is the shell-level
+/// `State::loop_playback` flag (Phase G, initialised
+/// `true`), and the ping-pong half is this module's
+/// [`PING_PONG`] thread-local (the RM7 `PLAYBACK_DEADLINE`
+/// pattern — session state with no new `State` field, so
+/// the shell's State census and its literal sites in other
+/// sections' fixtures are untouched). Neither half is
+/// persisted, exactly like the flag and the playback speed
+/// it sits beside. Ping-pong wins when both halves are
+/// set: it is the later, more specific choice — and the
+/// cycle below never rests in that combined state anyway.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LoopMode {
+    /// Stop on the window's last frame (the shell poll's
+    /// `should_stop_at_end` enforcement).
+    Off,
+    /// Wrap to the window's start and keep playing
+    /// (`advance_play`'s own fold).
+    Loop,
+    /// Bounce: reverse at each end of the window and keep
+    /// playing (`advance_ping_pong`'s reflection).
+    PingPong,
+}
+
+impl LoopMode {
+    /// The mode a session with these two flags is in.
+    pub fn from_flags(loop_playback: bool, ping_pong: bool) -> LoopMode {
+        if ping_pong {
+            LoopMode::PingPong
+        } else if loop_playback {
+            LoopMode::Loop
+        } else {
+            LoopMode::Off
+        }
+    }
+
+    /// The mode one press of the loop control moves to:
+    /// Off → Loop → PingPong → Off. From the combined
+    /// state (both flags set — reachable only by flipping
+    /// the palette's loop toggle while ping-pong is on)
+    /// the cycle also lands on Off, so the control always
+    /// resyncs the two flags to a named mode.
+    pub fn next(self) -> LoopMode {
+        match self {
+            LoopMode::Off => LoopMode::Loop,
+            LoopMode::Loop => LoopMode::PingPong,
+            LoopMode::PingPong => LoopMode::Off,
+        }
+    }
+
+    /// The two flags this mode is stored as.
+    pub fn flags(self) -> (bool, bool) {
+        match self {
+            LoopMode::Off => (false, false),
+            LoopMode::Loop => (true, false),
+            LoopMode::PingPong => (true, true),
+        }
+    }
+
+    /// Whether the mode keeps playing at the window's
+    /// ends (either looping flavour) — the value the
+    /// shell poll's stop check consults.
+    pub fn loops(self) -> bool {
+        self != LoopMode::Off
+    }
+}
+
+thread_local! {
+    /// The ping-pong half of the loop mode (Roadmap Wave
+    /// 2, W2-40) — see [`LoopMode`]. A `thread_local` for
+    /// the RM7 reason: it is pure session state with the
+    /// shell's own lifetime, and a new `State` field would
+    /// owe an exhaustive literal-site splice across other
+    /// sections' fixtures for a value no fixture reads.
+    /// Written by [`cycle_loop_mode`], read through
+    /// [`ping_pong_enabled`].
+    static PING_PONG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether ping-pong is the session's active loop mode
+/// half — the shell poll's advance switch and this
+/// panel's mode derivation both read it here.
+pub fn ping_pong_enabled() -> bool {
+    PING_PONG.with(|c| c.get())
+}
+
+/// The session's current loop mode, from its two stored
+/// halves (the `State` flag and [`PING_PONG`]).
+pub fn loop_mode(s: &State) -> LoopMode {
+    LoopMode::from_flags(s.loop_playback, ping_pong_enabled())
+}
+
+/// One press of the `pb-loop` control (Roadmap Wave 2,
+/// W2-40): advance the loop MODE one step (Off → Loop →
+/// PingPong → Off) and store it back into its two halves.
+///
+/// Silent by design, mirroring the Phase G toggle it
+/// extends: the press rewrites session state only — no
+/// core call, no status line, no undo snapshot — and the
+/// button's own label shows the new mode on the next
+/// render while poll does the rest. Entering ping-pong
+/// also resets the core's travel direction to forward
+/// (`EditorCore::play_reverse`), so a fresh bounce always
+/// starts by playing toward the end rather than resuming
+/// whatever direction a previous ping-pong session — or
+/// a seek across one — left behind.
+pub fn cycle_loop_mode(s: &mut State) {
+    let next = loop_mode(s).next();
+    let (loop_playback, ping_pong) = next.flags();
+    s.loop_playback = loop_playback;
+    PING_PONG.with(|c| c.set(ping_pong));
+    if next == LoopMode::PingPong {
+        s.core.play_reverse = false;
+    }
+}
+
+/// Button label for the loop-mode cycle — the mode is in
+/// the label itself ("Loop: off" / "Loop: on" /
+/// "Loop: ping-pong"), so the control reads correctly at
+/// a glance in any state, like the speed cycle's.
+pub fn loop_mode_label(mode: LoopMode) -> &'static str {
+    match mode {
+        LoopMode::Off => "Loop: off",
+        LoopMode::Loop => "Loop: on",
+        LoopMode::PingPong => "Loop: ping-pong",
+    }
+}
+
+/// The caption beside the loop-mode cycle, naming what
+/// the mode does at the window's ends.
+pub fn loop_mode_caption(mode: LoopMode) -> &'static str {
+    match mode {
+        LoopMode::Off => "Off — stops at the end",
+        LoopMode::Loop => "On — wraps at the end",
+        LoopMode::PingPong => "Ping-pong — bounces at the ends",
     }
 }
 
@@ -381,7 +545,10 @@ pub fn next_key(cur: usize, keys: &[usize]) -> Option<usize> {
 
 /// Button label for the loop toggle — the state is in the
 /// label itself ("Loop: on" / "Loop: off"), so the control
-/// reads correctly at a glance in either state.
+/// reads correctly at a glance in either state. Kept for
+/// the palette's flag and the pre-W2-40 vocabulary:
+/// [`loop_mode_label`] is the cycle's label now, and its
+/// Loop/Off arms return these exact strings.
 pub fn loop_toggle_label(loop_playback: bool) -> &'static str {
     if loop_playback {
         "Loop: on"
@@ -658,7 +825,6 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
     let fps = core.project.fps;
     let tween_on = core.project.tween_playback;
     let loop_range = core.loop_range;
-    let loop_playback = s.loop_playback;
     let playback_speed = s.playback_speed;
     let cur_duration = core
         .project
@@ -757,10 +923,15 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
             )),
     );
 
-    // ---- Loop playback: shell-level on/off for the wrap
-    // advance_play always performs. Off = poll pauses at the
-    // end (see should_stop_at_end); the button itself only
-    // flips the State flag — no core call, no undo snapshot.
+    // ---- Loop playback: the loop MODE cycle (Roadmap
+    // Wave 2, W2-40) — one press steps Off → Loop →
+    // PingPong → Off through `cycle_loop_mode`, storing
+    // into the Phase G flag and this module's ping-pong
+    // thread-local. Key, icon and row are the Phase G
+    // toggle's, unchanged; only the press's meaning grew.
+    // Off = poll pauses at the end (see
+    // should_stop_at_end); the button itself touches no
+    // project state and takes no undo snapshot.
     panel = panel.child(design::section_label("Loop playback", t));
     let mut loop_row = row()
         .gap(6.0)
@@ -769,12 +940,10 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
         .child(icon_btn(
             "pb-loop",
             "repeat",
-            loop_toggle_label(loop_playback),
-            loop_playback,
+            loop_mode_label(loop_mode(s)),
+            loop_mode(s) != LoopMode::Off,
             t,
-            |s| {
-                s.loop_playback = !s.loop_playback;
-            },
+            cycle_loop_mode,
         ));
     // The loop jumps exist only while a range is set:
     // absent when there is nothing to jump to. Wave 9:
@@ -808,11 +977,7 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
         loop_row = loop_row.child(start_btn).child(end_btn);
     }
     loop_row = loop_row.child(design::section_label(
-        if loop_playback {
-            "On — wraps at the end"
-        } else {
-            "Off — stops at the end"
-        },
+        loop_mode_caption(loop_mode(s)),
         t,
     ));
     panel = panel.child(loop_row);
@@ -1184,6 +1349,44 @@ mod tests {
     fn loop_toggle_label_states_the_state() {
         assert_eq!(loop_toggle_label(true), "Loop: on");
         assert_eq!(loop_toggle_label(false), "Loop: off");
+    }
+
+    #[test]
+    fn w2_40_loop_mode_derives_from_its_two_flags() {
+        // Roadmap Wave 2 (W2-40): ping-pong wins over the
+        // wrap flag (the later, more specific choice); the
+        // wrap flag alone is the historical Loop.
+        assert_eq!(LoopMode::from_flags(false, false), LoopMode::Off);
+        assert_eq!(LoopMode::from_flags(true, false), LoopMode::Loop);
+        assert_eq!(LoopMode::from_flags(true, true), LoopMode::PingPong);
+        assert_eq!(LoopMode::from_flags(false, true), LoopMode::PingPong);
+        // The cycle walks all three modes and every mode
+        // stores as flags that derive straight back to it.
+        let mut mode = LoopMode::Off;
+        for want in [LoopMode::Loop, LoopMode::PingPong, LoopMode::Off] {
+            mode = mode.next();
+            assert_eq!(mode, want);
+            let (lp, pp) = mode.flags();
+            assert_eq!(LoopMode::from_flags(lp, pp), mode, "flags round-trip");
+        }
+        assert!(LoopMode::Loop.loops());
+        assert!(LoopMode::PingPong.loops());
+        assert!(!LoopMode::Off.loops());
+    }
+
+    #[test]
+    fn w2_40_loop_mode_labels_state_the_mode() {
+        assert_eq!(loop_mode_label(LoopMode::Off), "Loop: off");
+        assert_eq!(loop_mode_label(LoopMode::Loop), "Loop: on");
+        assert_eq!(loop_mode_label(LoopMode::PingPong), "Loop: ping-pong");
+        // The two pre-W2-40 modes keep their Phase G
+        // captions byte-for-byte; only the mode is new.
+        assert_eq!(loop_mode_caption(LoopMode::Off), "Off — stops at the end");
+        assert_eq!(loop_mode_caption(LoopMode::Loop), "On — wraps at the end");
+        assert_eq!(
+            loop_mode_caption(LoopMode::PingPong),
+            "Ping-pong — bounces at the ends"
+        );
     }
 
     #[test]

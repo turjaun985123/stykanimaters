@@ -1,0 +1,1728 @@
+{
+  "format_version": 1,
+  "name": "Blank Episode",
+  "fps": 24.0,
+  "stage": [
+    960.0,
+    720.0
+  ],
+  "background": 2304048,
+  "figures": [
+    {
+      "name": "Hero",
+      "color": 15263980,
+      "def": {
+        "nodes": [
+          {
+            "name": "hips",
+            "parent": null,
+            "length": 0.0,
+            "rest_angle": 0.0,
+            "head": false,
+            "bend": 1.0,
+            "thickness": 5.0,
+            "color": null,
+            "ik_end": false,
+            "shape": "Line",
+            "style": {
+              "taper": 1.0,
+              "cap": "Round",
+              "color2": null,
+              "opacity": 1.0
+            },
+            "media": null,
+            "min_angle": null,
+            "max_angle": null
+          },
+          {
+            "name": "chest",
+            "parent": 0,
+            "length": 46.0,
+            "rest_angle": 180.0,
+            "head": false,
+            "bend": 1.0,
+            "thickness": 5.0,
+            "color": null,
+            "ik_end": false,
+            "shape": "Line",
+            "style": {
+              "taper": 1.0,
+              "cap": "Round",
+              "color2": null,
+              "opacity": 1.0
+            },
+            "media": null,
+            "min_angle": null,
+            "max_angle": null
+          },
+          {
+            "name": "head",
+            "parent": 1,
+            "length": 30.0,
+            "rest_angle": 0.0,
+            "head": true,
+            "bend": 1.0,
+            "thickness": 5.0,
+            "color": null,
+            "ik_end": false,
+            "shape": "Line",
+            "style": {
+              "taper": 1.0,
+              "cap": "Round",
+              "color2": null,
+              "opacity": 1.0
+            },
+            "media": null,
+            "min_angle": null,
+            "max_angle": null
+          },
+          {
+            "name": "upper-arm L",
+            "parent": 1,
+            "length": 38.0,
+            "rest_angle": 118.0,
+            "head": false,
+            "bend": 1.0,
+            "thickness": 5.0,
+            "color": null,
+            "ik_end": false,
+            "shape": "Line",
+            "style": {
+              "taper": 1.0,
+              "cap": "Round",
+              "color2": null,
+              "opacity": 1.0
+            },
+            "media": null,
+            "min_angle": null,
+            "max_angle": null
+          },
+          {
+            "name": "forearm L",
+            "parent": 3,
+            "length": 34.0,
+            "rest_angle": 4.0,
+            "head": false,
+            "bend": -1.0,
+            "thickness": 5.0,
+            "color": null,
+            "ik_end": true,
+            "shape": "Line",
+            "style": {
+              "taper": 1.0,
+              "cap": "Round",
+              "color2": null,
+              "opacity": 1.0
+            },
+            "media": null,
+            "min_angle": -10.0,
+            "max_angle": 160.0
+          },
+          {
+            "name": "upper-arm R",
+            "parent": 1,
+            "length": 38.0,
+            "rest_angle": -118.0,
+            "head": false,
+            "bend": 1.0,
+            "thickness": 5.0,
+            "color": null,
+            "ik_end": false,
+            "shape": "Line",
+            "style": {
+              "taper": 1.0,
+              "cap": "Round",
+              "color2": null,
+              "opacity": 1.0
+            },
+            "media": null,
+            "min_angle": null,
+            "max_angle": null
+          },
+          {
+            "name": "forearm R",
+            "parent": 5,
+            "length": 34.0,
+            "rest_angle": -4.0,
+            "head": false,
+            "bend": -1.0,
+            "thickness": 5.0,
+            "color": null,
+            "ik_end": true,
+            "shape": "Line",
+            "style": {
+              "taper": 1.0,
+              "cap": "Round",
+              "color2": null,
+              "opacity": 1.0
+            },
+            "media": null,
+            "min_angle": -10.0,
+            "max_angle": 160.0
+          },
+          {
+            "name": "thigh L",
+            "parent": 0,
+            "length": 44.0,
+            "rest_angle": -11.0,
+            "head": false,
+            "bend": 1.0,
+            "thickness": 5.0,
+            "color": null,
+            "ik_end": false,
+            "shape": "Line",
+            "style": {
+              "taper": 1.0,
+              "cap": "Round",
+              "color2": null,
+              "opacity": 1.0
+            },
+            "media": null,
+            "min_angle": null,
+            "max_angle": null
+          },
+          {
+            "name": "shin L",
+            "parent": 7,
+            "length": 42.0,
+            "rest_angle": 5.0,
+            "head": false,
+            "bend": 1.0,
+            "thickness": 5.0,
+            "color": null,
+            "ik_end": true,
+            "shape": "Line",
+            "style": {
+              "taper": 1.0,
+              "cap": "Round",
+              "color2": null,
+              "opacity": 1.0
+            },
+            "media": null,
+            "min_angle": -160.0,
+            "max_angle": 10.0
+          },
+          {
+            "name": "thigh R",
+            "parent": 0,
+            "length": 44.0,
+            "rest_angle": 11.0,
+            "head": false,
+            "bend": 1.0,
+            "thickness": 5.0,
+            "color": null,
+            "ik_end": false,
+            "shape": "Line",
+            "style": {
+              "taper": 1.0,
+              "cap": "Round",
+              "color2": null,
+              "opacity": 1.0
+            },
+            "media": null,
+            "min_angle": null,
+            "max_angle": null
+          },
+          {
+            "name": "shin R",
+            "parent": 9,
+            "length": 42.0,
+            "rest_angle": -5.0,
+            "head": false,
+            "bend": 1.0,
+            "thickness": 5.0,
+            "color": null,
+            "ik_end": true,
+            "shape": "Line",
+            "style": {
+              "taper": 1.0,
+              "cap": "Round",
+              "color2": null,
+              "opacity": 1.0
+            },
+            "media": null,
+            "min_angle": -160.0,
+            "max_angle": 10.0
+          }
+        ]
+      },
+      "hidden": false,
+      "clip": null,
+      "states": [],
+      "locked": false,
+      "opacity": 1.0
+    }
+  ],
+  "frames": [
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 24.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 24.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 24.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    },
+    {
+      "poses": [
+        {
+          "root": [
+            480.0,
+            470.0
+          ],
+          "angles": [
+            0.0,
+            180.0,
+            0.0,
+            118.0,
+            4.0,
+            -118.0,
+            -4.0,
+            -11.0,
+            5.0,
+            11.0,
+            -5.0
+          ]
+        }
+      ],
+      "duration": 1.0,
+      "easing": null,
+      "bends": []
+    }
+  ],
+  "camera": [
+    {
+      "frame": 0,
+      "x": 480.0,
+      "y": 360.0,
+      "zoom": 1.0,
+      "angle": 0.0
+    }
+  ],
+  "tween_playback": true,
+  "easing": "Smooth",
+  "camera_follow": null,
+  "particles": [],
+  "strokes": [],
+  "audio": [],
+  "clips": [],
+  "fx_clips": [],
+  "assets": [],
+  "channels": [],
+  "sprites": [],
+  "texts": [
+    {
+      "content": "CHAPTER ONE",
+      "size": 54.0,
+      "color": 16777215,
+      "keys": [
+        {
+          "frame": 0.0,
+          "x": 480.0,
+          "y": 300.0,
+          "scale": 1.0,
+          "angle": 0.0,
+          "opacity": 1.0,
+          "flip_x": false,
+          "flip_y": false,
+          "scale_y": 0.0,
+          "pivot_x": 0.5,
+          "pivot_y": 0.5
+        },
+        {
+          "frame": 14.0,
+          "x": 480.0,
+          "y": 300.0,
+          "scale": 1.0,
+          "angle": 0.0,
+          "opacity": 1.0,
+          "flip_x": false,
+          "flip_y": false,
+          "scale_y": 0.0,
+          "pivot_x": 0.5,
+          "pivot_y": 0.5
+        },
+        {
+          "frame": 15.0,
+          "x": 480.0,
+          "y": 300.0,
+          "scale": 1.0,
+          "angle": 0.0,
+          "opacity": 0.0,
+          "flip_x": false,
+          "flip_y": false,
+          "scale_y": 0.0,
+          "pivot_x": 0.5,
+          "pivot_y": 0.5
+        }
+      ]
+    },
+    {
+      "content": "CHAPTER TWO",
+      "size": 54.0,
+      "color": 16777215,
+      "keys": [
+        {
+          "frame": 0.0,
+          "x": 480.0,
+          "y": 300.0,
+          "scale": 1.0,
+          "angle": 0.0,
+          "opacity": 0.0,
+          "flip_x": false,
+          "flip_y": false,
+          "scale_y": 0.0,
+          "pivot_x": 0.5,
+          "pivot_y": 0.5
+        },
+        {
+          "frame": 16.0,
+          "x": 480.0,
+          "y": 300.0,
+          "scale": 1.0,
+          "angle": 0.0,
+          "opacity": 0.0,
+          "flip_x": false,
+          "flip_y": false,
+          "scale_y": 0.0,
+          "pivot_x": 0.5,
+          "pivot_y": 0.5
+        },
+        {
+          "frame": 16.25,
+          "x": 480.0,
+          "y": 300.0,
+          "scale": 1.0,
+          "angle": 0.0,
+          "opacity": 1.0,
+          "flip_x": false,
+          "flip_y": false,
+          "scale_y": 0.0,
+          "pivot_x": 0.5,
+          "pivot_y": 0.5
+        },
+        {
+          "frame": 30.0,
+          "x": 480.0,
+          "y": 300.0,
+          "scale": 1.0,
+          "angle": 0.0,
+          "opacity": 1.0,
+          "flip_x": false,
+          "flip_y": false,
+          "scale_y": 0.0,
+          "pivot_x": 0.5,
+          "pivot_y": 0.5
+        },
+        {
+          "frame": 31.0,
+          "x": 480.0,
+          "y": 300.0,
+          "scale": 1.0,
+          "angle": 0.0,
+          "opacity": 0.0,
+          "flip_x": false,
+          "flip_y": false,
+          "scale_y": 0.0,
+          "pivot_x": 0.5,
+          "pivot_y": 0.5
+        }
+      ]
+    },
+    {
+      "content": "CHAPTER THREE",
+      "size": 54.0,
+      "color": 16777215,
+      "keys": [
+        {
+          "frame": 0.0,
+          "x": 480.0,
+          "y": 300.0,
+          "scale": 1.0,
+          "angle": 0.0,
+          "opacity": 0.0,
+          "flip_x": false,
+          "flip_y": false,
+          "scale_y": 0.0,
+          "pivot_x": 0.5,
+          "pivot_y": 0.5
+        },
+        {
+          "frame": 32.0,
+          "x": 480.0,
+          "y": 300.0,
+          "scale": 1.0,
+          "angle": 0.0,
+          "opacity": 0.0,
+          "flip_x": false,
+          "flip_y": false,
+          "scale_y": 0.0,
+          "pivot_x": 0.5,
+          "pivot_y": 0.5
+        },
+        {
+          "frame": 32.25,
+          "x": 480.0,
+          "y": 300.0,
+          "scale": 1.0,
+          "angle": 0.0,
+          "opacity": 1.0,
+          "flip_x": false,
+          "flip_y": false,
+          "scale_y": 0.0,
+          "pivot_x": 0.5,
+          "pivot_y": 0.5
+        },
+        {
+          "frame": 46.0,
+          "x": 480.0,
+          "y": 300.0,
+          "scale": 1.0,
+          "angle": 0.0,
+          "opacity": 1.0,
+          "flip_x": false,
+          "flip_y": false,
+          "scale_y": 0.0,
+          "pivot_x": 0.5,
+          "pivot_y": 0.5
+        },
+        {
+          "frame": 47.0,
+          "x": 480.0,
+          "y": 300.0,
+          "scale": 1.0,
+          "angle": 0.0,
+          "opacity": 0.0,
+          "flip_x": false,
+          "flip_y": false,
+          "scale_y": 0.0,
+          "pivot_x": 0.5,
+          "pivot_y": 0.5
+        }
+      ]
+    }
+  ],
+  "weather": null,
+  "head_ring_scale": 1.0,
+  "subtitles": [],
+  "subtitle_style": {
+    "position": "Bottom",
+    "font_scale": 1.0,
+    "text_color": 16777215,
+    "box_color": 0,
+    "font": "Shaped"
+  }
+}

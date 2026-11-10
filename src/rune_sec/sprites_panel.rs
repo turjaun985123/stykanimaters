@@ -677,9 +677,20 @@ fn asset_manager(s: &State, t: &Theme) -> El {
         |s: &mut State| import_asset_dialog(s),
     ));
     if rows.is_empty() {
+        // W2-57 (PL-6 completion, IA-RM28-6): the state
+        // offers its filling action — the Import press
+        // above, offered again here as the empty state's
+        // own button (the library-empty precedent).
         sec = sec.child(
-            design::empty_state("image", "No image assets in this project yet.", t)
-                .key("asset-empty"),
+            design::empty_state_action(
+                "image",
+                "No image assets in this project yet.",
+                "asset-empty-import",
+                "Import image…",
+                t,
+                |s: &mut State| import_asset_dialog(s),
+            )
+            .key("asset-empty"),
         );
     }
     for row in &rows {
@@ -1467,9 +1478,19 @@ pub fn sprites_panel(s: &State, t: &Theme) -> El {
     let mut add = col().key("sprite-add").gap(2.0);
     add = add.child(design::section_label("Add sprite", t));
     if options.is_empty() {
+        // W2-57 (PL-6 completion, IA-RM28-6): with no
+        // assets the picker's filling action is the
+        // import — the Asset Manager's own op.
         add = add.child(
-            design::empty_state("image", "No image assets in this project yet.", t)
-                .key("sprite-add-empty"),
+            design::empty_state_action(
+                "image",
+                "No image assets in this project yet.",
+                "sprite-add-empty-import",
+                "Import image…",
+                t,
+                |s: &mut State| import_asset_dialog(s),
+            )
+            .key("sprite-add-empty"),
         );
     } else {
         let mut picker = row().gap(6.0).w_full().flex_wrap();

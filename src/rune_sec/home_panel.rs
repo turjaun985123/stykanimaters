@@ -596,7 +596,9 @@ use rune::{col, el, row, text, El, TextEdit, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::Project;
 use stykanimate_rs::projects::{self, ProjectInfo};
+use stykanimate_rs::samples;
 use stykanimate_rs::shell;
+use stykanimate_rs::templates;
 
 use crate::chrome_view::{btn, danger_btn};
 use crate::rune_sec::design;
@@ -2294,6 +2296,186 @@ pub fn dispatch_new(core: &mut EditorCore) {
     core.status = "New project.".into();
 }
 
+/// Install starter template `idx` as the session
+/// (Roadmap Wave 2, W2-91 — IA-W2-91-2): the same
+/// install shape as [`dispatch_new`]; a parse failure
+/// reports on the status line and changes nothing.
+pub fn dispatch_template(core: &mut EditorCore, idx: usize) {
+    let Some(t) = templates::TEMPLATES.get(idx) else {
+        return;
+    };
+    match templates::template_project(t.id) {
+        Ok(project) => {
+            core.project = project;
+            core.note_project_swapped();
+            reset_session(core);
+            core.status = format!("New project from template: {}.", t.name);
+        }
+        Err(e) => core.status = e,
+    }
+}
+
+/// A template row's press: [`dispatch_template`]
+/// through the `NewFromTemplate` arm — the same
+/// session-discard gate as New.
+fn template_pressed(s: &mut State, idx: usize) {
+    if s.confirm_action != Some(ConfirmAction::NewFromTemplate(idx)) && session_dirty(&s.core) {
+        s.confirm_action = Some(ConfirmAction::NewFromTemplate(idx));
+        s.core.status =
+            i18n_wire::tr(&s.core, "status_template_discard_arm");
+        return;
+    }
+    s.confirm_action = None;
+    dispatch_template(&mut s.core, idx);
+    s.stroke_selected = None;
+}
+
+/// Install bundled sample `idx` as the session
+/// (Roadmap Wave 2, W2-92 — IA-W2-92-2): the same
+/// install shape as [`dispatch_template`]; the session
+/// is unsaved, so edits can never corrupt the bundled
+/// sample.
+pub fn dispatch_sample(core: &mut EditorCore, idx: usize) {
+    let Some(sm) = samples::SAMPLES.get(idx) else {
+        return;
+    };
+    match samples::sample_project(sm.id) {
+        Ok(project) => {
+            core.project = project;
+            core.note_project_swapped();
+            reset_session(core);
+            core.status = format!("Opened sample episode: {}.", sm.name);
+        }
+        Err(e) => core.status = e,
+    }
+}
+
+/// A sample row's press: [`dispatch_sample`] through
+/// the `OpenSample` arm — the same session-discard
+/// gate as New.
+fn sample_pressed(s: &mut State, idx: usize) {
+    if s.confirm_action != Some(ConfirmAction::OpenSample(idx)) && session_dirty(&s.core) {
+        s.confirm_action = Some(ConfirmAction::OpenSample(idx));
+        s.core.status =
+            i18n_wire::tr(&s.core, "status_sample_discard_arm");
+        return;
+    }
+    s.confirm_action = None;
+    dispatch_sample(&mut s.core, idx);
+    s.stroke_selected = None;
+}
+
+/// The Home template + sample chooser section
+/// (Roadmap Wave 2, W2-91/W2-92): a label row and one
+/// pressable row per registry entry, directly under
+/// the New button row. Names and blurbs come from the
+/// registries — content identifiers, not UI copy.
+fn template_section(s: &State, t: &Theme) -> El {
+    let mut section = col()
+        .key("home-templates")
+        .gap(6.0)
+        .child(design::section_label(
+            &i18n_wire::tr(&s.core, "home_templates_label"),
+            t,
+        ));
+    for (idx, tpl) in templates::TEMPLATES.iter().enumerate() {
+        let label = format!("{} — {}", tpl.name, tpl.blurb);
+        let key = format!("home-tpl-{}", tpl.id);
+        if s.confirm_action == Some(ConfirmAction::NewFromTemplate(idx)) {
+            section = section.child(danger_btn(&key, "Discard changes?", t, move |s: &mut State| {
+                template_pressed(s, idx);
+            }));
+        } else {
+            section = section.child(btn(&key, &label, false, t, move |s: &mut State| {
+                template_pressed(s, idx);
+            }));
+        }
+    }
+    section = section.child(design::section_label(
+        &i18n_wire::tr(&s.core, "home_samples_label"),
+        t,
+    ));
+    for (idx, smp) in samples::SAMPLES.iter().enumerate() {
+        let label = format!("{} — {}", smp.name, smp.blurb);
+        let key = format!("home-sample-{}", smp.id);
+        if s.confirm_action == Some(ConfirmAction::OpenSample(idx)) {
+            section = section.child(danger_btn(&key, "Discard changes?", t, move |s: &mut State| {
+                sample_pressed(s, idx);
+            }));
+        } else {
+            section = section.child(btn(&key, &label, false, t, move |s: &mut State| {
+                sample_pressed(s, idx);
+            }));
+        }
+    }
+    section
+}
+
+/// Roadmap Wave 2 (W2-13, IA-W2-13-2 — panel entry):
+/// the harness-story import door. The shell has no file
+/// picker surface, so the entry works from the project
+/// directory's conventional drop point: it reads
+/// `harness-story.json` beside the app (plus every
+/// `*.json` under `characters/` next to it as cast
+/// Bibles) and runs the import through
+/// `harness_import::import_into_core`, whose status line
+/// carries the report's counts; a missing file or a
+/// refusal changes nothing and says so. (The MCP tool
+/// `import_harness_story` is the scripted door for the
+/// same import.)
+fn harness_import_section(s: &State, t: &Theme) -> El {
+    col()
+        .key("home-harness")
+        .gap(6.0)
+        .child(design::section_label(
+            &i18n_wire::tr(&s.core, "home_harness_import_title"),
+            t,
+        ))
+        .child(btn(
+            "home-harness-import",
+            &i18n_wire::tr(&s.core, "home_harness_import"),
+            false,
+            t,
+            |s: &mut State| harness_import_pressed(s),
+        ))
+}
+
+/// The harness import press: read the drop-point files
+/// and import, or refuse in the core's status voice.
+fn harness_import_pressed(s: &mut State) {
+    let story_path = std::path::Path::new("harness-story.json");
+    let story = match std::fs::read_to_string(story_path) {
+        Ok(text) => text,
+        Err(_) => {
+            s.core.status =
+                "No harness-story.json found beside the app — place the story file there and press again."
+                    .into();
+            return;
+        }
+    };
+    let mut bibles: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("characters") {
+        let mut paths: Vec<std::path::PathBuf> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .collect();
+        paths.sort();
+        for p in paths {
+            if let Ok(text) = std::fs::read_to_string(&p) {
+                bibles.push(text);
+            }
+        }
+    }
+    let refs: Vec<&str> = bibles.iter().map(|b| b.as_str()).collect();
+    match stykanimate_rs::harness_import::import_into_core(&mut s.core, &story, &refs) {
+        Ok(_) => {}
+        Err(e) => {
+            s.core.status = format!("Harness import refused: {e}");
+        }
+    }
+}
+
 // ---- Session-discard gates (UI mission Wave 4, audit
 // ---- S16 D2): the State-level press handlers for the
 // ---- session-replacing controls this panel owns. Each
@@ -3008,6 +3190,18 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
             }),
     );
     card = card.child(design::divider(t));
+    card = card.child(template_section(s, t));
+    card = card.child(harness_import_section(s, t));
+    // The legacy-migration banner (Roadmap Wave 2,
+    // W2-65) mounts above the recovery banner: its offer
+    // is the perishable one — the migration gate closes
+    // once the new data dir holds the user's own work —
+    // and on a first-launch screen it is the older claim.
+    // It renders only while its startup-captured plan
+    // holds (see migration_prompt's module docs).
+    if let Some(banner) = crate::rune_sec::migration_prompt::migration_banner(s, t) {
+        card = card.child(banner);
+    }
     if home.recovery_offer_live(&s.core) {
         card = card.child(recovery_banner(s, t));
     }
@@ -4444,7 +4638,7 @@ mod tests {
         // command-palette tests' precedent).
         let mut s = crate::init();
         s.core.project.name = "Unsaved Work".into();
-        s.core.snapshot();
+        s.core.snapshot_labeled("Test edit");
         new_project_pressed(&mut s);
         assert_eq!(s.confirm_action, Some(ConfirmAction::NewProject));
         assert_eq!(s.core.project.name, "Unsaved Work", "first press only arms");
@@ -4457,7 +4651,7 @@ mod tests {
     fn home_open_arms_first_while_dirty() {
         let mut s = crate::init();
         let before = s.core.project.name.clone();
-        s.core.snapshot();
+        s.core.snapshot_labeled("Test edit");
         open_row_pressed(&mut s, Path::new("projects/demo.json"), "Demo");
         assert_eq!(s.confirm_action, Some(ConfirmAction::OpenProject));
         assert_eq!(s.core.project.name, before, "arming does not open anything");
@@ -4468,7 +4662,7 @@ mod tests {
     fn banner_recover_arms_first_while_dirty() {
         let mut s = crate::init();
         s.home_panel.recovery_offer = true;
-        s.core.snapshot();
+        s.core.snapshot_labeled("Test edit");
         recover_banner_pressed(&mut s);
         assert_eq!(s.confirm_action, Some(ConfirmAction::RecoverSnapshot));
         assert!(s.home_panel.recovery_offer, "arming keeps the banner up");

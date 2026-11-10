@@ -356,6 +356,50 @@
 //! through its normal path
 //! (`dopesheet::bend_key_frames` → [1, 3]).
 
+//! The Roadmap Wave 2 scene (W2-28) gives the Build
+//! workspace (Wave 2, W2-21) its first probe
+//! representation: `build-workspace` switches through
+//! `workspaces::select_workspace` — which also enters
+//! setup mode, W2-21's rule for the workspace — plants
+//! ONE segment media on the demo figure's head node
+//! through the segment inspector's own attach op
+//! (`attach_asset`, the picker button's handler) over
+//! one PNG asset written directly into
+//! `project.assets` (the `sprites-populated`
+//! exception: no op creates an asset with chosen
+//! bytes; `solid_png` is this module's own fixture
+//! builder), and selects node 4 through the pub
+//! `selected_node` field, as the `selected` scene
+//! does. The demo humanoid's constructor already
+//! carries the head, IK-end and joint-limit badges
+//! (nodes 2; 4, 6, 8, 10), so media is the only badge
+//! kind a plant has to add; node 4 — IK end, limits
+//! set, bend side −1 — is the inspector's richest
+//! demo subject, so its R6 block, limit rows and
+//! limit-arc rows all render in this tree (fact 38).
+
+//! The Roadmap Wave 2 scenes (W2-77) give the wave's
+//! remaining unrendered surfaces their probe
+//! representation. `dialogue-lane` plants the dialogue
+//! lane's full form — two chapters and two cues on the
+//! same spans — through the frame panel's own
+//! `add_frame` op (one extra frame, so both 3-frame
+//! spans clear the lane's two-frame text threshold at
+//! the default chip width), the core's `chapter_add`
+//! op, and one direct `project.subtitles` write (the
+//! `plant_subtitle_cue` exception: the panel's add op
+//! opens an editor session a scene cannot drive).
+//! `subtitles-assist` rides `subtitles-populated`'s
+//! plant pattern into the Audio workspace with a cue
+//! whose density draws exactly one timing-assistant
+//! proposal. `marquee-selected` is `selected` plus
+//! W2-01's committed figure set, written through the
+//! stage's own setter — a zero-tree-delta scene by
+//! construction (IA-W2-01-4). `sprites-flipped` is
+//! `sprites-populated` with one sprite's keys flipped
+//! and one rotated camera key, IA-W2-06-4's rendered
+//! proof for the bitmap layer's flip/camera legs.
+
 use crate::State;
 
 /// `"default"` — the demo project exactly as `EditorCore::new()`
@@ -936,6 +980,198 @@ fn scene_states_populated(s: &mut State) {
             speed: 1.0,
         },
     );
+}
+
+/// `"build-workspace"` — the Build workspace over
+/// the demo project with the rig tree populated:
+/// figure 0 selected, ONE segment media planted on
+/// the head node, and node 4 (forearm L) selected,
+/// so a `--tree` dump contains the rig card's full
+/// row list with all four badge kinds live and the
+/// segment inspector in its populated form
+/// (fact 38). The workspace switch is
+/// `workspaces::select_workspace` — the chips' op,
+/// which also enters setup mode (W2-21's rule).
+/// The media plant goes through the segment
+/// inspector's own attach op
+/// (`inspector_segment::attach_asset` — the picker
+/// button's handler): the scene first puts one
+/// real PNG asset in the project by direct write
+/// (the `sprites-populated` exception — no op
+/// creates an asset with chosen bytes), selects
+/// node 2 through the pub `selected_node` field
+/// exactly as the `selected` scene does, attaches,
+/// then moves the selection to node 4 the same
+/// way. Node 4 is the inspector's richest demo
+/// node: an IK end with joint limits and a
+/// backwards bend side, so the R6 block, the
+/// limit rows and the limit-arc rows all render
+/// in this tree. On a figure-less project the
+/// scene stops after the workspace switch, total
+/// like every scene in this table.
+fn scene_build_workspace(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Build,
+    );
+    if s.core.project.figures.is_empty() {
+        return;
+    }
+    s.core.select_figure(0);
+    s.core.project.assets = vec![stykanimate_rs::model::ImageAsset {
+        name: "badge.png".to_string(),
+        png: solid_png(48, 24, [230, 120, 0]),
+    }];
+    let nodes = s.core.project.figures[0].def.nodes.len();
+    if nodes > 4 {
+        s.core.selected_node = Some(2);
+        crate::rune_sec::inspector_segment::attach_asset(&mut s.core, 0);
+        s.core.selected_node = Some(4);
+    }
+}
+
+/// `"dialogue-lane"` — the dialogue lane in its full
+/// form: two chapters over two cues on the same spans,
+/// so a `--tree` dump contains the lane's chapter band
+/// (never rendered by the cue-only subtitle scenes)
+/// beside its line row (fact 41). One frame is added
+/// through the frame panel's own op
+/// (`EditorCore::add_frame`) so both spans are three
+/// frames wide — a two-frame span is 64 pt at the
+/// default chip width, under the lane's 66 pt text
+/// threshold, and its title would not render. The
+/// chapters go through the core's `chapter_add` op;
+/// the cues are one direct `project.subtitles` write
+/// (the `plant_subtitle_cue` exception — the panel's
+/// add op opens a text session a scene cannot drive).
+/// The playhead parks at frame 0 (the timeline chips'
+/// `goto` op), inside the first chapter.
+fn scene_dialogue_lane(s: &mut State) {
+    s.core.add_frame();
+    s.core.chapter_add(0, 3, "Arrival");
+    s.core.chapter_add(3, 6, "The Bell");
+    s.core.project.subtitles = vec![
+        stykanimate_rs::subtitles::SubtitleCue {
+            start_frame: 0,
+            end_frame: 3,
+            text: "The bell rings.".to_string(),
+            speaker: Some("NOVA".to_string()),
+        },
+        stykanimate_rs::subtitles::SubtitleCue {
+            start_frame: 3,
+            end_frame: 6,
+            text: "We run for the shore.".to_string(),
+            speaker: None,
+        },
+    ];
+    s.core.goto(0);
+}
+
+/// `"subtitles-assist"` — the Audio workspace with
+/// ONE subtitle cue planted, dense enough to draw
+/// exactly one timing-assistant proposal, so a
+/// `--tree` dump contains the assistant block in its
+/// proposal form (fact 42). The cue is one direct
+/// `project.subtitles` write (the
+/// `plant_subtitle_cue` exception). At the demo's
+/// 12 fps its 30 characters in 3 frames need 22
+/// frames at the panel's default target, and as the
+/// last cue its dead air is unbounded, so the engine
+/// proposes exactly one Extend — the block renders
+/// one proposal row and the Apply-all row, no stuck
+/// line, no "fits" line.
+fn scene_subtitles_assist(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Audio,
+    );
+    s.core.project.subtitles =
+        vec![stykanimate_rs::subtitles::SubtitleCue {
+            start_frame: 0,
+            end_frame: 3,
+            text: "The bell rings over the harbor".to_string(),
+            speaker: None,
+        }];
+}
+
+/// `"marquee-selected"` — the `selected` scene plus
+/// W2-01's committed marquee set over figures 0 and
+/// 1, written through the core's promoted field
+/// (IA-W2-01-1's landed form of IA-W2-01-4's
+/// prescribed def: `EditorCore::selected_figures`).
+/// The set is canvas paint inside the stage element,
+/// so this scene's tree is the `selected` tree
+/// unchanged (fact 43); the two figures' selection
+/// handles are a `--snap` fact and no snap is filed
+/// for this scene.
+fn scene_marquee_selected(s: &mut State) {
+    scene_selected(s);
+    crate::stage_view::set_figure_set(&mut s.core, vec![0, 1]);
+}
+
+/// `"sprites-flipped"` — `sprites-populated` with
+/// sprite 0's keys flipped horizontally and ONE
+/// camera key at frame 0 rotated 20°, so a `--tree`
+/// dump (and the scene's snap) proves the bitmap
+/// layer's flip and camera-angle legs (fact 44;
+/// IA-W2-06-4). The flips are a direct write on the
+/// parent scene's planted keys (its own plant
+/// exception); the camera key goes through the
+/// model's upsert (`Project::set_camera_key` — the
+/// panel's write path) with its angle then set on
+/// the key directly, no op setting a chosen angle
+/// without the panel's session state.
+fn scene_sprites_flipped(s: &mut State) {
+    scene_sprites_populated(s);
+    if let Some(sprite) = s.core.project.sprites.get_mut(0) {
+        for key in &mut sprite.keys {
+            key.flip_x = true;
+        }
+    }
+    s.core.project.set_camera_key(0, 480.0, 360.0, 1.0);
+    if let Some(key) =
+        s.core.project.camera.iter_mut().find(|k| k.frame == 0)
+    {
+        key.angle = 20.0;
+    }
+}
+
+/// `"focus-field"` — the default scene with the project
+/// name field pre-focused (W2-66, A20-10 focus half):
+/// `State::name_edit`'s focus flag set by direct field
+/// write — the write main.rs's own key-routing tests make
+/// (`esc_closes_the_menu_even_while_a_field_is_focused`).
+/// The field builders wire the flag into the element, so
+/// this scene's tree is the focus census's positive
+/// control: exactly one focused element (the `proj-name`
+/// textbox), the focusable set unchanged (the default
+/// scene's four textboxes), focusVisible still false —
+/// rings are not assertable from dumps (P14). The Tab
+/// walk itself is scripted, not scened (IA-W2-66-3).
+fn scene_focus_field(s: &mut State) {
+    s.name_edit.focused = true;
+}
+
+/// `"long-project"` — the W2-74 stress fixture installed
+/// as the probe's project (600 frames, 12 figures,
+/// chapters, dialogue, camera track), playhead parked
+/// mid-episode. The fixture parses through the lib
+/// registry (fixtures::long_project — the loader's own
+/// serde rule over embedded bytes); a parse failure
+/// leaves the demo project in place rather than
+/// panicking, total like every scene in this table.
+/// This scene's --tree is the first RENDERED long-project
+/// inventory: it converts W2-73's element projection into
+/// a measurement and feeds W2-78's scaled overflow run.
+fn scene_long_project(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Animate,
+    );
+    if let Ok(project) = stykanimate_rs::fixtures::long_project() {
+        s.core.project = project;
+        s.core.goto(300);
+    }
 }
 
 /// `"dopesheet-keys"` — the Animate workspace with real
@@ -1802,6 +2038,13 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
         ("home-missing-audio", scene_home_missing_audio),
         ("home-scan-fallback", scene_home_scan_fallback),
         ("states-populated", scene_states_populated),
+        ("build-workspace", scene_build_workspace),
+        ("focus-field", scene_focus_field),
+        ("long-project", scene_long_project),
+        ("dialogue-lane", scene_dialogue_lane),
+        ("subtitles-assist", scene_subtitles_assist),
+        ("marquee-selected", scene_marquee_selected),
+        ("sprites-flipped", scene_sprites_flipped),
     ]
 }
 
@@ -2172,6 +2415,113 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
 ///    playhead; the rest of the inventory is
 ///    `clips-populated`'s, session section
 ///    included.
+/// 38. Under `--scene build-workspace` (Roadmap
+///     Wave 2, W2-28): an element keyed `rig-tree`
+///     exists (the Build workspace's rig card,
+///     mounted only there) and its subtree holds
+///     exactly 73 elements — the card root, the
+///     title cluster (4), the divider, the
+///     figure-name line, the row list and the
+///     actions row (11: five buttons of two
+///     elements each over one row). The list holds
+///     one element keyed `rig-node-{i}` for each of
+///     the demo humanoid's 11 nodes (4 elements per
+///     row: row, indent, disclosure slot, name)
+///     plus 10 badge elements — the head badge on
+///     node 2, IK-end and joint-limit badges on
+///     nodes 4, 6, 8 and 10 (the constructor's own
+///     settings), and the media badge on node 2,
+///     the scene's one plant. Elements keyed
+///     `rig-disclose-{i}` number exactly 6 (the
+///     parent nodes 0, 1, 3, 5, 7, 9). No element
+///     is keyed `frames` (FrameOps is Animate-only,
+///     gated out) and an element keyed
+///     `figures-panel` exists (Figures mounts in
+///     Build, as in every workspace except Home
+///     and Export).
+/// 39. Under `--scene focus-field` (Roadmap Wave
+///     2, W2-66): the tree is the default tree with
+///     exactly one focused element — the `proj-name`
+///     textbox — and the focusable set unchanged
+///     (the default scene's four textboxes:
+///     `proj-name`, `figures-filter`,
+///     `library-search`, `fig-name`); focusVisible
+///     stays false, rings being paint, not elements
+///     (P14).
+/// 40. Under `--scene long-project` (Roadmap Wave
+///     2, W2-74): the elements keyed `frame-N`
+///     number exactly 600, each of `frame-1`..=
+///     `frame-600` occurring exactly once — the
+///     600-frame stress fixture's chip row (facts
+///     5/6 generalised) — and the subtitle lane
+///     renders (the fixture carries dialogue).
+/// 41. Under `--scene dialogue-lane` (Roadmap Wave
+///     2, W2-77): an element keyed `dialogue-lane`
+///     exists and its subtree holds exactly 17
+///     elements — the header set (4 under the root:
+///     header row, name label, spacer, frame
+///     readout), one chapter band row (6: the row,
+///     the segments keyed `dialogue-chapter-0` and
+///     `dialogue-chapter-1` with their title texts,
+///     and the spacer carrying the second segment to
+///     frame 3) and one line row (6: the row, the
+///     blocks keyed `dialogue-line-0` and
+///     `dialogue-line-1` with their line texts, and
+///     the spacer carrying the second block). The
+///     scene plants two chapters ([0, 3) "Arrival",
+///     [3, 6) "The Bell") and two cues on the same
+///     spans over a six-frame timeline (the demo's
+///     five frames plus one added through the frame
+///     op, so both spans clear the lane's text
+///     threshold); no earlier tree contains the
+///     chapter band, the cue-only subtitle scenes
+///     planting no chapters.
+/// 42. Under `--scene subtitles-assist` (Roadmap
+///     Wave 2, W2-77): an element keyed
+///     `subtitle-assist` exists (the timing
+///     assistant's block, mounted in the Audio
+///     workspace's subtitle section only when cues
+///     exist — no earlier scene puts cues there) and
+///     its subtree holds exactly 24 elements — the
+///     block root, the section label, the two
+///     parameter stepper rows (7 each: row, label,
+///     two buttons of two elements, value), one
+///     proposal row (4: row, line text, Apply
+///     button) carrying the element keyed
+///     `subtitle-assist-apply-0`, and the Apply-all
+///     row (4: row, the button keyed
+///     `subtitle-assist-apply-all`, count text). The
+///     scene's one planted cue (30 characters over
+///     frames 0..3 at the demo's 12 fps) draws
+///     exactly one Extend proposal from the engine:
+///     no stuck line and no "fits" line render.
+/// 43. Under `--scene marquee-selected` (Roadmap
+///     Wave 2, W2-77): the element inventory is
+///     identical to the `selected` tree's — the
+///     committed marquee figure set (figures 0 and
+///     1) is stage canvas paint inside the one
+///     `stage` element (fact 1's rule) and changes
+///     no element, so the scene's proof is that the
+///     shell renders with the set live; the two
+///     figures' selection handles are `--snap`
+///     territory and are not asserted here
+///     (IA-W2-01-4's reasoning, adopted).
+/// 44. Under `--scene sprites-flipped` (Roadmap
+///     Wave 2, W2-77; IA-W2-06-4): an element keyed
+///     `stage-sprite-layer` exists and its subtree
+///     holds exactly 3 elements (the container and
+///     the two placed sprites, `stage-sprite-0` and
+///     `stage-sprite-1`) — sprite 0's keys flipped,
+///     sprite 1 the unflipped control — and elements
+///     keyed `cam-key-row-0`, `cam-key-0`,
+///     `cam-key-clear-0` and `cam-key-easing` exist
+///     (the one planted camera key at frame 0,
+///     rotated 20°, in the camera panel's list; the
+///     list's empty form does not render). The
+///     mirrored bitmap itself is the scene's
+///     `--snap` proof; the tree proves the layer
+///     mounts and places under flip and rotated
+///     camera state.
 pub fn layout_assertions() -> Vec<&'static str> {
     vec![
         "exactly one element keyed \"stage\"",
@@ -2211,6 +2561,13 @@ pub fn layout_assertions() -> Vec<&'static str> {
         "under --scene home-missing-audio: elements keyed \"home-row-0\" and \"home-totals\" exist and the element keyed \"home-proj-meta-0\" has text ending \"· 1 audio clip missing\" (the missing-audio marker on the seeded row's light-read meta line — see fact 35)",
         "under --scene home-scan-fallback: elements keyed \"home-row-0\" and \"home-totals\" exist and the element keyed \"home-proj-meta-0\" has text ending \"· 1 audio clip missing\" (the missing-audio marker on the seeded row's scan-fallback meta line — the seeded file is hand-trimmed of its frames key, so the light read refuses it and the scan's line renders — see fact 36)",
         "under --scene states-populated: elements keyed \"clip-state-row-0\" and \"clip-state-clear-0\" exist (the states section's state-row form over one planted state key — see fact 37)",
+        "under --scene build-workspace: an element keyed \"rig-tree\" exists and its subtree holds exactly 73 elements — 11 elements keyed \"rig-node-{i}\" (one per demo-humanoid node; 4 elements per row plus 10 badge elements), 6 elements keyed \"rig-disclose-{i}\" (the parent nodes) and the five rig action buttons — and no element is keyed \"frames\" (the Build workspace's rig card over the demo rig with all four badge kinds live — see fact 38)",
+        "under --scene focus-field: exactly one focused element (\"proj-name\") and the focusable set is the default scene's four textboxes (see fact 39)",
+        "under --scene long-project: the elements keyed \"frame-N\" number exactly 600, each of frame-1..=frame-600 exactly once, and the subtitle lane renders (see fact 40)",
+        "under --scene dialogue-lane: an element keyed \"dialogue-lane\" exists and its subtree holds exactly 17 elements — the header set (4), one chapter band row (6: segments \"dialogue-chapter-0\" and \"dialogue-chapter-1\" with title texts plus the offset spacer) and one line row (6: blocks \"dialogue-line-0\" and \"dialogue-line-1\" with line texts plus the offset spacer) — over two planted chapters and two planted cues on [0, 3) and [3, 6) of a six-frame timeline (see fact 41)",
+        "under --scene subtitles-assist: an element keyed \"subtitle-assist\" exists and its subtree holds exactly 24 elements — root, section label, two stepper rows (7 each), one proposal row (4, with \"subtitle-assist-apply-0\") and the Apply-all row (4, with \"subtitle-assist-apply-all\") — over one planted cue drawing exactly one Extend proposal (see fact 42)",
+        "under --scene marquee-selected: the element inventory is identical to the selected tree's (the committed marquee set over figures 0 and 1 is stage canvas paint and changes no element — see fact 43)",
+        "under --scene sprites-flipped: an element keyed \"stage-sprite-layer\" exists and its subtree holds exactly 3 elements (\"stage-sprite-0\" flipped, \"stage-sprite-1\" the control) and elements keyed \"cam-key-row-0\", \"cam-key-0\", \"cam-key-clear-0\" and \"cam-key-easing\" exist (one planted rotated camera key at frame 0 — see fact 44)",
     ]
 }
 
@@ -2257,11 +2614,16 @@ mod tests {
     /// Wave T home-missing-audio scene appended after
     /// those, the Wave U home-scan-fallback scene
     /// appended after those, and the Wave Z
-    /// states-populated scene last.
+    /// states-populated scene appended after those,
+    /// the Roadmap Wave 2 build-workspace scene
+    /// appended after those, and the six further
+    /// Roadmap Wave 2 scenes (focus-field,
+    /// long-project, dialogue-lane, subtitles-assist,
+    /// marquee-selected, sprites-flipped) last.
     #[test]
-    fn scene_table_has_thirtyfive_uniquely_named_scenes() {
+    fn scene_table_has_fortytwo_uniquely_named_scenes() {
         let table = scenes();
-        assert_eq!(table.len(), 35, "thirty-five scenes are registered");
+        assert_eq!(table.len(), 42, "forty-two scenes are registered");
         let mut names: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
         let total = names.len();
         names.sort_unstable();
@@ -2298,6 +2660,20 @@ mod tests {
         assert_eq!(table[32].0, "home-missing-audio");
         assert_eq!(table[33].0, "home-scan-fallback");
         assert_eq!(table[34].0, "states-populated");
+        assert_eq!(table[35].0, "build-workspace");
+        assert_eq!(table[36].0, "focus-field");
+        assert_eq!(table[37].0, "long-project");
+        assert_eq!(table[38].0, "dialogue-lane");
+        assert_eq!(table[39].0, "subtitles-assist");
+        assert_eq!(table[40].0, "marquee-selected");
+        assert_eq!(table[41].0, "sprites-flipped");
+    }
+
+    #[test]
+    fn focus_field_scene_pre_focuses_the_project_name_field() {
+        let mut s = crate::init();
+        scene_focus_field(&mut s);
+        assert!(s.name_edit.focused);
     }
 
     /// The export scene reaches the Export workspace through

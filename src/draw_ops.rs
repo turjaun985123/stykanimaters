@@ -728,7 +728,7 @@ pub fn tool_draw_stroke(core: &mut EditorCore, args: &Value) -> Result<Value, St
     }
     let n_points = points.len();
     let index = core.project.strokes.len();
-    core.snapshot();
+    core.snapshot_labeled("Draw stroke");
     core.project.strokes.push(Stroke {
         frame,
         points,
@@ -777,7 +777,7 @@ pub fn tool_draw_arrow(core: &mut EditorCore, args: &Value) -> Result<Value, Str
     let points = crate::paint::arrow_points([x1, y1], [x2, y2], head);
     let n_points = points.len();
     let index = core.project.strokes.len();
-    core.snapshot();
+    core.snapshot_labeled("Draw arrow");
     core.project.strokes.push(Stroke {
         frame,
         points,
@@ -874,7 +874,7 @@ pub fn tool_set_stroke_style(core: &mut EditorCore, args: &Value) -> Result<Valu
         }
     }
     let old_width = core.project.strokes[index].width;
-    core.snapshot();
+    core.snapshot_labeled("Stroke style");
     let stroke = &mut core.project.strokes[index];
     if let Some(c) = color {
         stroke.color = c;
@@ -941,7 +941,7 @@ pub fn tool_simplify_stroke(core: &mut EditorCore, args: &Value) -> Result<Value
             "status": core.status,
         }));
     }
-    core.snapshot();
+    core.snapshot_labeled("Simplify stroke");
     simplify_stroke_at(&mut core.project, index, epsilon);
     let after = core.project.strokes[index].points.len();
     core.status = format!("Stroke {} simplified to {} points.", index + 1, after);
@@ -1066,7 +1066,7 @@ pub fn tool_delete_all_strokes(core: &mut EditorCore, _args: &Value) -> Result<V
             "status": core.status,
         }));
     }
-    core.snapshot();
+    core.snapshot_labeled("Delete strokes");
     core.project.strokes.clear();
     core.status = format!("Deleted {n} stroke{}.", if n == 1 { "" } else { "s" });
     Ok(json!({
@@ -1115,7 +1115,7 @@ pub fn tool_recolor_strokes(core: &mut EditorCore, args: &Value) -> Result<Value
             "status": core.status,
         }));
     }
-    core.snapshot();
+    core.snapshot_labeled("Recolour strokes");
     for i in targets {
         core.project.strokes[i].color = color;
     }
@@ -1605,7 +1605,7 @@ pub fn tool_apply_nib_stroke(core: &mut EditorCore, args: &Value) -> Result<Valu
     };
     let angle = dops_opt_f32(args, "angle")?.unwrap_or(45.0);
     let points = stroke.points.len();
-    core.snapshot();
+    core.snapshot_labeled("Apply nib profile");
     apply_nib(&mut core.project.strokes[index], nib, angle);
     core.status = format!("Stroke {} nib profiled.", index + 1);
     Ok(json!({
@@ -1672,7 +1672,7 @@ pub fn tool_smooth_stroke(core: &mut EditorCore, args: &Value) -> Result<Value, 
             "status": core.status,
         }));
     }
-    core.snapshot();
+    core.snapshot_labeled("Smooth stroke");
     smooth_stroke(&mut core.project.strokes[index], subdiv as usize);
     let after = core.project.strokes[index].points.len();
     core.status = format!("Stroke {} smoothed to {} points.", index + 1, after);
@@ -1721,7 +1721,7 @@ pub fn tool_mirror_all_strokes(core: &mut EditorCore, args: &Value) -> Result<Va
     if core.project.strokes.is_empty() {
         return Err("no strokes to mirror (the project has no strokes)".into());
     }
-    core.snapshot();
+    core.snapshot_labeled("Mirror strokes");
     let mirrored = mirror_strokes_all(&mut core.project, cx);
     core.status = format!("Mirrored {mirrored} stroke(s) across x = {cx}.");
     Ok(json!({
@@ -1818,7 +1818,7 @@ pub fn tool_set_stroke_spray(core: &mut EditorCore, args: &Value) -> Result<Valu
                 "status": core.status,
             }));
         }
-        core.snapshot();
+        core.snapshot_labeled("Clear stroke spray");
         core.project.strokes[index].spray = None;
         core.status = format!("Stroke {} spray mark cleared.", index + 1);
         return Ok(json!({
@@ -1830,7 +1830,7 @@ pub fn tool_set_stroke_spray(core: &mut EditorCore, args: &Value) -> Result<Valu
         }));
     }
     let frame = stroke.frame;
-    core.snapshot();
+    core.snapshot_labeled("Set stroke spray");
     let stroke = &mut core.project.strokes[index];
     let mark = stroke.spray.get_or_insert(crate::model::SprayMark {
         seed: 0x5EED_0000u64 + (frame as u64) * 131 + index as u64,
@@ -1907,7 +1907,7 @@ pub fn tool_clear_strokes_on_frame(core: &mut EditorCore, args: &Value) -> Resul
             "status": core.status,
         }));
     }
-    core.snapshot();
+    core.snapshot_labeled("Clear strokes on frame");
     core.project.strokes.retain(|s| s.frame != frame);
     core.status = format!("Cleared {n} stroke(s) on frame {}.", frame + 1);
     Ok(json!({

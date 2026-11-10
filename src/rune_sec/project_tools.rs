@@ -323,6 +323,10 @@ pub fn blank_project(name: &str) -> Project {
         subtitles: Vec::new(),
         subtitle_style: Default::default(),
         format_version: stykanimate_rs::model::FORMAT_VERSION_CURRENT,
+        chapters: Vec::new(),
+        stored_guides: Vec::new(),
+        title_cards: Default::default(),
+        beat_markers: Vec::new(),
     }
 }
 
@@ -611,7 +615,7 @@ pub fn apply_project_name(core: &mut EditorCore, raw: &str) -> bool {
     match clean_project_name(raw) {
         Some(name) => {
             if name != core.project.name {
-                core.snapshot();
+                core.snapshot_labeled("Rename project");
                 core.project.name = name.clone();
             }
             core.status = format!("Project name set to \"{name}\".");
@@ -1371,6 +1375,7 @@ mod tests {
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
             sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            migration_panel: rune_sec::migration_prompt::initial_state(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
@@ -1389,12 +1394,15 @@ mod tests {
             toast_now: 0.0,
             last_dark: true,
             workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            setup_mode_before_build: false,
             guides: false,
             show_left: true,
             show_right: true,
+            stage_focus_restore: None,
             key_clipboard: None,
             key_follow_graph: false,
             key_sel: Default::default(),
+            keyframe_tools: Default::default(),
             help_panel: Default::default(),
             camera_panel: Default::default(),
             segment_numbers: Default::default(),
@@ -1408,6 +1416,11 @@ stroke_selected: None,
 particle_selected: None,
 guides_frustum: true,
 guides_safe: true,
+guides_golden: false,
+guides_diagonals: false,
+guides_stored: true,
+rulers: false,
+limit_arcs: false,
 onion_ui: Default::default(),
 last_frame: 0,
 pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
@@ -1568,7 +1581,7 @@ playback_speed: 1.0,
         // press only arms, the second runs the swap.
         let mut core = EditorCore::new();
         core.project.name = "Unsaved Work".into();
-        core.snapshot();
+        core.snapshot_labeled("Test edit");
         let mut s = test_state(core);
         assert!(session_dirty(&s.core), "one counted edit is dirty");
         new_pressed(&mut s);
@@ -1596,7 +1609,7 @@ playback_speed: 1.0,
             PathBuf::from("./projects/alpha.json"),
             PathBuf::from("./projects/beta.json"),
         ];
-        core.snapshot();
+        core.snapshot_labeled("Test edit");
         let mut s = test_state(core);
         open_row_pressed(&mut s, 1);
         assert_eq!(s.confirm_action, Some(ConfirmAction::OpenProject));
@@ -1627,7 +1640,7 @@ playback_speed: 1.0,
         core.current = 1;
         core.playing = true;
         core.solo = Some(0);
-        core.snapshot();
+        core.snapshot_labeled("Test edit");
         let mut s = test_state(core);
         open_row_pressed(&mut s, 1);
         assert_eq!(s.confirm_action, Some(ConfirmAction::OpenProject));
@@ -1643,7 +1656,7 @@ playback_speed: 1.0,
     fn recover_arms_first_while_dirty() {
         let mut core = EditorCore::new();
         core.project.name = "Unsaved Work".into();
-        core.snapshot();
+        core.snapshot_labeled("Test edit");
         let mut s = test_state(core);
         recover_pressed(&mut s);
         assert_eq!(s.confirm_action, Some(ConfirmAction::RecoverSnapshot));
@@ -1655,7 +1668,7 @@ playback_speed: 1.0,
     #[test]
     fn a_press_elsewhere_in_the_panel_stands_the_arm_down() {
         let mut core = EditorCore::new();
-        core.snapshot();
+        core.snapshot_labeled("Test edit");
         let mut s = test_state(core);
         new_pressed(&mut s);
         assert_eq!(s.confirm_action, Some(ConfirmAction::NewProject));
@@ -1863,7 +1876,7 @@ playback_speed: 1.0,
         // the status strip's dirty read of the same counter
         // contradicted it.
         let mut core = EditorCore::new();
-        core.snapshot();
+        core.snapshot_labeled("Test edit");
         assert_eq!(
             core.edits_since_autosave(),
             1,
@@ -1897,7 +1910,7 @@ playback_speed: 1.0,
         // doing: a dirty session swapped either way reads
         // clean without any recovery write having happened.
         let mut core = EditorCore::new();
-        core.snapshot();
+        core.snapshot_labeled("Test edit");
         assert_eq!(core.edits_since_autosave(), 1);
         new_project(&mut core);
         assert_eq!(
@@ -1905,7 +1918,7 @@ playback_speed: 1.0,
             0,
             "New zeroes the counter via the swap"
         );
-        core.snapshot();
+        core.snapshot_labeled("Test edit");
         assert_eq!(core.edits_since_autosave(), 1);
         apply_recovered_project(&mut core, Project::new_demo());
         assert_eq!(

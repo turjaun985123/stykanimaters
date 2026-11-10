@@ -972,8 +972,15 @@ pub fn menu_scrim(s: &State) -> El {
 /// `design::panel_col`, whose 12/8 padding/gap is the
 /// panel recipe — and gave it the P15 M2 entrance: a
 /// fade plus a 4 pt rise on the zero-bounce SNAP spring
-/// pair. The `.anchored(...)` placement stays the
-/// outermost call on the returned element.
+/// pair. Reduced motion (Roadmap Wave 2, W2-53 —
+/// verified from the pinned Rune rev 87caf2a): the
+/// host Reduce Motion flag gates this pair inside the
+/// runtime (`PropClass::reduce` in rune-motion's
+/// store) — the 4 pt rise lands at once and the fade
+/// becomes Rune's 0.18 s REDUCED_FADE, so no call-site
+/// gate is needed or wanted here. The `.anchored(...)`
+/// placement stays the outermost call on the returned
+/// element.
 pub fn menu_dropdown(s: &State, t: &Theme) -> El {
     let Some(open) = s.menus.open else {
         return el();
@@ -1242,6 +1249,16 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
                     t,
                     |s| {
                         s.show_right = !s.show_right;
+                    },
+                ))
+                .child(separator("menu-view-sep3", t))
+                .child(item(
+                    "view-stage-focus",
+                    &i18n_wire::tr(core, "menu_stage_focus"),
+                    s.stage_focus_restore.is_some(),
+                    t,
+                    |s| {
+                        crate::rune_sec::workspaces::toggle_stage_focus(s);
                     },
                 ));
         }

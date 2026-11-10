@@ -135,7 +135,7 @@ impl EditorCore {
             return None;
         }
         let centre = [self.project.stage[0] / 2.0, self.project.stage[1] / 2.0];
-        self.snapshot();
+        self.snapshot_labeled("Add sprite");
         self.project.sprites.push(SpriteInstance {
             asset,
             keys: vec![InstanceKey {
@@ -168,7 +168,7 @@ impl EditorCore {
             self.status = format!("Sprite delete failed: no sprite {}.", index + 1);
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Delete sprite");
         self.project.sprites.remove(index);
         self.status = format!("Sprite {} deleted.", index + 1);
     }
@@ -270,7 +270,7 @@ impl EditorCore {
     /// once, replace the key at `key.frame` or insert it at
     /// its sorted position, and set the success status.
     fn write_sprite_key(&mut self, index: usize, key: InstanceKey) {
-        self.snapshot();
+        self.snapshot_labeled("Set sprite key");
         let keys = &mut self.project.sprites[index].keys;
         match keys.iter().position(|k| k.frame == key.frame) {
             Some(pos) => keys[pos] = key,
@@ -325,7 +325,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Delete sprite key");
         self.project.sprites[index]
             .keys
             .retain(|k| k.frame != frame_f);
@@ -364,7 +364,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Set sprite asset");
         self.project.sprites[index].asset = asset;
         self.status = format!(
             "Sprite {} now uses asset {}.",
@@ -406,7 +406,7 @@ impl EditorCore {
             );
             return;
         }
-        self.snapshot();
+        self.snapshot_labeled("Move sprite");
         let inst = self.project.sprites.remove(index);
         self.project.sprites.insert(to, inst);
         self.status = format!(

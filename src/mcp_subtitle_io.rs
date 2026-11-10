@@ -168,7 +168,7 @@ fn import_document(
         }));
     }
     let count = cues.len();
-    core.snapshot();
+    core.snapshot_labeled("Import subtitles");
     core.project.subtitles = cues;
     core.status = format!("Imported {count} subtitle(s) from {format_label}.");
     Ok(json!({

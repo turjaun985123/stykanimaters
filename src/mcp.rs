@@ -1337,7 +1337,7 @@ fn tool_delete_camera_key() -> Tool {
             if !core.project.camera.iter().any(|k| k.frame == frame) {
                 return Err(format!("No camera key at frame {}.", frame + 1));
             }
-            core.snapshot();
+            core.snapshot_labeled("Delete camera key");
             core.project.remove_camera_key(frame);
             core.status = format!("Camera key at frame {} deleted.", frame + 1);
             Ok(json!({ "ok": true, "frame": frame, "status": core.status }))
@@ -1355,7 +1355,7 @@ fn tool_delete_camera_key() -> Tool {
 fn tool_get_camera() -> Tool {
     Tool {
         name: "get_camera",
-        description: "Read the camera (the camera panel, as data): the interpolated camera {x, y, zoom} and raw angle at 'frame' (default: the current frame), the follow target (figure index or null), and every camera key sorted by frame — each verbatim with a 'stale' flag when its frame is at/past the project's frame count. Angles are raw as stored; compare modulo 360. Read-only.",
+        description: "Read the camera (the camera panel, as data): the interpolated camera {x, y, zoom} and raw angle at 'frame' (default: the current frame), the follow target (figure index or null), and every camera key sorted by frame — each verbatim with its 'easing' (the timing of the move from that key to the next) and a 'stale' flag when its frame is at/past the project's frame count. Angles are raw as stored; compare modulo 360. Read-only.",
         schema: json!({
             "type": "object",
             "properties": {
@@ -1380,6 +1380,7 @@ fn tool_get_camera() -> Tool {
                         "y": k.y,
                         "zoom": k.zoom,
                         "angle": k.angle,
+                        "easing": k.easing.label(),
                         "stale": k.frame >= frame_count,
                     })
                 })
@@ -1792,7 +1793,7 @@ fn tool_set_camera_follow() -> Tool {
                 None => Err("missing required argument 'figure'".to_string()),
                 Some(Value::Null) => {
                     if core.project.camera_follow.is_some() {
-                        core.snapshot();
+                        core.snapshot_labeled("Camera follow");
                         core.project.camera_follow = None;
                     }
                     core.status = "Camera follow off.".to_string();
@@ -1806,7 +1807,7 @@ fn tool_set_camera_follow() -> Tool {
                     let fi = arg_usize(args, "figure")?;
                     check_figure(core, fi)?;
                     if core.project.camera_follow != Some(fi) {
-                        core.snapshot();
+                        core.snapshot_labeled("Camera follow");
                         core.project.camera_follow = Some(fi);
                     }
                     core.status = format!(
@@ -1855,7 +1856,7 @@ fn tool_set_tween_playback() -> Tool {
                 // through it counted TWO edits (snapshot +
                 // mark) for one call. The status is the
                 // toggle's own text.
-                core.snapshot();
+                core.snapshot_labeled("Tween playback");
                 core.project.tween_playback = enabled;
                 core.status = format!(
                     "Tween playback {}.",

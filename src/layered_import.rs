@@ -364,7 +364,7 @@ fn apply_parts(
         parts: ready.len(),
         ..Default::default()
     };
-    core.snapshot();
+    core.snapshot_labeled("Import layered set");
     // Nodes dressed by THIS import: a later part matching
     // only an already-dressed node degrades to a sprite
     // instead of silently overwriting the earlier part.

@@ -195,6 +195,8 @@ mod tests {
         Pose {
             root: [root_x, 200.0],
             angles: vec![angle, 0.0, 0.0],
+            sx: 1.0,
+            sy: 1.0,
         }
     }
 
@@ -370,6 +372,8 @@ mod motion_tests {
         Pose {
             root: [x, y],
             angles: Vec::new(),
+            sx: 1.0,
+            sy: 1.0,
         }
     }
 

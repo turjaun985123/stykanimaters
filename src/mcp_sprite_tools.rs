@@ -241,7 +241,7 @@ pub fn tool_sprite_move_key(core: &mut EditorCore, args: &Value) -> Result<Value
             "status": core.status,
         }));
     }
-    core.snapshot();
+    core.snapshot_labeled("Move sprite key");
     let mut moved = key;
     moved.frame = to as f32;
     let keys = &mut core.project.sprites[sprite].keys;
@@ -334,7 +334,7 @@ pub fn tool_sprite_delete_key_at(core: &mut EditorCore, args: &Value) -> Result<
             frame + 1
         ));
     }
-    core.snapshot();
+    core.snapshot_labeled("Delete sprite key");
     core.project.sprites[sprite]
         .keys
         .retain(|k| k.frame != frame as f32);
