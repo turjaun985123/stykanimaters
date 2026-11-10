@@ -97,42 +97,84 @@ the premises were wrong, in two places:
   fixture pins the control's trip path (UNPROVEN), so
   the fixture can no longer hide either conflation.
 
-Wave V (V7) pair gate -- content fidelity across scenes.
-  The workflow also snaps `home-missing-audio` (Wave V; the
-  scene was previously tree-dumped only, so its row's
-  thumbnail had no pixels to prove) and can pass both snaps
-  to this probe (--also-snap / --also-tree). The seeded
-  constructions make the four thumbnail strips a fidelity
-  experiment:
+Pair gate -- content fidelity across scenes (Wave V, V7;
+  redesigned Wave X, X10). The workflow also snaps
+  `home-missing-audio` (Wave V; the scene was previously
+  tree-dumped only, so its row's thumbnail had no pixels
+  to prove) and can pass both snaps to this probe
+  (--also-snap / --also-tree). The seeded constructions
+  make the four thumbnails a fidelity experiment:
 
     * home-populated's three saves are the demo project
       ("Harbour Lights"), then the same project plus one
       added figure saved twice more ("Night Train",
       "First Steps"; scenes.rs `scene_home_populated`).
-      Among its three strips, exactly two must therefore
-      be pixel-IDENTICAL and the third must DIFFER -- the
-      added figure is red (editor.rs FIGURE_COLORS[1]) at
-      stage x=390, hundreds of strip pixels.
+      Among its three thumbnails, exactly two must
+      therefore carry the SAME content and the third
+      DIFFERENT content -- the added figure is red
+      (editor.rs FIGURE_COLORS[1]) at stage x=390.
     * home-missing-audio's single save is the demo project
       plus a missing audio clip (which does not render),
-      so its strip must be pixel-identical to the
-      populated snap's singleton strip -- the same content
-      rendered by a separate process -- and differ from
-      the pair.
+      so its thumbnail must carry the populated snap's
+      singleton content -- the same content rendered by a
+      separate process -- and differ from the pair.
 
   Row ORDER is never assumed (the scan sorts
   newest-first and save mtimes can tie): the gate works
-  on the multiset of strips. Identical means 0 differing
-  pixels -- the rasteriser's determinism is a proven
-  property of this codebase (the subtitle census's
-  pixel-identical mid-stage legs rest on it); different
-  means >= DIFF_FLOOR differing pixels, ~1/4 of the
-  expected added-figure signal. The missing-audio row
+  on the multiset of thumbnails. The missing-audio row
   also passes the same non-blank floors and totals
   control as the populated rows, against its own tree
-  dump. If the four strips do not share one pixel size,
-  the fixture geometry moved and the gate reports
-  UNPROVEN rather than guessing.
+  dump.
+
+  Wave X redesign -- V7's measurement was refuted, W7
+  measured why, and this is the replacement. V7 compared
+  raw pixels: identical = 0 differing pixels, different
+  = >= 25. On real snaps (runs 42765217055, 42767540386,
+  42771786953, 42774207670 -- identical values on each)
+  that premise fails twice over. (a) The four strips do
+  not share one pixel size: the middle row sits at a
+  half-point y, so its strip is 112x239 against the
+  others' 112x238, and the gate UNPROVEN'd on geometry
+  before comparing anything (run 42774207670's
+  transcript). (b) Inside the thumbnail band, the
+  identical-content pair differs by 566 raw pixels --
+  MORE than the different-content pair's 330: the
+  half-point row's thumbnail is composited at a
+  half-pixel phase, resampling every stroke's
+  anti-aliasing, while the added figure's own signal is
+  ~15 red-ish pixels. The distributions overlap and
+  invert; no raw-pixel threshold separates them, and
+  loosening one would have certified nothing.
+
+  The signature the thumbnails actually carry is their
+  INK MASK under the probe's own ink predicate
+  (brightest channel >= INK_MIN -- inside the slot only
+  stroke pixels qualify, per the Wave W note above),
+  anchored on the thumbnail band itself (the bounding
+  box of the strip's exact stage-background pixels --
+  the thumbnail is ~95% that colour and the surround
+  contains none of it) and compared by COVERAGE
+  DISTANCE: the number of ink pixels in one mask with
+  no ink pixel of the other within Chebyshev distance
+  1, counted both ways. A half-pixel resample moves a
+  stroke's classified pixels by at most that 1 px
+  neighbourhood, so identical content measures 0;
+  different content leaves whole strokes uncovered.
+  Measured on the real sets above: identical pairs
+  (the populated pair; the singleton vs the
+  missing-audio thumbnail across processes) = 0;
+  every different-content pair = 48..51. The floors:
+  identical means EXACTLY 0 unmatched (that is what
+  the measurement gives identical content, on every
+  real set), and different means >=
+  INK_UNMATCHED_FLOOR = 12, ~1/4 of the weakest
+  measured different-content signal (48) -- the Wave L
+  discipline. A distance of 1..11 matches NEITHER
+  construction and FAILs as ambiguous: the gate exists
+  to prove fidelity, and a near-miss proves nothing.
+  Strip sizes are never compared -- masks are
+  coordinate sets in band space, so the legitimate
+  1 px strip-height difference is not a premise.
 
 Usage:
     python3 scripts/home_thumbnail_probe.py \
@@ -187,7 +229,11 @@ ROW_PAD_PT = 8.0                # design::row_base px(8.0)
 ROW_BG_FLOOR = 0.18             # measured ~0.33 on real snaps
 ROW_INK_FLOOR = 15              # measured ~59+ on real snaps
 CONTROL_BG_CEIL = 0.06
-DIFF_FLOOR = 25                 # differing px: same vs added-figure content
+# Pair gate (Wave X): ink-mask coverage distance -- identical
+# content measures exactly 0 unmatched px on every real set;
+# different content measures 48..51 (see docstring). The floor
+# is ~1/4 of the weakest different-content signal.
+INK_UNMATCHED_FLOOR = 12
 ROW_KEYS = ("home-row-0", "home-row-1", "home-row-2")
 MISSING_ROW_KEYS = ("home-row-0",)
 CONTROL_KEY = "home-totals"
@@ -438,21 +484,88 @@ def analyse(png_bytes, tree):
     return verdict, code, lines
 
 
-def pixel_diff(a, b):
-    """Differing-pixel count between two same-size strips."""
-    return sum(1 for pa, pb in zip(a[2], b[2]) if pa != pb)
+def thumb_band(strip):
+    """The thumbnail's band within a strip: the bounding box of
+    its exact stage-background pixels, or None.
+
+    The thumbnail is ~95% exact stage background; the strip's
+    surround (card #1D222B, or the selected fill on the current
+    row) contains none of it (the totals control measures 0.000
+    exact), so the box is the thumbnail's own extent wherever
+    the row geometry placed it.
+    """
+    w, h, pixels = strip
+    x0, y0, x1, y1 = w, h, -1, -1
+    for y in range(h):
+        row = pixels[y * w:(y + 1) * w]
+        for x, px in enumerate(row):
+            if px == STAGE_BG:
+                if x < x0:
+                    x0 = x
+                if x > x1:
+                    x1 = x
+                if y < y0:
+                    y0 = y
+                y1 = y
+    if x1 < 0:
+        return None
+    return x0, y0, x1 + 1, y1 + 1
+
+
+def ink_mask(strip):
+    """The strip thumbnail's ink signature: {(x, y)} of ink
+    pixels (the probe's INK_MIN predicate) in band coordinates,
+    or None when no band can be located. The scan window is
+    the band extended by 1 px, so a stroke touching the
+    thumbnail's edge is not clipped by the background's
+    bounding box; the slot around the band holds no ink
+    (its flats peak at 76, under INK_MIN), so nothing else
+    can enter the mask."""
+    band = thumb_band(strip)
+    if band is None:
+        return None
+    bx, by, bx1, by1 = band
+    w, h, pixels = strip
+    mask = set()
+    for y in range(max(0, by - 1), min(h, by1 + 1)):
+        row = pixels[y * w:(y + 1) * w]
+        for x in range(max(0, bx - 1), min(w, bx1 + 1)):
+            if max(row[x]) >= INK_MIN:
+                mask.add((x - bx, y - by))
+    return mask
+
+
+def ink_unmatched(a, b):
+    """Coverage distance between two ink masks: ink pixels of
+    `a` with no ink of `b` within Chebyshev distance 1, plus
+    the symmetric count. Identical content measures 0 -- the
+    1 px neighbourhood absorbs the half-pixel resample phase
+    a thumbnail's row position can impose (Wave X docstring).
+    """
+    def dilated(mask):
+        out = set()
+        for (x, y) in mask:
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    out.add((x + dx, y + dy))
+        return out
+    da, db = dilated(a), dilated(b)
+    return (sum(1 for p in a if p not in db)
+            + sum(1 for p in b if p not in da))
 
 
 def analyse_pair(pop_bytes, pop_tree, miss_bytes, miss_tree):
-    """Return (verdict, exit_code, lines) — the Wave V pair gate.
+    """Return (verdict, exit_code, lines) — the pair gate
+    (Wave V, V7; redesigned Wave X, X10).
 
     Both snaps' rows must carry rendered thumbnails (the
     measure_snap floors + control, per snap), and the four
-    strips must satisfy the seeded constructions' fidelity
-    pattern (see the module docstring): among the populated
-    strips exactly one identical pair plus a differing
-    singleton, and the missing-audio strip pixel-identical
-    to that singleton.
+    thumbnails must satisfy the seeded constructions'
+    fidelity pattern (see the module docstring): among the
+    populated thumbnails exactly one identical pair
+    (ink-coverage distance 0) plus a differing singleton,
+    and the missing-audio thumbnail carrying the
+    singleton's content.
     """
     lines = []
     sections = []
@@ -475,51 +588,60 @@ def analyse_pair(pop_bytes, pop_tree, miss_bytes, miss_tree):
     pop = [pop_strips.get(k) for k in ROW_KEYS]
     miss = miss_strips.get(MISSING_ROW_KEYS[0])
     gate = None  # None = PASS, else (verdict, reason lines)
+    masks = None
     if any(s is None for s in pop) or miss is None:
         gate = ("UNPROVEN", ["a row strip could not be extracted "
                              "(see the sections above)"])
     else:
-        sizes = {(s[0], s[1]) for s in pop} | {(miss[0], miss[1])}
-        if len(sizes) != 1:
+        masks = [ink_mask(s) for s in pop] + [ink_mask(miss)]
+        if any(m is None for m in masks):
             gate = ("UNPROVEN",
-                    [f"the four strips do not share one pixel size: "
-                     f"{sorted(sizes)} — the fixture geometry moved"])
+                    ["a thumbnail band could not be located in one of "
+                     "the strips (no exact stage-background pixels) — "
+                     "the band premise does not hold for this snap"])
     if gate is None:
-        d01 = pixel_diff(pop[0], pop[1])
-        d02 = pixel_diff(pop[0], pop[2])
-        d12 = pixel_diff(pop[1], pop[2])
-        lines.append(f"populated pairwise differing pixels: "
+        pop_masks, miss_mask = masks[:3], masks[3]
+        d01 = ink_unmatched(pop_masks[0], pop_masks[1])
+        d02 = ink_unmatched(pop_masks[0], pop_masks[2])
+        d12 = ink_unmatched(pop_masks[1], pop_masks[2])
+        lines.append(f"populated pairwise ink-coverage distances: "
                      f"rows 0-1: {d01}, rows 0-2: {d02}, rows 1-2: {d12} "
-                     f"(identical = 0, different-content floor {DIFF_FLOOR})")
+                     f"(identical = 0, different-content floor "
+                     f"{INK_UNMATCHED_FLOOR})")
         pairs = {(0, 1): d01, (0, 2): d02, (1, 2): d12}
         identical = [ij for ij, d in pairs.items() if d == 0]
-        cross_ok = all(d >= DIFF_FLOOR
+        cross_ok = all(d >= INK_UNMATCHED_FLOOR
                        for ij, d in pairs.items() if ij not in identical)
         if len(identical) != 1 or not cross_ok:
             gate = ("FAIL",
-                    ["the populated strips are not one identical pair plus "
-                     "a differing singleton — the added-figure construction "
-                     "no longer reads in the thumbnails"])
+                    ["the populated thumbnails are not one identical "
+                     "pair plus a differing singleton — a coverage "
+                     "distance of 1..%d matches neither construction, "
+                     "and any other pattern means the added-figure "
+                     "construction no longer reads in the thumbnails"
+                     % (INK_UNMATCHED_FLOOR - 1)])
         else:
             (i, j) = identical[0]
             k = ({0, 1, 2} - {i, j}).pop()
-            lines.append(f"PASS  populated rows {i} and {j} share a thumbnail "
-                         f"pixel-for-pixel; row {k} differs")
-            dm_single = pixel_diff(miss, pop[k])
-            dm_pair = min(pixel_diff(miss, pop[i]), pixel_diff(miss, pop[j]))
-            lines.append(f"missing-audio strip vs the singleton row {k}: "
-                         f"{dm_single} differing px; vs the paired rows: "
-                         f"{dm_pair} differing px")
-            if dm_single == 0 and dm_pair >= DIFF_FLOOR:
-                lines.append("PASS  the missing-audio project's thumbnail is "
-                             "the demo project's thumbnail, rendered by a "
-                             "separate process, and differs from the "
+            lines.append(f"PASS  populated rows {i} and {j} carry the same "
+                         f"thumbnail content (coverage distance 0); "
+                         f"row {k} differs")
+            dm_single = ink_unmatched(miss_mask, pop_masks[k])
+            dm_pair = min(ink_unmatched(miss_mask, pop_masks[i]),
+                          ink_unmatched(miss_mask, pop_masks[j]))
+            lines.append(f"missing-audio thumbnail vs the singleton "
+                         f"row {k}: coverage distance {dm_single}; vs "
+                         f"the paired rows: {dm_pair}")
+            if dm_single == 0 and dm_pair >= INK_UNMATCHED_FLOOR:
+                lines.append("PASS  the missing-audio project's thumbnail "
+                             "carries the demo project's content, rendered "
+                             "by a separate process, and differs from the "
                              "added-figure pair")
                 gate = ("PASS", [])
             else:
                 gate = ("FAIL",
-                        ["the missing-audio strip does not match the "
-                         "populated singleton strip — either the demo "
+                        ["the missing-audio thumbnail does not match the "
+                         "populated singleton's content — either the demo "
                          "content changed in one scene or thumbnails are "
                          "not content-faithful"])
     gate_verdict, gate_lines = gate
@@ -607,11 +729,17 @@ def self_test():
     assert verdict3 == "UNPROVEN" and code3 == 2, lines3
     print("self-test PASS: stage-washed fixture -> UNPROVEN (control trips)")
 
-    # --- Pair gate (Wave V, V7): synthetic versions of the
-    # two scenes' constructions. Kind A = the demo thumb
-    # (stage bg + ink diagonal), kind B = A plus a red
-    # block (the added figure), kind C = a third distinct
-    # thumb (stage bg + an ink bar, no diagonal).
+    # --- Pair gate (Wave V, V7; redesigned Wave X, X10):
+    # synthetic versions of the two scenes' constructions.
+    # Kind A = the demo thumb (stage bg + ink diagonal),
+    # kind B = A plus a red block (the added figure), kind
+    # C = a third distinct thumb (stage bg + an ink bar, no
+    # diagonal). Kind B2 = B with its diagonal painted 1 px
+    # thicker -- the synthetic form of the real snaps'
+    # half-pixel resample (same strokes, different
+    # anti-aliasing coverage); kind B3 = B plus an isolated
+    # 2x2 ink dot far from every stroke -- a near-miss that
+    # matches neither construction.
     miss_rects = {"home-row-0": [16, 20, 300, 80],
                   "home-totals": [16, 278, 300, 18]}
     miss_elements = [{"path": "#0", "key": None, "rect": [0, 0, W, H]}]
@@ -628,14 +756,18 @@ def self_test():
                 kind = kinds.get(k)
                 if kind is None or not (ry + 12 <= y < ry + 12 + 42):
                     return CARD
-                if kind == "B" and rx + 36 <= x < rx + 52 \
+                if kind in ("B", "B2", "B3") and rx + 36 <= x < rx + 52 \
                         and ry + 20 <= y < ry + 44:
                     return (255, 93, 93, 255)
+                if kind == "B3" and rx + 56 <= x < rx + 58 \
+                        and ry + 16 <= y < ry + 18:
+                    return (232, 232, 236, 255)
                 if kind == "C":
                     if ry + 30 <= y < ry + 32:
                         return (232, 232, 236, 255)
                     return STAGE_BG + (255,)
-                if abs((x - (rx + 8)) - (y - (ry + 12))) < 2:
+                if abs((x - (rx + 8)) - (y - (ry + 12))) \
+                        < (3 if kind == "B2" else 2):
                     return (232, 232, 236, 255)
                 return STAGE_BG + (255,)
             return CARD
@@ -675,6 +807,46 @@ def self_test():
         encode_png(W, H, lambda x, y: CARD), miss_tree)
     assert verdict == "FAIL" and code == 1, lines
     print("self-test PASS: blank missing-audio fixture -> FAIL")
+
+    # --- Wave X redesign fixtures. The real snaps' pair is
+    # a RESAMPLE, not a copy: the middle row sits at a
+    # half-point y (its strip is 1 px taller) and its
+    # thumbnail's strokes carry different anti-aliasing.
+    # This fixture reproduces both facts -- row 1's rect is
+    # 1 px taller and its diagonal is painted 1 px thicker
+    # (kind B2). The raw pixels of rows 0 and 1 DIFFER (the
+    # old gate's 0-diff identity leg fails here), but the
+    # ink-coverage distance is 0, so the gate must PASS.
+    res_rects = dict(rects)
+    res_rects["home-row-1"] = [16, 106, 300, 81]
+    res_elements = [{"path": "#0", "key": None, "rect": [0, 0, W, H]}]
+    for k, r in res_rects.items():
+        res_elements.append({"path": f"#0/panel/{k}", "key": k, "rect": r})
+    res_tree = {"elements": res_elements}
+    res_png = encode_png(W, H, make_painter(
+        res_rects, {"home-row-0": "B", "home-row-1": "B2",
+                    "home-row-2": "A"}))
+    _w, _h, res_rows = decode_png(res_png)
+    _els = load_elements(res_tree)
+    _sx = _w / W
+    s0 = strip_pixels(res_rows, _w, _h, res_rects["home-row-0"], _sx, _sx)
+    s1 = strip_pixels(res_rows, _w, _h, res_rects["home-row-1"], _sx, _sx)
+    raw01 = sum(1 for pa, pb in zip(s0[2], s1[2]) if pa != pb)
+    assert raw01 > 0, "resample fixture must differ in raw pixels"
+    verdict, code, lines = analyse_pair(res_png, res_tree, miss_png, miss_tree)
+    assert verdict == "PASS" and code == 0, lines
+    print("self-test PASS: resampled pair (raw diff > 0, coverage 0) "
+          "-> PASS")
+
+    # The near-miss pair (kind B3: B plus a 2x2 ink dot)
+    # sits at coverage distance 4 -- neither identical (0)
+    # nor different (>= INK_UNMATCHED_FLOOR). The gate
+    # refuses to guess: FAIL.
+    murk_png = encode_png(W, H, make_painter(
+        rects, {"home-row-0": "B", "home-row-1": "B3", "home-row-2": "A"}))
+    verdict, code, lines = analyse_pair(murk_png, tree, miss_png, miss_tree)
+    assert verdict == "FAIL" and code == 1, lines
+    print("self-test PASS: near-miss pair (coverage distance 4) -> FAIL")
     return 0
 
 
@@ -758,7 +930,8 @@ def main(argv):
         if summary:
             with open(summary, "a") as fh:
                 fh.write("\n### Home thumbnail probe (Wave Q, Q16; pair "
-                         "gate Wave V, V7)\n\n```\n" + text + "```\n")
+                         "gate Wave V, V7; redesigned Wave X, X10)\n\n```\n"
+                         + text + "```\n")
     return code
 
 

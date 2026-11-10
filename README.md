@@ -164,6 +164,10 @@ present and fall back to a folder-based flow when neither exists.
   the lowercase slug — so listings and inserted figures keep the
   name's case; older library files without a stored name still
   list by file stem and gain the exact name when saved again.
+  The pose library and the 3D figure and pose libraries resolve
+  their entries by the name stored inside each file too, so a
+  library file placed in the folder — or renamed — outside the
+  app still loads, renames and deletes from inside it.
 - **Drawing** — Draw mode with an expanded brush library (preset
   brushes, brush/eraser tools, brush opacity and scatter, and a
   Spray brush whose strokes record a spray mark and render
@@ -190,9 +194,12 @@ present and fall back to a folder-based flow when neither exists.
   `src/rune_sec/`.)
 - **Audio** — clips placed at frames, each with a per-clip
   gain; playback mixes **all** clips audible at the playhead
-  at their gains, synced via `ffplay`, and MP4/WebM exports
-  mix every clip into the soundtrack at its frame offset and
-  gain; per-clip normalise / split
+  at their gains, synced via `ffplay`, and MP4 exports mix
+  every clip into the soundtrack at its frame offset and
+  gain — frame-range MP4 and WebM exports mix the clips
+  inside the range the same way (WebM carries its audio as
+  Opus; a full WebM export is video-only); per-clip
+  normalise / split
   (including split at silences) / crossfade plus pitch shift
   and compressor (audio engine and editor ops; the audio
   panel and waveform view are Rune shell sections in
@@ -221,8 +228,12 @@ present and fall back to a folder-based flow when neither exists.
   - *Export:* `.piv` v2/v3/v4/v5, `.stk`, `.nodes`, `.stknds`,
     plus PNG sequence, GIF, MP4, WebM, APNG, JPEG sequence, SVG
     and spritesheets. MP4/WebM can also be exported for a frame
-    range (video-only), and APNG/JPEG sequence exports take a
-    frame range too. The raster exports (PNG sequence, GIF,
+    range — both include audio from the clips inside the range,
+    cut to the range (Opus in WebM; a full WebM export stays
+    video-only), and a clip whose file cannot be probed or
+    decoded fails the export instead of being left out silently.
+    APNG/JPEG sequence exports take a frame range too. The
+    raster exports (PNG sequence, GIF,
     MP4, WebM, APNG, JPEG sequence and spritesheets) also
     accept an optional output scale — a true re-render at
     the scaled size, not a resample. The export bundles
@@ -237,8 +248,21 @@ present and fall back to a folder-based flow when neither exists.
     the encoder's own frame counts as the encode runs, ending
     with a single finished event for the video encode (an
     MP4's audio mux runs afterwards and can still fail the
-    export). The hooks are core-level only for now — neither
-    the export panel nor the MCP server surfaces them.
+    export). Both surfaces use them now: the export panel runs
+    PNG/JPEG sequence and MP4/WebM exports (full and frame
+    range) as background jobs on a worker thread and shows the
+    live progress in the panel — the render and encode phases
+    as separate readouts, every number taken from the hooks'
+    own events — while the formats with no progress contract
+    (SVG, GIF, APNG, spritesheets, contact sheets and the
+    export bundles) still run synchronously; and over MCP
+    stdio, a tool call carrying a progress token streams
+    `notifications/progress` while the export runs (encode
+    counts for video, render counts for sequences). The live
+    HTTP bridge cannot stream, so tokened calls there run
+    exactly as untokened ones, and `export_bundle` sends no
+    progress at all — deliberately, since per-member counters
+    would run backwards under a single token.
   - *Subtitles:* cues import and export as SRT and WebVTT;
     speaker credits ride WebVTT voice tags (SRT has no speaker
     syntax, and an SRT export reports how many credits it
@@ -253,7 +277,7 @@ present and fall back to a folder-based flow when neither exists.
   (`src/projects.rs`), a recovery snapshot and
   session-continuity helpers (`src/shell.rs`), native open/save
   dialogs, save/load as JSON (`project.styk.json`), and
-  **28 languages** (the original's 27 + Bengali; 662 UI
+  **28 languages** (the original's 27 + Bengali; 678 UI
   strings in each language's table) in `src/i18n.rs`.
   These library features survived the Rune
   migration untouched, and the Home panel and settings
@@ -263,7 +287,7 @@ present and fall back to a folder-based flow when neither exists.
 ## Drive it from an AI agent (MCP)
 
 The `mcp_server` binary speaks MCP (JSON-RPC 2.0 over stdio,
-protocol `2024-11-05`) and exposes **381 tools**: project/figure/
+protocol `2024-11-05`) and exposes **390 tools**: project/figure/
 pose editing, camera (with rotation), graph keys and tangent
 presets, FX clip management and FX presets, weather (including
 storm), audio, drawing (including polygon and star shapes
@@ -275,6 +299,15 @@ frame-range formats), and
 rendering — including `render_frame_base64`, so an agent can see
 the frame it just made, and `render_contact_sheet`. Full tool catalogue and the client
 configuration snippet live in [docs/MCP.md](docs/MCP.md).
+
+The running editor also hosts a live MCP bridge on loopback
+HTTP (127.0.0.1 only, with Host/Origin validation), serving
+the same tools against the open project. It is **off by
+default**: it starts only when live control is explicitly
+enabled in Settings — a stored explicit choice is honoured as
+written — and it is unauthenticated by design (any program
+running as your user on this machine can call it while it is
+enabled), which is exactly why it no longer starts on its own.
 
 ## Architecture notes
 

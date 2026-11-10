@@ -797,7 +797,21 @@ def entry_field(chunk: str) -> str | None:
 # Wave V tree reads 983 (980 + V6's 3 dynamic subtitle
 # stems), agreeing with V13/V20's measurement, so the
 # floor is ratcheted 980 -> 983.
-KEY_TOTAL_FLOOR = 983
+# Wave X ratchet (X16's baseline recount, 2026-11-10):
+# on the clean Wave W integration HEAD (dccddbb,
+# detached worktree) this counter reads 984 total
+# (865 static + 119 dynamic, 61 files) — the 983 floor
+# plus the one static key Wave W's integration counted
+# (xc-progress, export_panel.rs 28 -> 29 by check 2).
+# The other three W1 progress keys (xc-progress-working
+# / -render / -encode) ride (key, line) tuple literals
+# in job_lines and are NOT captured by this counter —
+# F6's documented artefact; they exist and are pinned,
+# they are simply outside the gate method, so the
+# floor is set to what this counter verifies: 984.
+# Floor raised 983 -> 984. Wave X's own key growth is
+# PENDING arithmetic in x16.md, never floored here.
+KEY_TOTAL_FLOOR = 984
 
 
 def inventory_counts() -> tuple[int, int, int, int]:

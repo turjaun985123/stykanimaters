@@ -629,15 +629,27 @@ jobs:
           # Clean slate, the same discipline as probe()
           # above: layout prefs live at
           # ./projects/.layout.json relative to the CWD,
-          # and the live-MCP pref defaults ON (shell.rs
-          # LayoutPrefs::live_mcp), with main.rs init
-          # starting the bridge when the pref says so —
-          # wiping ./projects (plus a fresh HOME, like the
-          # other probes) is what makes the endpoint's
-          # presence a property of the binary, not of
-          # whatever state an earlier probe left behind.
+          # and main.rs init starts the bridge when the
+          # stored live-MCP pref says so (shell.rs
+          # LayoutPrefs::live_mcp) — wiping ./projects
+          # (plus a fresh HOME, like the other probes) is
+          # what makes the slate a property of the binary,
+          # not of whatever state an earlier probe left
+          # behind.
           rm -rf ./projects
           export HOME="$(mktemp -d)"
+          # Wave X: since Wave W (W4) the live-MCP pref
+          # defaults OFF (explicit-enable), so a clean slate
+          # alone no longer starts the bridge and this probe
+          # failed on its stale default-on premise inside
+          # two green conclusions. The probe exists to
+          # exercise the ENABLED path, so seed the stored
+          # pref — the deliberate opt-in a user makes in
+          # Settings — into the fresh projects dir before
+          # launching; the loader's field salvage adopts
+          # the one correctly-typed field.
+          mkdir -p ./projects
+          printf '{ "live_mcp": true }\n' > ./projects/.layout.json
           # A windowed run needs a display (the one-shot
           # modes above do not): Xvfb by hand rather than
           # xvfb-run, because the app is a long-lived

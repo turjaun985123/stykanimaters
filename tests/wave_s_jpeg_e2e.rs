@@ -147,6 +147,12 @@ fn sprite_at(asset: usize, x: f32, y: f32, scale: f32) -> SpriteInstance {
             y,
             scale,
             angle: 0.0,
+            opacity: 1.0,
+            flip_x: false,
+            flip_y: false,
+            scale_y: 0.0,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
         }],
     }
 }

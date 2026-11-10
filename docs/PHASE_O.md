@@ -468,9 +468,10 @@ model pins (§3).
 
 **That table is now written — the debt is
 discharged (Wave S, S8) — refreshed against a
-newer dispatch (Wave V, V19), and upgraded to
+newer dispatch (Wave V, V19), upgraded to
 the first 16/16-complete dispatch (Wave W,
-W12).** Original source:
+W12), and upgraded again to the Wave W
+integration dispatch (Wave X, X15).** Original source:
 **Headless Rune probe run `42759195547`**,
 completed **SUCCESS** on
 `59cb0bec36b80648c9f9fe0dfd7d30cd6266d5c3`
@@ -515,7 +516,7 @@ exactly, so the refresh moves no number — it
 adds two rows, two SCAN_SET flags, and the
 census-clean citation.
 
-Current source: **Headless Rune probe run
+Previous source: **Headless Rune probe run
 `42767540386`**, completed **SUCCESS** on
 `fbc36448ac6c280ffbda893d187e4416eea84c36`
 (`fbc3644`, the Wave U integrated tree plus the
@@ -536,13 +537,35 @@ was re-measured in these dumps: the 36
 reproduce exactly for the third consecutive
 dispatch, and the table gains the one row the
 refresh notes owed, `tree-home-scan-fallback.json`,
-required and CLEAN. Per §2's output shape each
+required and CLEAN.
+
+Current source: **Headless Rune probe run
+`42774207670`**, completed **SUCCESS** on
+`dccddbb7d76dc038ea34622d101c6e632d69fa61`
+(`dccddbb`, the Wave W integrated tree),
+artifact `headless-probe-output` (224 files,
+37 `tree-*.json` dumps). Its scan reads
+`OVERFLOW SCAN: CLEAN (0 hits, scan set
+complete)` — the 16/16 contract again — its
+`subtitle-census.txt` reads `SUBTITLE CENSUS:
+PASS` (19 PASS, 0 FAIL), and both Home markers
+read `PASS` — all read from the artifact
+itself, not from the workflow conclusion.
+Every figure below was re-measured in these
+dumps: 36 of the 37 counts reproduce exactly;
+the one move is `tree-audio-open.json`,
+408 → **462** elements (it already read 462 on
+the Wave V round-2 artifact `42771786953`, so
+the move predates Wave W and is stable across
+both dispatches). Every O-1…O-9 measurement
+reproduces exactly — the fourth consecutive
+dispatch to do so. Per §2's output shape each
 scene's hit list is empty, so the table records
 the verdict per scene:
 
 | Scene tree | Window | Elements | SCAN_SET | Non-exempt hits | Verdict |
 |---|---|---|---|---|---|
-| tree-audio-open.json | 1440×900 | 408 | required | 0 | CLEAN |
+| tree-audio-open.json | 1440×900 | 462 | required | 0 | CLEAN |
 | tree-build-open.json | 1440×900 | 376 | — | 0 | CLEAN |
 | tree-clips-populated.json | 1440×900 | 1224 | — | 0 | CLEAN |
 | tree-default-1280.json | 1280×720 | 1161 | — | 0 | CLEAN |
@@ -677,6 +700,36 @@ still trips its control leg (`home-totals`
 stage-bg share 0.672 against the 0.06 ceiling —
 "premise does not hold"); diagnosing that leg
 is Wave W's W7 slice, not this table's.
+
+**Upgrade notes (Wave X, X15).** W12's
+commitment is discharged: the citation upgrades
+to `42774207670` (above), the first successful
+Wave V-or-later dispatch against which this
+table was re-verified end to end. (The Wave V
+fix round's own dispatch, `42771786953` on
+`2462a82`, also completed SUCCESS and its
+artifact was read at the Wave V close; this
+upgrade takes the newer dispatch, on the
+Wave W integrated tree, as the standing
+source.) One number moved —
+`tree-audio-open.json`, 408 → 462, recorded in
+the current-source paragraph and in the table;
+every other figure and every O-1…O-9
+measurement reproduces. The pair gate's
+verdict, stated alongside as W12 required: on
+this artifact the legacy thumbnail legs PASS
+on real snaps for the first time — W7's
+re-derived predicates read control shares
+0.008 / 0.004 against the 0.06 ceiling, every
+row over its floors — but the fidelity gate
+stopped at its strip-geometry precondition:
+the four strips do not share one pixel size
+((112, 238) and (112, 239) px — "the fixture
+geometry moved"), so the probe's verdict is
+`HOME THUMBNAIL PROBE: UNPROVEN` and the
+identity legs issued no verdict. No threshold
+was loosened to reach this reading; the gate's
+redesign is Wave X's X10 slice.
 
 **CI, stated once and exactly.** The last completed
 master CI run before Wave R was on `0b75051`

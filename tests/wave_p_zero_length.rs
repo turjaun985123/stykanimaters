@@ -55,6 +55,8 @@ const BLACK: image::Rgb<u8> = image::Rgb([0, 0, 0]);
 
 fn node(name: &str, parent: Option<usize>, length: f32, thickness: f32) -> NodeDef {
     NodeDef {
+        min_angle: None,
+        max_angle: None,
         name: name.into(),
         parent,
         length,
@@ -96,6 +98,7 @@ fn zero_length_segment_project() -> Project {
         },
         hidden: false,
         clip: None,
+        states: Vec::new(),
         locked: false,
         opacity: 1.0,
     }];

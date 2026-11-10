@@ -157,6 +157,12 @@ fn populated_fixture() -> Project {
             y: 200.0,
             scale: 2.0,
             angle: 0.0,
+            opacity: 1.0,
+            flip_x: false,
+            flip_y: false,
+            scale_y: 0.0,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
         }],
     }];
     project

@@ -422,6 +422,34 @@ wiring had been filed at this pass's final
 check; any that lands later is the
 integrator's to apply with this note's counts.
 
+Wave X maintenance (X17): no Wave X slice
+registers a new scene (the wave builds the
+SpriteLoop GAP proposals -- states, bend-follow,
+sprites, alpha export -- plus filed remainders;
+none adds a `scenes()` entry), so the counts
+the W14 note above recorded stand: the scan
+set still has 16 entries, all required and
+still no pending entries; `scenes()` lists
+34 names, and the harness produces 37 tree
+dumps. Both tree loops were re-verified
+set-equal to the `scenes()` registry (and to
+each other) at this pass, so V14's fallback-
+mirror repair holds. The X10 boundary in
+headless.yml this wave, drawn as W7/W14 drew
+it: X10 owns the Home thumbnail probe step
+(and its snap capture block for
+`home-missing-audio` in the snap step) plus
+the pair region of home_thumbnail_probe.py;
+everything else in the workflow -- the tree
+loops, the census and marker steps, the
+live-MCP probe, upload and summary -- is this
+pass's. X10's region reads tree dumps but
+produces none, so no SCAN_SET entry is owed
+to it. No IA from X3 or X10 naming workflow
+wiring had been filed at this pass's final
+check; any that lands later is the
+integrator's to apply with this note's counts.
+
 Checks considered and NOT added (they would
 false-positive or judge what rects cannot show):
 

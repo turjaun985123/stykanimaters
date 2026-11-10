@@ -543,9 +543,11 @@ maps the result onto `crate::model::Project`:
   `.nodemc`'s own frames) become `Project.sprites` tracks, keyed by
   (instance type, instance id) in first-appearance order. Each
   appearance contributes an `InstanceKey` { frame, x, y,
-  scale = |scaleX|, angle = file rotation } — the same placement
-  rule the original adapter uses (it likewise keeps only |scaleX|
-  as the object scale and the |scaleY/scaleX| ratio as metadata).
+  scale = |scaleX|, angle = file rotation } — the placement rule
+  the original adapter uses — plus, since Wave X (P-6), the
+  record's scaleY magnitude, its flipX/flipY flags, its
+  pivotX/pivotY and the style block's opacity, all carried on the
+  same key and written back on export.
   Group instances display the member at `groupFrame`; if the frame
   is out of range the first member is used (the original's semantic
   validator rejects such files; this importer stays lenient). A
@@ -627,11 +629,11 @@ adapter's own "stored poses preserved, dynamics not recreated" stance)
   state, movieclip instance playback cursors / play modes / rotation
   / flips (the model's clip playback loops from the clip start), and
   figure-instance scale changes after an instance's first frame.
-* Sprite-instance detail beyond the placement rule above: the
-  |scaleY/scaleX| ratio, flipX/flipY, instance and library pivots
-  (the model anchors sprite images at their centre — the adapter
-  likewise retains pivots as metadata only), corner distortions,
-  and smart-stretch parameters. A sprite track whose group cursor
+* Sprite-instance detail beyond the placement rule above: corner
+  distortions and smart-stretch parameters, and the LIBRARY image
+  pivot (instance pivots are modelled on the key since Wave X,
+  P-6; the library pivot is not retained — the adapter likewise
+  retains it as metadata only). A sprite track whose group cursor
   moves between members keeps the member resolved at first
   appearance.
 * Text detail beyond the above: opacity, shadow, and the font table

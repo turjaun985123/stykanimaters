@@ -7428,3 +7428,1335 @@ artefact (§6.16 (4)) stands settled as
 disclosed: 662 line-wise, 663
 structural, convention kept (W18's R1
 closure).
+
+### 6.18 Wave X — the SpriteLoop
+build wave: states, bend-follow,
+joint limits, alpha, sprite keys;
+the Wave W frame closed
+(2026-11-10)
+
+Ordered 2026-11-10 (the standing
+continuous order, re-issued once
+more and boarded ahead so this wave
+launched the moment Wave W's
+integration pushed): "assign 20
+agents continuous write code if ci
+gets error then fix that". Twenty
+agents, one owner per file,
+integrator surfaces via filed
+actions (board:
+`~/workspace/wave-x/BOARD.md`;
+findings:
+`~/workspace/wave-x/findings/`).
+The board's base is the Wave W
+integration HEAD `dccddbb` (666 ×
+28, scenes 34, MCP 381, element
+keys 984 by the gate's method);
+`src/i18n.rs` and
+`src/rune_sec/i18n_wire.rs` were
+frozen to this wave's agents, all
+key work arriving via IA. This
+section was written from all
+nineteen sibling findings (x1–x19;
+x20 is this section) and from the
+CI frame read via `gh` at the
+final check, headless transcripts
+read from the runs' downloaded
+artifacts — never from workflow
+conclusions alone, per the
+42759195547 lesson. Every Wave X
+status below is IMPLEMENTED (in
+tree, uncommitted at write time);
+Wave X has no CI verdict. The
+Wave W frame, by contrast, is
+closed here, exactly — and it does
+not close green: two red build
+rounds, for two different reasons,
+both recorded in full below. HEAD
+advanced one commit mid-wave
+(`aa598ec`, the Wave W round-2
+fix, test code only), so no
+slice's base moved in substance.
+
+**The Wave W integration ledger.**
+Four commits on top of `2462a82`,
+in order: (1) `08cd835` — export
+progress end to end: W1's panel
+background job (worker thread over
+a cloned `Project`, `State` gains
+`export_job`, polled in
+`main.rs::poll` before the live-MCP
+drain, the two phases in separate
+atomic slots with separate readout
+lines, finish wording byte-identical
+to the synchronous actions'), W2's
+funnel adoption (eight dual-hook
+`*_with_progress` video entries;
+every pre-existing entry delegates
+unhooked, byte-identical), W3's MCP
+progress transport (a per-call
+ProgressSink composed only when
+the client passed
+`_meta.progressToken` AND the
+transport installed a
+NotificationSink, parked on
+`EditorCore` for the handler's
+duration, panic-safe; the stdio
+shell restructured to one shared
+writer — the old StdoutLock would
+have deadlocked against drainer
+notifications; `export_bundle`
+deliberately unwired, its counters
+would run backwards under one
+token), and W6's range audio riding
+the same slice's export.rs (WebM
+range exports mux the range's
+audio as Opus; MP4 range already
+carried audio; full WebM stays
+video-only). (2) `04361bb` —
+live-MCP explicit-enable (W4: the
+persisted default flipped ON→OFF
+in the serde default and the
+`Default` impl, a stored `true`
+still honoured, no migration —
+the file cannot distinguish a
+deliberate choice from a cemented
+default; bind and the Host/Origin
+gate were already sound), the
+library name paths (W9: V1's
+backing-file trap found in all
+three unaudited libraries — 2D
+poses, 3D poses, 3D figures — and
+closed with one scan-based
+entry-file resolver per library;
+save unchanged), the waveform
+health caption (W5: composed
+through the shared `health_segment`
+path, no new keys), and W11's doc
+corrections (the subtitles.rs
+speaker-prefix doc, the
+help_panel 54-vs-61 census note,
+the library_panel stem-naming
+provenance; dated records
+preserved verbatim). (3) `bb511d3`
+— the F6 integrator pass: i18n
+catalogue 662 → **666 × 28**
+(IA-W1-1's four progress keys
+inserted in all 28 tables, genuine
+translations in 8 languages, slots
+preserved; IA-W6-1's three value
+updates; IA-W4-2's Live MCP help
+row corrected at all four mirror
+sites; the i18n_wire header count
+updated). (4) `dccddbb` — probes,
+docs, records: W7's re-derived
+thumbnail probe, W12's PHASE_O §2
+citation upgrade to run
+42767540386, W14's overflow
+maintenance note (16/34/37
+re-verified, headless.yml
+byte-unchanged), W15/F6's MCP.md
+rows for W3's progress sentences
+(census holds 381), W16's README
+pass 4 (name fidelity and the
+subtitle RGB steppers claimed;
+range audio flagged pending W6),
+§6.17 itself (W17) and QA_RUNE
+§19 (W18: R1 closed; R5 left open
+pending the Wave V build verdict).
+The integrator's instruments on
+the committed tree before the
+push: gate **PASS 10/10** (element
+keys **984** by the gate's method
+= 865 static + 119 dynamic, floor
+then standing at 983; State 49/22
+— W1's `export_job` field landed;
+palette 134; MCP 381 = 44+319+9+4+5;
+icons 163; scenes 34; layout facts
+1..=36; docs/MCP.md in sync),
+catalogue 666 × 28 by the line
+convention (667 structural, the
+`status_ready` tuple, disclosure
+kept), SCAN_SET 16 required / 0
+pending. A fifth commit, the CI
+fix `aa598ec`, belongs to the
+frame below.
+
+**The Wave W CI frame — two
+rounds, read at the transcript
+level, and not green.** Round 1
+(on `dccddbb`): build 42774188570
+**FAILED** at its Test step — the
+lib test target only: **8 × error
+E0425** in `src/export.rs`
+(4105/4116, 4127/4137, 4149/4160,
+4197/4207), where W6's four WebM
+range pins call `temp_tone_wav(…)`
+and `webm_has_opus(…)` — two
+helpers that were referenced but
+never defined anywhere in the
+tree (the module's own fixture
+writer is `temp_wav`, silent). The
+Build step passed, every other
+target compiled, the product code
+was never implicated — and no lib
+tests ran. Headless 42774207670
+concluded **GREEN**, and its
+transcripts, read from the
+downloaded artifact (224 files),
+are: **SUBTITLE CENSUS: PASS**
+(19 PASS / 0 FAIL). **HOME
+MISSING-AUDIO MARKER: PASS** and
+**HOME SCAN-FALLBACK MARKER:
+PASS**. The overflow scan over
+the run's artifacts, run locally
+on the download: **CLEAN (0 hits,
+scan set complete)** across the
+16 required trees (37 dumps). The
+**Home thumbnail probe reads
+UNPROVEN** — but its shape
+changed decisively: the LEGACY
+leg **PASSes in a CI transcript
+for the first time** (control
+home-totals stage-bg share 0.008
+on the populated snap, 0.004 on
+the missing-audio snap, against
+the 0.06 ceiling that read 0.672 /
+0.681 before W7's re-derivation;
+rows 0.333 / 0.337 / 0.339 against
+the 0.18 floor, ink 115 / 115 /
+59 against the floor of 15 —
+W7's locally measured numbers
+reproduced digit for digit). The
+pair gate then executed for the
+first time and stopped at its
+strip-geometry precondition —
+"the four strips do not share one
+pixel size: [(112, 238), (112,
+239)]" — so its identity legs
+issued no verdict: **not the FAIL
+W7's older-artifact analysis
+predicted**, and not a PASS; the
+redesign it needs is X10's slice
+below. And the **MCP PROBE reads
+FAIL (1 assertion)** inside the
+green conclusion: `GET /health`
+never answered within 90 s, the
+app log is empty, the bridge
+simply never started. That is
+W4's intended behaviour meeting a
+probe whose clean-slate setup
+assumed the old one — the step's
+own comment states its premise
+("the live-MCP pref defaults ON …
+wiping ./projects … is what makes
+the endpoint's presence a property
+of the binary"). On a wiped
+profile the flipped default means
+no bridge, by design. Classified
+here as **probe debt, not an app
+regression** (remainder (3)); any
+other reading would re-open the
+security gap W4 closed. The fix
+is `aa598ec` — "define the two
+range_mux_tests helpers W6's pins
+call": a real 440 Hz tone WAV
+writer and the `A_OPUS` CodecID
+scan, defined in `range_mux_tests`
+beside `temp_wav`; no production
+code touched. Round 2 (on
+`aa598ec`): headless 42775545085
+concluded GREEN with transcripts
+**identical in every particular**
+(the fix touches no binary code)
+— census PASS, both markers PASS,
+overflow CLEAN, thumbnail
+UNPROVEN on the same precondition,
+MCP probe FAIL on the same single
+assertion. Build 42775511096
+**FAILED** at its Test step,
+differently: the lib target now
+compiled and ran — **1,633
+passed, 1 failed** — the failure
+`mcp::tests::tokened_video_range_
+streams_encode_progress`
+(src/mcp.rs:3016): the tokened
+MP4-range call emitted TWO
+progress notifications, both
+`(progress 2, total 2)`. The
+2024-11-05 wire shape carries no
+`finished` flag, so the encode
+drainer's unfinished event at the
+terminal count and the terminal
+event itself arrive as the same
+number twice, and the pin enforces
+U11's strictly-increasing rule on
+the wire, where the client sees
+it. (At the core level the two
+events differ by their flag; the
+sequence sibling pin and the
+both-gates pin passed.) The
+remaining test targets did not
+run. **Round 3 is owed**: coalesce
+the duplicate in the transport
+translation or in the drainer's
+emission — the pin stands exactly
+as written. Net Wave W frame: the
+product code compiled in both
+rounds; the headless frame is
+green at the transcript level
+except the pair gate (UNPROVEN,
+redesigned below) and the MCP
+probe (probe debt, above); but no
+Build, Test & Binary run has
+landed green on a commit carrying
+Wave W, so **Wave W is not yet
+VERIFIED** — round 1 was a
+test-authoring slip in W6's pins,
+round 2 is a real transport
+contract violation that W3's own
+pin caught. Both are recorded
+here rather than smoothed over,
+and Wave X's integration inherits
+the same pin.
+
+**Animation states, core (X1).**
+GAP item #1's foundation lands in
+model.rs only: `StateKey { frame,
+clip, offset, speed }` (offset and
+speed serde-defaulted, so a key
+written as `{frame, clip}` is a
+plain switch) and
+`FigureInstance::states: Vec<
+StateKey>` with `#[serde(default)]`
+— every pre-Wave-X project loads
+with an empty vec and behaves
+byte-identically, the legacy path
+being the old code in effect.
+Resolution: the key in force is
+the greatest key frame not past
+`f` (a key takes over AT its
+frame; ties go to the later vec
+entry); local time is
+`(f − key.frame) · speed + offset`
+with corrupt speeds sanitised at
+read (non-finite or non-positive
+plays at 1.0, finite capped at
+1e6); a dangling state clip skips
+the figure exactly as a dangling
+legacy `clip` does. Loop modes
+stay a clip property; bends are
+unaffected. Ten pins in a new
+`state_key_tests` module, incl.
+the headline (idle keyed at 0,
+run keyed at 3, one figure playing
+both across one timeline) and the
+tween-follows-the-state-clock leg.
+**IA-X1-1 is compile-blocking**:
+the new field makes every
+exhaustive `FigureInstance`
+literal in the tree a hard error —
+25 sites in 16 files each need
+one `states: Vec::new(),` line
+(the two inside model.rs are done;
+the finisher's sweep is the W1
+State-literal precedent).
+
+**State ops bundle (X2).** GAP #1
+Step 2, in editor.rs's clip-ops
+region: `clip_compatible` (the
+retarget guard the existing
+copy-pose paths always had and
+`apply_clips` never did — true
+iff the clip's def matches the
+figure's node count AND every
+frame pose fits that count),
+`assign_clip_to_figure` and
+`unlink_figure` (the parameterised
+link and its missing inverse;
+refusals in the copy-pose voice,
+no snapshot on refusal, the
+already-linked case a silent
+no-op), `set_state_key` /
+`remove_state_key` (X1's authoring
+remainder: upsert by frame, kept
+sorted, NaN speed refused at
+write), and
+`create_clip_from_figure_range`
+over the half-open `[start, end)`,
+named "{fig} clip {start+1}-{end}"
+so ranged clips are distinguishable
+in the list X3's panel derives
+from. Plus the coherence fix X1's
+landing made necessary:
+`delete_clip` / `move_clip`
+remapped `fig.clip` but not
+`fig.states` — keys would have
+pointed at the wrong clips after
+any delete or swap; both ops now
+remap the keys in the same
+snapshot. Six pins, one undo step
+per mutation throughout.
+
+**Named-state panel + tools
+(X3).** GAP #13 in its no-new-field
+form: clips_panel gains a states
+section derived from
+`FigureInstance::{clip, states}`
+against the pool (per selected
+figure: the base-link line, the
+keys in timeline order with clear
+buttons, and a click-to-key-at-
+playhead strip over the pool,
+the clip in force marked), all
+writes routing through X2's ops —
+one authoring path, rig guard
+included — and `usage_text` /
+`clip_list`'s `used_by` now count
+state-key usage (the base-link-only
+filter called state-keyed clips
+unused). Seven registry tools
+(`figure_list_states`,
+`figure_set_state`,
+`figure_clear_state`,
+`figure_assign_clip`,
+`figure_unlink_clip`,
+`clip_compatible`,
+`clip_create_range`), every
+clip-addressing one accepting the
+clip by index OR by name through
+one shared resolver — **the census
+moves 381 → 388 in tree** (registry
+319 → 326). Element keys: +1 static
++ 3 dynamic stems, zero lost.
+**IA-X3-1** files eight catalogue
+keys for the panel's labels (the
+panel's i18n pin passes once they
+land, Q7 pattern).
+
+**Bend-follow for image media
+(X4).** GAP #2, and the wave's
+second deliberate contract
+reversal, on the record: segment
+images now follow the bend arc
+exactly as segment lines always
+have. `MediaItem::Image` gains
+`src_rect` (full = `[0,0,1,1]`);
+`media_items` fetches `bends_at`
+once per figure and, for a bent
+node, emits two half-quads split
+at `bend_mid`, each sampling its
+half of the source; `composite_
+image` gains the subrect mapping
+(byte-identical at the full rect,
+so unbent projects produce
+identical item streams and
+identical composites); SVG emits
+the split as two clipped `<use>`s
+under a new `mclip{n}` family
+(the bare emission stands for
+full-rect items). Text is
+untouched — it stays on the chord
+as one rigid label, its pin
+standing; no test had ever pinned
+image-on-chord, and the new pins
+state the reversal in their doc
+comments. The stage placeholder
+needed no code: it draws the same
+funnel's items, so bent images
+draw two placeholders sharing the
+bend edge by construction. Four
+pins, incl. the two-tone
+compositing proof (each half
+samples its own source half; a
+pixel below the old chord paints,
+a pixel inside it no longer
+does).
+
+**Sprite small wins (X5).** GAP
+#3, all four: `sprite_at_point`
+— tested since Wave 13 and never
+called — is wired into the stage
+pointer path (`sprite_pick_at` in
+stage_sprites.rs; main.rs's
+stage_drag miss branch picks
+joint → sprite → stroke, the
+visual stacking order, and the
+existing selection overlay lights
+with no new drawing code); two
+new ops, `set_sprite_asset`
+(re-point an instance at another
+asset keeping every key verbatim)
+and `reorder_sprite` (z-order,
+draw order being Vec order), each
+one undo step with the family's
+validated-no-op discipline; their
+MCP handlers + TOOL ENTRY SPECs
+in mcp_sprite_tools.rs (the P38
+route — the registry splice is
+one integrator action, **+2 tools
+→ 390 projected**); and a sprite
+lane in the dopesheet rendering
+on its own condition so the
+figure section's early returns
+can no longer hide it. The
+panel's new labels follow
+sprites_panel.rs's literal-English
+convention (the file was never
+i18n-wired) — no catalogue IA
+owed, remainder (9).
+
+**Joint limits (X6).** GAP #6's
+main half: `NodeDef` gains
+`min_angle` / `max_angle:
+Option<f32>`, both
+`#[serde(default)]` (None =
+unlimited = today's behaviour),
+with `clamp_angle` semantics
+stated exactly (both-None returns
+the angle UNCHANGED, not even
+normalised, so unlimited joints
+are bit-identical everywhere;
+min > max is the wrap arc, the
+forbidden value taking the nearer
+endpoint; a single bound clamps
+one side; min == max pins the
+joint). Enforcement at the three
+funnels: `aim_node` (the solved
+angle clamped before the write),
+`apply_ik` (mid joint clamped
+first and its position recomputed
+so chain lengths are never
+violated, then the end joint),
+and graph Angle channels
+(unlimited nodes keep the raw
+channel value — the standing
+no-re-wrap contract). Stored
+poses are never rewritten: limits
+bind solving, not data. The
+humanoid preset gains anatomical
+limits (elbows −10°/+160°, knees
+−160°/+10°, signs derived from
+the code's own IK geometry, the
+rest pose inside its own limits);
+quadruped/simple get none — their
+flexion signs were not derived,
+and a guessed preset is a fake
+one. The segment inspector gains
+the limit steppers + Clear
+(`seg-lim-*` keys), one snapshot
+per effective press. The 35-site
+NodeDef literal sweep was
+compile-required plumbing, done
+in-slice. **IA-X6-1** files four
+catalogue keys (`segment_limit_
+min/max/off/clear`). No MCP tool:
+parity is in the enforcement —
+both surfaces funnel into the
+same solvers.
+
+**Import/export riders (X7).**
+(a) The P-4 rider: Stick Nodes
+import stops hard-coding
+`ik_end: false`. The grammar
+carries no such field (W10
+verified), so `convert()` now
+DERIVES it — a node no other node
+parents to (a chain leaf, origin
+excluded) imports as an end
+effector, identically on every
+import path through the funnel.
+Heads and tails are leaves too
+and derive ends as well; the
+grammar cannot distinguish them,
+the consequence is stated in the
+finding and asserted in the
+quadruped pin rather than left
+implicit. Two pins that asserted
+the old drop are reversed BY
+CHOICE, on the record, and the
+export loss list is corrected to
+the residual truth (only a
+non-leaf node's stored flag is
+lost). (b) P-4r, W10's item-#4
+residual: Pivot v5 export
+transcodes non-PNG assets —
+`piv_image_payload` passes PNG
+blobs through verbatim with their
+IHDR size (the existing verbatim
+pin stands), decodes any other
+blob by content and re-encodes
+it as PNG with the REAL anchors
+from the decoded size, and
+refuses undecodable bytes by
+name before anything is written.
+`export_piv_v5` therefore returns
+`Result<Vec<u8>, String>` now —
+**IA-X7-1** files the two call-site
+adaptations (editor.rs's
+`export_v5_file`, mcp_io.rs's
+`piv5` arm) for the integrator.
+Three pins, incl. the
+encoder-made-JPEG transcode proof
+(no verbatim JPEG in the payload;
+the embedded image decodes as PNG
+at the source's size).
+
+**Alpha sequence export (X8).**
+GAP #7 / P-5: an RGBA variant of
+the one scaled render funnel.
+The drawable collection is
+extracted verbatim into
+`collect_frame_art` (shared, so
+the RGB pass is byte-identical
+and every byte-identity pin
+stands); the alpha pass composites
+the same coverage through a
+premultiplied accumulator starting
+at (0,0,0,0) — no background
+fill — un-premultiplied once at
+the end, so supersampled edges
+carry true coverage alpha with no
+dark fringe. Media and subtitle
+tails run at parity: an alpha
+sequence carries sprites, stage
+texts and burned-in subtitles
+like the RGB one; the ONLY
+difference is the background.
+Eight `export_png_alpha_sequence*`
+entries + four spritesheet
+entries ride the scale entries
+(scaled alpha comes free; an
+empty alpha sheet is a 1×1
+TRANSPARENT pixel, this family's
+blank). **IA-X8-1** exposes it on
+the MCP `render` tool as an
+optional `alpha` argument (+0
+tools). Panel exposure is NOT
+proposed — a toggle there is a
+product decision for the user,
+flagged, remainder (5). APNG
+still renders opaque (the named
+follow-up); GIF untouched.
+
+**Sprite key enrichment (X9).**
+GAP #8 / P-6 closes four proven
+.stknds round-trip losses:
+`InstanceKey` gains `opacity`
+(default 1.0), `flip_x` / `flip_y`
+(false), `scale_y` (0.0 — the
+follow-`scale` sentinel, resolved
+in exactly one place,
+`eff_scale_y()`), and `pivot_x` /
+`pivot_y` (0.5), every one
+serde-defaulted so pre-enrichment
+files load with today's behaviour.
+The importer populates them from
+the sites that used to discard
+them (the sprite branch's scaleY,
+pivot and flips; the style block's
+opacity, now returned by
+`read_style`); evaluation builds
+the quad from the pivot with each
+axis negated under its flip — a
+mirror AROUND THE PIVOT — and at
+the defaults the corners are
+bit-identical to the old
+±half-extent form (X5's pointer
+wiring inherits the enriched
+geometry for free, hit-testing
+the same quads); export writes
+scaleY = `eff_scale_y()`, the
+key's pivot and flips, and the
+key's opacity. `set_sprite_key`
+now PRESERVES the enrichment of
+the key it replaces (panel
+transform stepping must not wipe
+an imported sprite's flips), and
+a new `set_sprite_key_full`
+writes all eleven fields in one
+undo step behind the MCP
+surface. The 69-site literal
+sweep was done in-slice;
+**IA-X9-1** files the registry
+schema/description replacement,
+**IA-X9-2** asks the finisher to
+re-sweep literals at integration,
+**IA-X9-3** files two exact
+NODES-ANIM-SPEC replacements.
+Panel enrichment controls are a
+follow-up (remainder (6));
+movieclip-instance flips remain
+discarded — a movieclip becomes
+a figure+clip, which has no
+InstanceKey.
+
+**Pair-gate redesign (X10).**
+§6.17's remainder (2) and the
+Wave W frame above, answered.
+The old gate was refuted twice
+over, both measured: its
+same-pixel-size premise is false
+on every real set (the middle
+populated row sits at a half-point
+y, its strip 112×239 against the
+others' 112×238 — "the fixture
+geometry moved" was the gate
+misreading its own fixture), and
+raw-pixel identity inverts
+(identical pair 566 differing px
+vs different pair 330 — a
+half-pixel phase shift resamples
+every stroke's anti-aliasing).
+The redesign measures a different
+signature: each thumbnail's INK
+MASK (W7's re-derived predicate),
+in coordinates anchored on the
+thumbnail band (the bounding box
+of the strip's exact stage-bg
+pixels — the surround contains
+none, the totals control measures
+0.000 exact), compared by
+ink-coverage distance (ink pixels
+of A with no ink of B within
+Chebyshev distance 1, symmetrised).
+Measured on all four real
+artifact sets on record: identical
+content = **exactly 0** (incl.
+the cross-process pair), different
+content = **48–51**; the floor is
+12 (~¼ of the weakest different
+signal), and a distance of 1–11
+matches NEITHER construction and
+FAILs as ambiguous — the gate
+refuses to guess. `DIFF_FLOOR` is
+retired. Run locally against the
+downloaded sets, the redesigned
+probe **PASSes on real snaps —
+the first PASS the pair gate has
+ever issued** — with identical
+transcripts on 42771786953 and
+42774207670; two new self-test
+fixtures pin the reason to exist
+(a resampled pair the old gate
+fails and the new one PASSes at
+distance 0; a near-miss pair at
+distance 4 FAILing as ambiguous).
+Its first CI execution is the
+Wave X integration headless
+(remainder (4)). No IA, no
+workflow change — the existing
+step already runs pair mode.
+
+**Bundle progress core type
+(X11).** W3's named future work,
+built: export.rs gains
+`BundleProgressEvent { completed_
+frames, total_frames, finished }`
+— the total is the sum of every
+member's frame total in its own
+reporting sense (render members:
+authored frames; encode members:
+sampled times, via the new
+`sampled_frame_total`; contract-less
+members: the frames they will
+write), allocated BEFORE the first
+member runs — and a `BundleProgress`
+tracker translating each member's
+phase events against the frames
+banked when its callback was
+taken: delivered counts are never
+retracted (a failed member banks
+only its reported peak, so the
+stream cannot run backwards even
+across a failure), and `finish()`
+fires the single terminal only if
+every member succeeded. Tokened
+`export_bundle` calls now stream
+it; every other call is
+byte-identical (the plain entries
+ARE the hooked entries with
+`None`). SVG/spritesheet members
+send no events of their own —
+they have no phase contract and
+none was invented; their frames
+land at completion, so the stream
+holds during them and never
+overstates. The panel's bundles
+stay synchronous (the core type
+exists; panel wiring is a panel
+slice). **IA-X11-1 is
+compile-blocking**: a third
+report tag, `ProgressPhase::
+Bundle` + `ProgressReport::bundle`
+in mcp.rs (tagging a bundle count
+Encode or Render would corrupt
+W3's never-merge discipline in
+the type, even though this
+protocol revision never puts the
+phase on the wire). IA-X11-2's
+docs sentence was applied by X18.
+
+**WebM range outcome widening
+(X12).** §6.17's remainder (4)
+closed: all six WebM range
+signatures return
+`Result<Mp4ExportOutcome>` — the
+MP4 range type, reused rather
+than paralleled (its doc now says
+so) — carrying `missing_audio`
+out of the plan both bodies
+already computed and discarded.
+The registry's `webm_range` reply
+flows it into the same
+`missing_audio` field the
+`mp4_range` branch fills (absent
+when empty, so an all-present
+export's reply is byte-identical
+to before). In the panel, the
+outcome is carried through the
+job's result type but the finish
+still speaks the byte-identical
+class-C sentence — the standing
+exclusion, stated plainly in the
+finding: the user-visible
+surfacing of this widening is
+the MCP reply and the core API.
+Five pins, incl. the panel finish
+keeping its sentence WITH an
+outcome naming a missing clip.
+IA-X12-1 (the docs row) was
+applied by X18.
+
+**entry_matches search fix
+(X13).** §6.17's remainder (8):
+the library panel's file-name leg
+matched the query against the
+FABRICATED verbatim
+`<display name>.json`, so wherever
+display and slug diverge beyond
+case the real file name could not
+be searched ("Foo Bar" lives in
+`foo-bar.json`; the leg searched
+`Foo Bar.json`). The leg now
+resolves through
+`library_entry_file` — the same
+display→file resolution delete
+and rename use — factored as
+`entry_matches_file` so both
+directions are pinnable without
+a library on disk. The verbatim
+direction survives through the
+resolver (a hand-placed entry
+whose file IS its name still
+matches by it); the one narrowing
+is deliberate — the fabricated
+form no longer matches when no
+such file exists, since it names
+no real file. Two new pins; the
+pre-existing pins re-verified
+against the new semantics by
+reading. No IAs.
+
+**Muted caption wiring (X14).**
+§6.17's remainder (10) closed:
+`clip_caption` / `waveform_
+caption` take the core (the W5
+precedent — the one production
+caller's chain already threads
+`&s.core` into every sibling
+helper) and the muted segment
+resolves through
+`audio_muted_segment`, the exact
+key and inline idiom the audio
+panel's own readout uses; English
+byte-identical, the unmuted
+string untouched, no new key.
+With this, the waveform strip has
+no remaining English-canonical
+caption surface: the health
+caption (W5) and the muted
+segment both resolve through the
+catalogue.
+
+**Citations + R5 closure (X15).**
+QA_RUNE gains §19.7: **R5 is
+CLOSED**, on §18.5's own rule —
+the build carrying V1's fix
+landed green (42771751700,
+4,024 tests summed from the run's
+own log, 0 failed; headless
+42771786953 green on the same
+commit; the fix verified standing
+in the current tree). PHASE_O
+§10's citation upgrades from
+42767540386 to **42774207670**
+(the Wave W integration headless
+on `dccddbb`), re-verified by
+W12's method first-hand: overflow
+CLEAN (scan set complete), census
+PASS 19/0, both markers PASS, 37
+dumps; 36 of 37 per-tree counts
+reproduce §10's table exactly and
+one moves (`tree-audio-open.json`
+408 → 462 — already 462 on the
+predecessor's artifact, so the
+move predates Wave W and is
+stable); O-1…O-9 reproduce
+exactly, the fourth consecutive
+dispatch to do so. The pair
+verdict is stated alongside, as
+W12's rule requires: UNPROVEN,
+its new shape recorded (legacy
+legs PASS; the fidelity gate
+stopped at its geometry
+precondition).
+
+**Gate/census maintenance
+(X16).** Clean detached worktree
+at `dccddbb`: gate PASS 10/10;
+element keys **984** by the
+gate's method (865 static + 119
+dynamic) with zero lost;
+`KEY_TOTAL_FLOOR` **ratcheted
+983 → 984** with the ledger entry,
+standing exactly at the verified
+count; `MCP_SURFACE_FLOOR` 381 ==
+verified, no ratchet owed;
+catalogue 666 × 28 (667
+structural) by independent parse.
+The board's "expect 987" is
+corrected on the record: it
+assumed the gate counts all four
+of W1's progress keys — it counts
+one (`xc-progress`); the other
+three ride `(key, line)` tuple
+literals the extractor does not
+capture. They exist, are pinned,
+and render through the same
+`.key()` call — a documented
+artefact of the instrument, and
+the floor is set to what the
+counter verifies (remainder (7)).
+Its pending-IA ledger was written
+before x3/x10 filed; the complete
+set is the integrator-actions
+paragraph below.
+
+**Overflow/headless maintenance
+(X17).** The audit found no drift,
+so the pass files the standing
+note, not a manufactured edit:
+both tree loops parse to the
+registry's 34 names, set-equal in
+both directions; the produced set
+is 37; SCAN_SET 16 required / 0
+pending, verified by importing
+the module; `headless.yml`
+byte-unchanged. The one change is
+the +28-line docstring maintenance
+note in `scripts/overflow_scan.py`
+recording those counts and the
+X10 boundary (X10 owns the
+snap-home-missing-audio capture
+block, the whole thumbnail-probe
+step, and the probe's pair region;
+its region produces no tree dump,
+so it owes no SCAN_SET entry).
+At X17's check no IA-X3/IA-X10
+workflow text existed; X10 as
+filed needs none. One thing its
+audit did not flag is recorded
+as remainder (3) below: the
+live-MCP probe step's stale
+premise.
+
+**MCP docs sync (X18).** Run
+against a moving census and
+reconciled at filing: at base the
+sweep reproduces W15 exactly (296
+character-identical / 85 condensed,
+the differing set byte-identical
+to a pristine `d5da9fd` sweep —
+zero new drift). During the slice
+X3 registered its seven tools
+in-tree (381 → 388) and two
+source purposes moved; actions:
+IA-X11-2 applied verbatim (the
+`export_bundle` row MATCHES
+source again); IA-X12-1 applied
+in intent — its premise that the
+`export_file` row is
+source-verbatim did not hold (the
+row was one of the 85 condensed),
+so the row's Purpose cell was set
+to the full current source
+description, X12's clause included
+verbatim, and the row now MATCHES;
+X3's seven tools documented with
+verbatim rows in registry order.
+Final sweep: source 388,
+catalogue 388, none missing or
+extra; 304 identical / 84
+condensed (the standing set minus
+`export_file`). Filed for the
+integrator: X5's two catalogue
+rows verbatim (they ride the
+registry splice), IA-X9-1's two
+row updates, IA-X8-1's `render`
+row sentence, and the count-prose
+update — to be taken from a fresh
+census at that pass (expected
+390 / registry 328), not from
+this arithmetic.
+
+**README truth pass 5 (X19).**
+Six hunks, README.md only. The
+666 count replaces 662; range
+audio is CLAIMED (pass 4's F6
+resolved — both range formats
+include the clips inside the
+range, Opus in WebM, full WebM
+video-only, an unprobeable clip
+fails the export) and the Audio
+bullet's overstatement corrected
+with it; the "core-level only"
+progress sentence is replaced
+(F7 resolved) with both surfaces
+and both deliberate non-wirings
+(the bridge, the bundle) stated
+as such; a new MCP-section
+paragraph documents the live
+bridge as it now is — loopback,
+Host/Origin-validated, OFF by
+default since W4, a stored choice
+honoured, unauthenticated by
+documented v1 design; and the
+Figure building bullet gains
+W9's name-path rule for the pose
+and 3D libraries. Flags: F1, F3,
+F4 carried; **F2 stands — no
+LICENSE file exists in the repo
+root** (the licence claim rests
+on Cargo.toml's
+`license = "GPL-3.0-or-later"`);
+F8/F9 record X12's widening
+(no README sentence needed) and
+the class-C range-WebM status
+wording lagging the file it
+describes (a catalogue-side
+decision, as W6 flagged it).
+
+**Integrator actions filed this
+wave.** Compile-blocking:
+**IA-X1-1** (25 `FigureInstance`
+literal sites in 16 files, one
+`states: Vec::new(),` line each),
+**IA-X11-1** (the `ProgressPhase::
+Bundle` tag + `ProgressReport::
+bundle` in src/mcp.rs — mcp_io's
+bundle wiring already calls it),
+**IA-X7-1** (`export_piv_v5`'s
+new `Result` signature at its two
+call sites). Catalogue:
+**IA-X3-1** +8 keys (clips block)
+and **IA-X6-1** +4 keys (segment
+block) — projected catalogue
+**666 + 12 = 678 × 28** (679
+structural) once both land; the
+owning panels' i18n pins pass
+only after insertion (Q7).
+Registry/docs: **X5's splice**
+(two TOOL ENTRY SPECs into
+`mcp_tools::tools()` + the
+catalogue rows X18 filed verbatim)
+— projected census **388 + 2 =
+390**; **IA-X9-1** (sprite_set_key
+schema/description replacement +
+sprite_list's enumeration; +0
+tools), **IA-X8-1** (the `render`
+tool's optional `alpha` argument;
++0 tools) with X18's row updates
+filed for both, and the MCP.md
+count prose to be re-taken from a
+fresh census at that pass.
+**IA-X9-2** (finisher re-sweep of
+InstanceKey literals — siblings
+may have added fresh literals
+against the old shape) and
+**IA-X9-3** (two exact
+NODES-ANIM-SPEC §17 replacements).
+Already applied in-wave: IA-X11-2
+and IA-X12-1 (by X18, above).
+No actions were filed by X2, X4,
+X10, X13, X14, X15, X16, X17,
+X19 or X20.
+
+**Rehearsal (X20) — every
+instrument, two snapshots.**
+Run on the near-settled tree and
+again on the full Wave X tree at
+the final check (HEAD `aa598ec`
+plus all twenty slices'
+uncommitted work): gate
+`phase_j_checks.py` **PASS 10/10**
+on both; `mcp_census.py` exit 0;
+`overflow_scan.py --self-test`
+all checks passed;
+`subtitle_census.py --self-test`
+PASS; `home_thumbnail_probe.py
+--self-test` PASS (8 cases at the
+final run — X10's two new fixtures
+included). The arithmetic ledger
+against the settled Wave W
+counts: element keys **984** at
+the settled base (X16's clean-
+worktree verification and this
+rehearsal's preliminary run
+agree; floor ratcheted to 984 in
+tree) and **995** on the final
+tree (871 static + 124 dynamic) —
++11 counted additions across the
+wave's panels, **zero lost**
+(check 2); the catalogue **666 ×
+28** in tree (independent parse:
+28 tables × 667 structural keys,
+identical ordered sequences, zero
+duplicates; the four IA-W1-1 keys
+present), **+12 pending** via
+IA-X3-1/IA-X6-1 above; MCP **381**
+settled, **388 in tree** (X3's
+seven tools registered in-tree
+and documented by X18 — gate
+check 9's doc-sync passes against
+388), **+2 pending** via X5's
+splice; scenes **34**; SCAN_SET
+**16 required / 0 pending**;
+palette 134; icons 163; State
+49/22. **Failure classification:
+no instrument failure on the
+final tree.** The wave's failures
+live in the CI frame, and none is
+pending-IA-shaped: round 1's
+E0425 ×8 was a defect in the
+wave's own test code (helpers
+referenced, never defined — W6
+filed no IA for them; fixed in
+`aa598ec`); round 2's single
+failing pin is a REAL product-code
+contract violation in the MCP
+transport (the duplicate (2,2)
+notification — fix owed, round
+3); the headless MCP probe's FAIL
+is instrument debt from an
+intended behaviour change (W4's
+default flip), not a regression;
+the thumbnail probe's UNPROVEN
+was a gate precondition, since
+redesigned in tree by X10. The
+compile-blocking IAs above are
+the integration's known first
+work, in the wave's established
+pattern — the tree as rehearsed
+does not compile until IA-X1-1,
+IA-X11-1 and IA-X7-1 land, which
+is stated here so no one mistakes
+the rehearsal's green instruments
+(python-side) for a compile
+verdict.
+
+**Verification — awaiting CI.**
+Wave X's counts are X16's
+(baseline) and this rehearsal's
+(final tree), not taken from
+siblings' claims: gate PASS
+10/10, census 388 in tree (44 +
+326 + 9 + 4 + 5) becoming a
+projected 390 at the splice,
+element keys 995 by the gate's
+method with the floor standing at
+984, catalogue 666 × 28 in tree
+becoming a projected 678 × 28
+when IA-X3-1 + IA-X6-1 land,
+palette 134, icons 163, scenes
+34, SCAN_SET 16 required / 0
+pending, State 49/22. Wave W's
+frame is closed above (two red
+build rounds, headless transcripts
+read, round 3 owed); Wave X's own
+proof is its integration push's
+Build, Test & Binary plus a
+headless dispatch, transcripts
+read — including the first
+execution of the state-key,
+state-ops, bend-follow, sprite,
+joint-limit, rider, alpha,
+bundle-progress and outcome pins,
+and the redesigned pair gate's
+first CI transcript.
+
+**Honest remainders.** (1) The
+standing user decisions stand
+exactly as §6.17 left them —
+white-on-accent contrast
+(3.14:1), the panel splitter,
+File-menu Save As, the two
+disagreeing "New project"
+results, `tab_visits_controls`
+OFF, project-swap undo, the skew
+channel, the whole-figure pose
+transform, MCP `write_recovery`,
+the waveform badge/call, S1's
+seven i18n value-vs-label
+discrepancies (RESERVED, neither
+side changed), the subtitle-stack
+cap/wrap, a panel export-scale
+control (core/MCP only by design)
+— and this wave touched none of
+them. The LICENSE file is still
+absent from the repo root (X19's
+F2; the claim rests on
+Cargo.toml's licence field).
+Sound remains user-verified only.
+(2) **Wave W's build is red until
+round 3.** The tokened range-video
+progress stream emits the terminal
+count twice (the wire shape has
+no `finished` flag); the fix
+belongs in the transport
+translation or the drainer's
+emission, and W3's pin stands
+exactly as written. Until a
+Build, Test & Binary run lands
+green on a commit carrying Wave
+W, Wave W stays IMPLEMENTED, not
+VERIFIED — and Wave X's
+integration run will execute the
+same pin against the same path.
+(3) **The live-MCP headless probe
+assumes the default W4 removed.**
+Its step launches the editor on a
+wiped profile and waits for an
+endpoint that, since the
+explicit-enable flip, correctly
+never starts; its own comment
+still says the pref "defaults
+ON". The repair is probe-side —
+seed `./projects/.layout.json`
+with a stored `live_mcp: true`
+(the file W4's design honours),
+or drive the Settings toggle —
+and would double as the first
+end-to-end proof of the
+stored-true path. Owner: the
+headless maintenance seat (the
+step is in X17's stated region;
+its audit this wave did not flag
+the premise). No app change is
+owed or wanted.
+(4) **The pair gate's standing
+transcript verdict is still
+UNPROVEN.** X10's redesign is in
+tree and PASSes on both real
+artifact sets by local run
+(coverage distance 0 identical /
+48–51 different, floor 12), but
+no CI transcript carries it yet;
+the Wave X integration headless
+owes the first one. Until then,
+Home thumbnails are legacy-proven
+and redesign-proven locally, not
+snap-proven in CI.
+(5) Alpha export has no panel
+surface (X8): core + (via
+IA-X8-1) MCP only. A panel alpha
+toggle is a product decision for
+the user — flagged, not built.
+Alpha APNG is the named
+follow-up; GIF carries no alpha
+worth having.
+(6) Sprite enrichment has no
+panel controls (X9): the
+round-trip closes through model /
+import / export / MCP today;
+panel steppers for opacity /
+flip / scale_y / pivot are a
+follow-up slice, and no fake
+controls were added in their
+place.
+(7) The gate extractor's
+tuple-carried-key blind spot
+(X16): keys carried as
+`(key, line)` tuples — W1's three
+progress lines, X6's limit rows,
+part of X3's state rows — are
+undercounted by the ratcheted
+instrument, so the counted total
+is a floor on the truth.
+Teaching check 1 a new pattern is
+a deliberate recount + re-ratchet
+for a future wave, not a
+mid-wave change under every
+slice's before/after census.
+(8) Assign/unlink deliberately
+never touch state keys (X2):
+keys are authored and removed
+only through their own ops, so
+no op silently destroys another
+op's authoring. A bulk
+clear-all-keys press does not
+exist; it composes per key, each
+its own undo step, until a later
+wave rosters a bulk op.
+(9) The sprites panel's strings
+remain literal English (X5) —
+the file was never i18n-wired
+and this wave followed its
+convention rather than wiring
+one file piecemeal; wiring it
+wholesale is unrostered.
+(10) §6.17 remainders closed
+here: the WebM range outcome
+((4) there) — X12 widened it,
+its panel half still speaking
+the class-C sentence by the
+standing exclusion; the library
+search ((8) there) — X13 fixed
+it through the scan-based
+resolver; the muted caption
+((10) there) — X14 wired it,
+closing the waveform strip's
+last English-canonical caption;
+R5 ((11) there) — X15 closed
+the row citing the green round;
+the Pivot JPEG residual ((9)
+there) — X7(b) transcodes or
+refuses by name; the README
+half of (5) there — X19's pass
+5 claims range audio, both
+progress surfaces and the
+live-bridge default (the class-C
+in-app half stands, a product
+ruling as before); the bundle
+half of (6) there — the core
+type exists and tokened bundle
+calls stream (X11), the panel's
+bundles remaining synchronous
+by design; the probe half of
+(2) there — the legacy leg is
+transcript-proven and the gate
+redesigned, its CI proof carried
+at (4) above; and (7) there —
+the SpriteLoop proposals P-1…P-6
++ P-4r are built this wave,
+while P-7 (bend channel +
+4-piece arc), P-8 (segment-media
+local transform), P-9 (layered
+import), P-10 (setup pose) and
+P-11 (strip-warp, on X4's
+subrect) remain genuinely
+unbuilt — Wave Y's roster, per
+W10's order. (3) there — the
+stored-`true` migration
+impossibility — stands exactly
+as documented.

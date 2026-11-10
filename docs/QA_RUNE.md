@@ -1197,3 +1197,35 @@ One carried item changes owner, not status: §18.4's
 "range MP4/WebM exports carry no audio (the panel
 warns)" is **W6**'s slice this wave; it stays open
 until W6's CI lands.
+
+### 19.7 R5 — CLOSED (Wave X, X15)
+
+§19.3 left this row open under §18.5's rule: QA closes
+R5 only when the build carrying V1's fix lands green.
+That build has landed. Build, Test & Binary run
+`42771751700` on `2462a82` completed **SUCCESS**; its
+test totals, summed from the run's own log, are
+**4,024 passed, 0 failed**. Headless Rune probe
+`42771786953` on the same commit also completed
+**SUCCESS** (conclusion verified via `gh`; its
+transcripts were read at the Wave V close and are
+recorded in §6.16/§6.17 of REDESIGN_PROGRESS). The
+fix itself stands unchanged in the current tree at
+the Wave X base (`dccddbb`): `library_file_text`
+(`src/editor.rs:273`) still writes the stored
+`"name"`, `library_stored_name` (`:290`) still reads
+it back with the stem fallback, and its round-trip
+pins stand beside them (`:7630`, `:7648`). §19.3's
+heading and the §19.6 table's R5 row are superseded
+by this closure: the figure-library case-loss row is
+**closed** — a figure saved as "Styk" is stored,
+listed, inserted, renamed and deleted as "Styk",
+with pre-fix files gaining the exact name at their
+next save (W19's migration e2e, Wave W, pins the
+legacy paths end to end). The same slice
+upgraded PHASE_O §10's scan-table citation to
+the Wave W integration dispatch `42774207670`
+(§19.4's forward pointer, discharged a wave
+later than it foresaw; the upgrade and the
+pair gate's UNPROVEN verdict are recorded
+there).
