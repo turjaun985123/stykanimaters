@@ -15048,3 +15048,36 @@ user-verified only. The
 SpriteLoop GAP list stays
 exhausted except what user
 briefs still own.
+
+**CI close (round 1, head d090b2c):** build 42821744738 SUCCESS —
+4,391 tests, 0 failed (+52 over AB's 4,339; the seats' rehearsal
+promised ≥4,389). Headless 42821766565 SUCCESS — SUBTITLE CENSUS,
+HOME THUMBNAIL PROBE, HOME MISSING-AUDIO MARKER, HOME
+SCAN-FALLBACK MARKER and MCP PROBE all PASS, 38 dumps, artifact
+overflow scan CLEAN (8th consecutive scanned-CLEAN; the §10
+O-measurement streak remains a distinct nine). AC10's forward
+check confirmed to the element: loop-range carries 1,265 flat
+elements = AB's 1,254 + 8 (AC3's bend strip — pills 18×2 at
+[500, 796] and [568, 796], glyph rows at y 779.5, dope-cell-0-1
+and dope-cell-0-3 at 8 elements each) + 3 (AC1's follow toggle
+row — keyframe-follow, key-follow and its label; AC1 predicted
+the row in the Graph trees, and it also mounts in this scene's
+keyframe-tools section, priced here so the next record need not
+re-derive it).
+
+**Reconciliation addendum** (the §6.23 paragraphs AC9 and
+AC14–AC19 composed before their findings landed, corrected per
+the house rule that the finding wins): remainder (4)'s open
+verdict is 42816228545 SUCCESS. AC9's tuple-carried family is
+FOUR keys (xc-progress-working/-render/-encode/-bundle), and
+IA-AC9-1 — the counter-method change — stands filed for a
+future wave boundary; it was not requested inside Wave AC. AC14's
+catalogue re-run was EXECUTED on the integrated tree with zero
+drift across all 392 rows (the record's expectation is now a
+result). AC16's README pass landed IN the integration commit,
+the 697 figure included (not deferred to a later pass). AC17
+appended QA_RUNE §19.12 directly in the same push. AC18's
+rehearsal read ≥4,389; the observed tally is 4,391. IA-AC15-1
+was applied with IA-AC5-1 (both header figures read 697).
+AC19's edit is comment-only; the pin its board line asked for
+already existed (AB4's origin-refusal pin). Wave AC is CLOSED.
