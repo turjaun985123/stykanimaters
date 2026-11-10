@@ -28,10 +28,39 @@
 //! `subtitle_set_style` is a full replace (all four
 //! arguments required) and its reply's `style` is the
 //! style as stored, after the op's clamping.
+//!
+//! No-change parity (Wave R, R20): the Subtitles panel
+//! never spends an undo step on a press that would change
+//! nothing — its colour swatches, scale stepper and text
+//! apply all guard before calling the ops, which snapshot
+//! unconditionally. These handlers keep the same rule on
+//! this surface: a `subtitle_update` identical to the cue
+//! as stored, and a `subtitle_set_style` whose clamped
+//! result equals the style in force, reply `changed:
+//! false` and spend no step. And because the panel's
+//! one-field-at-a-time style gestures are read-modify-write
+//! over `EditorCore::subtitle_style`, `subtitle_list`
+//! carries that same read: its reply's `style` is the
+//! style in force, so a client can compose a faithful
+//! partial change through the full-replace tool.
+//!
+//! Speakers (Wave R, R21): a cue may carry a speaker
+//! name — metadata, normalised by the core
+//! (`subtitles::normalise_speaker`: trimmed, empty
+//! stores none, tag-breaking names refused by the op).
+//! `subtitle_add` and `subtitle_update` accept it as an
+//! optional `speaker` argument; because `subtitle_update`
+//! is a full replace, an absent or empty argument CLEARS
+//! the cue's speaker — `subtitle_list` reports each
+//! cue's speaker (the field is present only when the
+//! cue carries one) so a client can compose a faithful
+//! replace. The no-change rule compares the speaker too:
+//! a speaker-only difference is a real change and spends
+//! its one step.
 
 use crate::editor::EditorCore;
 use crate::mcp::Tool;
-use crate::subtitles::{SubtitleCue, SubtitlePosition, SubtitleStyle};
+use crate::subtitles::{normalise_speaker, SubtitleCue, SubtitlePosition, SubtitleStyle};
 use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------
@@ -94,6 +123,19 @@ fn sub_req_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
     }
 }
 
+/// An optional string argument: absent (or null) is
+/// `None`; a present non-string refuses in the required
+/// helper's voice.
+fn sub_opt_str<'a>(args: &'a Value, key: &str) -> Result<Option<&'a str>, String> {
+    match sub_get(args, key) {
+        Some(v) => v
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| format!("argument '{key}' must be a string")),
+        None => Ok(None),
+    }
+}
+
 /// Colours travel as `0xRRGGBB` integers.
 fn sub_opt_color(args: &Value, key: &str) -> Result<Option<u32>, String> {
     match sub_get(args, key) {
@@ -128,13 +170,22 @@ fn sub_project_summary(core: &EditorCore) -> Value {
 /// One cue as JSON: its index in the kept (sorted) list,
 /// its half-open frame range and its text — the shape
 /// `subtitle_list` reports and the mutation tools echo.
+/// The cue's speaker rides along as `speaker` ONLY when
+/// it carries one (Wave R, R21): an additive field,
+/// absent for uncredited cues, so a consumer written
+/// before the field existed reads the same shape it
+/// always did.
 fn subtitle_cue_json(index: usize, cue: &SubtitleCue) -> Value {
-    json!({
+    let mut value = json!({
         "index": index,
         "start_frame": cue.start_frame,
         "end_frame": cue.end_frame,
         "text": cue.text,
-    })
+    });
+    if let Some(speaker) = &cue.speaker {
+        value["speaker"] = json!(speaker);
+    }
+    value
 }
 
 /// One style as JSON — the shape `subtitle_set_style`
@@ -181,6 +232,11 @@ fn tool_subtitle_list(core: &mut EditorCore, _args: &Value) -> Result<Value, Str
         "ok": true,
         "subtitles": subtitles,
         "count": core.project.subtitles.len(),
+        // The style in force, in the shape
+        // `subtitle_set_style` echoes: the read half of
+        // the panel's read-modify-write style gestures
+        // (Wave R, R20).
+        "style": subtitle_style_json(core.project.subtitle_style),
     }))
 }
 
@@ -188,7 +244,12 @@ fn tool_subtitle_add(core: &mut EditorCore, args: &Value) -> Result<Value, Strin
     let start_frame = sub_req_usize(args, "start_frame")?;
     let end_frame = sub_req_usize(args, "end_frame")?;
     let text = sub_req_str(args, "text")?;
-    match core.subtitle_add(start_frame, end_frame, text) {
+    // The optional speaker rides to the op raw: the op
+    // normalises it (and refuses a tag-breaking name in
+    // its own voice), so there is exactly one refusal
+    // surface for it.
+    let speaker = sub_opt_str(args, "speaker")?;
+    match core.subtitle_add(start_frame, end_frame, text, speaker) {
         Some(index) => Ok(json!({
             "ok": true,
             "index": index,
@@ -206,12 +267,49 @@ fn tool_subtitle_update(core: &mut EditorCore, args: &Value) -> Result<Value, St
     let start_frame = sub_req_usize(args, "start_frame")?;
     let end_frame = sub_req_usize(args, "end_frame")?;
     let text = sub_req_str(args, "text")?;
-    match core.subtitle_update(index, start_frame, end_frame, text) {
+    let speaker = sub_opt_str(args, "speaker")?;
+    // No-change parity (Wave R, R20): an update identical
+    // to the cue as stored would re-sort a list that
+    // cannot move — the stored list is the same either
+    // way — so, like the panel's unchanged text apply,
+    // it reports and spends no undo step. A missing index
+    // falls through to the op, whose refusal voice is the
+    // one this surface already speaks.
+    //
+    // The comparison covers the speaker too (Wave R,
+    // R21): the replace is full, so the would-be stored
+    // speaker is the argument normalised — an absent or
+    // empty argument means NO speaker, and a
+    // speaker-only difference is a real change. A name
+    // the normaliser refuses can never equal a stored
+    // speaker, so it skips the guard and falls through
+    // to the op, which refuses it in its own voice.
+    if let Ok(want_speaker) = normalise_speaker(speaker) {
+        if let Some(cue) = core.project.subtitles.get(index) {
+            if cue.start_frame == start_frame
+                && cue.end_frame == end_frame
+                && cue.text == text
+                && cue.speaker.as_deref() == want_speaker.as_deref()
+            {
+                core.status =
+                    "Subtitle update matched the cue as stored; nothing changed.".to_string();
+                return Ok(json!({
+                    "ok": true,
+                    "changed": false,
+                    "index": index,
+                    "status": core.status,
+                    "project": sub_project_summary(core),
+                }));
+            }
+        }
+    }
+    match core.subtitle_update(index, start_frame, end_frame, text, speaker) {
         // The op re-sorts after the replace: the reply's
         // index is the cue's position in the list now,
         // which may differ from the index addressed.
         Some(new_index) => Ok(json!({
             "ok": true,
+            "changed": true,
             "index": new_index,
             "status": core.status,
             "project": sub_project_summary(core),
@@ -256,6 +354,27 @@ fn tool_subtitle_set_style(core: &mut EditorCore, args: &Value) -> Result<Value,
         text_color,
         box_color,
     };
+    // No-change parity (Wave R, R20): the op stores
+    // `validated()`; for the finite scale the parse above
+    // guarantees, that stored form is `sanitised()`
+    // exactly (the same clamp), so the would-be result
+    // can be compared against the style in force before
+    // the op runs. An equal result is a no-op — the
+    // panel's swatches and stepper guard the same way —
+    // and spends no undo step. A stored style that is
+    // itself unsanitised (a hand-edited file) never
+    // compares equal here, so the op still runs and the
+    // rewrite lands as the real change it is.
+    if style.sanitised() == core.subtitle_style() {
+        core.status = "Subtitle style matched the current style; nothing changed.".to_string();
+        return Ok(json!({
+            "ok": true,
+            "changed": false,
+            "style": subtitle_style_json(core.project.subtitle_style),
+            "status": core.status,
+            "project": sub_project_summary(core),
+        }));
+    }
     // The op validates, snapshots exactly once on success
     // (one undo step) and explains a refusal on the status
     // line.
@@ -263,6 +382,7 @@ fn tool_subtitle_set_style(core: &mut EditorCore, args: &Value) -> Result<Value,
         .map_err(|_| core.status.clone())?;
     Ok(json!({
         "ok": true,
+        "changed": true,
         "style": subtitle_style_json(core.project.subtitle_style),
         "status": core.status,
         "project": sub_project_summary(core),
@@ -270,17 +390,16 @@ fn tool_subtitle_set_style(core: &mut EditorCore, args: &Value) -> Result<Value,
 }
 
 // ---------------------------------------------------------------------
-// registration — NOTE: this module's tools() is NOT yet
-// merged into `mcp::all_tools()`; that wiring (plus the
-// lib.rs module line) is an integrator action filed in
-// the P29 findings.
+// registration — wired into `mcp::all_tools()` since
+// Wave Q (Q1): the lib.rs module line and the all_tools
+// extend are in `src/mcp.rs`, after the io family.
 // ---------------------------------------------------------------------
 
 pub fn tools() -> Vec<Tool> {
     vec![
         Tool {
             name: "subtitle_list",
-            description: "List the project's subtitle cues in their kept order (sorted by start frame, then end frame): each cue's index in the list, its half-open frame range [start_frame, end_frame) and its text. Indices are 0-based, the convention of every index in this registry. Read-only. (Wave P, P29)",
+            description: "List the project's subtitle cues in their kept order (sorted by start frame, then end frame): each cue's index in the list, its half-open frame range [start_frame, end_frame) and its text. A cue's speaker is reported as 'speaker' when the cue carries one; the field is absent when it does not. Indices are 0-based, the convention of every index in this registry. The reply also carries the project's subtitle style in 'style' — the style in force, in the shape subtitle_set_style echoes — so a caller can compose a one-field style change from true values. Read-only. (Wave P, P29; style read added Wave R, R20; speaker report Wave R, R21)",
             schema: json!({
                 "type": "object",
                 "properties": {},
@@ -290,13 +409,14 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "subtitle_add",
-            description: "Add a subtitle cue over the half-open frame range [start_frame, end_frame) with the given text: the cue shows at start_frame and is gone at end_frame, so end_frame must be after start_frame and the text must not be empty. The cue list is kept sorted by (start_frame, end_frame) and the reply's 'index' is the new cue's position in it. Frames are 0-based and are not clamped to the timeline. Refused cues (bad range, empty text) change nothing. One undo step. (Wave P, P29)",
+            description: "Add a subtitle cue over the half-open frame range [start_frame, end_frame) with the given text: the cue shows at start_frame and is gone at end_frame, so end_frame must be after start_frame and the text must not be empty. An optional 'speaker' names who speaks the line: it is trimmed, an empty or whitespace-only name stores no speaker, and a name containing '<', '>' or a newline is refused. The cue list is kept sorted by (start_frame, end_frame) and the reply's 'index' is the new cue's position in it. Frames are 0-based and are not clamped to the timeline. Refused cues (bad range, empty text, unusable speaker name) change nothing. One undo step. (Wave P, P29; speaker Wave R, R21)",
             schema: json!({
                 "type": "object",
                 "properties": {
                     "start_frame": { "type": "integer", "minimum": 0, "description": "First frame the cue is shown on (0-based)" },
                     "end_frame": { "type": "integer", "minimum": 0, "description": "First frame the cue is no longer shown on (0-based, exclusive; must be after start_frame)" },
-                    "text": { "type": "string", "description": "The cue's text (must not be empty)" }
+                    "text": { "type": "string", "description": "The cue's text (must not be empty)" },
+                    "speaker": { "type": "string", "description": "Optional speaker name for the cue; trimmed, an empty name stores no speaker" }
                 },
                 "required": ["start_frame", "end_frame", "text"]
             }),
@@ -304,14 +424,15 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "subtitle_update",
-            description: "Replace the subtitle cue at 'index' (its index in subtitle_list) with a new half-open frame range [start_frame, end_frame) and text — a full replace, all four arguments required. The list is re-sorted afterwards and the reply's 'index' is the cue's position in the list now, which may differ from the index addressed. Refused updates (no such cue, bad range, empty text) change nothing. One undo step. (Wave P, P29)",
+            description: "Replace the subtitle cue at 'index' (its index in subtitle_list) with a new half-open frame range [start_frame, end_frame) and text — a full replace, all four arguments required. The optional 'speaker' is part of the replace: the cue's speaker becomes the given name (trimmed; an empty or whitespace-only name, or omitting the argument, clears it), and a name containing '<', '>' or a newline is refused — read the cue with subtitle_list first to compose a replace that keeps its speaker. The list is re-sorted afterwards and the reply's 'index' is the cue's position in the list now, which may differ from the index addressed. Refused updates (no such cue, bad range, empty text, unusable speaker name) change nothing. An update identical to the cue as stored is a no-op and spends no undo step; the reply's 'changed' says whether anything moved. One undo step. (Wave P, P29; no-op rule Wave R, R20; speaker Wave R, R21)",
             schema: json!({
                 "type": "object",
                 "properties": {
                     "index": { "type": "integer", "minimum": 0, "description": "Index of the cue in subtitle_list" },
                     "start_frame": { "type": "integer", "minimum": 0, "description": "First frame the cue is shown on (0-based)" },
                     "end_frame": { "type": "integer", "minimum": 0, "description": "First frame the cue is no longer shown on (0-based, exclusive; must be after start_frame)" },
-                    "text": { "type": "string", "description": "The cue's text (must not be empty)" }
+                    "text": { "type": "string", "description": "The cue's text (must not be empty)" },
+                    "speaker": { "type": "string", "description": "Optional speaker name for the cue; trimmed, an empty name (or omitting it) clears the speaker" }
                 },
                 "required": ["index", "start_frame", "end_frame", "text"]
             }),
@@ -331,7 +452,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "subtitle_set_style",
-            description: "Replace the project's subtitle style in one call — a full replace, all four arguments required: 'position' (\"bottom\" or \"top\", the stage edge the cue block is anchored to), 'font_scale' (multiplier on the renderers' house subtitle size; a finite value is clamped to 0.5-3.0, a non-finite one is refused), 'text_color' and 'box_color' (packed 0xRRGGBB integers: the cue text colour and its backing/outline colour). The reply's 'style' is the style as stored, after clamping. Refused calls (unknown position, missing or mistyped arguments) change nothing. One undo step. (Wave P, P29)",
+            description: "Replace the project's subtitle style in one call — a full replace, all four arguments required: 'position' (\"bottom\" or \"top\", the stage edge the cue block is anchored to), 'font_scale' (multiplier on the renderers' house subtitle size; a finite value is clamped to 0.5-3.0, a non-finite one is refused), 'text_color' and 'box_color' (packed 0xRRGGBB integers: the cue text colour and its backing/outline colour). The reply's 'style' is the style as stored, after clamping. Refused calls (unknown position, missing or mistyped arguments) change nothing. A call whose clamped result equals the style already in force is a no-op and spends no undo step; the reply's 'changed' says whether anything moved. One undo step. (Wave P, P29; no-op rule Wave R, R20)",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -372,6 +493,7 @@ mod tests {
             start_frame,
             end_frame,
             text: text.to_string(),
+            speaker: None,
         }
     }
 
@@ -631,6 +753,231 @@ mod tests {
             .expect_err("a non-finite scale refuses");
         assert_eq!(err, "argument 'font_scale' must be a finite number");
         assert_eq!(core.project.subtitle_style, style_before);
+        assert_eq!(core.undo_depth(), depth_before);
+    }
+
+    // -----------------------------------------------------------------
+    // Wave R (R20): the shell<->MCP parity pins — the
+    // style read on `subtitle_list` and the no-change
+    // rule on the two replace tools.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn list_reports_the_style_in_force() {
+        let mut core = cued_core();
+        let reply = call("subtitle_list", &mut core, json!({})).expect("list succeeds");
+        // The style rides the list reply in the shape
+        // set_style echoes — the read half of the panel's
+        // read-modify-write style gestures.
+        assert_eq!(
+            reply["style"],
+            subtitle_style_json(core.project.subtitle_style)
+        );
+        // After a style change the same read reports the
+        // new style — and the list stays read-only.
+        call(
+            "subtitle_set_style",
+            &mut core,
+            json!({
+                "position": "top",
+                "font_scale": 1.5,
+                "text_color": 0xFF_FF00u32,
+                "box_color": 0x00_0010u32,
+            }),
+        )
+        .expect("set_style succeeds");
+        let depth_before = core.undo_depth();
+        let status_before = core.status.clone();
+        let reply = call("subtitle_list", &mut core, json!({})).expect("list succeeds");
+        assert_eq!(reply["style"]["position"], json!("top"));
+        assert_eq!(reply["style"]["font_scale"], json!(1.5));
+        assert_eq!(reply["style"]["text_color"], json!(0xFF_FF00u32));
+        assert_eq!(core.undo_depth(), depth_before);
+        assert_eq!(core.status, status_before);
+    }
+
+    #[test]
+    fn set_style_noop_spends_nothing_and_reports_unchanged() {
+        let mut core = EditorCore::new();
+        let args = json!({
+            "position": "top",
+            "font_scale": 1.5,
+            "text_color": 0xFF_FF00u32,
+            "box_color": 0x00_0010u32,
+        });
+        let reply = call("subtitle_set_style", &mut core, args.clone())
+            .expect("the first set_style succeeds");
+        assert_eq!(reply["changed"], json!(true));
+        let depth_before = core.undo_depth();
+        // The identical call again: the panel's swatches
+        // would never reach the op, and neither does this
+        // surface — no step, and the reply says so.
+        let reply = call("subtitle_set_style", &mut core, args)
+            .expect("the repeat set_style succeeds as a no-op");
+        assert_eq!(reply["changed"], json!(false));
+        assert_eq!(
+            reply["style"],
+            subtitle_style_json(core.project.subtitle_style)
+        );
+        assert_eq!(core.undo_depth(), depth_before);
+        // The clamp-to-current case: 99.0 stores the max
+        // once (a real change), then the same oversized
+        // call clamps onto the style in force and is a
+        // no-op.
+        let big = json!({
+            "position": "top",
+            "font_scale": 99.0,
+            "text_color": 0xFF_FF00u32,
+            "box_color": 0x00_0010u32,
+        });
+        let reply = call("subtitle_set_style", &mut core, big.clone())
+            .expect("the clamping set_style succeeds");
+        assert_eq!(reply["changed"], json!(true));
+        assert_eq!(core.undo_depth(), depth_before + 1);
+        let reply = call("subtitle_set_style", &mut core, big)
+            .expect("the repeat clamping call succeeds as a no-op");
+        assert_eq!(reply["changed"], json!(false));
+        assert_eq!(core.undo_depth(), depth_before + 1);
+    }
+
+    #[test]
+    fn update_noop_spends_nothing_and_reports_unchanged() {
+        let mut core = cued_core();
+        let depth_before = core.undo_depth();
+        let cues_before = core.project.subtitles.clone();
+        // Cue 0 exactly as stored: the panel's unchanged
+        // text apply closes free; this surface reports
+        // the no-op and spends nothing.
+        let reply = call(
+            "subtitle_update",
+            &mut core,
+            json!({ "index": 0, "start_frame": 0, "end_frame": 24, "text": "First line" }),
+        )
+        .expect("the identical update succeeds as a no-op");
+        assert_eq!(reply["changed"], json!(false));
+        assert_eq!(reply["index"], json!(0));
+        assert_eq!(core.project.subtitles, cues_before);
+        assert_eq!(core.undo_depth(), depth_before);
+        // A missing index still refuses through the op's
+        // own voice (the guard falls through), and a real
+        // update still reports the change and spends
+        // exactly one step.
+        call(
+            "subtitle_update",
+            &mut core,
+            json!({ "index": 99, "start_frame": 0, "end_frame": 24, "text": "Ghost" }),
+        )
+        .expect_err("no such cue refuses the update");
+        let reply = call(
+            "subtitle_update",
+            &mut core,
+            json!({ "index": 0, "start_frame": 0, "end_frame": 24, "text": "First line, edited" }),
+        )
+        .expect("a real update succeeds");
+        assert_eq!(reply["changed"], json!(true));
+        assert_eq!(core.undo_depth(), depth_before + 1);
+    }
+
+    // -----------------------------------------------------------------
+    // Wave R (R21): the speaker argument on add/update and
+    // its report on list.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn speaker_flows_through_add_and_list() {
+        let mut core = EditorCore::new();
+        let depth_before = core.undo_depth();
+        // The name is stored trimmed, and the add spends
+        // exactly one step, speaker or not.
+        call(
+            "subtitle_add",
+            &mut core,
+            json!({ "start_frame": 0, "end_frame": 24, "text": "Hello.", "speaker": "  Mary Jane  " }),
+        )
+        .expect("add with a speaker succeeds");
+        assert_eq!(core.undo_depth(), depth_before + 1);
+        assert_eq!(
+            core.project.subtitles[0].speaker.as_deref(),
+            Some("Mary Jane")
+        );
+        call(
+            "subtitle_add",
+            &mut core,
+            json!({ "start_frame": 24, "end_frame": 48, "text": "Plain." }),
+        )
+        .expect("plain add succeeds");
+        // The list reports the speaker only where one is
+        // carried: an additive field, absent otherwise.
+        let reply = call("subtitle_list", &mut core, json!({})).expect("list succeeds");
+        assert_eq!(reply["subtitles"][0]["speaker"], json!("Mary Jane"));
+        assert!(
+            reply["subtitles"][1].get("speaker").is_none(),
+            "no speaker key on an uncredited cue: {}",
+            reply["subtitles"][1]
+        );
+        // A name the voice tag cannot carry refuses
+        // through the op: no cue, no step.
+        let depth_before = core.undo_depth();
+        let err = call(
+            "subtitle_add",
+            &mut core,
+            json!({ "start_frame": 48, "end_frame": 72, "text": "Bad.", "speaker": "A>B" }),
+        )
+        .expect_err("an unusable speaker name refuses");
+        assert!(!err.is_empty(), "the refusal explains itself");
+        assert_eq!(core.project.subtitles.len(), 2);
+        assert_eq!(core.undo_depth(), depth_before);
+    }
+
+    #[test]
+    fn update_speaker_legs_follow_the_full_replace_rule() {
+        let mut core = EditorCore::new();
+        call(
+            "subtitle_add",
+            &mut core,
+            json!({ "start_frame": 0, "end_frame": 24, "text": "Line", "speaker": "Mary" }),
+        )
+        .expect("add succeeds");
+        let depth_before = core.undo_depth();
+        // Same range, same text, same speaker: a no-op —
+        // the R20 guard compares the speaker too.
+        let reply = call(
+            "subtitle_update",
+            &mut core,
+            json!({ "index": 0, "start_frame": 0, "end_frame": 24, "text": "Line", "speaker": "Mary" }),
+        )
+        .expect("the identical update succeeds as a no-op");
+        assert_eq!(reply["changed"], json!(false));
+        assert_eq!(core.undo_depth(), depth_before);
+        // Omitting the speaker on a speaker'd cue is a
+        // real change — the full replace clears it — and
+        // spends exactly one step.
+        let reply = call(
+            "subtitle_update",
+            &mut core,
+            json!({ "index": 0, "start_frame": 0, "end_frame": 24, "text": "Line" }),
+        )
+        .expect("the speaker-clearing update succeeds");
+        assert_eq!(reply["changed"], json!(true));
+        assert_eq!(core.project.subtitles[0].speaker, None);
+        assert_eq!(core.undo_depth(), depth_before + 1);
+        // A speaker-only change back is likewise one
+        // step; a bad name then refuses through the op
+        // and spends nothing.
+        call(
+            "subtitle_update",
+            &mut core,
+            json!({ "index": 0, "start_frame": 0, "end_frame": 24, "text": "Line", "speaker": "Mary" }),
+        )
+        .expect("restoring the speaker succeeds");
+        let depth_before = core.undo_depth();
+        call(
+            "subtitle_update",
+            &mut core,
+            json!({ "index": 0, "start_frame": 0, "end_frame": 24, "text": "Line", "speaker": "A>B" }),
+        )
+        .expect_err("a bad speaker name refuses");
+        assert_eq!(core.project.subtitles[0].speaker.as_deref(), Some("Mary"));
         assert_eq!(core.undo_depth(), depth_before);
     }
 }

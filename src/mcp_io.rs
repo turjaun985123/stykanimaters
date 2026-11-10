@@ -38,6 +38,21 @@
 //! exactly what each output contains today; where the SVG
 //! writer's fidelity is still behind the rasterizer's, the
 //! `render` description says so rather than implying parity.
+//!
+//! Wave R (R13): frame-range exports take the task-named
+//! `from_frame`/`to_frame` arguments (the Wave 11 `from`/`to`
+//! spellings stay accepted for the same bounds), resolved by
+//! [`arg_frame_range`] and validated strictly against the
+//! timeline by [`check_frame_range`] before any file is
+//! written — an export writes exactly the frames named, so a
+//! bound past the end is refused instead of silently
+//! exporting a shorter range. The engine's range exporters
+//! keep their clamping contract for the export panel, whose
+//! loop range is pre-clamped state rather than an argument;
+//! the contact sheet keeps [`arg_range`] and its clamping
+//! window for the same reason. `export_bundle` takes no
+//! range at all: bundles cover the whole timeline on both
+//! surfaces by deliberate design (see the handler).
 
 use crate::editor::EditorCore;
 use crate::mcp::Tool;
@@ -73,17 +88,35 @@ fn arg_frame(core: &EditorCore, args: &Value) -> Result<usize, String> {
     }
 }
 
-/// A required non-negative integer argument (used by the
-/// frame-range export formats). Floats are rejected: the range
-/// bounds must be exact frame indices.
-fn arg_usize(args: &Value, key: &str) -> Result<usize, String> {
-    match args.get(key) {
-        Some(v) => v
-            .as_u64()
-            .map(|n| n as usize)
-            .ok_or_else(|| format!("argument '{key}' must be a non-negative integer")),
-        None => Err(format!("missing required integer argument: {key}")),
+/// One range bound under either spelling: the task-named
+/// `framed` key (`from_frame`/`to_frame`) or the `legacy`
+/// key (`from`/`to`) the Wave 11 tools shipped with. Absent
+/// (or null) under both spellings is `None`; a non-integer
+/// under either is refused naming that key (floats and
+/// negatives included — the bounds must be exact frame
+/// indices); both spellings present must agree, since a
+/// disagreement is a caller mistake, not a choice.
+fn arg_range_bound(args: &Value, legacy: &str, framed: &str) -> Result<Option<usize>, String> {
+    let mut found: Option<usize> = None;
+    for key in [legacy, framed] {
+        match args.get(key) {
+            None | Some(Value::Null) => {}
+            Some(v) => {
+                let n = v.as_u64().map(|n| n as usize).ok_or_else(|| {
+                    format!("argument '{key}' must be a non-negative integer")
+                })?;
+                match found {
+                    Some(prev) if prev != n => {
+                        return Err(format!(
+                            "arguments '{legacy}' and '{framed}' disagree for the same range bound"
+                        ));
+                    }
+                    _ => found = Some(n),
+                }
+            }
+        }
     }
+    Ok(found)
 }
 
 fn ensure_parent(path: &Path) -> Result<(), String> {
@@ -392,8 +425,19 @@ fn tool_export_file(core: &mut EditorCore, args: &Value) -> Result<Value, String
         // export_mp4/export_webm, so they do not fit the byte
         // pipeline below: they render straight to `path` and
         // return the number of frames written.
-        let from = arg_usize(args, "from")?;
-        let to = arg_usize(args, "to")?;
+        // Bounds are required for the range formats: the
+        // task-named 'from_frame'/'to_frame' or the Wave 11
+        // 'from'/'to' spellings (Wave R, R13), validated
+        // against the timeline before any file is written.
+        let (from, to) = match arg_frame_range(args)? {
+            Some((f, t, framed)) => {
+                check_frame_range((f, t), core.project.frames.len(), framed)?;
+                (f, t)
+            }
+            None => {
+                return Err("missing required integer argument: from".to_string());
+            }
+        };
         let path_ref = Path::new(&path);
         ensure_parent(path_ref)?;
         let mut missing_audio: Vec<String> = Vec::new();
@@ -472,19 +516,10 @@ fn encode_png(img: &ImageBuffer<Rgb<u8>, Vec<u8>>) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// The rasterizer renders at 2x supersampling; scale the result to
-/// `w`x`h` (exact stage size when w/h are the stage dimensions).
-fn scaled(img: &ImageBuffer<Rgb<u8>, Vec<u8>>, w: u32, h: u32) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
-    if img.width() == w && img.height() == h {
-        img.clone()
-    } else {
-        image::imageops::resize(img, w.max(1), h.max(1), image::imageops::FilterType::Triangle)
-    }
-}
-
 /// Render one authored frame at the requested output scale
-/// (1.0 = exact stage size; the 2x supersampled render is
-/// resampled down, which keeps edges smooth).
+/// (1.0 = exact stage size): a true re-render at that scale
+/// through the export funnel (Wave R, R10 via IA-R10-1),
+/// never a resample of the 1.0 raster.
 fn render_png_bytes(
     core: &EditorCore,
     frame: usize,
@@ -503,10 +538,8 @@ fn render_png_bytes(
     if !(scale > 0.0) || !scale.is_finite() {
         return Err("argument 'scale' must be a positive number".to_string());
     }
-    let img = crate::export::render_frame_at(p, frame as f32);
-    let w = (p.stage[0] as f64 * scale).round().max(1.0) as u32;
-    let h = (p.stage[1] as f64 * scale).round().max(1.0) as u32;
-    let img = scaled(&img, w, h);
+    let img = crate::export::render_frame_at_scaled(p, frame as f32, scale as f32)
+        .map_err(|e| e.to_string())?;
     let (w, h) = (img.width(), img.height());
     Ok((encode_png(&img)?, w, h))
 }
@@ -546,6 +579,65 @@ fn arg_range(args: &Value) -> Result<Option<(usize, usize)>, String> {
     }
 }
 
+/// A frame range for the EXPORT tools (Wave R, R13): the
+/// task-named 'from_frame'/'to_frame' arguments, with the
+/// Wave 11 'from'/'to' spellings still accepted for the same
+/// bounds via [`arg_range_bound`]. Both bounds or neither —
+/// a lone bound is refused, as in [`arg_range`]. The third
+/// element records whether a 'from_frame'/'to_frame' spelling
+/// was used, so error messages and reply echoes speak the
+/// caller's vocabulary. Timeline validation is the caller's
+/// next step ([`check_frame_range`]): this resolver does not
+/// know the frame count.
+fn arg_frame_range(args: &Value) -> Result<Option<(usize, usize, bool)>, String> {
+    let from = arg_range_bound(args, "from", "from_frame")?;
+    let to = arg_range_bound(args, "to", "to_frame")?;
+    let framed = matches!(args.get("from_frame"), Some(v) if !v.is_null())
+        || matches!(args.get("to_frame"), Some(v) if !v.is_null());
+    let (from_name, to_name) = if framed {
+        ("from_frame", "to_frame")
+    } else {
+        ("from", "to")
+    };
+    match (from, to) {
+        (Some(f), Some(t)) => {
+            if t < f {
+                Err(format!(
+                    "argument '{to_name}' must not be less than '{from_name}'"
+                ))
+            } else {
+                Ok(Some((f, t, framed)))
+            }
+        }
+        (None, None) => Ok(None),
+        _ => Err(format!(
+            "arguments '{from_name}' and '{to_name}' must be given together"
+        )),
+    }
+}
+
+/// The export tools' strict timeline check (Wave R, R13),
+/// run before any file is written: the last frame of the
+/// range must exist. The engine's range exporters clamp
+/// out-of-range bounds (their contract with the panel, whose
+/// loop range is pre-clamped state), but an MCP caller who
+/// names frame 40 of a 24-frame project asked for frames
+/// that do not exist — silently writing a shorter export
+/// would misreport what was produced, so the range is
+/// refused in the same voice as `render_png_bytes`' frame
+/// check. `framed` selects the argument vocabulary the
+/// error names.
+fn check_frame_range(range: (usize, usize), frames: usize, framed: bool) -> Result<(), String> {
+    let to = range.1;
+    if to >= frames {
+        let to_name = if framed { "to_frame" } else { "to" };
+        return Err(format!(
+            "argument '{to_name}' {to} is out of range (project has {frames} frames)"
+        ));
+    }
+    Ok(())
+}
+
 fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let path = arg_path(args)?;
     let format = args
@@ -556,12 +648,21 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     if project.frames.is_empty() {
         return Err("project has no frames to render".to_string());
     }
-    let range = arg_range(args)?;
+    // Wave R (R13): ranges arrive as 'from_frame'/'to_frame'
+    // (or the Wave 11 'from'/'to' spellings) and are validated
+    // against the timeline before anything is written.
+    let (range, range_framed) = match arg_frame_range(args)? {
+        Some((f, t, framed)) => {
+            check_frame_range((f, t), project.frames.len(), framed)?;
+            (Some((f, t)), framed)
+        }
+        None => (None, false),
+    };
     if range.is_some() && matches!(format, "png" | "mp4" | "webm") {
         // 'png' is a single frame by definition; video ranges
         // already exist as export_file's mp4_range/webm_range.
         return Err(format!(
-            "arguments 'from'/'to' are not supported for format '{format}' \
+            "arguments 'from_frame'/'to_frame' are not supported for format '{format}' \
              (ranges: gif, apng, spritesheet, svg, jpeg, png_sequence; \
              for video ranges use export_file with mp4_range/webm_range)"
         ));
@@ -642,11 +743,25 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
         "png_sequence" => {
             // export_png_sequence writes frame-NNNN.png files into
             // a directory (creating it); `path` names that directory.
-            match range {
-                Some((f, t)) => {
+            // Wave R (R10 via IA-R10-1): an optional 'scale'
+            // argument routes to the true-scaled sequence
+            // entries; absent, the unscaled calls run unchanged.
+            let scale = args.get("scale").and_then(Value::as_f64);
+            match (range, scale) {
+                (Some((f, t)), Some(s)) => crate::export::export_png_sequence_range_scaled(
+                    project,
+                    f,
+                    t,
+                    path_ref,
+                    s as f32,
+                ),
+                (Some((f, t)), None) => {
                     crate::export::export_png_sequence_range(project, f, t, path_ref)
                 }
-                None => crate::export::export_png_sequence(project, path_ref),
+                (None, Some(s)) => {
+                    crate::export::export_png_sequence_scaled(project, path_ref, s as f32)
+                }
+                (None, None) => crate::export::export_png_sequence(project, path_ref),
             }
         }
         _ => {
@@ -666,10 +781,17 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
         out["directory"] = json!(path);
     }
     // The range is echoed only when one was passed, so the
-    // no-range reply shapes stay byte-identical (D1's pins).
+    // no-range reply shapes stay byte-identical (D1's pins);
+    // the echo uses the spelling the caller used (Wave R,
+    // R13), so a 'from'/'to' reply is unchanged from Wave 11.
     if let Some((f, t)) = range {
-        out["from"] = json!(f);
-        out["to"] = json!(t);
+        if range_framed {
+            out["from_frame"] = json!(f);
+            out["to_frame"] = json!(t);
+        } else {
+            out["from"] = json!(f);
+            out["to"] = json!(t);
+        }
     }
     // Wave P (P15): the missing-audio list rides along on
     // the same discipline — present only when the MP4
@@ -864,6 +986,10 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
     let stem = crate::projects::file_stem_for(&project.name)
         .unwrap_or_else(|| "project".to_string());
     let engine = |r: std::io::Result<usize>| r.map_err(|e| e.to_string());
+    // Wave R (R10 via IA-R10-1): an optional 'scale' argument
+    // scales the bundle's PNG sequence member (a true
+    // re-render at that scale); absent, it renders at 1.0.
+    let bundle_scale = args.get("scale").and_then(Value::as_f64);
     let members: Vec<BundleMember> = if kind == "images" {
         let png_dir = dir.join("png");
         let jpeg_dir = dir.join("jpeg");
@@ -873,7 +999,12 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
             BundleMember {
                 name: "png_sequence",
                 target: png_dir.display().to_string(),
-                result: engine(crate::export::export_png_sequence(project, &png_dir)),
+                result: engine(match bundle_scale {
+                    Some(s) => {
+                        crate::export::export_png_sequence_scaled(project, &png_dir, s as f32)
+                    }
+                    None => crate::export::export_png_sequence(project, &png_dir),
+                }),
                 missing_audio: Vec::new(),
             },
             BundleMember {
@@ -1007,7 +1138,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "export_file",
-            description: "Export the project: 'piv2', 'piv3', 'piv4' or 'piv5' write the whole animation as .piv bytes; 'stk' writes a single figure as Pivot .stk bytes and 'nodes' writes it as a Stick Nodes .nodes figure (both take the 'figure' index, defaulting to the selected figure); 'stknds' writes the whole animation as a Stick Nodes project; 'mp4_range' and 'webm_range' render only frames 'from'..='to' (both required, integer frame indices) to a video file (needs ffmpeg) with the same frame content as the render tool's raster output — composited sprite/text instances and segment media included. 'mp4_range' also muxes the range's share of the project's audio (and fails rather than writing a silent file when audio is present but unusable); 'webm_range' never carries audio — the WebM path has no audio support at any range. The .piv/.stk/.nodes/.stknds formats are data interchange: they carry only what those formats hold, not the asset table, sprites, texts or audio. Parent directories are created.",
+            description: "Export the project: 'piv2', 'piv3', 'piv4' or 'piv5' write the whole animation as .piv bytes; 'stk' writes a single figure as Pivot .stk bytes and 'nodes' writes it as a Stick Nodes .nodes figure (both take the 'figure' index, defaulting to the selected figure); 'stknds' writes the whole animation as a Stick Nodes project; 'mp4_range' and 'webm_range' render only frames 'from_frame'..='to_frame' (both required, integer frame indices; the Wave 11 spellings 'from'/'to' are still accepted for the same bounds; a bound past the end of the timeline is refused) to a video file (needs ffmpeg) with the same frame content as the render tool's raster output — composited sprite/text instances and segment media included. 'mp4_range' also muxes the range's share of the project's audio (and fails rather than writing a silent file when audio is present but unusable); 'webm_range' never carries audio — the WebM path has no audio support at any range. The .piv/.stk/.nodes/.stknds formats are data interchange: they carry only what those formats hold, not the asset table, sprites, texts or audio. Parent directories are created.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -1015,7 +1146,9 @@ pub fn tools() -> Vec<Tool> {
                     "format": { "type": "string", "enum": ["piv2", "piv3", "piv4", "piv5", "stk", "nodes", "stknds", "mp4_range", "webm_range"] },
                     "figure": { "type": "integer", "minimum": 0, "description": "Figure index for formats 'stk' and 'nodes' (default: selected figure)" },
                     "from": { "type": "integer", "minimum": 0, "description": "First frame for formats 'mp4_range' and 'webm_range' (required there)" },
-                    "to": { "type": "integer", "minimum": 0, "description": "Last frame for formats 'mp4_range' and 'webm_range' (required there)" }
+                    "to": { "type": "integer", "minimum": 0, "description": "Last frame for formats 'mp4_range' and 'webm_range' (required there)" },
+                    "from_frame": { "type": "integer", "minimum": 0, "description": "First frame for formats 'mp4_range' and 'webm_range' (required there; alternative spelling of 'from')" },
+                    "to_frame": { "type": "integer", "minimum": 0, "description": "Last frame for formats 'mp4_range' and 'webm_range' (required there; alternative spelling of 'to')" }
                 },
                 "required": ["path", "format"]
             }),
@@ -1023,7 +1156,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "render",
-            description: "Render the animation. Formats: 'png' renders ONE frame (arg 'frame', default current; arg 'scale', default 1.0 = stage size) to a PNG file; 'gif', 'mp4' (needs ffmpeg), 'webm', 'apng' and 'spritesheet' render the whole timeline to the file at 'path'; 'svg', 'jpeg' and 'png_sequence' write one file per frame into the DIRECTORY at 'path' (created if needed). The sequence/animation formats 'gif', 'apng', 'spritesheet', 'svg', 'jpeg' and 'png_sequence' accept an optional frame range: args 'from' and 'to' (0-based, inclusive, given together, clamped to the timeline; echoed in the reply). Video ranges are export_file's mp4_range/webm_range. Parent directories are created for file targets. CONTENT — the raster formats (png, png_sequence, gif, mp4, webm, apng, spritesheet, jpeg) draw the full frame: camera (pan/zoom/rotation), figures with segment styling (cap, taper, colour gradient, segment opacity AND figure opacity) and bent segments, drawing strokes, FX/particles and weather, with sprite instances, text instances and segment media (images/text attached to segments) composited in. 'mp4' also muxes the project's audio when an unmuted clip's file exists (and fails if that mux fails); 'webm' never carries audio — the WebM path has no audio support. 'svg' is the vector writer: it draws figures (segment taper, gradients, segment opacity AND figure opacity, bent segments arced through the bend midpoint), strokes (a pressured stroke as per-segment lines at its baked widths), FX/particles and weather through the same camera, and it emits sprite instances, text instances and segment media (images embedded once per asset as PNG data with a placement matrix; an image item's figure×style opacity rides as an opacity attribute). One divergence from the raster remains: SVG text is a monospace font run where the raster stamps 3×5 bitmap glyphs (the content and centre agree; the advance width does not).",
+            description: "Render the animation. Formats: 'png' renders ONE frame (arg 'frame', default current; arg 'scale', default 1.0 = stage size, a true re-render at that scale) to a PNG file; 'gif', 'mp4' (needs ffmpeg), 'webm', 'apng' and 'spritesheet' render the whole timeline to the file at 'path'; 'svg', 'jpeg' and 'png_sequence' write one file per frame into the DIRECTORY at 'path' (created if needed). The sequence/animation formats 'gif', 'apng', 'spritesheet', 'svg', 'jpeg' and 'png_sequence' accept an optional frame range: args 'from_frame' and 'to_frame' (0-based, inclusive, given together; the Wave 11 spellings 'from'/'to' are still accepted for the same bounds; a bound past the end of the timeline is refused rather than clamped; echoed in the reply under the spelling used). Video ranges are export_file's mp4_range/webm_range. Parent directories are created for file targets. CONTENT — the raster formats (png, png_sequence, gif, mp4, webm, apng, spritesheet, jpeg) draw the full frame: camera (pan/zoom/rotation), figures with segment styling (cap, taper, colour gradient, segment opacity AND figure opacity) and bent segments, drawing strokes, FX/particles and weather, with sprite instances, text instances and segment media (images/text attached to segments) composited in. 'mp4' also muxes the project's audio when an unmuted clip's file exists (and fails if that mux fails); 'webm' never carries audio — the WebM path has no audio support. 'svg' is the vector writer: it draws figures (segment taper, gradients, segment opacity AND figure opacity, bent segments arced through the bend midpoint), strokes (a pressured stroke as per-segment lines at its baked widths), FX/particles and weather through the same camera, and it emits sprite instances, text instances and segment media (images embedded once per asset as PNG data with a placement matrix; an image item's figure×style opacity rides as an opacity attribute). One divergence from the raster remains: SVG text is a monospace font run where the raster stamps 3×5 bitmap glyphs (the content and centre agree; the advance width does not).",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -1032,7 +1165,9 @@ pub fn tools() -> Vec<Tool> {
                     "frame": { "type": "integer", "minimum": 0, "description": "Frame index for format 'png' (default: current frame)" },
                     "from": { "type": "integer", "minimum": 0, "description": "First frame of an inclusive range (with 'to'); sequence/animation formats only" },
                     "to": { "type": "integer", "minimum": 0, "description": "Last frame of an inclusive range (with 'from'); sequence/animation formats only" },
-                    "scale": { "type": "number", "exclusiveMinimum": 0, "description": "Output scale for format 'png' relative to the stage size (default 1.0)" }
+                    "from_frame": { "type": "integer", "minimum": 0, "description": "First frame of an inclusive range (with 'to_frame'); sequence/animation formats only" },
+                    "to_frame": { "type": "integer", "minimum": 0, "description": "Last frame of an inclusive range (with 'from_frame'); sequence/animation formats only" },
+                    "scale": { "type": "number", "exclusiveMinimum": 0, "description": "Output scale relative to the stage size (default 1.0): format 'png' is a true re-render at that scale, and format 'png_sequence' renders its sequence at that scale" }
                 },
                 "required": ["path", "format"]
             }),
@@ -1040,12 +1175,13 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "export_bundle",
-            description: "Export a whole bundle of formats into the DIRECTORY at 'path' in one call (the export panel's two bundle buttons). kind 'images': a PNG sequence (png/ subdir), a JPEG sequence (jpeg/), one SVG per frame (svg/) and a spritesheet (spritesheet.png). kind 'video': '<project>.mp4' and '<project>.webm'. Member content matches the render tool per format: the image members are full raster frames (composited media included) and the SVG member matches the render tool's SVG (media included; text as font glyphs is its standing divergence); the mp4 member muxes usable project audio, the webm member is silent. Bundles always cover the WHOLE timeline — they deliberately ignore frame ranges, matching the panel. Every member is attempted: the reply lists each member with ok + frame count, or ok:false + the failure's reason; member failures never fail the call itself.",
+            description: "Export a whole bundle of formats into the DIRECTORY at 'path' in one call (the export panel's two bundle buttons). kind 'images': a PNG sequence (png/ subdir), a JPEG sequence (jpeg/), one SVG per frame (svg/) and a spritesheet (spritesheet.png). kind 'video': '<project>.mp4' and '<project>.webm'. Member content matches the render tool per format: the image members are full raster frames (composited media included) and the SVG member matches the render tool's SVG (media included; text as font glyphs is its standing divergence); the mp4 member muxes usable project audio, the webm member is silent. Bundles always cover the WHOLE timeline — they deliberately ignore frame ranges, matching the panel. An optional 'scale' (default 1.0) scales the PNG sequence member (a true re-render at that scale). Every member is attempted: the reply lists each member with ok + frame count, or ok:false + the failure's reason; member failures never fail the call itself.",
             schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Destination directory (created if needed)" },
-                    "kind": { "type": "string", "enum": ["images", "video"], "description": "Which bundle to export" }
+                    "kind": { "type": "string", "enum": ["images", "video"], "description": "Which bundle to export" },
+                    "scale": { "type": "number", "exclusiveMinimum": 0, "description": "Output scale for the PNG sequence member relative to the stage size (default 1.0)" }
                 },
                 "required": ["path", "kind"]
             }),
@@ -1657,6 +1793,192 @@ mod tests {
             .expect("second save failed");
         let second_bytes = std::fs::read(&path2).expect("second saved file missing");
         assert_eq!(second_bytes, first_bytes, "save/load/save must be byte-identical");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- Wave R (R13): frame-range exports ----
+
+    /// A core over the 5-frame demo project, fps pinned to
+    /// 24.0 per the wave contract.
+    fn range_core() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project = Project::new_demo();
+        core.project.fps = 24.0;
+        core
+    }
+
+    #[test]
+    fn render_range_from_frame_to_frame_writes_exactly_the_range() {
+        let dir = temp_dir("range-framed");
+        let mut core = range_core();
+        assert_eq!(core.project.frames.len(), 5, "demo fixture frame count");
+        let target = dir.join("seq");
+        let out = call(
+            "render",
+            &mut core,
+            json!({ "path": target.to_string_lossy(), "format": "png_sequence", "from_frame": 1, "to_frame": 3 }),
+        )
+        .expect("ranged render failed");
+        // The reply counts the range and echoes it under the
+        // spelling the caller used.
+        assert_eq!(out["frames"], 3);
+        assert_eq!(out["from_frame"], 1);
+        assert_eq!(out["to_frame"], 3);
+        assert!(out.get("from").is_none(), "legacy echo keys must not appear: {out}");
+        // Exactly the three named frames were written.
+        let written = std::fs::read_dir(&target).unwrap().count();
+        assert_eq!(written, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_range_legacy_spelling_and_no_range_shape_unchanged() {
+        let dir = temp_dir("range-legacy");
+        let mut core = range_core();
+        let target = dir.join("seq");
+        let out = call(
+            "render",
+            &mut core,
+            json!({ "path": target.to_string_lossy(), "format": "png_sequence", "from": 1, "to": 3 }),
+        )
+        .expect("legacy ranged render failed");
+        assert_eq!(out["frames"], 3);
+        assert_eq!(out["from"], 1);
+        assert_eq!(out["to"], 3);
+        assert!(out.get("from_frame").is_none(), "framed echo keys must not appear: {out}");
+
+        // Both spellings given and agreeing: accepted; a
+        // framed spelling was used, so the echo is framed.
+        let agreed = dir.join("agreed");
+        let out = call(
+            "render",
+            &mut core,
+            json!({ "path": agreed.to_string_lossy(), "format": "png_sequence", "from": 1, "from_frame": 1, "to": 3, "to_frame": 3 }),
+        )
+        .expect("agreeing dual-spelling render failed");
+        assert_eq!(out["frames"], 3);
+        assert_eq!(out["from_frame"], 1);
+        assert_eq!(out["to_frame"], 3);
+
+        // No range at all: the whole timeline, and no echo
+        // keys of either spelling (D1's shape discipline).
+        let whole = dir.join("whole");
+        let out = call(
+            "render",
+            &mut core,
+            json!({ "path": whole.to_string_lossy(), "format": "png_sequence" }),
+        )
+        .expect("full render failed");
+        assert_eq!(out["frames"], 5);
+        for key in ["from", "to", "from_frame", "to_frame"] {
+            assert!(out.get(key).is_none(), "unexpected echo key {key}: {out}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_range_invalid_ranges_refused_before_any_write() {
+        let dir = temp_dir("range-refused");
+        let mut core = range_core();
+        // (extra args, substring the error must carry)
+        let cases: Vec<(Value, &str)> = vec![
+            // from after to
+            (json!({ "from_frame": 3, "to_frame": 1 }), "must not be less than"),
+            // past the end of the 5-frame timeline, either spelling
+            (json!({ "from_frame": 0, "to_frame": 5 }), "'to_frame' 5 is out of range (project has 5 frames)"),
+            (json!({ "from": 0, "to": 99 }), "'to' 99 is out of range (project has 5 frames)"),
+            // negative bound
+            (json!({ "from_frame": -1, "to_frame": 2 }), "must be a non-negative integer"),
+            // a lone bound of either spelling
+            (json!({ "from_frame": 1 }), "must be given together"),
+            (json!({ "to": 2 }), "must be given together"),
+            // the two spellings disagreeing on one bound
+            (json!({ "from": 0, "from_frame": 1, "to_frame": 2 }), "disagree"),
+        ];
+        for (i, (extra, needle)) in cases.iter().enumerate() {
+            let target = dir.join(format!("case{i}"));
+            let mut args = json!({ "path": target.to_string_lossy(), "format": "png_sequence" });
+            for (k, v) in extra.as_object().unwrap() {
+                args[k.as_str()] = v.clone();
+            }
+            let err = call("render", &mut core, args)
+                .expect_err("invalid range must be refused");
+            assert!(err.contains(needle), "case {i}: error '{err}' must contain '{needle}'");
+            assert!(!target.exists(), "case {i}: a refused range wrote {target:?}");
+        }
+        // A range on a format that takes none (single frame).
+        let target = dir.join("single");
+        let err = call(
+            "render",
+            &mut core,
+            json!({ "path": target.to_string_lossy(), "format": "png", "from_frame": 0, "to_frame": 2 }),
+        )
+        .expect_err("png takes no range");
+        assert!(err.contains("not supported for format 'png'"), "{err}");
+        assert!(!target.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_file_range_bounds_validated_before_any_write() {
+        let dir = temp_dir("range-export-file");
+        let mut core = range_core();
+        let target = dir.join("x.mp4");
+        // No bounds at all: the Wave 11 missing-argument voice.
+        let err = call(
+            "export_file",
+            &mut core,
+            json!({ "path": target.to_string_lossy(), "format": "mp4_range" }),
+        )
+        .expect_err("range formats require their bounds");
+        assert!(err.contains("missing required integer argument: from"), "{err}");
+        // Past the end under the new spelling: refused, no file.
+        let err = call(
+            "export_file",
+            &mut core,
+            json!({ "path": target.to_string_lossy(), "format": "mp4_range", "from_frame": 0, "to_frame": 5 }),
+        )
+        .expect_err("past-the-end range must be refused");
+        assert!(err.contains("'to_frame' 5 is out of range (project has 5 frames)"), "{err}");
+        assert!(!target.exists(), "a refused range wrote {target:?}");
+        // from after to under the legacy spelling.
+        let err = call(
+            "export_file",
+            &mut core,
+            json!({ "path": target.to_string_lossy(), "format": "webm_range", "from": 3, "to": 1 }),
+        )
+        .expect_err("inverted range must be refused");
+        assert!(err.contains("must not be less than"), "{err}");
+        assert!(!target.exists(), "a refused range wrote {target:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ranged_exports_are_read_only() {
+        let dir = temp_dir("range-read-only");
+        let mut core = range_core();
+        let undo_before = core.undo_depth();
+        let edits_before = core.edits_since_autosave();
+        let target = dir.join("seq");
+        call(
+            "render",
+            &mut core,
+            json!({ "path": target.to_string_lossy(), "format": "png_sequence", "from_frame": 0, "to_frame": 2 }),
+        )
+        .expect("ranged render failed");
+        let refused = dir.join("nope");
+        assert!(call(
+            "render",
+            &mut core,
+            json!({ "path": refused.to_string_lossy(), "format": "png_sequence", "from_frame": 0, "to_frame": 9 }),
+        )
+        .is_err());
+        assert_eq!(core.undo_depth(), undo_before, "exports must not spend undo steps");
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits_before,
+            "exports must not dirty the project"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

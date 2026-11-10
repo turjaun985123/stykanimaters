@@ -3343,7 +3343,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "set_frame_duration",
-            description: "Set a frame's hold-time multiplier (1.0 = one beat at the project fps).",
+            description: "Set a frame's hold-time multiplier (1.0 = one beat at the project fps). Not an undo step (the panel writes through the same mark_dirty seam); a real change counts for dirty/autosave.",
             schema: obj_schema(
                 json!({
                     "frame": { "type": "integer" },
@@ -3355,7 +3355,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "set_frame_durations",
-            description: "Set hold-time multipliers for frames 0..n in one call (same positive-value rule as set_frame_duration; extra entries beyond the frame count are ignored).",
+            description: "Set hold-time multipliers for frames 0..n in one call (same positive-value rule as set_frame_duration; extra entries beyond the frame count are ignored). Not an undo step (the panel writes through the same mark_dirty seam); a real change counts for dirty/autosave.",
             schema: obj_schema(
                 json!({
                     "durations": { "type": "array", "items": { "type": "number" } }
@@ -3706,7 +3706,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "set_weather",
-            description: "Set continuous weather over the whole timeline, or turn it off.",
+            description: "Set continuous weather over the whole timeline, or turn it off. Not an undo step (the panel writes through the same mark_dirty seam); a real change counts for dirty/autosave.",
             schema: obj_schema(
                 json!({
                     "kind": { "type": "string", "enum": ["rain", "snow", "fireflies", "fog", "storm", "off"] },
@@ -4031,7 +4031,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "layers",
-            description: "Apply layer state to a figure: locked, hidden, opacity (0.05-1.0), and solo (true solos this figure in the editor, false clears its solo).",
+            description: "Apply layer state to a figure: locked, hidden, opacity (0.05-1.0), and solo (true solos this figure in the editor, false clears its solo). Not an undo step (the panel writes through the same mark_dirty seam); a real change counts for dirty/autosave.",
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
@@ -4460,7 +4460,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "layers_set_all_visible",
-            description: "Show or hide ALL figures at once (the figures panel's All / None buttons): visible=true shows every figure, visible=false hides every figure. Clears any active solo, exactly as the panel does, so the flags are the effective visibility. Returns how many figures changed state.",
+            description: "Show or hide ALL figures at once (the figures panel's All / None buttons): visible=true shows every figure, visible=false hides every figure. Clears any active solo, exactly as the panel does, so the flags are the effective visibility. Returns how many figures changed state. Not an undo step (the panel writes through the same mark_dirty seam); a real change counts for dirty/autosave.",
             schema: obj_schema(
                 json!({
                     "visible": { "type": "boolean" }
@@ -4471,7 +4471,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "layers_invert_visibility",
-            description: "Invert every figure's hidden flag (the figures panel's Invert button). Clears any active solo, exactly as the panel does. Returns how many figures changed state (always the figure count).",
+            description: "Invert every figure's hidden flag (the figures panel's Invert button). Clears any active solo, exactly as the panel does. Returns how many figures changed state (always the figure count). Not an undo step (the panel writes through the same mark_dirty seam); a real change counts for dirty/autosave.",
             schema: obj_schema(json!({}), &[]),
             handler: crate::figure_ops::tool_layers_invert_visibility,
         },
@@ -5695,7 +5695,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "asset_import",
-            description: "Import a PNG file from disk into the asset table (appended; its index is returned). The file must start with the PNG magic bytes, decode as an image and be at most 8388608 bytes (8 MiB) — anything else is refused before any change. The stored name defaults to the file's name; the optional 'name' argument overrides it. One undo step. (Unlike attach_image_to_node, this never touches ./import and attaches nothing.)",
+            description: "Import a PNG or JPEG file from disk into the asset table (appended; its index is returned). The file must start with the PNG magic bytes or the JPEG SOI marker, decode as an image and be at most 8388608 bytes (8 MiB) — anything else is refused before any change. The stored name defaults to the file's name; the optional 'name' argument overrides it. One undo step. (Unlike attach_image_to_node, this never touches ./import and attaches nothing.)",
             schema: obj_schema(
                 json!({
                     "path": { "type": "string" },

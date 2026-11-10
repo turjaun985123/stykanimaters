@@ -26,6 +26,14 @@
 //! these handlers are the MCP surface, mirroring the GUI
 //! import/export behaviour directly, the way `mcp_io`'s
 //! handlers mirror the editor's save/load.
+//!
+//! Cue speakers (Wave R, R21) ride the converters, so
+//! they ride these tools unchanged: WebVTT voice tags
+//! round-trip them, and SRT neither writes nor reads
+//! them (the converters' documented settlement — an SRT
+//! import into a speaker'd project therefore reports
+//! `changed: true` and the imported cues carry no
+//! speaker).
 
 use crate::editor::EditorCore;
 use crate::mcp::Tool;
@@ -148,16 +156,17 @@ fn tool_subtitle_import_vtt(core: &mut EditorCore, args: &Value) -> Result<Value
 }
 
 // ---------------------------------------------------------------------
-// registration — NOTE: this module's tools() is NOT yet merged
-// into `mcp::all_tools()`; that wiring (plus the lib.rs module
-// line) is an integrator action filed in the P30 findings.
+// registration — wired into `mcp::all_tools()` since
+// Wave Q (Q1): the lib.rs module line and the all_tools
+// extend are in `src/mcp.rs`, before the cue/style
+// family's extend.
 // ---------------------------------------------------------------------
 
 pub fn tools() -> Vec<Tool> {
     vec![
         Tool {
             name: "subtitle_export_srt",
-            description: "Write the project's subtitle cues as an SRT (SubRip) document to the file at 'path', timed at the project's frame rate (the Subtitles panel's SRT export). Read-only; no undo step. A path that cannot be written is refused and changes nothing. (Wave P, P30)",
+            description: "Write the project's subtitle cues as an SRT (SubRip) document to the file at 'path', timed at the project's frame rate (the Subtitles panel's SRT export). Cue speakers are not written — SRT has no speaker syntax — and cue text is written verbatim. Read-only; no undo step. A path that cannot be written is refused and changes nothing. (Wave P, P30; speaker note Wave R, R21)",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -169,7 +178,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "subtitle_import_srt",
-            description: "Replace the project's whole subtitle cue list with the cues parsed from the SRT (SubRip) file at 'path', timed at the project's frame rate (the Subtitles panel's SRT import): timestamps convert to half-open frame ranges and the list is kept sorted. A file that cannot be read, or in which nothing parses, is refused before any change. An import matching the current list changes nothing and spends no undo step; a changed list is one undo step. The reply's 'changed' says which happened. (Wave P, P30)",
+            description: "Replace the project's whole subtitle cue list with the cues parsed from the SRT (SubRip) file at 'path', timed at the project's frame rate (the Subtitles panel's SRT import): timestamps convert to half-open frame ranges and the list is kept sorted. Imported cues carry no speaker: SRT has none to read. A file that cannot be read, or in which nothing parses, is refused before any change. An import matching the current list changes nothing and spends no undo step; a changed list is one undo step. The reply's 'changed' says which happened. (Wave P, P30; speaker note Wave R, R21)",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -181,7 +190,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "subtitle_export_vtt",
-            description: "Write the project's subtitle cues as a WebVTT document to the file at 'path', timed at the project's frame rate (the Subtitles panel's WebVTT export). Read-only; no undo step. A path that cannot be written is refused and changes nothing. (Wave P, P30)",
+            description: "Write the project's subtitle cues as a WebVTT document to the file at 'path', timed at the project's frame rate (the Subtitles panel's WebVTT export). A cue's speaker is written as a WebVTT voice tag (<v Name>…</v>) around its text. Read-only; no undo step. A path that cannot be written is refused and changes nothing. (Wave P, P30; speaker Wave R, R21)",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -193,7 +202,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "subtitle_import_vtt",
-            description: "Replace the project's whole subtitle cue list with the cues parsed from the WebVTT file at 'path', timed at the project's frame rate (the Subtitles panel's WebVTT import): timestamps convert to half-open frame ranges and the list is kept sorted. A file that cannot be read, or with no WEBVTT header, or in which nothing parses, is refused before any change. An import matching the current list changes nothing and spends no undo step; a changed list is one undo step. The reply's 'changed' says which happened. (Wave P, P30)",
+            description: "Replace the project's whole subtitle cue list with the cues parsed from the WebVTT file at 'path', timed at the project's frame rate (the Subtitles panel's WebVTT import): timestamps convert to half-open frame ranges and the list is kept sorted. WebVTT voice tags are read back as cue speakers; a malformed tag degrades to plain cue text, never a lost cue. A file that cannot be read, or with no WEBVTT header, or in which nothing parses, is refused before any change. An import matching the current list changes nothing and spends no undo step; a changed list is one undo step. The reply's 'changed' says which happened. (Wave P, P30; speaker Wave R, R21)",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -245,11 +254,13 @@ mod tests {
                 start_frame: 0,
                 end_frame: 24,
                 text: "First line".to_string(),
+                speaker: None,
             },
             SubtitleCue {
                 start_frame: 24,
                 end_frame: 48,
                 text: "Second line".to_string(),
+                speaker: None,
             },
         ];
         core
@@ -434,5 +445,64 @@ mod tests {
             assert_eq!(reply["changed"], json!(false), "{tool} round trip");
             assert_eq!(reply["count"], json!(2));
         }
+    }
+
+    #[test]
+    fn vtt_round_trip_keeps_the_speaker_and_srt_drops_it() {
+        // Wave R (R21) at the tool surface: the speaker
+        // rides WebVTT's voice tag end to end, while SRT
+        // drops it — visibly, as a changed import whose
+        // text is untouched.
+        let dir = temp_dir("speaker");
+        let vtt_path = dir.join("cues.vtt");
+        let srt_path = dir.join("cues.srt");
+        let mut core = cued_core();
+        core.project.subtitles[0].speaker = Some("Mary Jane".to_string());
+        call(
+            "subtitle_export_vtt",
+            &mut core,
+            json!({ "path": vtt_path.to_string_lossy() }),
+        )
+        .unwrap();
+        let written = std::fs::read_to_string(&vtt_path).unwrap();
+        assert!(
+            written.contains("<v Mary Jane>First line</v>"),
+            "the voice tag is on the wire: {written}"
+        );
+        // Back into the same core: a no-change import,
+        // speaker included in the comparison.
+        let reply = call(
+            "subtitle_import_vtt",
+            &mut core,
+            json!({ "path": vtt_path.to_string_lossy() }),
+        )
+        .expect("vtt round trip succeeds");
+        assert_eq!(reply["changed"], json!(false));
+        assert_eq!(
+            core.project.subtitles[0].speaker.as_deref(),
+            Some("Mary Jane")
+        );
+        // SRT: the document carries no name, and importing
+        // it is a real change whose only casualty is the
+        // speaker — frames and text identical.
+        call(
+            "subtitle_export_srt",
+            &mut core,
+            json!({ "path": srt_path.to_string_lossy() }),
+        )
+        .unwrap();
+        let written = std::fs::read_to_string(&srt_path).unwrap();
+        assert!(!written.contains("Mary"), "no name in the SRT: {written}");
+        let reply = call(
+            "subtitle_import_srt",
+            &mut core,
+            json!({ "path": srt_path.to_string_lossy() }),
+        )
+        .expect("srt import succeeds");
+        assert_eq!(reply["changed"], json!(true), "the speaker loss is a change");
+        assert_eq!(core.project.subtitles[0].speaker, None);
+        assert_eq!(core.project.subtitles[0].text, "First line");
+        assert_eq!(core.project.subtitles[0].start_frame, 0);
+        assert_eq!(core.project.subtitles[0].end_frame, 24);
     }
 }
