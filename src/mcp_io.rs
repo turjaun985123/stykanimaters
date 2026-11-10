@@ -1356,12 +1356,18 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
     // re-render at that scale); absent, it renders at 1.0.
     let bundle_progress = call_bundle_progress(core);
     let tracker = if core.progress_sink.is_some() {
-        let totals: Vec<usize> = if kind == "images" {
-            vec![project.frames.len(); 4]
-        } else {
-            let member_total = crate::export::sampled_frame_total(project);
-            vec![member_total, member_total]
-        };
+        // Wave AB (AB7): the totals come from the core's
+        // one allocation helper — the same helper the
+        // export panel's bundle job allocates through —
+        // so the arithmetic lives in export.rs alone.
+        let totals = crate::export::bundle_member_totals(
+            if kind == "images" {
+                crate::export::BundleKind::Images
+            } else {
+                crate::export::BundleKind::Video
+            },
+            project,
+        );
         Some(crate::export::BundleProgress::new(
             &totals,
             Some(&bundle_progress),

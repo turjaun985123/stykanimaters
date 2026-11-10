@@ -710,24 +710,23 @@ impl BundleKind {
 /// Each bundle member's frame total in run order — the
 /// allocation the core `BundleProgress` tracker is
 /// constructed with, computed before the first member
-/// runs (Wave Z, Z8; the allocation rule is X11's):
-/// the images members each write one file per authored
-/// frame, so each share is the authored frame count;
-/// the video members report against the sampled-times
-/// count, so each share is
-/// `export::sampled_frame_total`. Pure: reads the
-/// project only.
+/// runs (Wave Z, Z8). The arithmetic itself is the
+/// core's one home (Wave AB, AB7):
+/// `export::bundle_member_totals`, shared with the MCP
+/// `export_bundle` driver — this wrapper only maps the
+/// panel's `BundleKind` onto the core's. Pure: reads
+/// the project only.
 pub fn bundle_member_totals(
     kind: BundleKind,
     project: &stykanimate_rs::model::Project,
 ) -> Vec<usize> {
-    match kind {
-        BundleKind::Images => vec![project.frames.len(); 4],
-        BundleKind::Video => {
-            let member = stykanimate_rs::export::sampled_frame_total(project);
-            vec![member, member]
-        }
-    }
+    stykanimate_rs::export::bundle_member_totals(
+        match kind {
+            BundleKind::Images => stykanimate_rs::export::BundleKind::Images,
+            BundleKind::Video => stykanimate_rs::export::BundleKind::Video,
+        },
+        project,
+    )
 }
 
 /// Did the export op that just ran report failure? The
@@ -2891,9 +2890,9 @@ mod tests {
             ("export_effective_none", "The project has no frames to export."),
             ("export_effective_no_range", "Loop range selected, but no loop range is set — exports write all frames. Set a loop range in the timeline first."),
             ("export_range_audio_note", "Range MP4 and WebM exports include audio from WAV and other ffmpeg-readable clips cut to the range — a clip whose file cannot be probed or decoded fails the export instead of being left out silently."),
-            ("export_piv_note_segments", "Media note: .piv v2/v3/v4 export image and text segments as plain segments — only v5 keeps segment media. Not even it keeps a media's local payload: the transform and opacity stay behind."),
+            ("export_piv_note_segments", "Media note: .piv v2/v3/v4 export image and text segments as plain segments — only v5 keeps segment media. Not even it keeps a media's whole local payload: only the flip crosses over — the offset, scale, angle and opacity stay behind."),
             ("export_piv_note_instances", "Media note: no .piv version writes sprite or text instances — they are left out of .piv exports."),
-            ("export_piv_note_both", "Media note: .piv v2/v3/v4 export image and text segments as plain segments (only v5 keeps them), and no .piv version writes sprite or text instances — they are left out of .piv exports. Neither keeps a media's local payload: the transform and opacity stay behind."),
+            ("export_piv_note_both", "Media note: .piv v2/v3/v4 export image and text segments as plain segments (only v5 keeps them), and no .piv version writes sprite or text instances — they are left out of .piv exports. Neither keeps a media's whole local payload: only the flip crosses over — the offset, scale, angle and opacity stay behind."),
             ("export_sprite_note", "Sprite note: .stk and .nodes carry only the selected figure, so project sprite instances are left out of those two exports. .stknds carries the sprite tracks (on re-import, groups come back as plain images and text instances are not carried)."),
             ("export_age_now", "just now"),
         ] {
@@ -3640,7 +3639,7 @@ mod tests {
         assert_eq!(
             piv_media_note(&core).as_deref(),
             Some(
-                "Media note: .piv v2/v3/v4 export image and text segments as plain segments — only v5 keeps segment media. Not even it keeps a media's local payload: the transform and opacity stay behind."
+                "Media note: .piv v2/v3/v4 export image and text segments as plain segments — only v5 keeps segment media. Not even it keeps a media's whole local payload: only the flip crosses over — the offset, scale, angle and opacity stay behind."
             )
         );
     }
@@ -3682,7 +3681,7 @@ mod tests {
         assert_eq!(
             piv_media_note(&core).as_deref(),
             Some(
-                "Media note: .piv v2/v3/v4 export image and text segments as plain segments (only v5 keeps them), and no .piv version writes sprite or text instances — they are left out of .piv exports. Neither keeps a media's local payload: the transform and opacity stay behind."
+                "Media note: .piv v2/v3/v4 export image and text segments as plain segments (only v5 keeps them), and no .piv version writes sprite or text instances — they are left out of .piv exports. Neither keeps a media's whole local payload: only the flip crosses over — the offset, scale, angle and opacity stay behind."
             )
         );
     }

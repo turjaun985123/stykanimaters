@@ -235,6 +235,65 @@
 //! three silent — a channel-keyed but unposed figure
 //! gets its rows, not a message denying its keys
 //! exist.
+//!
+//! ## Frame-bend marks (Wave AB, AB3 — §6.22)
+//!
+//! A figure's stored frame bends (`Frame::bends` —
+//! the per-frame, per-node bend table the posing
+//! surfaces write: `cycle_bend`, the bend steppers,
+//! `set_bend`, Pivot import, and the graph bake) are
+//! the fourth event kind this lane shows. The other
+//! three derivations are each blind to it: the pose
+//! rule reads poses, the state derivation reads the
+//! states vec, and the channel derivation reads the
+//! graph curves — a bend authored by hand writes none
+//! of those, so a figure bent entirely from the pose
+//! tools showed its pose keys and no trace of the
+//! frames its segments actually arc on. Each figure
+//! row now also carries its bend-change frames
+//! ([`bend_key_frames`]): [`figure_keyframes`]' own
+//! change rule transposed to the bend table — a frame
+//! marks when the figure's stored bend row,
+//! normalised exactly as the model's `bends_at` reads
+//! it, is non-zero there and differs from the
+//! previous frame's row (past [`BEND_EPS`]); a bend
+//! disappearing marks nothing, the pose rule's
+//! appearance asymmetry. A baked bend channel
+//! therefore marks where its stored rows truly
+//! change — every frame of a varying bake, once for
+//! a flat one — exactly as a baked pose channel
+//! already does.
+//!
+//! The mark is NOT a fourth glyph, by measurement:
+//! the shell's LABEL width model charges a full em
+//! (12 pt) for each of ◆/◇/●, so two glyphs and their
+//! gap already take 26 of the cell's 30 pt — a third
+//! glyph (40 pt with gaps) would spill into the
+//! neighbouring cells in precisely the coincidence
+//! cases (pose + channel + bend) the composition
+//! exists to keep lossless. The border is the state
+//! channel's, the diamond's accent is the pose's, and
+//! the dot's secondary tone is the graph channel's;
+//! none can be borrowed without making one signal
+//! mean two events. The bend mark is instead a thin
+//! bar at the cell's bottom — [`BEND_STRIP_W`] ×
+//! [`BEND_STRIP_H`], centred so its ends clear the
+//! cell's rounded corners, in the primary text tone
+//! no cell mark uses: a position channel, not a
+//! glyph. It coexists with the border, both fills
+//! and either glyph pairing in every combination,
+//! and a lone bend shows the bar alone; in a bend
+//! cell the glyphs centre in the height above the
+//! bar, and every other cell's tree is unchanged.
+//! Cell presses are unchanged (select + goto — the
+//! mark rides the existing cells, no new element
+//! keys). The lane's gating widens with the marks:
+//! rows render when any of the four kinds exists
+//! ([`any_bend_keys`]), and the "No keyframes yet"
+//! empty state requires all four silent — its copy
+//! stands, as it did for Y11 and AA3: posing remains
+//! a true way to create a key, and the bend tools
+//! are posing tools on the same frames.
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, Color, El};
@@ -260,6 +319,20 @@ pub const DOPE_HEADER_H: f32 = 18.0;
 /// tall enough for the 12 pt diamond and a real press
 /// target.
 pub const DOPE_ROW_H: f32 = 20.0;
+
+/// Height of the frame-bend mark's bar (Wave AB,
+/// AB3): a 2 pt rule at the bottom of a bend cell —
+/// thick enough to read at a glance against either
+/// fill, thin enough to leave the glyphs their
+/// height (they centre in the 18 pt above it).
+pub const BEND_STRIP_H: f32 = 2.0;
+
+/// Width of the frame-bend mark's bar: the cell
+/// width minus the cell's corner radius on each
+/// side (30 − 2 × 6 = 18), so the bar's ends sit
+/// inside the rounded corners instead of poking
+/// past them.
+pub const BEND_STRIP_W: f32 = 18.0;
 
 /// Width of a figure row's header cell: 6 pt of
 /// padding on each side, the figures panel's 10 pt
@@ -400,6 +473,11 @@ pub struct DopeRow {
     /// frames holding a graph channel key for this
     /// figure, any target (Wave AA, AA3).
     pub channel_keys: Vec<usize>,
+    /// The figure's frame-bend key frames, ascending
+    /// ([`bend_key_frames`]'s output) — the frames
+    /// where the figure's stored bend row changes
+    /// (Wave AB, AB3).
+    pub bend_keys: Vec<usize>,
 }
 
 /// The shown rows for the current project, in display
@@ -420,6 +498,7 @@ pub fn dope_rows(core: &EditorCore) -> Vec<DopeRow> {
                 keys: figure_keyframes(project, fi),
                 state_keys: state_key_frames(fig),
                 channel_keys: channel_key_frames(project, fi),
+                bend_keys: bend_key_frames(project, fi),
             }
         })
         .collect()
@@ -526,6 +605,113 @@ pub fn is_channel_key(channel_keys: &[usize], frame: usize) -> bool {
 pub fn any_channel_keys(core: &EditorCore) -> bool {
     (0..core.project.figures.len())
         .any(|fi| !channel_key_frames(&core.project, fi).is_empty())
+}
+
+/// The bend-change epsilon, in radians (Wave AB,
+/// AB3): a stored bend row "changes" only when a
+/// component moves by more than this. It is the pose
+/// rule's epsilon discipline transposed — far below
+/// every authored granularity (`cycle_bend`'s steps
+/// are 0.35 rad apart, the smallest authored bend
+/// movement there is) and above the float dust of
+/// resized and re-evaluated rows.
+pub const BEND_EPS: f32 = 0.01;
+
+/// Figure `fi`'s stored bend row at `frame`,
+/// normalised exactly as the model's `bends_at` reads
+/// it: a missing figure entry (or a short row) pads
+/// with zeros to the figure's node count and a long
+/// row truncates. One addition of this lane's own: a
+/// non-finite component reads as 0.0 — the shell's
+/// sanitised-read rule for corrupt stores, so a
+/// hand-edited NaN shows no mark rather than a
+/// phantom one. An out-of-range `fi` or frame yields
+/// the all-zero row.
+fn bend_row(project: &Project, fi: usize, frame: usize) -> Vec<f32> {
+    let n = project
+        .figures
+        .get(fi)
+        .map(|f| f.def.nodes.len())
+        .unwrap_or(0);
+    let mut row: Vec<f32> = project
+        .frames
+        .get(frame)
+        .and_then(|f| f.bends.get(fi))
+        .map(|r| {
+            r.iter()
+                .map(|b| if b.is_finite() { *b } else { 0.0 })
+                .collect()
+        })
+        .unwrap_or_default();
+    row.resize(n, 0.0);
+    row
+}
+
+/// A figure's frame-bend key frames (Wave AB, AB3),
+/// ascending: the frames where the figure's STORED
+/// bend row (`Frame::bends`) changes — the fourth
+/// event kind this lane shows, and the frame table's
+/// own data, invisible to the other three derivations
+/// (poses read poses, state keys read the states vec,
+/// channel keys read the graph curves; a bend keyed
+/// from the posing surfaces writes none of those).
+/// The rule is [`figure_keyframes`]' change rule
+/// transposed: a frame marks when its normalised row
+/// ([`bend_row`]) is non-zero past [`BEND_EPS`] AND
+/// differs from the previous frame's row past the
+/// same epsilon — frame 0 against the implicit
+/// all-zero row, so a bend authored on the first
+/// frame marks. A bend DISAPPEARING (the row
+/// returning to zero) does not mark, the pose rule's
+/// appearance/disappearance asymmetry exactly. A
+/// baked bend channel therefore marks where its
+/// stored rows actually change — every frame of a
+/// varying bake, once for a flat one — as baked poses
+/// already do. The comparison runs over the whole
+/// normalised row, the row `bends_at` returns; the
+/// writers refuse origin bends, so index 0 is zero in
+/// authored data. An out-of-range `fi` yields an
+/// empty vec.
+pub fn bend_key_frames(project: &Project, fi: usize) -> Vec<usize> {
+    if fi >= project.figures.len() {
+        return Vec::new();
+    }
+    let n = project.figures[fi].def.nodes.len();
+    let mut prev = vec![0.0; n];
+    let mut keys = Vec::new();
+    for f in 0..project.frames.len() {
+        let cur = bend_row(project, fi, f);
+        let nonzero = cur.iter().any(|b| b.abs() > BEND_EPS);
+        let changed = cur
+            .iter()
+            .zip(prev.iter())
+            .any(|(a, b)| (a - b).abs() > BEND_EPS);
+        if nonzero && changed {
+            keys.push(f);
+        }
+        prev = cur;
+    }
+    keys
+}
+
+/// Whether `frame` holds one of a row's bend keys.
+/// `bend_keys` is [`bend_key_frames`]' ascending
+/// output, so this is a binary search — [`is_key`]'s
+/// twin for the bend table.
+pub fn is_bend_key(bend_keys: &[usize], frame: usize) -> bool {
+    bend_keys.binary_search(&frame).is_ok()
+}
+
+/// Whether ANY figure in the project carries a
+/// stored bend change — [`any_keyframes`]' sibling
+/// for the bend table, so the lane's gating can hear
+/// all four kinds of key (Wave AB, AB3). Computed
+/// through [`bend_key_frames`] itself, as
+/// [`any_channel_keys`] is: silent tables do not
+/// speak for the lane.
+pub fn any_bend_keys(core: &EditorCore) -> bool {
+    (0..core.project.figures.len())
+        .any(|fi| !bend_key_frames(&core.project, fi).is_empty())
 }
 
 /// The total width of one figure row (and of the
@@ -722,8 +908,14 @@ pub fn dopesheet_lane(s: &State, t: &Theme) -> El {
     // Wave AA (AA3): channel keys speak the same way —
     // a figure can be fully graph-driven (channels
     // keyed, timeline poses static or even absent).
-    let figures_keyed =
-        any_keyframes(core) || any_state_keys(core) || any_channel_keys(core);
+    // Wave AB (AB3): stored bend changes speak the
+    // same way again — a figure can be bent entirely
+    // from the pose tools with static poses and no
+    // channels at all.
+    let figures_keyed = any_keyframes(core)
+        || any_state_keys(core)
+        || any_channel_keys(core)
+        || any_bend_keys(core);
 
     if core.project.figures.is_empty() && sprite_rows.is_empty() {
         // No figures and no sprites: nothing can have a
@@ -867,6 +1059,15 @@ fn figure_row(r: &DopeRow, core: &EditorCore, t: &Theme) -> El {
         // the three keeps its historical single text
         // child — the trees below change only where a
         // channel key actually sits.
+        // Wave AB (AB3): the bend table — a stored bend
+        // change on this frame adds the bottom bar
+        // under whatever the glyph composition already
+        // made (see `bend_cell`); it is a position
+        // channel, not a fourth glyph, so the full
+        // pose+state+channel+bend stack keeps the
+        // border, both glyphs AND the bar, and a cell
+        // with no bend change keeps its historical
+        // single child exactly.
         let state_key = is_state_key(&r.state_keys, frame);
         let channel_key = is_channel_key(&r.channel_keys, frame);
         let primary = if is_key(&r.keys, frame) {
@@ -891,13 +1092,18 @@ fn figure_row(r: &DopeRow, core: &EditorCore, t: &Theme) -> El {
         } else {
             None
         };
-        cell = match (primary, dot) {
+        let glyphs = match (primary, dot) {
             (Some(glyph), Some(dot)) => {
-                cell.child(row().gap(2.0).center_y().child(glyph).child(dot))
+                Some(row().gap(2.0).center_y().child(glyph).child(dot))
             }
-            (Some(glyph), None) => cell.child(glyph),
-            (None, Some(dot)) => cell.child(dot),
-            (None, None) => cell,
+            (Some(glyph), None) => Some(glyph),
+            (None, Some(dot)) => Some(dot),
+            (None, None) => None,
+        };
+        cell = match (glyphs, is_bend_key(&r.bend_keys, frame)) {
+            (glyphs, true) => cell.child(bend_cell(glyphs, t)),
+            (Some(glyph), false) => cell.child(glyph),
+            (None, false) => cell,
         };
         cells = cells.child(cell);
     }
@@ -907,6 +1113,40 @@ fn figure_row(r: &DopeRow, core: &EditorCore, t: &Theme) -> El {
     } else {
         cells
     }
+}
+
+/// The content of a cell whose frame carries a
+/// stored bend change (Wave AB, AB3): the cell's
+/// glyph content — possibly none — centred in the
+/// cell's upper share, and the bend bar under it: a
+/// [`BEND_STRIP_W`] × [`BEND_STRIP_H`] pill in the
+/// primary text tone, centred at the cell's bottom
+/// edge. The stack is exactly the cell's own size,
+/// so the bar can never push a glyph out of the
+/// cell, and the cell's border (the state
+/// coincidence) and its fills draw around the stack
+/// unchanged. A bend change alone shows the bar
+/// alone in an otherwise empty cell.
+fn bend_cell(glyphs: Option<El>, t: &Theme) -> El {
+    let area = el().size(CHIP_W, DOPE_ROW_H - BEND_STRIP_H).center();
+    let area = match glyphs {
+        Some(g) => area.child(g),
+        None => area,
+    };
+    col()
+        .size(CHIP_W, DOPE_ROW_H)
+        .child(area)
+        .child(
+            el()
+                .size(CHIP_W, BEND_STRIP_H)
+                .center()
+                .child(
+                    el()
+                        .size(BEND_STRIP_W, BEND_STRIP_H)
+                        .radius(BEND_STRIP_H / 2.0)
+                        .fill(t.text),
+                ),
+        )
 }
 
 /// One sprite instance's row (Wave X, X5): the header
@@ -1340,6 +1580,172 @@ mod tests {
         assert_eq!(rows[0].keys, vec![0, 2]);
         assert_eq!(rows[0].state_keys, vec![2, 3]);
         assert_eq!(rows[0].channel_keys, vec![0, 1, 2, 3]);
+        for dark in [true, false] {
+            let t = rune::tok::theme(dark);
+            let _ = dopesheet_lane(&s, &t);
+        }
+    }
+
+    fn bend_frame(poses: Vec<Pose>, bends: Vec<Vec<f32>>) -> Frame {
+        let mut f = frame(poses);
+        f.bends = bends;
+        f
+    }
+
+    #[test]
+    fn bend_key_frames_marks_stored_bend_changes() {
+        // Wave AB (AB3): the change rule over stored
+        // rows — a bend appearing marks, holding the
+        // same bend does not, changing it marks again,
+        // and its disappearance marks nothing (the
+        // pose rule's asymmetry).
+        let mut s = crate::init();
+        s.core.project.figures = vec![figure("Alpha")];
+        let bent = vec![vec![0.0, 0.35, 0.0]];
+        let bent_more = vec![vec![0.0, 0.7, 0.0]];
+        s.core.project.frames = vec![
+            frame(vec![]),
+            frame(vec![]),
+            bend_frame(vec![], bent.clone()),
+            bend_frame(vec![], bent),
+            bend_frame(vec![], bent_more),
+            frame(vec![]),
+        ];
+        assert_eq!(bend_key_frames(&s.core.project, 0), vec![2, 4]);
+        assert!(is_bend_key(&bend_key_frames(&s.core.project, 0), 4));
+        assert!(!is_bend_key(&bend_key_frames(&s.core.project, 0), 3));
+        // An out-of-range figure has no row to change.
+        assert!(bend_key_frames(&s.core.project, 7).is_empty());
+    }
+
+    #[test]
+    fn bend_key_frames_frame_zero_epsilon_and_corrupt_rows() {
+        let mut s = crate::init();
+        s.core.project.figures = vec![figure("Alpha")];
+        // A bend on frame 0 marks, against the implicit
+        // all-zero row before it.
+        s.core.project.frames = vec![bend_frame(vec![], vec![vec![0.0, 0.35, 0.0]])];
+        assert_eq!(bend_key_frames(&s.core.project, 0), vec![0]);
+        // All-zero rows, however they are stored, mark
+        // nothing.
+        s.core.project.frames = vec![
+            bend_frame(vec![], vec![vec![0.0, 0.0, 0.0]]),
+            bend_frame(vec![], vec![Vec::new()]),
+        ];
+        assert!(bend_key_frames(&s.core.project, 0).is_empty());
+        // A sub-epsilon wiggle is dust, not a change —
+        // and a sub-epsilon bend alone is not a bend.
+        s.core.project.frames = vec![
+            bend_frame(vec![], vec![vec![0.0, 0.35, 0.0]]),
+            bend_frame(vec![], vec![vec![0.0, 0.355, 0.0]]),
+            bend_frame(vec![], vec![vec![0.0, 0.005, 0.0]]),
+        ];
+        assert_eq!(bend_key_frames(&s.core.project, 0), vec![0]);
+        // A non-finite component reads as zero: no
+        // phantom mark at its own frame, and no phantom
+        // change against the row it corrupts.
+        s.core.project.frames = vec![
+            bend_frame(vec![], vec![vec![0.0, f32::NAN, 0.0]]),
+            bend_frame(vec![], vec![vec![0.0, 0.35, 0.0]]),
+            bend_frame(vec![], vec![vec![0.0, 0.35, f32::INFINITY]]),
+        ];
+        assert_eq!(bend_key_frames(&s.core.project, 0), vec![1]);
+    }
+
+    #[test]
+    fn bend_key_frames_normalises_missing_short_and_long_rows() {
+        // The `bends_at` normalisation, mirrored: a
+        // missing figure entry and a short row pad with
+        // zeros; a long row's surplus past the node
+        // count is not the figure's row and changes
+        // nothing.
+        let mut s = crate::init();
+        let alpha = figure("Alpha");
+        let n = alpha.def.nodes.len();
+        s.core.project.figures = vec![alpha, figure("Beta")];
+        let mut long_row = vec![0.0; n];
+        long_row.push(0.9);
+        s.core.project.frames = vec![
+            frame(vec![]),
+            bend_frame(vec![], vec![vec![0.0, 0.35, 0.0]]),
+            bend_frame(vec![], vec![Vec::new(), vec![0.35]]),
+            bend_frame(vec![], vec![long_row]),
+        ];
+        assert_eq!(bend_key_frames(&s.core.project, 0), vec![1]);
+        assert_eq!(bend_key_frames(&s.core.project, 1), vec![2]);
+    }
+
+    #[test]
+    fn dope_rows_carry_bend_key_frames() {
+        let mut s = two_figure_state();
+        s.core.project.frames[2].bends = vec![vec![0.0, 0.35, 0.0]];
+        s.core.project.frames[3].bends = vec![vec![0.0, 0.35, 0.0]];
+        let rows = dope_rows(&s.core);
+        // The row arrives on frame 2 and is held,
+        // unchanged, on frame 3: one mark.
+        assert_eq!(rows[0].bend_keys, vec![2]);
+        assert!(rows[1].bend_keys.is_empty());
+        assert!(any_bend_keys(&s.core));
+    }
+
+    #[test]
+    fn bend_keys_alone_speak_for_the_lane() {
+        // A figure with no poses, no state keys and no
+        // channels, bent only from the pose tools: the
+        // lane's gating hears the bend table, so the
+        // "No keyframes yet" empty state cannot deny
+        // the bend (Wave AB, AB3 — Y11's state-key rule,
+        // one table over). Construction is the
+        // assertable level here (the module's
+        // discipline).
+        let mut s = crate::init();
+        s.core.project.figures = vec![figure("Alpha")];
+        s.core.project.frames = vec![
+            frame(vec![]),
+            bend_frame(vec![], vec![vec![0.0, 0.35, 0.0]]),
+        ];
+        assert!(!any_keyframes(&s.core));
+        assert!(!any_state_keys(&s.core));
+        assert!(!any_channel_keys(&s.core));
+        assert!(any_bend_keys(&s.core));
+        for dark in [true, false] {
+            let t = rune::tok::theme(dark);
+            let _ = dopesheet_lane(&s, &t);
+        }
+    }
+
+    #[test]
+    fn lane_constructs_with_bend_coincidences() {
+        // Every composition the bend bar can meet,
+        // across four frames of one figure: frame 0
+        // pose+bend, frame 1 bend alone, frame 2
+        // pose+state+channel+bend (the full stack —
+        // border, both glyphs and the bar in one cell),
+        // frame 3 state+bend. Construction is the
+        // assertable level (the module's discipline);
+        // the derivations under the compositions are
+        // pinned exactly.
+        let mut s = crate::init();
+        let mut fig = figure("Alpha");
+        fig.states = vec![
+            StateKey { frame: 2, clip: 0, offset: 0, speed: 1.0 },
+            StateKey { frame: 3, clip: 0, offset: 0, speed: 1.0 },
+        ];
+        s.core.project.figures = vec![fig];
+        let a = pose(100.0, 10.0);
+        let b = pose(100.0, 25.0);
+        s.core.project.frames = vec![
+            bend_frame(vec![a.clone()], vec![vec![0.0, 0.35, 0.0]]),
+            bend_frame(vec![a.clone()], vec![vec![0.0, 0.0, 0.35]]),
+            bend_frame(vec![b.clone()], vec![vec![0.0, 0.7, 0.0]]),
+            bend_frame(vec![b], vec![vec![0.0, -0.35, 0.0]]),
+        ];
+        s.core.project.channels = vec![channel(0, ChannelTarget::Bend(1), &[2.0])];
+        let rows = dope_rows(&s.core);
+        assert_eq!(rows[0].keys, vec![0, 2]);
+        assert_eq!(rows[0].state_keys, vec![2, 3]);
+        assert_eq!(rows[0].channel_keys, vec![2]);
+        assert_eq!(rows[0].bend_keys, vec![0, 1, 2, 3]);
         for dark in [true, false] {
             let t = rune::tok::theme(dark);
             let _ = dopesheet_lane(&s, &t);

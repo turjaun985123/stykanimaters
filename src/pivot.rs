@@ -2164,20 +2164,30 @@ fn piv_image_payload(
 ///   segments also get the per-object image/text flags byte the
 ///   grammar requires.
 ///
-/// * **The media's local payload is not carried.** An image
-///   segment's `offset`, `scale`, `angle_offset`, `flip` and
+/// * **The media's local payload is mostly not carried.** An
+///   image segment's `offset`, `scale`, `angle_offset` and
 ///   stored `opacity` have no slot in the segment record or
 ///   the side tables, and nothing of them is baked in either:
 ///   the image table holds the asset's bytes verbatim and
-///   its anchors are the blob's real pixel size. The
-///   record's only per-media bytes beyond the table index
-///   are the extra triple's endpoint-reversal /
-///   baseline-reflection pair, written 0 for every segment
-///   (and the frame objects' image/text flags byte likewise
-///   0) — so even `flip`, whose u-reversal is the two bytes
-///   composed, is dropped, wholly, like the rest of the
-///   payload. Pivot renders a v5 image segment at the
-///   segment's own geometry, unflipped, at full opacity.
+///   its anchors are the blob's real pixel size. Pivot
+///   renders a v5 image segment at the segment's own
+///   geometry, at full opacity. The one payload field that
+///   IS carried is `flip` (Wave AB, AB6): the segment
+///   record's extra triple ends with an endpoint-reversal /
+///   baseline-reflection pair, and the two composed are
+///   exactly the funnel's u-reversal — reversal alone is a
+///   half-turn about the segment's midpoint ((u, v) ->
+///   (1 - u, -v): the endpoints swap and the rotation gains
+///   pi), reflection alone mirrors across the segment line
+///   ((u, v) -> (u, -v)), and both together are
+///   (u, v) -> (1 - u, v), the funnel's flipped sampling
+///   with the quad itself unchanged. A flipped image
+///   segment therefore writes the pair (1, 1); every other
+///   segment writes (0, 0), byte-identical to files written
+///   before the carriage existed. The frame objects'
+///   image/text flags byte stays 0, so the stored
+///   reflection bit is the effective one (the format XORs
+///   the segment byte with that flags byte at render).
 ///
 /// * **Text side tables** for figures containing text segments
 ///   (`SegmentMedia::Text`): one table entry per distinct content
@@ -2514,7 +2524,9 @@ fn write_text_entry(out: &mut Vec<u8>, content: &str) {
 ///
 /// Image segments (`SegmentMedia::Image` with a valid asset
 /// index) are written as primitive 2 with the extra triple
-/// (image-table index, 0, 0), and the figure's image side table
+/// (image-table index, then the flip pair — (1, 1) for a
+/// flipped image, (0, 0) otherwise; see `export_piv_v5`'s
+/// payload note), and the figure's image side table
 /// follows the bend count, per the grammar: a u16 entry count,
 /// then per entry four i32 anchors, a u64 **absolute** end offset
 /// (into the whole payload), and the entry's PNG payload (the
@@ -2540,9 +2552,14 @@ fn write_figure_v5(
     // segments (there is no blob to write for them).
     let mut table: Vec<usize> = Vec::new();
     let mut seg_table_idx: Vec<Option<usize>> = vec![None; def.nodes.len()];
+    // Per-node flip for image segments that actually land in
+    // the table (Wave AB, AB6): the segment record's
+    // endpoint-reversal / baseline-reflection pair carries it.
+    let mut seg_flip: Vec<bool> = vec![false; def.nodes.len()];
     for (i, node) in def.nodes.iter().enumerate().skip(1) {
-        if let Some(SegmentMedia::Image { asset, .. }) = node.media {
+        if let Some(SegmentMedia::Image { asset, flip, .. }) = node.media {
             if asset < assets.len() {
+                seg_flip[i] = flip;
                 seg_table_idx[i] = Some(match table.iter().position(|&a| a == asset) {
                     Some(p) => p,
                     None => {
@@ -2612,8 +2629,20 @@ fn write_figure_v5(
         // two table indices is set.
         if let Some(ti) = seg_table_idx[i].or(seg_text_idx[i]) {
             out.extend_from_slice(&(ti as u16).to_le_bytes()); // extra: table index
-            out.push(0); // extra: endpoint reversal
-            out.push(0); // extra: baseline reflection
+            // The flip pair (Wave AB, AB6): a flipped IMAGE
+            // segment writes (1, 1) — endpoint reversal composed
+            // with baseline reflection is exactly the funnel's
+            // u-reversal (see `export_piv_v5`'s docs). Text
+            // segments carry no flip in the model, and an
+            // unflipped image writes (0, 0): byte-identical to
+            // every file written before the carriage existed.
+            let (rev, refl) = if seg_table_idx[i].is_some() && seg_flip[i] {
+                (1, 1)
+            } else {
+                (0, 0)
+            };
+            out.push(rev); // extra: endpoint reversal
+            out.push(refl); // extra: baseline reflection
         }
     }
     // Bend block: non-zero rest bends as (segment ordinal,
@@ -3192,6 +3221,152 @@ mod tests {
             }
             other => panic!("text label must be recovered, got {other:?}"),
         }
+    }
+
+    /// One walked v5 segment record: its primitive and, for a
+    /// media segment, the extra triple (table index, reversal
+    /// byte, reflection byte, and the two bytes' payload
+    /// offsets — the offsets serve byte-diff pins).
+    struct WalkedExtra {
+        prim: u8,
+        extra: Option<(u16, u8, u8, usize, usize)>,
+    }
+
+    /// Walk the FIRST stored figure record of an exported v5
+    /// payload, collecting each segment's primitive and media
+    /// extra triple (AB6). Mirrors the writer's fixed layout
+    /// (flags 144); whole-file integrity is `walk_v5_export`'s
+    /// job, asserted separately by the caller.
+    fn walk_v5_segment_extras(payload: &[u8]) -> Vec<WalkedExtra> {
+        let mut r = Reader::new(payload);
+        assert_eq!(r.u8().unwrap(), 5);
+        r.u32().unwrap();
+        r.u32().unwrap();
+        let bg_slots = r.u16().unwrap();
+        for _ in 1..bg_slots {
+            r.u8().unwrap(); // kind: solid colour
+            r.u32().unwrap(); // colour
+            r.str8().unwrap(); // name
+        }
+        let figure_slots = r.u16().unwrap();
+        assert_eq!(figure_slots, 3, "one stored figure");
+        let flags = r.u8().unwrap();
+        assert_eq!(flags, 144);
+        let count = r.u16().unwrap() as usize;
+        let mut out = Vec::new();
+        for _ in 0..count {
+            r.u16().unwrap(); // parent
+            r.u16().unwrap(); // id
+            r.f32().unwrap(); // length
+            r.f64().unwrap(); // angle
+            r.f32().unwrap(); // thickness
+            let prim = r.u8().unwrap();
+            r.u8().unwrap(); // aux
+            r.take(3).unwrap(); // rgb
+            r.u8().unwrap(); // transparency
+            let extra = if prim == 2 || prim == 5 {
+                let table = r.u16().unwrap();
+                let a_pos = r.pos;
+                let a = r.u8().unwrap();
+                let b_pos = r.pos;
+                let b = r.u8().unwrap();
+                Some((table, a, b, a_pos, b_pos))
+            } else {
+                None
+            };
+            out.push(WalkedExtra { prim, extra });
+        }
+        out
+    }
+
+    /// media_project with node 3's image flipped, plus a
+    /// second, unflipped image segment on node 4 — same asset,
+    /// so one table entry serves two segments and the flip
+    /// pair is proven per-segment, not per-asset.
+    fn flip_project() -> Project {
+        let mut project = media_project();
+        project.figures[0].def.nodes[3].media = Some(SegmentMedia::Image {
+            asset: 0,
+            offset: [0.0, 0.0],
+            scale: 1.0,
+            angle_offset: 0.0,
+            flip: true,
+            opacity: 1.0,
+        });
+        project.figures[0].def.nodes[4].media = Some(SegmentMedia::Image {
+            asset: 0,
+            offset: [0.0, 0.0],
+            scale: 1.0,
+            angle_offset: 0.0,
+            flip: false,
+            opacity: 1.0,
+        });
+        project
+    }
+
+    #[test]
+    fn v5_export_carries_flip_as_the_reversal_reflection_pair() {
+        // Wave AB (AB6): a flipped image segment writes the
+        // extra pair (1, 1) — endpoint reversal composed with
+        // baseline reflection is the funnel's u-reversal (see
+        // export_piv_v5's docs). An unflipped image segment
+        // and the text segment write (0, 0).
+        let project = flip_project();
+        let bytes = export_piv_v5(&project).unwrap();
+        let payload = inflate_export(&bytes);
+        // The generic walker still lands exactly at payload end.
+        walk_v5_export(&payload);
+        let segs = walk_v5_segment_extras(&payload);
+        // Segment records are nodes 1.. in order: node 3 is
+        // record 2 (image, flipped), node 4 record 3 (image),
+        // node 5 record 4 (text).
+        assert_eq!(segs[2].prim, 2);
+        let (t3, a3, b3, _, _) = segs[2].extra.expect("node 3 is an image segment");
+        assert_eq!((a3, b3), (1, 1), "flipped image writes the pair");
+        assert_eq!(segs[3].prim, 2);
+        let (t4, a4, b4, _, _) = segs[3].extra.expect("node 4 is an image segment");
+        assert_eq!(t4, t3, "both image segments share one table entry");
+        assert_eq!((a4, b4), (0, 0), "unflipped image writes (0, 0)");
+        assert_eq!(segs[4].prim, 5);
+        let (_, a5, b5, _, _) = segs[4].extra.expect("node 5 is a text segment");
+        assert_eq!((a5, b5), (0, 0), "text carries no flip");
+        // Round-trip through the port's own importer: the file
+        // parses and the structure survives. Image media stays
+        // unmodelled on import by standing design, so the pair
+        // is walked and skipped there like the image blob
+        // itself — the carriage is for the format's renderer.
+        let back = import_piv(&bytes).unwrap();
+        assert_eq!(
+            back.figures[0].def.nodes.len(),
+            project.figures[0].def.nodes.len()
+        );
+        assert_eq!(back.frames.len(), project.frames.len());
+    }
+
+    #[test]
+    fn v5_export_flip_changes_only_the_pair_bytes() {
+        // The carriage is surgically the pair: flipping node
+        // 3's image changes exactly two payload bytes — its
+        // segment record's reversal and reflection bytes.
+        let plain = media_project();
+        let mut flipped = media_project();
+        flipped.figures[0].def.nodes[3].media = Some(SegmentMedia::Image {
+            asset: 0,
+            offset: [0.0, 0.0],
+            scale: 1.0,
+            angle_offset: 0.0,
+            flip: true,
+            opacity: 1.0,
+        });
+        let a = inflate_export(&export_piv_v5(&plain).unwrap());
+        let b = inflate_export(&export_piv_v5(&flipped).unwrap());
+        assert_eq!(a.len(), b.len(), "flip carriage adds no bytes");
+        let segs = walk_v5_segment_extras(&b);
+        let (_, _, _, a_pos, b_pos) = segs[2].extra.expect("node 3 is an image segment");
+        let diffs: Vec<usize> = (0..a.len()).filter(|&i| a[i] != b[i]).collect();
+        assert_eq!(diffs, vec![a_pos, b_pos], "only the pair bytes change");
+        assert_eq!((a[a_pos], a[b_pos]), (0, 0));
+        assert_eq!((b[a_pos], b[b_pos]), (1, 1));
     }
 
     #[test]

@@ -4023,6 +4023,137 @@ playback_speed: 1.0,
         assert_eq!(sanitise_media_opacity(f32::NEG_INFINITY), 1.0);
     }
 
+    /// A real PNG for the funnel pins below (Wave AB,
+    /// AB10): `media_items` asks the asset for its
+    /// dimensions, so the bytes must really decode —
+    /// the scenes.rs `solid_png` pattern. (The `asset`
+    /// fixture's empty bytes exercise only the funnel's
+    /// skip path.)
+    fn funnel_png() -> Vec<u8> {
+        let img =
+            image::RgbaImage::from_pixel(4, 2, image::Rgba([200, 40, 40, 255]));
+        let mut buf = Vec::new();
+        let _ = image::DynamicImage::ImageRgba8(img).write_to(
+            &mut std::io::Cursor::new(&mut buf),
+            image::ImageFormat::Png,
+        );
+        buf
+    }
+
+    /// The alpha of the first image item the funnel
+    /// emits for `core`'s project — the selected node's
+    /// sprite (segment media precedes instances in the
+    /// funnel's order, and the demo project carries no
+    /// other segment media).
+    fn funnel_alpha(core: &EditorCore) -> f32 {
+        stykanimate_rs::media::media_items(&core.project, 0.0)
+            .iter()
+            .find_map(|i| match i {
+                stykanimate_rs::media::MediaItem::Image { alpha, .. } => {
+                    Some(*alpha)
+                }
+                _ => None,
+            })
+            .expect("an image item")
+    }
+
+    #[test]
+    fn panel_opacity_readout_is_the_funnels_media_factor() {
+        // Wave AB (AB10): the cross-surface pin AA1's
+        // panel pins and Z5's funnel pins each stop
+        // short of. On ONE project, the value the panel
+        // state carries (and the row formats) is the
+        // media factor of the funnel's composed alpha —
+        // figure × carrier style × media — so the
+        // readout cannot drift from what renders.
+        let mut core = core_with_sprite();
+        core.project.assets[0].png = funnel_png();
+        let fi = core.selected_figure;
+        core.project.figures[fi].opacity = 0.5;
+        core.project.figures[fi].def.nodes[1].style.opacity = 0.5;
+        set_media_opacity(&mut core, 0.5);
+        let st = segment_state(&core).expect("node 1 is selected");
+        assert_eq!(st.media_opacity, Some(0.5));
+        assert_eq!(
+            format_media_opacity(st.media_opacity.expect("an opacity")),
+            "50%"
+        );
+        assert_eq!(funnel_alpha(&core), 0.125, "figure × style × media");
+        // A second factor value: readout and funnel
+        // move together.
+        set_media_opacity(&mut core, 0.25);
+        let st = segment_state(&core).expect("node 1 is selected");
+        assert_eq!(
+            format_media_opacity(st.media_opacity.expect("an opacity")),
+            "25%"
+        );
+        assert_eq!(funnel_alpha(&core), 0.0625);
+    }
+
+    #[test]
+    fn corrupt_store_reads_and_repairs_identically_on_panel_and_funnel() {
+        // Wave AB (AB10): a corrupt stored opacity
+        // (a hand-edited file — the only source) shows
+        // on the panel exactly what the funnel renders,
+        // and one downward press through the panel's
+        // own op repairs the store so state, readout
+        // and funnel agree on a real value afterwards.
+        let mut core = core_with_sprite();
+        core.project.assets[0].png = funnel_png();
+        set_media_opacity(&mut core, f32::NAN);
+        let st = segment_state(&core).expect("node 1 is selected");
+        assert_eq!(st.media_opacity, Some(1.0));
+        assert_eq!(
+            format_media_opacity(st.media_opacity.expect("an opacity")),
+            "100%"
+        );
+        assert_eq!(funnel_alpha(&core), 1.0, "the funnel reads NaN as 1 too");
+        set_media_opacity(&mut core, 1.7);
+        assert_eq!(segment_state(&core).unwrap().media_opacity, Some(1.0));
+        assert_eq!(funnel_alpha(&core), 1.0, "a stored 1.7 clamps on both");
+        // The repair: the panel's downward press turns
+        // the NaN store into a real 0.95 everywhere.
+        set_media_opacity(&mut core, f32::NAN);
+        adjust_media_opacity(&mut core, -MEDIA_OPACITY_STEP);
+        assert_eq!(media_opacity_of(&core), 0.95);
+        assert_eq!(segment_state(&core).unwrap().media_opacity, Some(0.95));
+        assert_eq!(funnel_alpha(&core), 0.95);
+    }
+
+    #[test]
+    fn reset_stays_hidden_and_harmless_for_an_opacity_only_difference() {
+        // Wave AB (AB10): the panel-flow half of AA1's
+        // Reset guarantee. The Reset button renders
+        // only while the state's transform is
+        // non-identity, and the state derives the
+        // transform WITHOUT the opacity — so a sprite
+        // differing only in opacity never offers a
+        // Reset that could destroy the value; when
+        // Reset does fire (a real transform
+        // difference), the stored opacity survives and
+        // the row keeps reading it.
+        let mut core = core_with_sprite();
+        set_media_opacity(&mut core, 0.45);
+        let st = segment_state(&core).expect("node 1 is selected");
+        assert!(
+            st.media_transform
+                .expect("a transform state")
+                .is_identity(),
+            "opacity is not part of the transform identity"
+        );
+        assert_eq!(st.media_opacity, Some(0.45));
+        adjust_media_scale(&mut core, MEDIA_SCALE_STEP);
+        reset_media_transform(&mut core);
+        let st = segment_state(&core).expect("node 1 is selected");
+        assert!(
+            st.media_transform
+                .expect("a transform state")
+                .is_identity()
+        );
+        assert_eq!(st.media_opacity, Some(0.45), "Reset spared the opacity");
+        assert_eq!(media_opacity_of(&core), 0.45);
+    }
+
     #[test]
     fn media_transform_labels_resolve_through_the_catalogue() {
         // IA-Y4-1 (the Q7 note): these six keys enter

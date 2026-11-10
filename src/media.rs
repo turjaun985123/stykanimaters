@@ -391,6 +391,14 @@ pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
                     // the shared edge (both sample u = 0.5
                     // there, flipped or not).
                     //
+                    // Wave AB (AB6): this u-reversal is also
+                    // the one media payload field the Pivot v5
+                    // writer carries — as the segment record's
+                    // endpoint-reversal / baseline-reflection
+                    // pair composed, (1, 1) mapping
+                    // (u, v) -> (1 - u, v); see
+                    // `pivot::export_piv_v5`.
+                    //
                     // Wave Y (Y9, GAP P-11): the two-half
                     // split generalises to K strips along the
                     // arc (`bend_strip_count`). The spine is

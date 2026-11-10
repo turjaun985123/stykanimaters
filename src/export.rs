@@ -2311,6 +2311,44 @@ pub fn sampled_frame_total(project: &Project) -> usize {
     sample_times(project).len()
 }
 
+/// Which of the two export bundles a member-totals
+/// allocation is for (Wave AB, AB7): the images bundle
+/// — PNG sequence, JPEG sequence, SVG, spritesheet —
+/// or the video bundle — MP4, WebM. The drivers' own
+/// kind vocabularies (the MCP tool's `kind` string,
+/// the export panel's `BundleKind`) map onto this at
+/// their allocation calls.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BundleKind {
+    /// The four image members.
+    Images,
+    /// The two video members.
+    Video,
+}
+
+/// Each bundle member's frame total in run order — the
+/// allocation a [`BundleProgress`] tracker is
+/// constructed with, computed before the first member
+/// runs (the allocation rule is X11's; Wave AB, AB7
+/// made this its one home, shared by the MCP
+/// `export_bundle` driver and the export panel's
+/// bundle job, so the two surfaces' totals can never
+/// drift apart): the images members each write one
+/// file per authored frame, so each share is the
+/// authored frame count; the video members report
+/// against the sampled-times count, so each share is
+/// [`sampled_frame_total`]. Pure: reads the project
+/// only.
+pub fn bundle_member_totals(kind: BundleKind, project: &Project) -> Vec<usize> {
+    match kind {
+        BundleKind::Images => vec![project.frames.len(); 4],
+        BundleKind::Video => {
+            let member = sampled_frame_total(project);
+            vec![member, member]
+        }
+    }
+}
+
 /// One progress update from a whole **bundle** export
 /// (Wave X, X11): several member exports run under one
 /// request (the `export_bundle` tool's image members —
@@ -9110,6 +9148,35 @@ progress=end
         assert_eq!(sampled_frame_total(&project), 5);
         project.frames[2].duration = 2.0;
         assert_eq!(sampled_frame_total(&project), 6);
+    }
+
+    #[test]
+    fn bundle_member_totals_allocates_the_x11_shares() {
+        // Wave AB (AB7): the one allocation home both
+        // bundle drivers call — the images shares are
+        // the authored frame count four times, the
+        // video shares the sampled-times total twice,
+        // and a held frame moves only the video shares.
+        let mut project = tiny_project();
+        let n = project.frames.len();
+        assert_eq!(
+            bundle_member_totals(BundleKind::Images, &project),
+            vec![n; 4]
+        );
+        let member = sampled_frame_total(&project);
+        assert_eq!(
+            bundle_member_totals(BundleKind::Video, &project),
+            vec![member, member]
+        );
+        project.frames[2].duration = 2.0;
+        assert_eq!(
+            bundle_member_totals(BundleKind::Images, &project),
+            vec![n; 4]
+        );
+        assert_eq!(
+            bundle_member_totals(BundleKind::Video, &project),
+            vec![member + 1, member + 1]
+        );
     }
 
     #[test]

@@ -177,6 +177,28 @@
 //! next. A record somehow left over from an earlier
 //! gesture (its Up never arrived) is settled as a cancel
 //! before a new grab arms.
+//!
+//! The recorded frame is the gesture's frame for its
+//! whole life (Wave AB, AB9 audit): a keyboard frame
+//! step mid-gesture — the shell's arrow keys call
+//! `core.goto` with no drag-in-flight gate — does NOT
+//! retarget the drag, and neither live writes nor the
+//! commit chase `current`. The base is the grab frame's
+//! own data (the exact key there verbatim, else its
+//! sample, `scale_y` materialised), so committing it at
+//! a stepped-to frame would author one frame's sampled
+//! transform as another frame's key. The stage gestures
+//! that DO follow `current` — the pose drag, the camera
+//! drag, the eraser — carry no grab-time payload: each
+//! of their moves computes its value from the pointer
+//! against the then-current frame's own data, so
+//! retargeting costs them nothing. The record-carrying
+//! gestures — this one, the brush stroke (its frame is
+//! stamped into the `Stroke` at `begin_draw`), the
+//! subtitle lane's cue drag, the graph canvas's key
+//! drag — all hold their grab target the same way, and
+//! the pin `sprite_drag_keeps_the_grab_frame_across_a_
+//! mid_gesture_frame_step` holds this one to it.
 
 use std::cell::RefCell;
 
@@ -1614,5 +1636,53 @@ mod tests {
         sprite_drag_up(&mut core, [10.0, 10.0], false);
         assert!(core.project.sprites.is_empty());
         assert_eq!(core.undo_depth(), 0);
+    }
+
+    #[test]
+    fn sprite_drag_keeps_the_grab_frame_across_a_mid_gesture_frame_step() {
+        // Wave AB (AB9): the shell's arrow keys step
+        // `core.current` with no drag-in-flight gate, so a
+        // frame step CAN land mid-gesture. The record's
+        // frame — and the base sampled/captured at it —
+        // stays the gesture's target throughout: the base
+        // is the grab frame's own data, and committing it
+        // at a stepped-to frame would author frame 0's
+        // transform as frame 2's key. (The pose drag's
+        // per-move read of `current` is no counter-model:
+        // it carries no grab-time payload — see the
+        // module docs' Dragging section.)
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+        let before = keys_json(&core, 0);
+        sprite_drag_down(&mut core, 0, [310.0, 195.0]);
+        assert!(sprite_drag_move(&mut core, [340.0, 215.0]));
+        // The mid-gesture step: navigation only — no
+        // snapshot, and the drag stays armed.
+        core.goto(2);
+        assert!(sprite_drag_active());
+        assert!(sprite_drag_move(&mut core, [350.0, 225.0]));
+        // Live writes still land at the grab frame, at
+        // the full press-relative delta (40, 30) on the
+        // frame-0 base (300, 200)…
+        let live = core.sprite_key_at(0, 0).expect("a key at frame 0");
+        assert!(close([live.x, live.y], [340.0, 230.0]), "live {live:?}");
+        // …and frame 2's own key is untouched by them.
+        let end = core.sprite_key_at(0, 2).expect("a key at frame 2");
+        assert!(close([end.x, end.y], [340.0, 200.0]));
+        assert_eq!(end.angle, 90.0);
+        assert_eq!(core.undo_depth(), 0, "still no snapshot mid-gesture");
+        // Release at the stepped-to frame: the commit
+        // still goes through the op at the GRAB frame —
+        // one undo step, and the op's recap names frame 1
+        // (1-based), not the displayed frame 3.
+        sprite_drag_up(&mut core, [350.0, 225.0], false);
+        assert!(!sprite_drag_active());
+        assert_eq!(core.undo_depth(), 1, "one undo step per drag");
+        assert_eq!(core.status, "Sprite 1 key set at frame 1.");
+        let key = core.sprite_key_at(0, 0).expect("a key at frame 0");
+        assert!(close([key.x, key.y], [340.0, 230.0]), "committed {key:?}");
+        assert_eq!(core.project.sprites[0].keys.len(), 2, "no key authored at the stepped-to frame");
+        core.undo();
+        assert_eq!(keys_json(&core, 0), before);
     }
 }

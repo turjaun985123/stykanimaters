@@ -1937,11 +1937,29 @@ impl EditorCore {
 
     /// Key the selected node's angle on a graph channel at the current
     /// frame, using its current keyframed value.
+    ///
+    /// The origin (node 0) is refused, before any snapshot
+    /// (Wave AB, AB4 — AA5's Bend(0) call extended to the
+    /// angle door): `model::evaluate` gives a parentless
+    /// node `abs_angle = 0.0` and never reads its stored
+    /// angle, so an Angle(0) channel's value lands in a
+    /// pose slot nothing renders. The refusal blocks
+    /// AUTHORING only: an Angle(0) channel a saved project
+    /// already carries stays selectable, its keys stay
+    /// editable and deletable through the transform tools,
+    /// and it round-trips untouched. Every caller of this
+    /// op (the graph panel's "Key angle", the command
+    /// palette, the keyframe tools' "Key angle here", MCP
+    /// `graph_key_angle`) inherits the refusal from here.
     pub fn key_graph_angle(&mut self) {
         let Some(ni) = self.selected_node else {
             self.status = "Select a joint first, then Key graph.".into();
             return;
         };
+        if ni == 0 {
+            self.status = "The origin has no angle to key.".into();
+            return;
+        }
         let fi = self.selected_figure;
         let frame = self.current as f32;
         let value = self
@@ -9129,6 +9147,41 @@ mod tests {
         );
         c.clear_graph();
         assert!(c.project.channels.is_empty());
+    }
+
+    #[test]
+    fn key_graph_angle_refuses_the_origin_without_a_snapshot() {
+        // Wave AB (AB4): evaluate never reads the origin's
+        // stored angle, so an Angle(0) channel is inert at
+        // render; Key angle refuses it before any snapshot —
+        // AA5's Bend(0) call, extended to the angle door.
+        let mut c = EditorCore::new();
+        c.selected_node = Some(0);
+        let depth = c.undo_depth();
+        c.key_graph_angle();
+        assert_eq!(c.status.as_str(), "The origin has no angle to key.");
+        assert!(c.project.channels.is_empty(), "no channel authored");
+        assert_eq!(c.undo_depth(), depth, "the refusal spends no undo step");
+        // An Angle(0) channel a saved project already
+        // carries gains no key and keeps the one it has:
+        // the refusal blocks authoring, never stored data.
+        c.project.channels = vec![crate::graph::Channel {
+            figure: 0,
+            target: crate::graph::ChannelTarget::Angle(0),
+            keys: vec![crate::graph::Key::flat(0.0, 33.0)],
+        }];
+        c.key_graph_angle();
+        assert_eq!(c.project.channels[0].keys.len(), 1, "the stored key is untouched");
+        assert_eq!(c.project.channels[0].keys[0].value, 33.0);
+        assert_eq!(c.undo_depth(), depth, "still no snapshot");
+        // A real joint still keys.
+        c.selected_node = Some(1);
+        c.key_graph_angle();
+        assert_eq!(c.project.channels.len(), 2, "joint 1 authored its channel");
+        assert_eq!(
+            c.project.channels[1].target,
+            crate::graph::ChannelTarget::Angle(1)
+        );
     }
 
     #[test]

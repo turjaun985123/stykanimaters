@@ -1731,6 +1731,47 @@ mod tests {
     }
 
     #[test]
+    fn paste_into_an_existing_bend_zero_channel() {
+        // Wave AB (AB11), on AA5's recorded boundary: the
+        // Bend(0) refusal lives in the authoring doors only.
+        // Paste resolves a channel by index and never
+        // consults the target, so a stored Bend(0) channel —
+        // one a saved project carries — accepts pasted keys
+        // like any other channel: rebased, exactly one
+        // snapshot, the stored key untouched.
+        let mut core = core_with_bend_zero();
+        let copied = copy_keys(&core, 0).unwrap();
+        let edits_before = core.edits_since_autosave();
+        assert!(paste_keys(&mut core, 2, &copied, 2.0));
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits_before + 1,
+            "the paste into Bend(0) is exactly one snapshot"
+        );
+        let ch = &core.project.channels[2];
+        assert_eq!(ch.target, ChannelTarget::Bend(0));
+        assert_eq!(ch.keys.len(), 4, "the stored key plus three pasted keys");
+        let frames: Vec<f32> = ch.keys.iter().map(|k| k.frame).collect();
+        assert!(
+            approx(frames[0], 0.0)
+                && approx(frames[1], 2.0)
+                && approx(frames[2], 6.0)
+                && approx(frames[3], 12.0),
+            "stored key kept, pasted keys rebased: {frames:?}"
+        );
+        assert!(
+            approx(ch.keys[0].value, 0.3),
+            "the stored key is untouched by the paste"
+        );
+        core.undo();
+        assert_eq!(
+            core.project.channels[2].keys.len(),
+            1,
+            "undo reverts the paste"
+        );
+    }
+
+    #[test]
     fn paste_into_same_channel_at_a_new_frame() {
         let mut core = core_with_channels();
         let copied = copy_keys(&core, 0).unwrap();
@@ -1802,6 +1843,85 @@ mod tests {
             .map(|ch| ch.keys.len())
             .collect();
         assert_eq!(keys_before, keys_after, "project channels untouched");
+    }
+
+    /// A core whose project carries, beside the standard
+    /// RootX/RootY pair of [`core_with_channels`], a Bend(0)
+    /// channel on figure 0 at index 2 holding one stored key
+    /// (frame 0, 0.3 rad) — the channel a saved project can
+    /// carry but no authoring door will create since Wave AA
+    /// (AA5 refused Bend(0) in `key_bend` and `tool_graph_key`
+    /// only). The AB11 pins record what the rest of the
+    /// library still does with it.
+    fn core_with_bend_zero() -> EditorCore {
+        let mut core = core_with_channels();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Bend(0),
+            keys: vec![Key::flat(0.0, 0.3)],
+        });
+        core
+    }
+
+    #[test]
+    fn duplicate_channel_carries_a_bend_zero_channel_verbatim() {
+        // Wave AB (AB11): duplicating a stored Bend(0)
+        // channel is propagation, not authoring — AA5 left
+        // the clone path untouched on purpose. Node 0 exists
+        // on every rig, so the node check that refuses
+        // Angle(5)/Length(5) onto a small rig can never
+        // refuse Bend(0); the clone lands with target and
+        // keys verbatim, in one snapshot.
+        let mut core = core_with_two_figures();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Bend(0),
+            keys: vec![
+                Key::flat(0.0, 0.3),
+                Key::flat(4.0, -0.2).with_interp(Interp::Linear),
+            ],
+        });
+        let idx = core.project.channels.len() - 1;
+        let source_keys = core.project.channels[idx].keys.clone();
+        let undo_before = core.undo_depth();
+        assert!(duplicate_channel_to_figure(&mut core, idx, 1));
+        assert_eq!(
+            core.undo_depth(),
+            undo_before + 1,
+            "one snapshot for the clone"
+        );
+        let copy = core.project.channels.last().expect("clone appended");
+        assert_eq!(copy.figure, 1);
+        assert_eq!(copy.target, ChannelTarget::Bend(0));
+        assert_eq!(copy.keys, source_keys, "keys carried verbatim");
+        assert_eq!(
+            core.project.channels[idx].figure, 0,
+            "the source channel is untouched"
+        );
+        // A second duplication refuses on the standing
+        // shadow rule — figure 1 now HAS a Bend(0) channel —
+        // not on any origin rule.
+        assert!(!duplicate_channel_to_figure(&mut core, idx, 1));
+        assert!(
+            core.status.contains("already has a channel for Bend 0"),
+            "status: {}",
+            core.status
+        );
+
+        // Even a rig shrunk to the origin alone still has
+        // node 0, so the clone lands there too.
+        let mut shrunk = core_with_two_figures();
+        shrunk.project.figures[1].def.nodes.truncate(1);
+        shrunk.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Bend(0),
+            keys: vec![Key::flat(0.0, 0.3)],
+        });
+        let idx = shrunk.project.channels.len() - 1;
+        assert!(
+            duplicate_channel_to_figure(&mut shrunk, idx, 1),
+            "node 0 exists even on a one-node rig"
+        );
     }
 
     #[test]
@@ -3023,6 +3143,104 @@ mod mcp_graph_tool_tests {
             depth + 1,
             "clear_graph is one undo step (Wave 11)"
         );
+    }
+
+    #[test]
+    fn key_all_channels_at_hold_keys_a_bend_zero_channel() {
+        // Wave AB (AB11): "key all" iterates EXISTING
+        // channels and hold-keys each at its evaluated
+        // value — AA5 recorded it as propagation, and a
+        // stored Bend(0) channel is keyed with the rest, in
+        // the same single snapshot the whole op always
+        // takes.
+        let mut core = core_with_bend_zero();
+        let depth = core.undo_depth();
+        let keyed = key_all_channels_at(&mut core, 2.0);
+        assert_eq!(keyed, 3, "all three channels keyed, Bend(0) included");
+        assert_eq!(
+            core.undo_depth(),
+            depth + 1,
+            "one snapshot for the whole op"
+        );
+        let ch = &core.project.channels[2];
+        assert_eq!(ch.keys.len(), 2);
+        assert!(approx(ch.keys[1].frame, 2.0));
+        assert!(
+            approx(ch.keys[1].value, 0.3),
+            "the held value is the channel's own evaluated value \
+             (a lone key clamps to itself everywhere)"
+        );
+        core.undo();
+        assert_eq!(
+            core.project.channels[2].keys.len(),
+            1,
+            "undo reverts the hold-key"
+        );
+    }
+
+    #[test]
+    fn bend_zero_channel_keys_shift_move_and_delete_like_any_channel() {
+        // Wave AB (AB11): the transform family resolves a
+        // channel by index and never consults the refusal —
+        // a stored Bend(0) channel's keys stay movable and
+        // deletable, and the channel itself deletable, so
+        // the authoring refusal never traps stored data.
+        let mut core = core_with_bend_zero();
+        core.project.channels[2].keys.push(Key::flat(4.0, 0.9));
+        // Shift (the nudge family): every key moves.
+        assert!(shift_keys(&mut core, 2, 2.0));
+        let frames: Vec<f32> = core.project.channels[2].keys.iter().map(|k| k.frame).collect();
+        assert!(
+            approx(frames[0], 2.0) && approx(frames[1], 6.0),
+            "shifted: {frames:?}"
+        );
+        // Move one key; its value travels with it.
+        assert!(move_key_at(&mut core, 2, 6.0, 3.0, None));
+        let ch = &core.project.channels[2];
+        assert!(approx(ch.keys[0].frame, 2.0) && approx(ch.keys[1].frame, 3.0));
+        assert!(
+            approx(ch.keys[1].value, 0.9),
+            "the value travelled with the moved key"
+        );
+        // Delete one key, then the channel itself.
+        assert!(remove_key_at(&mut core, 2, 3.0));
+        assert_eq!(core.project.channels[2].keys.len(), 1);
+        assert!(delete_channel(&mut core, 2));
+        assert_eq!(
+            core.project.channels.len(),
+            2,
+            "the Bend(0) channel itself is deletable"
+        );
+    }
+
+    #[test]
+    fn bend_zero_channel_reduces_like_any_channel() {
+        // Wave AB (AB11): reduce resolves by index too. The
+        // keys are collinear (Linear), so the interior key
+        // contributes nothing and goes; the endpoints stay.
+        // Bend values are radians and the tool applies the
+        // caller's tolerance in the channel's own units —
+        // the panel's degree conversion is the panel's
+        // (Z11), the tool deliberately has none.
+        let mut core = core_with_channels();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Bend(0),
+            keys: vec![
+                key(0.0, 0.0, 0.0, 0.0, Interp::Linear),
+                key(2.0, 0.45, 0.0, 0.0, Interp::Linear),
+                key(4.0, 0.9, 0.0, 0.0, Interp::Linear),
+            ],
+        });
+        let out = tool_graph_reduce_keys(
+            &mut core,
+            &json!({ "channel": 2, "tolerance": 0.01 }),
+        )
+        .unwrap();
+        assert_eq!(out["removed"], 1);
+        let ch = &core.project.channels[2];
+        assert_eq!(ch.keys.len(), 2, "endpoints kept, interior dropped");
+        assert!(approx(ch.keys[0].frame, 0.0) && approx(ch.keys[1].frame, 4.0));
     }
 
     #[test]

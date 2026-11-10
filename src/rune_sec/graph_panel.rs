@@ -2658,6 +2658,70 @@ mod tests {
     }
 
     #[test]
+    fn bend_zero_channel_stays_selectable_and_editable_in_the_panel() {
+        // Wave AB (AB11), on AA5's recorded guarantee: the
+        // panel refusal blocks Key bend only. A stored
+        // Bend(0) channel — one a saved project carries —
+        // is a selector entry, resolves as the drawn
+        // channel through a row pick, and the drawn-channel
+        // transforms (reduce with the panel's converted
+        // bend tolerance, shift, delete) act on it: the
+        // authoring refusal never traps stored data.
+        let mut core = EditorCore::new();
+        core.selected_node = Some(0);
+        core.project.channels = vec![channel(
+            ChannelTarget::Bend(0),
+            vec![
+                Key::flat(0.0, 0.0),
+                Key::flat(2.0, 0.45),
+                Key::flat(4.0, 0.9),
+            ],
+        )];
+        assert!(
+            selector_entries(&core).contains(&ChannelTarget::Bend(0)),
+            "the stored channel is offered in the selector"
+        );
+        let mut sel = GraphPanelState::default();
+        sel.selected_channel = Some(0);
+        assert_eq!(
+            effective_channel_index(&core, &sel),
+            Some(0),
+            "a row pick draws the Bend(0) channel"
+        );
+        // Panel reduce reaches it: the interior key is
+        // collinear (flat tangents make the two-key probe
+        // pass exactly through it), so it goes.
+        apply_reduce(&mut core, ChannelTarget::Bend(0));
+        assert_eq!(
+            core.project.channels[0].keys.len(),
+            2,
+            "interior key reduced"
+        );
+        assert!(
+            core.status.contains("removed 1 key(s)"),
+            "status: {}",
+            core.status
+        );
+        // Shift acts on it through the drawn resolution.
+        shift_drawn_channel(&mut core, &sel, 1.0);
+        let frames: Vec<f32> = core.project.channels[0]
+            .keys
+            .iter()
+            .map(|k| k.frame)
+            .collect();
+        assert!(
+            approx(frames[0], 1.0) && approx(frames[1], 5.0),
+            "shifted: {frames:?}"
+        );
+        // And Delete removes the channel outright.
+        delete_drawn_channel(&mut core, &mut sel);
+        assert!(
+            core.project.channels.is_empty(),
+            "the channel itself is deletable"
+        );
+    }
+
+    #[test]
     fn effective_target_fallback_order() {
         let mut core = EditorCore::new();
         core.selected_node = Some(1);
