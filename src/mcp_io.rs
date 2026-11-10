@@ -1666,7 +1666,7 @@ pub fn tools() -> Vec<Tool> {
                     "from_frame": { "type": "integer", "minimum": 0, "description": "First frame of an inclusive range (with 'to_frame'); sequence/animation formats only" },
                     "to_frame": { "type": "integer", "minimum": 0, "description": "Last frame of an inclusive range (with 'from_frame'); sequence/animation formats only" },
                     "scale": { "type": "number", "exclusiveMinimum": 0, "description": "Output scale relative to the stage size (default 1.0), a true re-render at that scale: formats 'png', 'png_sequence', 'gif', 'mp4', 'webm', 'apng', 'spritesheet' and 'jpeg' accept it" },
-                    "alpha": { "type": "boolean", "description": "Transparent background with per-pixel coverage alpha instead of the project background (default false): formats 'png_sequence' and 'spritesheet' only" }
+                    "alpha": { "type": "boolean", "description": "Transparent background with per-pixel coverage alpha instead of the project background (default false): formats 'png_sequence', 'spritesheet' and 'apng' only" }
                 },
                 "required": ["path", "format"]
             }),
@@ -3263,5 +3263,110 @@ mod tests {
             "one combined count across all members, terminal last"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------
+    // Wave AA (AA10): bundle progress truth — the manifest,
+    // the progress stream and the panel line are three
+    // tellings of one count. The stream pins (X11, Z6) and
+    // the alpha-flag pins (Z6) each cover one telling;
+    // these pins tie the manifest's per-member frame
+    // counts to the same story: for the same bundle,
+    // requesting alpha changes no member's frame count,
+    // so the alpha manifest and the opaque manifest agree
+    // member for member on (format, frames) — the counts
+    // the bundle total was allocated from.
+    // -----------------------------------------------------------------
+
+    /// The (format, frames) story of a bundle reply, in
+    /// plan order — the manifest's counting content,
+    /// without the paths (which name the caller's dir).
+    fn bundle_frame_story(reply: &Value) -> Vec<(String, u64)> {
+        reply["members"]
+            .as_array()
+            .expect("bundle reply members")
+            .iter()
+            .map(|m| {
+                (
+                    m["format"].as_str().expect("member format").to_string(),
+                    m["frames"].as_u64().expect("member frames"),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bundle_alpha_and_opaque_manifests_count_the_same_frames() {
+        let mut core = bundle_alpha_core();
+        let opaque_dir = temp_dir("bundle-truth-opaque");
+        let opaque = call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": opaque_dir.to_string_lossy(), "kind": "images" }),
+        )
+        .expect("opaque bundle failed");
+        assert_eq!(opaque["succeeded"], 4, "{opaque}");
+        let alpha_dir = temp_dir("bundle-truth-alpha");
+        let alpha = call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": alpha_dir.to_string_lossy(), "kind": "images", "alpha": true }),
+        )
+        .expect("alpha bundle failed");
+        assert_eq!(alpha["succeeded"], 4, "{alpha}");
+        assert_eq!(alpha["failed"], opaque["failed"], "{alpha} vs {opaque}");
+        // bundle_alpha_core has 3 authored frames; every
+        // images member's engine result is that count
+        // (the sequences write one file per frame, SVG
+        // one file per frame, the sheet tiles each frame
+        // once) — the same 3 per member the progress
+        // total allocates (4 x 3 = 12, X11's stream pin).
+        let story = vec![
+            ("png_sequence".to_string(), 3),
+            ("jpeg_sequence".to_string(), 3),
+            ("svg".to_string(), 3),
+            ("spritesheet".to_string(), 3),
+        ];
+        assert_eq!(bundle_frame_story(&opaque), story, "{opaque}");
+        assert_eq!(
+            bundle_frame_story(&alpha),
+            story,
+            "alpha changes pixels, not counts: {alpha}"
+        );
+        let _ = std::fs::remove_dir_all(&opaque_dir);
+        let _ = std::fs::remove_dir_all(&alpha_dir);
+    }
+
+    #[test]
+    fn bundle_alpha_video_manifest_counts_match_the_opaque_bundle() {
+        let mut core = bundle_core();
+        let opaque_dir = temp_dir("bundle-truth-video-opaque");
+        let opaque = call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": opaque_dir.to_string_lossy(), "kind": "video" }),
+        )
+        .expect("opaque video bundle failed");
+        assert_eq!(opaque["succeeded"], 2, "{opaque}");
+        let alpha_dir = temp_dir("bundle-truth-video-alpha");
+        let alpha = call(
+            "export_bundle",
+            &mut core,
+            json!({ "path": alpha_dir.to_string_lossy(), "kind": "video", "alpha": true }),
+        )
+        .expect("alpha video bundle failed");
+        assert_eq!(alpha["succeeded"], 2, "{alpha}");
+        // The video members' counts are the encoders'
+        // sampled-frame counts; whatever they are, the
+        // alpha request (which no video member honours)
+        // must not change them — the two manifests count
+        // the same bundle.
+        assert_eq!(
+            bundle_frame_story(&alpha),
+            bundle_frame_story(&opaque),
+            "the alpha video manifest counts the opaque bundle's frames: {alpha} vs {opaque}"
+        );
+        let _ = std::fs::remove_dir_all(&opaque_dir);
+        let _ = std::fs::remove_dir_all(&alpha_dir);
     }
 }

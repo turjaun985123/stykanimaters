@@ -1821,6 +1821,14 @@ fn pose_absolutes(def: &FigureDef, pose: &Pose) -> Vec<f32> {
 }
 
 /// Export one figure definition as a legacy `.stk` file.
+///
+/// The shared figure stream (`write_figure`) stores
+/// geometry and shape only, so per-node colours, styles
+/// and media are not written: a node carrying segment
+/// media (an image or text segment, with its local
+/// transform and stored opacity) exports as a plain
+/// segment, exactly as in the v2/v3/v4 `.piv` writers
+/// built on the same stream.
 pub fn export_stk(def: &FigureDef, name: &str) -> Vec<u8> {
     let mut out = Vec::new();
     write_figure(&mut out, def, name, &rest_absolutes(def));
@@ -2155,6 +2163,21 @@ fn piv_image_payload(
 ///   width spans the segment, centred on it). Figures with image
 ///   segments also get the per-object image/text flags byte the
 ///   grammar requires.
+///
+/// * **The media's local payload is not carried.** An image
+///   segment's `offset`, `scale`, `angle_offset`, `flip` and
+///   stored `opacity` have no slot in the segment record or
+///   the side tables, and nothing of them is baked in either:
+///   the image table holds the asset's bytes verbatim and
+///   its anchors are the blob's real pixel size. The
+///   record's only per-media bytes beyond the table index
+///   are the extra triple's endpoint-reversal /
+///   baseline-reflection pair, written 0 for every segment
+///   (and the frame objects' image/text flags byte likewise
+///   0) — so even `flip`, whose u-reversal is the two bytes
+///   composed, is dropped, wholly, like the rest of the
+///   payload. Pivot renders a v5 image segment at the
+///   segment's own geometry, unflipped, at full opacity.
 ///
 /// * **Text side tables** for figures containing text segments
 ///   (`SegmentMedia::Text`): one table entry per distinct content

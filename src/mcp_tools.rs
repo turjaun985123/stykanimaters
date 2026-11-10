@@ -1849,6 +1849,19 @@ fn tool_graph_key(core: &mut EditorCore, args: &Value) -> Result<Value, String> 
     let fi = req_usize(args, "figure")?;
     check_figure(core, fi)?;
     let target = parse_graph_target(core, fi, args)?;
+    // Wave AA (AA5): a Bend(0) channel can never render —
+    // the origin has no segment — and every other bend
+    // writer refuses this write (the panel's `cycle_bend`
+    // and this module's `set_bend`, same sentence). Refuse
+    // it here too, before the snapshot, in both target
+    // forms (the parse above has already normalised them).
+    // The refusal sits in this tool, NOT in
+    // `parse_graph_target`: that parser is shared with the
+    // transform tools, and an existing Bend(0) channel's
+    // keys must stay movable, reducible and deletable.
+    if target == crate::graph::ChannelTarget::Bend(0) {
+        return Err("The origin has no segment to bend.".into());
+    }
     let frame = req_f32(args, "frame")?;
     if frame < 0.0 {
         return Err("argument 'frame' must not be negative".into());
@@ -7214,6 +7227,43 @@ mod tests {
         core.undo();
         assert_eq!(core.project.name, "Afterwards");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn graph_key_refuses_bend_on_the_origin() {
+        // Wave AA (AA5): the origin has no segment, so a
+        // Bend(0) channel is inert at render; graph_key
+        // refuses it with set_bend's exact sentence, in both
+        // target forms, before any snapshot — while bend on
+        // a real segment keys as before.
+        let tools = tools();
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        for target in [json!("bend:0"), json!({ "bend": 0 })] {
+            let err = call(
+                &mut core,
+                &tools,
+                "graph_key",
+                json!({ "figure": 0, "target": target, "frame": 0.0, "value": 0.3 }),
+            )
+            .expect_err("bend:0 must be refused");
+            assert_eq!(err, "The origin has no segment to bend.");
+        }
+        assert!(core.project.channels.is_empty(), "no channel authored");
+        assert_eq!(core.undo_depth(), depth, "the refusals spent no undo step");
+        // A bend on a segment that exists still keys.
+        call(
+            &mut core,
+            &tools,
+            "graph_key",
+            json!({ "figure": 0, "target": "bend:1", "frame": 0.0, "value": 0.3 }),
+        )
+        .unwrap();
+        assert_eq!(core.project.channels.len(), 1);
+        assert_eq!(
+            core.project.channels[0].target,
+            crate::graph::ChannelTarget::Bend(1)
+        );
     }
 
     #[test]
