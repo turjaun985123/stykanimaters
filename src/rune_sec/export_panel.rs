@@ -2734,7 +2734,15 @@ mod tests {
         core.loop_range = Some((1, 2));
         let note = loop_note(&core).expect("note with a loop range set");
         assert!(note.contains("frames 2–3"), "unexpected note: {note}");
-        assert!(note.contains("video-only"), "video caveat missing: {note}");
+        // Wave W (W6): range WebM exports carry audio too
+        // (Opus), so the note no longer calls the video
+        // formats video-only — the caveat now names both
+        // video formats in the range list, and the audio
+        // clause below states what they carry.
+        assert!(
+            note.contains("MP4/WebM exports write only those frames"),
+            "video caveat missing: {note}"
+        );
         // Wave 11 (C9): the audio clause must state the
         // Wave 10 truth, not the Wave 9 WAV-only version —
         // non-WAV clips sound in a range MP4, and an

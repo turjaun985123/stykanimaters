@@ -853,7 +853,7 @@ fn handle_connection(mut stream: TcpStream, tx: &SyncSender<LiveRequest>, stop: 
         // this port is the LIVE editor (the stdio server has
         // no HTTP listener at all). No core access, no queue.
         if path == "/" || path == "/health" {
-            write_json(&mut stream, 200, &health_body());
+            write_json(&mut stream, 200, &health_body(is_enabled()));
         } else {
             write_response(&mut stream, 404, "Not Found", "text/plain", b"no such path\n");
         }
@@ -1084,7 +1084,7 @@ fn body_too_large_body() -> String {
 /// constant truth about the build — the field below
 /// reports `true` outright, and
 /// `health_body_names_the_live_server` pins it.
-fn health_body() -> Value {
+fn health_body(enabled: bool) -> Value {
     json!({
         // Wave 14 (D7): the server's identity comes from
         // the one set of consts the router's initialize
@@ -1097,7 +1097,7 @@ fn health_body() -> Value {
         "live": true,
         "endpoint": endpoint(),
         "port": PORT,
-        "enabled": is_enabled(),
+        "enabled": enabled,
         // Wave 14: the shell-control channel is compiled
         // in and drained by poll unconditionally, so this
         // endpoint serves the shell_* tools — a constant
@@ -1699,7 +1699,7 @@ mod tests {
 
     #[test]
     fn health_body_names_the_live_server() {
-        let body = health_body();
+        let body = health_body(true);
         assert_eq!(body["server"], "stykanimate-rs");
         assert!(body["version"].as_str().is_some_and(|v| !v.is_empty()));
         assert_eq!(body["transport"], "live-http");
@@ -1708,16 +1708,24 @@ mod tests {
         // Wave 14 (D4): endpoint state, from the same
         // sources the listener itself uses — the PORT
         // constant it binds and the ENABLED atomic that is
-        // set only after a successful bind. `enabled` is
-        // pinned by self-consistency, not a fixed value:
-        // unit tests never start the bridge, and the field's
-        // contract is that it reports the flag truthfully,
-        // whatever the flag currently reads.
+        // set only after a successful bind. `enabled`
+        // reports the flag the handler read, never a
+        // hard-coded state: the body takes it as a
+        // parameter (Wave W CI round 3: the old two-read
+        // self-consistency pin raced parallel tests that
+        // flip the atomic — left Bool(false) vs right
+        // Bool(true)), and both values are pinned here
+        // deterministically.
         assert_eq!(body["port"], json!(PORT), "health names the bound port");
         assert_eq!(
             body["enabled"],
-            json!(is_enabled()),
-            "health reports the enabled flag, not a hard-coded state"
+            json!(true),
+            "health reports the enabled flag it was given"
+        );
+        assert_eq!(
+            health_body(false)["enabled"],
+            json!(false),
+            "health reports the disabled flag it was given"
         );
         assert_eq!(body["auth"], "none");
         // Wave 14 (D4, landed at integration): shell
@@ -1879,7 +1887,7 @@ mod tests {
             .len();
         assert!(served > 0);
         assert_eq!(
-            health_body()["tools"],
+            health_body(false)["tools"],
             json!(served),
             "health reports the served surface, not a stored number"
         );
