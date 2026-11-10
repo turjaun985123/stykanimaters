@@ -401,7 +401,7 @@ pub fn add_cue(s: &mut State) {
     let (start, end) = default_cue_window(&s.core);
     if let Some(i) = s.core.subtitle_add(start, end, DEFAULT_CUE_TEXT) {
         s.subtitle_selected = Some(i);
-        begin_edit(s, i);
+        begin_edit(s);
     }
 }
 
@@ -979,7 +979,7 @@ fn style_block(s: &State, t: &Theme) -> El {
     for (ci, &rgb) in SUBTITLE_PALETTE.iter().enumerate() {
         text_colors = text_colors.child(design::swatch(
             &format!("subtitle-text-color-{ci}"),
-            stykanimate_rs::stage_view::hex_color(rgb).unwrap_or(t.bg),
+            crate::stage_view::hex_color(rgb).unwrap_or(t.bg),
             style.text_color == rgb,
             t,
             move |s: &mut State| set_text_color(s, rgb),
@@ -989,7 +989,7 @@ fn style_block(s: &State, t: &Theme) -> El {
     for (ci, &rgb) in SUBTITLE_PALETTE.iter().enumerate() {
         box_colors = box_colors.child(design::swatch(
             &format!("subtitle-box-color-{ci}"),
-            stykanimate_rs::stage_view::hex_color(rgb).unwrap_or(t.bg),
+            crate::stage_view::hex_color(rgb).unwrap_or(t.bg),
             style.box_color == rgb,
             t,
             move |s: &mut State| set_box_color(s, rgb),

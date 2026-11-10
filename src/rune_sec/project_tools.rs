@@ -321,7 +321,7 @@ pub fn blank_project(name: &str) -> Project {
         head_ring_scale: 1.0,
         subtitles: Vec::new(),
         subtitle_style: Default::default(),
-        format_version: crate::model::FORMAT_VERSION_CURRENT,
+        format_version: stykanimate_rs::model::FORMAT_VERSION_CURRENT,
     }
 }
 
