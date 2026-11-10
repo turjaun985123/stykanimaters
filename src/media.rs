@@ -2068,6 +2068,7 @@ fn glyph_rows(ch: char) -> [u8; 5] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::{Channel, ChannelTarget, Key};
     use crate::model::{
         ClipDef, ClipLoop, Easing, FigureDef, FigureInstance, Frame, ImageAsset, NodeDef,
         NodeStyle, Pose, Shape, SpriteInstance, TextInstance,

@@ -1734,6 +1734,7 @@ pub fn tools() -> Vec<Tool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::GenericImageView;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("styk-mcp-io-{}-{tag}", std::process::id()));
