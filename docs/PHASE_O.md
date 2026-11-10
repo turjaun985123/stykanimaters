@@ -467,8 +467,10 @@ scan's output for those dumps plus its in-file
 model pins (§3).
 
 **That table is now written — the debt is
-discharged (Wave S, S8) — and refreshed against a
-newer dispatch (Wave V, V19).** Original source:
+discharged (Wave S, S8) — refreshed against a
+newer dispatch (Wave V, V19), and upgraded to
+the first 16/16-complete dispatch (Wave W,
+W12).** Original source:
 **Headless Rune probe run `42759195547`**,
 completed **SUCCESS** on
 `59cb0bec36b80648c9f9fe0dfd7d30cd6266d5c3`
@@ -491,7 +493,7 @@ measured and stands, but a citation is only as
 strong as its weakest transcript, so the table
 below is re-sourced.
 
-Current source: **Headless Rune probe run
+Previous source: **Headless Rune probe run
 `42765217055`**, completed **SUCCESS** on
 `9d7dd0a6e0853ce6fd6f0eef3c2ceee9a96bbd85`
 (`9d7dd0a`, the Waves S+T tree carrying the
@@ -511,7 +513,30 @@ measurement below was re-measured in these dumps:
 each reproduces the original discharge's value
 exactly, so the refresh moves no number — it
 adds two rows, two SCAN_SET flags, and the
-census-clean citation. Per §2's output shape each
+census-clean citation.
+
+Current source: **Headless Rune probe run
+`42767540386`**, completed **SUCCESS** on
+`fbc36448ac6c280ffbda893d187e4416eea84c36`
+(`fbc3644`, the Wave U integrated tree plus the
+one-character fix for the E0308 the refresh
+notes below record), artifact
+`headless-probe-output` (221 files, 37
+`tree-*.json` dumps). This is the first
+successful dispatch under the 16-tree SCAN_SET
+contract: its scan reads `OVERFLOW SCAN: CLEAN
+(0 hits, scan set complete)` — no INCOMPLETE
+provenance gap — its `subtitle-census.txt`
+reads `SUBTITLE CENSUS: PASS` (19 PASS, 0 FAIL),
+and both Home markers read `PASS`, the
+scan-fallback marker on its first real run —
+all read from the artifact itself, not from
+the workflow conclusion. Every figure below
+was re-measured in these dumps: the 36
+reproduce exactly for the third consecutive
+dispatch, and the table gains the one row the
+refresh notes owed, `tree-home-scan-fallback.json`,
+required and CLEAN. Per §2's output shape each
 scene's hit list is empty, so the table records
 the verdict per scene:
 
@@ -536,6 +561,7 @@ the verdict per scene:
 | tree-home-populated.json | 1440×900 | 375 | — | 0 | CLEAN |
 | tree-home.json | 1440×900 | 291 | — | 0 | CLEAN |
 | tree-home-missing-audio.json | 1440×900 | 334 | required | 0 | CLEAN |
+| tree-home-scan-fallback.json | 1440×900 | 333 | required | 0 | CLEAN |
 | tree-library-populated.json | 1440×900 | 1160 | — | 0 | CLEAN |
 | tree-loop-range.json | 1440×900 | 1196 | required | 0 | CLEAN |
 | tree-menu-open.json | 1440×900 | 1169 | — | 0 | CLEAN |
@@ -619,6 +645,38 @@ owes:* the `tree-home-scan-fallback.json` row
 census transcript read alongside the conclusion —
 this table's citation upgrades to that run when
 it lands.
+
+**Upgrade notes (Wave W, W12).** The refresh
+notes' item (3) is discharged: the next
+successful dispatch landed — `42767540386`,
+above — carrying the 37th dump, a 16/16
+complete scan, and a census transcript read
+alongside (PASS), so the table's citation
+stands upgraded to it and the scan-fallback
+row is in. No number moved: every per-tree
+figure and every O-1…O-9 measurement
+reproduces on the new artifact exactly, the
+third consecutive dispatch to do so. The
+citation does not move to the Wave V
+integration dispatch: `42771069640` (on
+`d5da9fd`) concluded **FAILURE** at its build
+step — `error[E0716]`, temporary value dropped
+while borrowed, at
+`src/rune_sec/home_panel.rs:3052` — so no scene
+ran, its artifact carries only fail-soft stubs,
+and the Home snap pair gate's first transcript
+verdict does not exist yet. It is recorded here
+so no one cites that run for anything; the
+citation upgrades to the first successful
+Wave V-or-later dispatch, the pair gate's
+verdict stated alongside, when the integrator's
+fix round lands it. One further transcript
+from the current citation's artifact, stated
+for the record: its legacy thumbnail probe
+still trips its control leg (`home-totals`
+stage-bg share 0.672 against the 0.06 ceiling —
+"premise does not hold"); diagnosing that leg
+is Wave W's W7 slice, not this table's.
 
 **CI, stated once and exactly.** The last completed
 master CI run before Wave R was on `0b75051`

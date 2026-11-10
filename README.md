@@ -159,7 +159,11 @@ present and fall back to a folder-based flow when neither exists.
   segments (lines, circles, regular polygons 3–6 sides), sprite
   and text segments (built-in 3×5 bitmap font for text), figure
   presets (humanoid, quadruped, mini), and a local figure library
-  (`./library/*.json` plus built-ins).
+  (`./library/*.json` plus built-ins). Saved figures store their
+  exact display name inside the library file — the filename stays
+  the lowercase slug — so listings and inserted figures keep the
+  name's case; older library files without a stored name still
+  list by file stem and gain the exact name when saved again.
 - **Drawing** — Draw mode with an expanded brush library (preset
   brushes, brush/eraser tools, brush opacity and scatter, and a
   Spray brush whose strokes record a spray mark and render
@@ -226,17 +230,22 @@ present and fall back to a folder-based flow when neither exists.
     a scale as well: it scales only the bundle's PNG sequence
     member, every other member is unaffected, and an invalid
     scale refuses the call before anything is written.
-    MP4/WebM exports also have an optional encode-phase
-    progress hook in the library: a caller passing a callback
-    receives the encoder's own frame counts as the encode
-    runs, ending with a single finished event for the video
-    encode (an MP4's audio mux runs afterwards and can still
-    fail the export). The hook is core-level only for now —
-    neither the export panel nor the MCP server surfaces it.
+    Exports also have optional progress hooks in the library:
+    PNG/JPEG sequence exports can report each frame as it is
+    rendered and written, with the final event marking the
+    whole export finished, while MP4/WebM exports can report
+    the encoder's own frame counts as the encode runs, ending
+    with a single finished event for the video encode (an
+    MP4's audio mux runs afterwards and can still fail the
+    export). The hooks are core-level only for now — neither
+    the export panel nor the MCP server surfaces them.
   - *Subtitles:* cues import and export as SRT and WebVTT;
     speaker credits ride WebVTT voice tags (SRT has no speaker
     syntax, and an SRT export reports how many credits it
-    could not write).
+    could not write). The subtitle panel sets the project-wide
+    style — Bottom or Top position, font scale, and text/box
+    colours chosen from palette swatches or adjusted to any
+    colour with RGB channel steppers.
   - A cross-format fixture corpus (`tests/fixtures/`) generated
     with the original's encoders guards the importers.
 - **Projects & shell** — named projects under `./projects/`

@@ -19,7 +19,11 @@ standing claims about the settled tree, read **§18**: a
 full re-audit against the Wave U integration HEAD
 (`1c7a70d`) that re-verifies every count, surface and
 contract this doc carries, fills §4's open rows, and
-supersedes §17's in-flight CI column.
+supersedes §17's in-flight CI column. **§19** (Wave W,
+W18) then aligns §18 against the Wave V integration
+HEAD (`d5da9fd`): counts re-verified, R1 closed, R5's
+CI frame stated, and §17's PHASE_O citation aligned
+with PHASE_O §10's re-sourcing.
 
 ## Headline findings
 
@@ -1063,3 +1067,133 @@ merely overlap.
 | R3 | `src/subtitles.rs` module doc (`:30–36`) says the speaker "is metadata… No renderer draws it yet (the prefix display is a filed IA…)" — stale since Wave R: `subtitle_display_lines` (`:431`) composes the prefix for the renderers and the panel carries the speaker field | doc text vs `:431` + the census's widening leg | subtitles owner / integrator — doc text only, no behaviour change |
 | R4 | Encode-progress has no consumer: the panel wiring needs a background-job slice (worker thread + shared state + tick polling — panel exports block the UI thread), and MCP transport needs a `notifications/progress` mapping. Both are boarded feature work, deliberately not improvised (IA-U11-1) | `src/export.rs:1407ff` contract; zero MCP references | a future panel/transport slice (V12 covers the render-phase extension this wave, not the wiring) |
 | R5 | Figure-library name case-loss: a figure saved as "Styk" is written to `styk.json` and listed/inserted as "styk" — CONFIRMED present at this audit's base (`src/editor.rs:3136` lower-cases the library file name; the slug path `src/figure_ops.rs:965` likewise) | greps above; the defect was first proven by Wave R-line CI round 5 | V1 owns the fix this wave (round-trip fidelity + on-disk migration behaviour); QA closes this row only when V1's CI lands |
+
+## 19. Wave W alignment — §18's remainders closed or re-pointed
+
+Appended 2026-11-10 (Wave W, W18). **Audit base: HEAD
+`d5da9fd`** (the Wave V integration), read from a pristine
+`git archive` snapshot, same method as §18; CI state via
+`gh` at the final check. §18's text is not rewritten —
+this section supersedes the cells it names, per this
+doc's audit-trail convention.
+
+### 19.1 Standing counts — re-verified at `d5da9fd`
+
+| Claim | Settled value | Evidence |
+|---|---|---|
+| MCP surface | **381 tools** (44 builtin + 319 registry + 9 io + 4 subtitle_io + 5 subtitle) | `mcp_census.py` on the snapshot: PASS, no duplicates; gate check 9 PASS (337 handlers resolve 1:1; docs/MCP.md in exact sync) |
+| Element keys | **983 total** (897 static + 86 dynamic), gate floor **983** | gate check 1 on the snapshot. §18.1's 980 / floor 980 is superseded: Wave V added V6's +3 dynamic stems and the integrator ratcheted the floor to the verified total (F5) |
+| i18n catalogue | **662 keys × 28** by the project's line-wise convention; **663** structural (see R1, closed below) | this audit's structural parse of the snapshot: 663 distinct keys; `status_ready` present in all 28 tables; headers state 662 (`src/i18n.rs:13`, `i18n_wire.rs:6`, README's languages bullet) |
+| Shell `State` | 48 fields, 22 full literals | gate check 3 |
+| Palette commands | **134** | gate checks 5 + 10 derive 134 from source |
+| Curated icons | **163** | pin `icon_data.rs:355`; gate check 5 |
+| Headless scenes | **34** (layout facts 1..=36) | gate checks 5 + 8: all 34 names in both headless.yml tree loops, reverse coverage exact |
+| Overflow SCAN_SET | **16 required / 0 pending** | gate check 8 (the required set's coverage is exact — no stale, no missing); direct parse agrees. §17's 13 is long superseded |
+
+Gate on the snapshot: **9/10 PASS** — the only non-pass
+is check 2 (key diff vs HEAD), which cannot run in an
+archive snapshot (`fatal: ambiguous argument 'HEAD'`);
+the integrator's in-repo run on the same committed tree
+reported PASS 10/10. Same snapshot caveat as §18, same
+resolution.
+
+### 19.2 R1 — CLOSED: the count convention stands
+
+§18.5 R1 offered two mechanical fixes (reformat the
+`status_ready` tuple to one line ×28, or restate the
+count as the structural figure). The Wave V integration
+settled it the third way, and this doc aligns with that
+settlement: **the line-wise convention stands, and the
+disclosure is kept.** F5's integration applied +151 /
+−52 keys on the convention (563 → **662**), the headers
+and README state 662 with the tuple note beside it, and
+the structural count is **663** — exactly one more, the
+same single `status_ready` multi-line tuple per table,
+sequences still identical ×28, no key lost, duplicated
+or desynchronised. Renumbering to the structural figure
+was declined so every historical count statement in
+this doc and REDESIGN_PROGRESS stays comparable.
+Wording rule from here: an i18n count stated in this
+doc is the line convention, with the structural figure
+named alongside wherever the count is load-bearing.
+
+### 19.3 R5 — fix in tree; CI has NOT landed green; row stays open
+
+V1's fix landed in the Wave V integration (slice 1/6)
+at `d5da9fd` and is carried unchanged into the current
+master `2462a82`: save writes the def JSON plus a
+top-level `"name"` field (`src/editor.rs`
+`library_file_text` `:260`), load prefers the stored
+name with the stem as legacy fallback
+(`library_stored_name` `:277`), the on-disk slug never
+changes, and rename/delete resolve through
+`library_entry_file`. Verified in the snapshot.
+
+The CI frame, stated exactly: round 1 on `d5da9fd` —
+build `42771042398` **CANCELLED** (superseded by the
+fix push; no verdict exists for it) and headless
+`42771069640` **FAILED** on E0716 temporaries in V3's
+Home label wiring (`home_panel.rs` — not V1's code),
+fixed by the integrator in `2462a82`. Round 2 on
+`2462a82` — build `42771751700` and headless
+`42771786953` were **still in flight at this audit's
+final check**. Per §18.5's own rule, QA closes R5 only
+when the build carrying V1's fix lands green; that has
+not happened yet, so the row stays open — fix verified
+in tree, verdict owed by round 2.
+
+### 19.4 §17's PHASE_O citation — aligned with PHASE_O §10's re-sourcing
+
+§17's scan-table row cites Headless Rune probe run
+`42759195547` (SUCCESS on `59cb0be`) as the table's
+artifact source, with no census disclosure. PHASE_O
+§10, as refreshed by V19 and present at `d5da9fd`,
+now **re-sources the table to run `42765217055`**
+(SUCCESS on `9d7dd0a`): its `subtitle-census.txt`
+reads PASS (19/0) and its Home marker PASS, both read
+from the artifact, and every per-tree figure and
+per-item measurement reproduces the original
+discharge's values exactly (two rows added: the
+speaker and home-missing-audio trees). §10 also makes
+the disclosure §17's citation lacked: run
+`42759195547`'s own `subtitle-census.txt` reads
+**FAIL (5 assertions)** inside its green workflow —
+the fail-soft pattern first flagged on that very run.
+**Alignment:** §17's row is superseded on citation —
+the table's standing source is `42765217055` per
+PHASE_O §10; the overflow verdict over `42759195547`'s
+artifacts was genuinely measured and stands (0
+non-exempt hits), but no citation in this doc should
+rest on that run without its census disclosure beside
+it. The next upgrade is W12's (this wave): re-source
+to the Wave V integration headless run — the first
+dispatched under the full 16/16 SCAN_SET contract —
+once its transcripts are read.
+
+### 19.5 §18.3's open cell — resolved
+
+§18.3 claimed no headless verdict for the Wave U tree
+because round-2 headless `42767540386` was still in
+flight at its filing. It has since completed **GREEN**
+on `fbc3644`, and the integrator read its transcripts
+on the artifacts: subtitle census PASS (19/0), Home
+missing-audio marker PASS, Home scan-fallback marker
+PASS on its first real run, overflow CLEAN with the
+16/16 scan set complete. §18.3's "still in flight"
+cell is superseded accordingly — the Wave U tree is
+headless-verified.
+
+### 19.6 What remains after this alignment
+
+| # | Remainder | State / owner |
+|---|---|---|
+| R2 | `help_panel.rs` "54 rows" prose vs its 61/36 pins | **W11** (Wave W doc-text corrections) — in flight; closes on its CI |
+| R3 | `src/subtitles.rs` stale speaker-prefix module doc | **W11** (same slice, with the `library_panel.rs` stem-naming provenance V1 flagged) — in flight |
+| R4 | Encode-progress consumers: panel wiring + MCP `notifications/progress` transport. Wave V's V12 added the render-phase contract beside U11's encode contract; both remain core-only at `d5da9fd` | **W1** (panel background job) + **W3** (MCP transport, audit-first) — in flight; closes on their CI |
+| R5 | Figure-library case-loss | fix in tree (§19.3); **open pending Wave V integration round-2 CI** (`42771751700` / `42771786953` on `2462a82`) |
+| R6 (new) | The legacy thumbnail probe's control leg trips on run `42767540386`'s real artifacts: home-totals strip measures 0.672 stage-bg share against the 0.06 ceiling — "premise does not hold" (V17's §6.16 remainder). The probe step is fail-soft, so the workflow stayed green; V7's Home snap pair gate (Wave V) has its first real run in the Wave V integration headless, transcripts not yet read at this check | **W7** owns the diagnosis (premise vs render; re-derive or retire with evidence — never loosen the number) |
+
+One carried item changes owner, not status: §18.4's
+"range MP4/WebM exports carry no audio (the panel
+warns)" is **W6**'s slice this wave; it stays open
+until W6's CI lands.

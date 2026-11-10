@@ -397,6 +397,31 @@ scenes, and V7's snap additions do not change
 the produced tree set, so no SCAN_SET entry is
 owed to V7.
 
+Wave W maintenance (W14): no Wave W slice
+registers a new scene (the wave wires progress
+surfaces and hardens; its only headless-facing
+slice is W7's probe-leg diagnosis), so the
+counts the V14 note above recorded stand: the
+scan set still has 16 entries, all required
+and still no pending entries; `scenes()` lists
+34 names, and the harness produces 37 tree
+dumps. Both tree loops were re-verified
+set-equal to the `scenes()` registry (and to
+each other) at this pass, so V14's fallback-
+mirror repair holds. The W7 boundary in
+headless.yml this wave: W7 owns the Home
+thumbnail probe step (and its snap capture
+block for `home-missing-audio` in the snap
+step); everything else in the workflow -- the
+tree loops, the census and marker steps, the
+live-MCP probe, upload and summary -- is this
+pass's. W7's region reads tree dumps but
+produces none, so no SCAN_SET entry is owed
+to it. No IA from W1 or W6 naming workflow
+wiring had been filed at this pass's final
+check; any that lands later is the
+integrator's to apply with this note's counts.
+
 Checks considered and NOT added (they would
 false-positive or judge what rects cannot show):
 

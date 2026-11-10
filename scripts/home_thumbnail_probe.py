@@ -36,18 +36,66 @@ frame's own geometry, size the floors to the measured signal):
     over a large share of the strip -- the thumbnail is 42 pt
     tall (56 * 720/960) against a taller row, so even a
     perfect thumbnail covers only part of the strip; floor
-    18% against a ~40% expectation -- and (b) INK: near-white
-    pixels (every channel >= 190) from the stick figure's
-    strokes, which at thumbnail scale are a thin minority;
-    floor 15 px against a ~50+ expectation. Text elsewhere in
-    the row cannot fake either signal: the strip covers only
-    the thumbnail's slot.
+    18% against a ~33% measured expectation -- and (b) INK:
+    bright stroke pixels (brightest channel >= 100) from
+    the figure's strokes, which at thumbnail scale are a
+    thin minority; floor 15 px against a ~59+ measured
+    expectation (see the Wave W note below). Text elsewhere
+    in the row cannot fake either signal: the strip covers
+    only the thumbnail's slot (the row's text starts at
+    x = 100 pt, past the slot's 92 pt end -- the same run's
+    tree dump shows it).
   * Negative control: the same strip over the `home-totals`
     footer (text only, never a thumbnail) must show almost
     no stage background (<= 6%). If the control trips, the
     probe's colour assumption is wrong for this theme and
     the verdict is UNPROVEN, not PASS -- a probe that cannot
     distinguish its control proves nothing.
+
+Wave W (W7) re-derivation -- the Q16 colour premises were
+fixture-specific and never held on a real snap. Every real
+transcript on record (headless runs 42764348922,
+42765217055, 42767540386) shows the identical control
+trip, stage-bg share 0.672 against the 0.06 ceiling: the
+probe had never issued a verdict on a real snap. Measured
+on run 42767540386's artifacts, the render is right and
+the premises were wrong, in two places:
+
+  * The strip's non-thumbnail flat colour is the app
+    theme's CARD background, #1D222B (29, 34, 43) --
+    app_theme.rs pins `t.card.hex() == "#1d222bff"`, and
+    the totals text sits on it (home_panel.rs renders
+    `home-totals` as plain text on the card). Q16's
+    fixture invented a panel colour (24, 26, 31) that
+    sits (11, 14, 17) from the stage background; the real
+    card sits (6, 6, 5) from it -- INSIDE the old +-12
+    tolerance box, so the control strip's card area was
+    counted as stage background. BG_TOL is now 2: less
+    than half the 5-channel minimum distance to the
+    nearest other flat colour the source fixes, so every
+    pixel is classified by its nearest source colour and
+    card/stage blends (midpoint distance 3) count as
+    neither. Measured at tolerance 2 on the same
+    artifacts: rows 0.333 / 0.337 / 0.339 stage-bg share
+    (floor 0.18), control 0.008 (ceiling 0.06).
+  * The ink predicate (every channel >= 190) measures
+    ZERO on every real row: `render_thumbnail` shrinks
+    the x2 supersampled frame to 112 px wide with a
+    Triangle filter (home_panel.rs), so the figure's
+    strokes are sub-pixel and their anti-aliased peak
+    coverage never reaches 190 on all channels. Ink is
+    now the brightest-channel predicate (>= 100: the
+    strip's flats peak at 48 stage / 43 card / 76 for the
+    current row's selected fill, so inside the slot only
+    stroke pixels qualify). Measured on the same
+    artifacts: 115 / 115 / 59 px per row (the demo-only
+    row is the weakest) -- the 15 px floor stands, now
+    at ~1/4 of the weakest measured signal.
+
+  The self-test fixtures below paint the REAL card
+  colour as their panel background, and a stage-washed
+  fixture pins the control's trip path (UNPROVEN), so
+  the fixture can no longer hide either conflation.
 
 Wave V (V7) pair gate -- content fidelity across scenes.
   The workflow also snaps `home-missing-audio` (Wave V; the
@@ -118,14 +166,26 @@ import zlib
 
 # --- The seeded fixture's facts (source-cited above) -----------
 STAGE_BG = (0x23, 0x28, 0x30)   # Project::new_demo background
-BG_TOL = 12                     # per-channel Chebyshev tolerance
-INK_MIN = 190                   # figure 0xE8E8EC -> (232, 232, 236)
+# Per-channel Chebyshev tolerance for "is stage background".
+# The nearest other flat colour the source fixes is the
+# theme's card background #1D222B (29, 34, 43), a distance
+# of (6, 6, 5); the tolerance must stay under half the
+# 5-channel minimum (2.5) so classification is by nearest
+# source colour -- 2 (Wave W re-derivation, see docstring;
+# the original 12 swallowed the card colour whole).
+BG_TOL = 2
+# Ink = a bright stroke pixel: brightest channel >= this.
+# Figure 0xE8E8EC anti-aliased by the thumbnail's Triangle
+# shrink peaks far below full value; 100 clears every flat
+# the strip can hold (stage 48, card 43, selected fill 76)
+# while the weakest real row measures 59 px of it.
+INK_MIN = 100
 THUMB_W_PT = 56.0               # home_panel.rs THUMB_W_PT
 ROW_PAD_PT = 8.0                # design::row_base px(8.0)
 
 # --- Floors (Wave L discipline: ~1/3 of the expected signal) ---
-ROW_BG_FLOOR = 0.18             # expected ~0.40
-ROW_INK_FLOOR = 15              # expected ~50+
+ROW_BG_FLOOR = 0.18             # measured ~0.33 on real snaps
+ROW_INK_FLOOR = 15              # measured ~59+ on real snaps
 CONTROL_BG_CEIL = 0.06
 DIFF_FLOOR = 25                 # differing px: same vs added-figure content
 ROW_KEYS = ("home-row-0", "home-row-1", "home-row-2")
@@ -281,7 +341,7 @@ def strip_stats(rows, png_w, png_h, rect, sx, sy):
             if (abs(r - STAGE_BG[0]) <= BG_TOL and abs(g - STAGE_BG[1]) <= BG_TOL
                     and abs(b - STAGE_BG[2]) <= BG_TOL):
                 bg += 1
-            elif r >= INK_MIN and g >= INK_MIN and b >= INK_MIN:
+            elif max(r, g, b) >= INK_MIN:
                 ink += 1
     return total, bg, ink
 
@@ -511,6 +571,13 @@ def self_test():
         elements.append({"path": f"#0/panel/{k}", "key": k, "rect": r})
     tree = {"elements": elements}
 
+    # The panel background is the app theme's real card
+    # colour #1D222B -- the Wave W lesson: the invented
+    # (24, 26, 31) this fixture used before sits farther
+    # from the stage background than the real card does,
+    # and hid the tolerance conflation for three waves.
+    CARD = (29, 34, 43, 255)
+
     def painted(x, y):
         for k in ROW_KEYS:
             rx, ry, _rw, rh = rects[k]
@@ -519,16 +586,26 @@ def self_test():
                 if abs((x - (rx + 8)) - (y - (ry + 12))) < 2:
                     return (232, 232, 236, 255)
                 return STAGE_BG + (255,)
-        return (24, 26, 31, 255)  # panel background
+        return CARD
 
     verdict, code, lines = analyse(encode_png(W, H, painted), tree)
     assert verdict == "PASS" and code == 0, lines
     verdict2, code2, lines2 = analyse(
-        encode_png(W, H, lambda x, y: (24, 26, 31, 255)), tree)
+        encode_png(W, H, lambda x, y: CARD), tree)
     assert verdict2 == "FAIL" and code2 == 1, lines2
     print("self-test PASS: painted fixture -> PASS, blank fixture -> FAIL")
     for line in lines:
         print("  " + line)
+
+    # A snap washed in stage background (the panel never
+    # rendered; the stage shows through everywhere,
+    # control included) must trip the control and issue
+    # no verdict -- the control's protective purpose,
+    # pinned for the first time.
+    verdict3, code3, lines3 = analyse(
+        encode_png(W, H, lambda x, y: STAGE_BG + (255,)), tree)
+    assert verdict3 == "UNPROVEN" and code3 == 2, lines3
+    print("self-test PASS: stage-washed fixture -> UNPROVEN (control trips)")
 
     # --- Pair gate (Wave V, V7): synthetic versions of the
     # two scenes' constructions. Kind A = the demo thumb
@@ -550,7 +627,7 @@ def self_test():
                     continue
                 kind = kinds.get(k)
                 if kind is None or not (ry + 12 <= y < ry + 12 + 42):
-                    return (24, 26, 31, 255)
+                    return CARD
                 if kind == "B" and rx + 36 <= x < rx + 52 \
                         and ry + 20 <= y < ry + 44:
                     return (255, 93, 93, 255)
@@ -561,7 +638,7 @@ def self_test():
                 if abs((x - (rx + 8)) - (y - (ry + 12))) < 2:
                     return (232, 232, 236, 255)
                 return STAGE_BG + (255,)
-            return (24, 26, 31, 255)
+            return CARD
         return paint
 
     pop_png = encode_png(W, H, make_painter(
@@ -595,7 +672,7 @@ def self_test():
     # A blank missing-audio snap fails the non-blank floors.
     verdict, code, lines = analyse_pair(
         pop_png, tree,
-        encode_png(W, H, lambda x, y: (24, 26, 31, 255)), miss_tree)
+        encode_png(W, H, lambda x, y: CARD), miss_tree)
     assert verdict == "FAIL" and code == 1, lines
     print("self-test PASS: blank missing-audio fixture -> FAIL")
     return 0
