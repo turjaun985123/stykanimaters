@@ -2777,7 +2777,7 @@ mod tests {
         assert_eq!(glyph_rows('~'), glyph_rows('?'), "unknown -> ?");
     }
 
-    fn image_items(items: &[MediaItem]) -> Vec<([V2; 4], usize)> {
+    fn image_items_with_asset(items: &[MediaItem]) -> Vec<([V2; 4], usize)> {
         items
             .iter()
             .filter_map(|i| match i {
@@ -2824,7 +2824,7 @@ mod tests {
         // Frame 0: asset is 4x2 px, scale 10 -> 40x20 quad at
         // (300, 200), unrotated.
         let items = media_items(&project, 0.0);
-        let images = image_items(&items);
+        let images = image_items_with_asset(&items);
         let (corners, _) = images.last().expect("sprite instance item");
         assert!(close(corners[0], [280.0, 190.0]), "c0 {corners:?}");
         assert!(close(corners[1], [320.0, 190.0]), "c1 {corners:?}");
@@ -2832,13 +2832,13 @@ mod tests {
         assert!(close(corners[3], [280.0, 210.0]), "c3 {corners:?}");
         // Frame 1: keys interpolate — centre (320, 200).
         let items = media_items(&project, 1.0);
-        let images = image_items(&items);
+        let images = image_items_with_asset(&items);
         let (corners, _) = images.last().expect("sprite instance item");
         let centre = scale(add(corners[0], corners[2]), 0.5);
         assert!(close(centre, [320.0, 200.0]), "centre {centre:?}");
         // Frame 2: rotated 90 degrees — the quad is 20 wide, 40 tall.
         let items = media_items(&project, 2.0);
-        let images = image_items(&items);
+        let images = image_items_with_asset(&items);
         let (corners, _) = images.last().expect("sprite instance item");
         assert!(close(corners[0], [350.0, 180.0]), "c0 {corners:?}");
         assert!(close(corners[1], [350.0, 220.0]), "c1 {corners:?}");
@@ -3937,7 +3937,7 @@ mod tests {
         });
         let items = media_items(&project, 0.0);
         assert_eq!(items.len(), 2);
-        let images = image_items(&items);
+        let images = image_items_with_asset(&items);
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].1, 0, "the instance's asset, not the clip's");
         let text = items.iter().find_map(|i| match i {

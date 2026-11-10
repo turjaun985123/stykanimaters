@@ -3822,7 +3822,7 @@ mod wave_y_p10_setup_pose_tests {
     use super::*;
     use crate::graph::{Channel, ChannelTarget, Key};
 
-    fn json<T: serde::Serialize>(v: &T) -> String {
+    fn json<T: serde::Serialize + ?Sized>(v: &T) -> String {
         serde_json::to_string(v).expect("serialises")
     }
 

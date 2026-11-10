@@ -532,8 +532,8 @@ mod tests {
         // "Head" dressed the humanoid's head node (index 2);
         // "Upper Arm L" met node `upper-arm L` (index 3) in
         // slug space.
-        let head_asset = match core.project.figures[0].def.nodes[2].media {
-            Some(SegmentMedia::Image { asset, .. }) => asset,
+        let head_asset = match &core.project.figures[0].def.nodes[2].media {
+            Some(SegmentMedia::Image { asset, .. }) => *asset,
             other => panic!("head node media: {other:?}"),
         };
         assert_eq!(core.project.assets[head_asset].name, "Head");
