@@ -236,7 +236,15 @@ jobs:
           # CWD-relative, so probe() also wipes ./projects
           # before every invocation.
           probe() { rm -rf ./projects; HOME="$(mktemp -d)" timeout "$@"; }
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error subtitles-populated subtitles-top subtitles-speaker home-missing-audio home-scan-fallback; do
+          # The retry list mirrors the plain attempt's
+          # list exactly (Wave V, V14): the Wave 7 light
+          # pair (default-light, settings-open-light) was
+          # missing here, so a plain-attempt miss on either
+          # could never be recovered and its dump would be
+          # absent without a word. The plain loop remains
+          # the coverage contract (gate check 8); this list
+          # is its recovery set, not a subset by design.
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error subtitles-populated subtitles-top subtitles-speaker home-missing-audio home-scan-fallback; do
             if [ ! -f "headless-out/tree-$scene.json" ]; then
               probe 60 xvfb-run -a "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
                 > "headless-out/tree-$scene-xvfb.log" 2>&1
@@ -345,6 +353,20 @@ jobs:
           probe 120 "$BIN" --snap headless-out/snap-home-populated.png --scene home-populated --at 0 \
             > headless-out/snap-home-populated.log 2>&1
           echo $? > headless-out/snap-home-populated.exit
+          # Wave V (V7): the missing-audio Home state,
+          # snapped as well — until now the scene was
+          # only ever tree-dumped (its marker proof is
+          # tree text), so its single row's thumbnail had
+          # no pixels to prove. The thumbnail probe step
+          # below reads this snap against
+          # snap-home-populated.png (the probe's pair
+          # gate: the seeded project is the demo project,
+          # so its thumbnail must match the demo row's
+          # thumbnail in the populated snap and differ
+          # from the added-figure rows).
+          probe 120 "$BIN" --snap headless-out/snap-home-missing-audio.png --scene home-missing-audio --at 0 \
+            > headless-out/snap-home-missing-audio.log 2>&1
+          echo $? > headless-out/snap-home-missing-audio.exit
           probe 120 "$BIN" --snap headless-out/snap-strokes-populated.png --scene strokes-populated --at 0 \
             > headless-out/snap-strokes-populated.log 2>&1
           echo $? > headless-out/snap-strokes-populated.exit
@@ -502,6 +524,13 @@ jobs:
       # rendered frame-0 thumbnails (see
       # scripts/home_thumbnail_probe.py). Fail-soft like
       # every probe step: the transcript is the result.
+      # Wave V (V7): the --also pair extends the same
+      # transcript with the missing-audio snap — its row's
+      # non-blank floors plus the cross-scene fidelity
+      # gate (identical projects share a thumbnail
+      # pixel-for-pixel; the added-figure projects
+      # differ). A missing missing-audio snap reports
+      # UNPROVEN in the transcript, never a step failure.
       - name: Home thumbnail probe — do the populated rows carry renders?
         if: ${{ !cancelled() }}
         continue-on-error: true
@@ -509,7 +538,9 @@ jobs:
           python3 scripts/home_thumbnail_probe.py \
             headless-out/snap-home-populated.png \
             headless-out/tree-home-populated.json \
-            headless-out/home-thumbnail-probe.txt || true
+            headless-out/home-thumbnail-probe.txt \
+            --also-snap headless-out/snap-home-missing-audio.png \
+            --also-tree headless-out/tree-home-missing-audio.json || true
 
       # Wave T (T12): the Home missing-audio marker — the
       # tree-text proof the geometry scanner cannot make.

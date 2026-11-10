@@ -793,7 +793,11 @@ def entry_field(chunk: str) -> str | None:
 # same 980: no Wave S slice added or lost an element
 # key (each findings file says so, and check 2 proves
 # zero loss per key), so the floor stands at 980.
-KEY_TOTAL_FLOOR = 980
+# Wave V integration (F5): the recount on the final
+# Wave V tree reads 983 (980 + V6's 3 dynamic subtitle
+# stems), agreeing with V13/V20's measurement, so the
+# floor is ratcheted 980 -> 983.
+KEY_TOTAL_FLOOR = 983
 
 
 def inventory_counts() -> tuple[int, int, int, int]:

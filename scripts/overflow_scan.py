@@ -365,6 +365,38 @@ its text (the marker plus the scan's defaulted
 "0 frames" count, the discriminator against the
 light-read line).
 
+Wave V maintenance (V14): no new scene was
+registered this wave (V6 builds subtitle-panel
+controls; V7 adds snaps of existing scenes), so
+the counts the U12 note above recorded stand:
+the scan set still has 16 entries, all required
+and still no pending entries; `scenes()` lists
+34 names, and the harness produces 37 tree
+dumps. One harness repair: the xvfb fallback
+tree loop in headless.yml had drifted from the
+plain loop -- it never named the Wave 7 light
+pair (`default-light`, `settings-open-light`),
+so a plain-attempt miss on either could never
+be recovered by the fallback and its dump would
+be absent without a word. The fallback list now
+mirrors the plain list exactly. (The gate's
+check 8 prints the per-loop split report-only
+and names the plain loop the coverage contract;
+that reading is unchanged -- the repair is to
+the recovery set, not the contract.) The three
+1280x720 size-variant probes remain plain-only,
+as before: they are literal probes, not loop
+scenes, and the scenes they pair with are
+retried at the default size. V7 owns the snap
+step's Home region this wave (snaps of
+`home-populated` / `home-missing-audio` plus
+the thumbnail probe's pixel gate, in
+scripts/home_thumbnail_probe.py); the tree
+loops this scan cross-checks already dump both
+scenes, and V7's snap additions do not change
+the produced tree set, so no SCAN_SET entry is
+owed to V7.
+
 Checks considered and NOT added (they would
 false-positive or judge what rects cannot show):
 

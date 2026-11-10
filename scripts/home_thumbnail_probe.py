@@ -49,11 +49,50 @@ frame's own geometry, size the floors to the measured signal):
     the verdict is UNPROVEN, not PASS -- a probe that cannot
     distinguish its control proves nothing.
 
+Wave V (V7) pair gate -- content fidelity across scenes.
+  The workflow also snaps `home-missing-audio` (Wave V; the
+  scene was previously tree-dumped only, so its row's
+  thumbnail had no pixels to prove) and can pass both snaps
+  to this probe (--also-snap / --also-tree). The seeded
+  constructions make the four thumbnail strips a fidelity
+  experiment:
+
+    * home-populated's three saves are the demo project
+      ("Harbour Lights"), then the same project plus one
+      added figure saved twice more ("Night Train",
+      "First Steps"; scenes.rs `scene_home_populated`).
+      Among its three strips, exactly two must therefore
+      be pixel-IDENTICAL and the third must DIFFER -- the
+      added figure is red (editor.rs FIGURE_COLORS[1]) at
+      stage x=390, hundreds of strip pixels.
+    * home-missing-audio's single save is the demo project
+      plus a missing audio clip (which does not render),
+      so its strip must be pixel-identical to the
+      populated snap's singleton strip -- the same content
+      rendered by a separate process -- and differ from
+      the pair.
+
+  Row ORDER is never assumed (the scan sorts
+  newest-first and save mtimes can tie): the gate works
+  on the multiset of strips. Identical means 0 differing
+  pixels -- the rasteriser's determinism is a proven
+  property of this codebase (the subtitle census's
+  pixel-identical mid-stage legs rest on it); different
+  means >= DIFF_FLOOR differing pixels, ~1/4 of the
+  expected added-figure signal. The missing-audio row
+  also passes the same non-blank floors and totals
+  control as the populated rows, against its own tree
+  dump. If the four strips do not share one pixel size,
+  the fixture geometry moved and the gate reports
+  UNPROVEN rather than guessing.
+
 Usage:
     python3 scripts/home_thumbnail_probe.py \
         headless-out/snap-home-populated.png \
         headless-out/tree-home-populated.json \
-        [headless-out/home-thumbnail-probe.txt]
+        [headless-out/home-thumbnail-probe.txt] \
+        [--also-snap headless-out/snap-home-missing-audio.png \
+         --also-tree headless-out/tree-home-missing-audio.json]
     python3 scripts/home_thumbnail_probe.py --self-test
 
 Exit codes: 0 = PASS (thumbnails pixel-proven), 1 = FAIL
@@ -88,7 +127,9 @@ ROW_PAD_PT = 8.0                # design::row_base px(8.0)
 ROW_BG_FLOOR = 0.18             # expected ~0.40
 ROW_INK_FLOOR = 15              # expected ~50+
 CONTROL_BG_CEIL = 0.06
+DIFF_FLOOR = 25                 # differing px: same vs added-figure content
 ROW_KEYS = ("home-row-0", "home-row-1", "home-row-2")
+MISSING_ROW_KEYS = ("home-row-0",)
 CONTROL_KEY = "home-totals"
 
 
@@ -217,14 +258,20 @@ def rect_of(elements, key):
 # ------------------------------------------------------------------
 # The measurement.
 
-def strip_stats(rows, png_w, png_h, rect, sx, sy):
-    """(total, stage_bg_hits, ink_hits) over the row's thumb strip."""
+def strip_bounds(png_w, png_h, rect, sx, sy):
+    """The row's thumbnail strip in PNG pixels: (x0, y0, x1, y1)."""
     x0 = int((rect[0] + ROW_PAD_PT) * sx)
     x1 = int((rect[0] + ROW_PAD_PT + THUMB_W_PT) * sx)
     y0 = int((rect[1] + 2.0) * sy)
     y1 = int((rect[1] + rect[3] - 2.0) * sy)
     x0, y0 = max(0, x0), max(0, y0)
     x1, y1 = min(png_w, x1), min(png_h, y1)
+    return x0, y0, x1, y1
+
+
+def strip_stats(rows, png_w, png_h, rect, sx, sy):
+    """(total, stage_bg_hits, ink_hits) over the row's thumb strip."""
+    x0, y0, x1, y1 = strip_bounds(png_w, png_h, rect, sx, sy)
     total = bg = ink = 0
     for y in range(y0, y1):
         row = rows[y]
@@ -239,16 +286,34 @@ def strip_stats(rows, png_w, png_h, rect, sx, sy):
     return total, bg, ink
 
 
-def analyse(png_bytes, tree):
-    """Return (verdict, exit_code, lines)."""
+def strip_pixels(rows, png_w, png_h, rect, sx, sy):
+    """(w, h, flat [(r, g, b), ...]) over the strip, or None if empty."""
+    x0, y0, x1, y1 = strip_bounds(png_w, png_h, rect, sx, sy)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    pixels = []
+    for y in range(y0, y1):
+        pixels.extend(rows[y][x0:x1])
+    return x1 - x0, y1 - y0, pixels
+
+
+def measure_snap(png_bytes, tree, row_keys):
+    """The control + non-blank measurement for ONE Home snap.
+
+    Return (verdict, exit_code, lines, strips, failures):
+    `lines` carries no final verdict line (callers compose
+    it); `strips` maps each measured row key to its
+    strip_pixels result for the pair gate.
+    """
     lines = []
+    strips = {}
     try:
         png_w, png_h, rows = decode_png(png_bytes)
     except (PngError, zlib.error, struct.error) as e:
-        return "UNPROVEN", 2, [f"snap PNG unreadable: {e}"]
+        return "UNPROVEN", 2, [f"snap PNG unreadable: {e}"], strips, 0
     elements = load_elements(tree)
     if not elements:
-        return "UNPROVEN", 2, ["tree dump carries no elements"]
+        return "UNPROVEN", 2, ["tree dump carries no elements"], strips, 0
     win_w, win_h = window_size(elements)
     sx, sy = png_w / win_w, png_h / win_h
     lines.append(f"snap {png_w}x{png_h}px, window {win_w:.0f}x{win_h:.0f}pt, "
@@ -260,20 +325,22 @@ def analyse(png_bytes, tree):
     control_rect = rect_of(elements, CONTROL_KEY)
     if control_rect is None:
         return "UNPROVEN", 2, lines + [f"control element {CONTROL_KEY!r} "
-                                       "missing from the tree dump"]
+                                       "missing from the tree dump"], strips, 0
     c_total, c_bg, _c_ink = strip_stats(rows, png_w, png_h, control_rect, sx, sy)
     if c_total == 0:
-        return "UNPROVEN", 2, lines + ["control strip is empty (rect off-snap?)"]
+        return ("UNPROVEN", 2,
+                lines + ["control strip is empty (rect off-snap?)"],
+                strips, 0)
     c_frac = c_bg / c_total
     lines.append(f"control {CONTROL_KEY}: stage-bg share {c_frac:.3f} "
                  f"over {c_total}px (ceiling {CONTROL_BG_CEIL})")
     if c_frac > CONTROL_BG_CEIL:
         lines.append("control trips: the strip colour premise does not "
                      "hold for this snap (theme/fixture drift?)")
-        return "UNPROVEN", 2, lines
+        return "UNPROVEN", 2, lines, strips, 0
 
     failures = 0
-    for key in ROW_KEYS:
+    for key in row_keys:
         rect = rect_of(elements, key)
         if rect is None:
             lines.append(f"FAIL  {key}: element missing from the tree dump")
@@ -284,6 +351,7 @@ def analyse(png_bytes, tree):
             lines.append(f"FAIL  {key}: thumbnail strip is empty (rect off-snap?)")
             failures += 1
             continue
+        strips[key] = strip_pixels(rows, png_w, png_h, rect, sx, sy)
         frac = bg / total
         ok = frac >= ROW_BG_FLOOR and ink >= ROW_INK_FLOOR
         lines.append(
@@ -293,11 +361,124 @@ def analyse(png_bytes, tree):
         if not ok:
             failures += 1
     if failures:
+        return "FAIL", 1, lines, strips, failures
+    return "PASS", 0, lines, strips, 0
+
+
+def analyse(png_bytes, tree):
+    """Return (verdict, exit_code, lines) — the populated snap alone."""
+    verdict, code, lines, _strips, failures = measure_snap(
+        png_bytes, tree, ROW_KEYS)
+    if verdict == "FAIL":
         lines.append(f"HOME THUMBNAIL PROBE: FAIL ({failures} row(s) "
                      "without a rendered thumbnail)")
+    elif verdict == "PASS":
+        lines.append("HOME THUMBNAIL PROBE: PASS (all three Home rows carry a "
+                     "rendered frame-0 thumbnail)")
+    return verdict, code, lines
+
+
+def pixel_diff(a, b):
+    """Differing-pixel count between two same-size strips."""
+    return sum(1 for pa, pb in zip(a[2], b[2]) if pa != pb)
+
+
+def analyse_pair(pop_bytes, pop_tree, miss_bytes, miss_tree):
+    """Return (verdict, exit_code, lines) — the Wave V pair gate.
+
+    Both snaps' rows must carry rendered thumbnails (the
+    measure_snap floors + control, per snap), and the four
+    strips must satisfy the seeded constructions' fidelity
+    pattern (see the module docstring): among the populated
+    strips exactly one identical pair plus a differing
+    singleton, and the missing-audio strip pixel-identical
+    to that singleton.
+    """
+    lines = []
+    sections = []
+    total_failures = 0
+
+    lines.append("[home-populated]")
+    v, _c, ls, pop_strips, f = measure_snap(pop_bytes, pop_tree, ROW_KEYS)
+    lines.extend(ls)
+    sections.append(v)
+    total_failures += f
+
+    lines.append("[home-missing-audio]")
+    v, _c, ls, miss_strips, f = measure_snap(
+        miss_bytes, miss_tree, MISSING_ROW_KEYS)
+    lines.extend(ls)
+    sections.append(v)
+    total_failures += f
+
+    lines.append("[thumbnail fidelity gate]")
+    pop = [pop_strips.get(k) for k in ROW_KEYS]
+    miss = miss_strips.get(MISSING_ROW_KEYS[0])
+    gate = None  # None = PASS, else (verdict, reason lines)
+    if any(s is None for s in pop) or miss is None:
+        gate = ("UNPROVEN", ["a row strip could not be extracted "
+                             "(see the sections above)"])
+    else:
+        sizes = {(s[0], s[1]) for s in pop} | {(miss[0], miss[1])}
+        if len(sizes) != 1:
+            gate = ("UNPROVEN",
+                    [f"the four strips do not share one pixel size: "
+                     f"{sorted(sizes)} — the fixture geometry moved"])
+    if gate is None:
+        d01 = pixel_diff(pop[0], pop[1])
+        d02 = pixel_diff(pop[0], pop[2])
+        d12 = pixel_diff(pop[1], pop[2])
+        lines.append(f"populated pairwise differing pixels: "
+                     f"rows 0-1: {d01}, rows 0-2: {d02}, rows 1-2: {d12} "
+                     f"(identical = 0, different-content floor {DIFF_FLOOR})")
+        pairs = {(0, 1): d01, (0, 2): d02, (1, 2): d12}
+        identical = [ij for ij, d in pairs.items() if d == 0]
+        cross_ok = all(d >= DIFF_FLOOR
+                       for ij, d in pairs.items() if ij not in identical)
+        if len(identical) != 1 or not cross_ok:
+            gate = ("FAIL",
+                    ["the populated strips are not one identical pair plus "
+                     "a differing singleton — the added-figure construction "
+                     "no longer reads in the thumbnails"])
+        else:
+            (i, j) = identical[0]
+            k = ({0, 1, 2} - {i, j}).pop()
+            lines.append(f"PASS  populated rows {i} and {j} share a thumbnail "
+                         f"pixel-for-pixel; row {k} differs")
+            dm_single = pixel_diff(miss, pop[k])
+            dm_pair = min(pixel_diff(miss, pop[i]), pixel_diff(miss, pop[j]))
+            lines.append(f"missing-audio strip vs the singleton row {k}: "
+                         f"{dm_single} differing px; vs the paired rows: "
+                         f"{dm_pair} differing px")
+            if dm_single == 0 and dm_pair >= DIFF_FLOOR:
+                lines.append("PASS  the missing-audio project's thumbnail is "
+                             "the demo project's thumbnail, rendered by a "
+                             "separate process, and differs from the "
+                             "added-figure pair")
+                gate = ("PASS", [])
+            else:
+                gate = ("FAIL",
+                        ["the missing-audio strip does not match the "
+                         "populated singleton strip — either the demo "
+                         "content changed in one scene or thumbnails are "
+                         "not content-faithful"])
+    gate_verdict, gate_lines = gate
+    lines.extend(("FAIL  " if gate_verdict == "FAIL" else "") + line
+                 for line in gate_lines)
+    sections.append(gate_verdict)
+    if gate_verdict == "FAIL":
+        total_failures += 1
+
+    if "FAIL" in sections:
+        lines.append(f"HOME THUMBNAIL PROBE: FAIL ({total_failures} "
+                     "assertion(s) failed across the two Home snaps)")
         return "FAIL", 1, lines
-    lines.append("HOME THUMBNAIL PROBE: PASS (all three Home rows carry a "
-                 "rendered frame-0 thumbnail)")
+    if "UNPROVEN" in sections:
+        lines.append("HOME THUMBNAIL PROBE: UNPROVEN")
+        return "UNPROVEN", 2, lines
+    lines.append("HOME THUMBNAIL PROBE: PASS (populated + missing-audio rows "
+                 "carry rendered thumbnails, and the thumbnails are "
+                 "content-faithful across the two scenes)")
     return "PASS", 0, lines
 
 
@@ -348,32 +529,148 @@ def self_test():
     print("self-test PASS: painted fixture -> PASS, blank fixture -> FAIL")
     for line in lines:
         print("  " + line)
+
+    # --- Pair gate (Wave V, V7): synthetic versions of the
+    # two scenes' constructions. Kind A = the demo thumb
+    # (stage bg + ink diagonal), kind B = A plus a red
+    # block (the added figure), kind C = a third distinct
+    # thumb (stage bg + an ink bar, no diagonal).
+    miss_rects = {"home-row-0": [16, 20, 300, 80],
+                  "home-totals": [16, 278, 300, 18]}
+    miss_elements = [{"path": "#0", "key": None, "rect": [0, 0, W, H]}]
+    for k, r in miss_rects.items():
+        miss_elements.append({"path": f"#0/panel/{k}", "key": k, "rect": r})
+    miss_tree = {"elements": miss_elements}
+
+    def make_painter(row_rects, kinds):
+        def paint(x, y):
+            for k, r in row_rects.items():
+                rx, ry = r[0], r[1]
+                if not (rx + 8 <= x < rx + 8 + 56 and ry + 2 <= y < ry + 78):
+                    continue
+                kind = kinds.get(k)
+                if kind is None or not (ry + 12 <= y < ry + 12 + 42):
+                    return (24, 26, 31, 255)
+                if kind == "B" and rx + 36 <= x < rx + 52 \
+                        and ry + 20 <= y < ry + 44:
+                    return (255, 93, 93, 255)
+                if kind == "C":
+                    if ry + 30 <= y < ry + 32:
+                        return (232, 232, 236, 255)
+                    return STAGE_BG + (255,)
+                if abs((x - (rx + 8)) - (y - (ry + 12))) < 2:
+                    return (232, 232, 236, 255)
+                return STAGE_BG + (255,)
+            return (24, 26, 31, 255)
+        return paint
+
+    pop_png = encode_png(W, H, make_painter(
+        rects, {"home-row-0": "B", "home-row-1": "B", "home-row-2": "A"}))
+    miss_png = encode_png(W, H, make_painter(
+        miss_rects, {"home-row-0": "A"}))
+    verdict, code, lines = analyse_pair(pop_png, tree, miss_png, miss_tree)
+    assert verdict == "PASS" and code == 0, lines
+    print("self-test PASS: pair fixture (pair B + singleton A, missing A) "
+          "-> PASS")
+    for line in lines:
+        print("  " + line)
+
+    # The missing-audio thumb carrying the ADDED figure's
+    # content (kind B) must fail the fidelity gate.
+    miss_b = encode_png(W, H, make_painter(
+        miss_rects, {"home-row-0": "B"}))
+    verdict, code, lines = analyse_pair(pop_png, tree, miss_b, miss_tree)
+    assert verdict == "FAIL" and code == 1, lines
+    print("self-test PASS: missing-audio thumb = added-figure content "
+          "-> FAIL")
+
+    # Three distinct populated thumbs: no identical pair,
+    # the construction is gone -> FAIL.
+    pop_abc = encode_png(W, H, make_painter(
+        rects, {"home-row-0": "A", "home-row-1": "B", "home-row-2": "C"}))
+    verdict, code, lines = analyse_pair(pop_abc, tree, miss_png, miss_tree)
+    assert verdict == "FAIL" and code == 1, lines
+    print("self-test PASS: three distinct populated thumbs -> FAIL")
+
+    # A blank missing-audio snap fails the non-blank floors.
+    verdict, code, lines = analyse_pair(
+        pop_png, tree,
+        encode_png(W, H, lambda x, y: (24, 26, 31, 255)), miss_tree)
+    assert verdict == "FAIL" and code == 1, lines
+    print("self-test PASS: blank missing-audio fixture -> FAIL")
     return 0
+
+
+def load_tree(path):
+    """(tree, None) or (None, error line) — unreadable is data."""
+    try:
+        return json.load(open(path)), None
+    except Exception as e:
+        return None, f"tree dump unreadable: {e}"
 
 
 def main(argv):
     if "--self-test" in argv:
         return self_test()
-    if len(argv) < 3:
+    args = argv[1:]
+    also_snap = also_tree = None
+    positional = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--also-snap" and i + 1 < len(args):
+            also_snap = args[i + 1]
+            i += 2
+        elif args[i] == "--also-tree" and i + 1 < len(args):
+            also_tree = args[i + 1]
+            i += 2
+        else:
+            positional.append(args[i])
+            i += 1
+    if len(positional) < 2:
         print(__doc__)
         return 2
-    snap_path, tree_path = argv[1], argv[2]
-    out_path = argv[3] if len(argv) > 3 else None
+    snap_path, tree_path = positional[0], positional[1]
+    out_path = positional[2] if len(positional) > 2 else None
+    pair_requested = also_snap is not None or also_tree is not None
     lines = []
     if not os.path.isfile(snap_path) or not os.path.isfile(tree_path):
         verdict, code = "UNPROVEN", 2
         lines.append(f"inputs missing (snap: {snap_path}, tree: {tree_path}) "
                      "-- the headless run produced no populated Home snap/tree")
         lines.append("HOME THUMBNAIL PROBE: UNPROVEN")
+    elif pair_requested and (also_snap is None or also_tree is None):
+        verdict, code = "UNPROVEN", 2
+        lines.append("--also-snap and --also-tree must be given together")
+        lines.append("HOME THUMBNAIL PROBE: UNPROVEN")
     else:
-        try:
-            tree = json.load(open(tree_path))
-        except Exception as e:  # unreadable dump: data, not a crash
+        tree, err = load_tree(tree_path)
+        if err is not None:
             verdict, code = "UNPROVEN", 2
-            lines.append(f"tree dump unreadable: {e}")
+            lines.append(err)
             lines.append("HOME THUMBNAIL PROBE: UNPROVEN")
-        else:
+        elif not pair_requested:
             verdict, code, lines = analyse(open(snap_path, "rb").read(), tree)
+        elif not os.path.isfile(also_snap) or not os.path.isfile(also_tree):
+            # The populated half still runs; the pair gate is
+            # the unproven part (the snap step is fail-soft, so
+            # a missing missing-audio snap is probe data).
+            verdict, code, lines = analyse(open(snap_path, "rb").read(), tree)
+            lines.append(f"pair inputs missing (snap: {also_snap}, "
+                         f"tree: {also_tree}) -- the headless run produced "
+                         "no missing-audio Home snap/tree")
+            if verdict != "FAIL":
+                verdict, code = "UNPROVEN", 2
+                lines.append("HOME THUMBNAIL PROBE: UNPROVEN")
+        else:
+            miss_tree, err = load_tree(also_tree)
+            if err is not None:
+                verdict, code = "UNPROVEN", 2
+                lines.append(f"missing-audio {err}")
+                lines.append("HOME THUMBNAIL PROBE: UNPROVEN")
+            else:
+                verdict, code, lines = analyse_pair(
+                    open(snap_path, "rb").read(), tree,
+                    open(also_snap, "rb").read(), miss_tree)
     text = "\n".join(lines) + "\n"
     print(text, end="")
     if out_path:
@@ -383,8 +680,8 @@ def main(argv):
         summary = os.environ.get("GITHUB_STEP_SUMMARY")
         if summary:
             with open(summary, "a") as fh:
-                fh.write("\n### Home thumbnail probe (Wave Q, Q16)\n\n```\n"
-                         + text + "```\n")
+                fh.write("\n### Home thumbnail probe (Wave Q, Q16; pair "
+                         "gate Wave V, V7)\n\n```\n" + text + "```\n")
     return code
 
 
