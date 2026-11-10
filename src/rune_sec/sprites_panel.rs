@@ -371,7 +371,14 @@ pub fn base_key(core: &EditorCore, inst: &SpriteInstance, frame: f32) -> Instanc
         return k;
     }
     if let Some(k) = InstanceKey::sample(&inst.keys, frame) {
-        return InstanceKey { frame, ..k };
+        // A stored key materialises its scale_y: when the
+        // sample follows Scale (the sentinel the readout
+        // surfaces keep), the write freezes the sampled
+        // EFFECTIVE value — the documented materialisation
+        // the Add-key / stepper pins assert. Follow is
+        // re-entered only through the explicit toggle.
+        let scale_y = if k.scale_y <= 0.0 { k.eff_scale_y() } else { k.scale_y };
+        return InstanceKey { frame, scale_y, ..k };
     }
     InstanceKey {
         frame,
