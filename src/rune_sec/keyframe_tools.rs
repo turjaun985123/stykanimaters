@@ -138,6 +138,56 @@
 //! `core.project.channels` — the same channel
 //! `key_graph_angle` authors.
 //!
+//! ## Channel scope — Angle by design (Wave AA, AA4)
+//!
+//! Every single-target op in this section resolves
+//! `(selected_figure, Angle(selected_node))` — see
+//! [`selected_angle_channel`]. That is the section's
+//! charter (Phase D, section 31: the graph-key controls
+//! for the selected joint, keying its angle), not an
+//! oversight, and the Wave AA audit of the keyframe
+//! tools' channel scope re-verified it surface by
+//! surface:
+//!
+//! * The library this section composes
+//!   (`stykanimate_rs::graph_keys`) is channel-generic
+//!   by design: every op addresses its channel by index
+//!   or by (figure, target) pair — Bend, Length and
+//!   Root channels included — and the MCP graph tools
+//!   inherit that reach (`graph_key` accepts the
+//!   `bend:N` / `length:N` / `root_x` spellings; the
+//!   index-addressed handlers accept any channel).
+//! * The Graph panel, mounted directly above this
+//!   section in the same column, edits the DRAWN
+//!   channel, whichever target it carries: its delete,
+//!   shift, duplicate and canvas edits resolve through
+//!   `effective_channel_index`, never a fixed target.
+//! * The two angle-named MCP core-op tools
+//!   (`graph_key_angle`, `graph_set_interp_at_playhead`)
+//!   state their angle scope in their own descriptions
+//!   and name the generic counterpart beside them.
+//!
+//! So no target is unreachable from the shell or from
+//! MCP; it is unreachable from THIS section, whose
+//! contract is one figure, one joint, its angle
+//! channel — framed by the target line and the
+//! angle-key indicator, and audited for exactly that
+//! honesty in UI mission Wave 10 (the scope-label
+//! note below). Widening the section to follow a
+//! picked target would duplicate the graph panel's
+//! drawn-channel state in a second section; acting on
+//! all of the joint's channels at once would break
+//! the ops' per-channel semantics (the clipboard holds
+//! ONE channel's keys; the nudge collision rule is
+//! per channel). The pin
+//! `single_target_ops_never_touch_the_joints_other_channels`
+//! proves the scope mechanically. Z11's bend-parity
+//! audit classified the same scope as documented
+//! design ("parity by equal absence", §6.20 remainder
+//! (2)); this note is the standing record it pointed
+//! at, and the scope changes only by a board call,
+//! never as an audit side effect.
+//!
 //! Phase H (section 18/40) puts Font Awesome glyphs on four
 //! of this section's controls through `icon_btn`: "Key all
 //! here" (`key`), "Copy key +10" (`copy`) and "Clear
@@ -411,6 +461,9 @@ use crate::State;
 /// The graph channel this section acts on: the selected
 /// figure's `Angle(selected_node)` channel — the one
 /// `key_graph_angle` authors and `set_graph_key_interp` edits.
+/// The Angle scope is the section's charter, not an
+/// oversight — see the module docs' "Channel scope"
+/// note (Wave AA, AA4) for the audit trail.
 /// `None` when no joint is selected or no channel exists yet.
 pub fn selected_angle_channel(core: &EditorCore) -> Option<&Channel> {
     let ni = core.selected_node?;
@@ -1609,6 +1662,68 @@ mod tests {
         assert_eq!(selected_angle_channel_index(&core), None);
         core.selected_node = None;
         assert_eq!(selected_angle_channel_index(&core), None);
+    }
+
+    /// The AA4 scope pin: this section's single-target
+    /// ops act on the selected joint's ANGLE channel
+    /// only — the scope the module docs' "Channel
+    /// scope" note promises. The same joint's Bend and
+    /// Length channels (same figure, same node) must
+    /// come through a delete and a nudge with every
+    /// key's frame, value and interp mode untouched,
+    /// while the angle channel provably changes — so
+    /// the pin fails if the scope ever silently widens
+    /// OR if the ops stop acting at all.
+    #[test]
+    fn single_target_ops_never_touch_the_joints_other_channels() {
+        let mut core = EditorCore::new();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(1),
+            keys: vec![Key::flat(0.0, 10.0), Key::flat(2.0, 30.0)],
+        });
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Bend(1),
+            keys: vec![Key::flat(0.0, 0.3), Key::flat(2.0, -0.4)],
+        });
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Length(1),
+            keys: vec![
+                Key::flat(0.0, 7.0).with_interp(Interp::Step),
+                Key::flat(2.0, 9.0),
+            ],
+        });
+        core.selected_figure = 0;
+        core.selected_node = Some(1);
+        let others_before: Vec<Vec<(f32, f32, Interp)>> = core.project.channels[1..]
+            .iter()
+            .map(|ch| ch.keys.iter().map(|k| (k.frame, k.value, k.interp)).collect())
+            .collect();
+
+        // Delete removes the angle key at the playhead…
+        core.current = 0;
+        assert!(delete_key_here_core(&mut core));
+        // …and the nudge moves the surviving angle key.
+        core.current = 2;
+        assert!(nudge_key_here_core(&mut core, 1));
+
+        let angle = selected_angle_channel(&core).expect("angle channel survives");
+        assert_eq!(angle.keys.len(), 1, "the frame-0 angle key was deleted");
+        assert_eq!(
+            (angle.keys[0].frame, angle.keys[0].value),
+            (3.0, 30.0),
+            "the frame-2 angle key was nudged to frame 3"
+        );
+        let others_after: Vec<Vec<(f32, f32, Interp)>> = core.project.channels[1..]
+            .iter()
+            .map(|ch| ch.keys.iter().map(|k| (k.frame, k.value, k.interp)).collect())
+            .collect();
+        assert_eq!(
+            others_after, others_before,
+            "the joint's bend and length channels are untouched"
+        );
     }
 
     #[test]

@@ -1392,11 +1392,26 @@ pub fn preview_points(preset: TangentPreset, w: f32, h: f32, samples: usize) -> 
 /// bend data) is keyed, exactly as `key_graph_angle` keys
 /// the pose angle. Bend values are radians throughout —
 /// the `bends_at` convention Y1's channel evaluation reads.
+///
+/// The origin (node 0) is refused, with `cycle_bend`'s
+/// sentence, before any snapshot (Wave AA, AA5): node 0
+/// has no segment, so a Bend(0) channel's value lands in
+/// a bends slot nothing renders — every frame-bend writer
+/// (`cycle_bend`, the inspector steppers, MCP `set_bend`)
+/// already refuses this exact write. The refusal blocks
+/// AUTHORING only: a Bend(0) channel a saved project
+/// already carries stays selectable in this panel, its
+/// keys stay editable and deletable, and it round-trips
+/// untouched.
 pub fn key_bend(core: &mut EditorCore) {
     let Some(ni) = core.selected_node else {
         core.status = "Select a joint first, then Key bend.".into();
         return;
     };
+    if ni == 0 {
+        core.status = "The origin has no segment to bend.".into();
+        return;
+    }
     let fi = core.selected_figure;
     let frame = core.current as f32;
     let target = ChannelTarget::Bend(ni);
@@ -2613,6 +2628,33 @@ mod tests {
         assert!(bare.project.channels.is_empty());
         assert_eq!(bare.undo_depth(), depth);
         assert!(bare.status.contains("Select a joint first"));
+    }
+
+    #[test]
+    fn key_bend_refuses_the_origin_without_a_snapshot() {
+        // Wave AA (AA5): node 0 has no segment, so a Bend(0)
+        // channel is inert at render; Key bend refuses it
+        // with cycle_bend's sentence, before any snapshot —
+        // the refusal every frame-bend writer already makes.
+        let mut core = EditorCore::new();
+        core.selected_node = Some(0);
+        let depth = core.undo_depth();
+        key_bend(&mut core);
+        assert_eq!(core.status.as_str(), "The origin has no segment to bend.");
+        assert!(core.project.channels.is_empty(), "no channel authored");
+        assert_eq!(core.undo_depth(), depth, "the refusal spends no undo step");
+        // A Bend(0) channel a saved project already carries
+        // gains no key and keeps the one it has: the refusal
+        // blocks authoring, never the stored data.
+        core.project.channels = vec![channel(
+            ChannelTarget::Bend(0),
+            vec![Key::flat(0.0, 0.3)],
+        )];
+        key_bend(&mut core);
+        let ch = channel_for(&core, ChannelTarget::Bend(0)).unwrap();
+        assert_eq!(ch.keys.len(), 1, "the stored key is untouched");
+        assert_eq!(ch.keys[0].value, 0.3);
+        assert_eq!(core.undo_depth(), depth, "still no snapshot");
     }
 
     #[test]

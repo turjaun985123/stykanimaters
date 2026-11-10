@@ -149,6 +149,17 @@
 //!   X5 selection is its whole effect, no key is written
 //!   and no undo step is spent (the panel's Add-key
 //!   refusal of a phantom step, applied to a gesture).
+//! - Pointer travel inside [`DRAG_THRESHOLD`] of the
+//!   press point is jitter, not a drag (Wave AA, AA8):
+//!   it writes nothing at all — not even a live key —
+//!   so a click whose release lands a hair off the press
+//!   is still a click, and a keyless frame authors no
+//!   key from hand shake alone (the subtitle lane's
+//!   "a wiggle inside one frame spends nothing", in
+//!   stage units). The first application at or past
+//!   the threshold starts the drag, and its target is
+//!   still measured from the press point, so crossing
+//!   costs no travel and the sprite does not jump.
 //!
 //! The record lives in this module's `thread_local`
 //! (the subtitle lane's `CUE_DRAG` precedent): gesture
@@ -558,6 +569,17 @@ pub fn sprite_pick_at(core: &EditorCore, p: V2) -> Option<usize> {
     sprite_at_point(&sprite_quads_at(core), p)
 }
 
+/// Pointer travel from the press point, in stage units,
+/// below which a sprite grab is a click rather than a
+/// drag (Wave AA, AA8 — see the module docs'
+/// "Dragging"): sub-threshold applications write
+/// nothing, so release jitter cannot author a key or
+/// spend an undo step. Stage units are the drag API's
+/// only currency (the stage pick tolerance is likewise
+/// stage-space); at the fit view one stage unit is
+/// roughly one window point.
+pub const DRAG_THRESHOLD: f32 = 2.0;
+
 /// One stage sprite drag in flight (see the module docs,
 /// "Dragging"): everything the settle needs, captured at
 /// the grab — the sprite's identity (index + the asset it
@@ -587,6 +609,14 @@ pub struct SpriteDrag {
     /// behaviour), else the stage-centre default. Only
     /// `x` / `y` ever change on it.
     pub base: InstanceKey,
+    /// Whether the pointer has travelled at least
+    /// [`DRAG_THRESHOLD`] from the press point — the
+    /// jitter gate (Wave AA, AA8): until it has, no
+    /// application writes anything; once it has, the
+    /// drag stays a drag even if the pointer comes back
+    /// inside the threshold (the release then settles
+    /// by the ordinary net-effect rules).
+    pub moved: bool,
     /// The instance's key list at the grab, verbatim.
     pub orig_keys: Vec<InstanceKey>,
 }
@@ -700,12 +730,31 @@ fn write_key_live(core: &mut EditorCore, sprite: usize, key: InstanceKey) -> boo
 /// dropped and nothing is written (see the module docs).
 fn sprite_drag_apply(core: &mut EditorCore, p: V2) {
     let record = SPRITE_DRAG.with(|cell| cell.borrow().clone());
-    let Some(record) = record else {
+    let Some(mut record) = record else {
         return;
     };
     if !drag_identity_holds(core, &record) {
         SPRITE_DRAG.with(|cell| *cell.borrow_mut() = None);
         return;
+    }
+    if !record.moved {
+        // The jitter gate (Wave AA, AA8): until the
+        // pointer has travelled DRAG_THRESHOLD from the
+        // press point the grab is still a click in
+        // progress — write nothing, not even a live key,
+        // so a keyless frame can gain no key from hand
+        // shake and the release's net-nil check sees the
+        // untouched list. Crossing flips `moved` on the
+        // stored record; the target below is still
+        // measured from the press point, so the sprite
+        // starts moving with the full delta, no jump.
+        let dx = p[0] - record.press[0];
+        let dy = p[1] - record.press[1];
+        if dx * dx + dy * dy < DRAG_THRESHOLD * DRAG_THRESHOLD {
+            return;
+        }
+        record.moved = true;
+        SPRITE_DRAG.with(|cell| *cell.borrow_mut() = Some(record.clone()));
     }
     if let Some(key) = drag_target(&record, p) {
         write_key_live(core, record.sprite, key);
@@ -741,6 +790,7 @@ pub fn sprite_drag_down(core: &mut EditorCore, sprite: usize, p: V2) {
         press: p,
         frame,
         base: crate::rune_sec::sprites_panel::base_key(core, inst, frame as f32),
+        moved: false,
         orig_keys: inst.keys.clone(),
     };
     SPRITE_DRAG.with(|cell| *cell.borrow_mut() = Some(record));
@@ -1455,6 +1505,66 @@ mod tests {
         sprite_drag_up(&mut core, [300.0, 200.0], false);
         assert_eq!(keys_json(&core, 0), before);
         assert_eq!(core.undo_depth(), 0);
+    }
+
+    #[test]
+    fn sprite_drag_jitter_below_threshold_is_a_click() {
+        // Wave AA (AA8): pointer travel inside
+        // DRAG_THRESHOLD of the press is hand jitter, not
+        // a drag: no live write, no key, no undo step, no
+        // status — even though the release point is not
+        // the press point, so the pre-AA8 gesture would
+        // have committed a key here.
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+        let before = keys_json(&core, 0);
+        let status = core.status.clone();
+        sprite_drag_down(&mut core, 0, [300.0, 200.0]);
+        assert!(sprite_drag_move(&mut core, [301.0, 201.0]));
+        // Nothing was written live: the stored key is
+        // exactly where it was.
+        let live = core.sprite_key_at(0, 0).expect("a key at frame 0");
+        assert!(close([live.x, live.y], [300.0, 200.0]), "live {live:?}");
+        sprite_drag_up(&mut core, [301.5, 200.5], false);
+        assert!(!sprite_drag_active());
+        assert_eq!(keys_json(&core, 0), before);
+        assert_eq!(core.undo_depth(), 0);
+        assert_eq!(core.status, status);
+        // At a KEYLESS frame the same jitter must not
+        // materialise the sample into a stored key.
+        core.goto(1);
+        let before = keys_json(&core, 0);
+        sprite_drag_down(&mut core, 0, [320.0, 200.0]);
+        assert!(sprite_drag_move(&mut core, [321.0, 201.0]));
+        sprite_drag_up(&mut core, [321.0, 201.0], false);
+        assert_eq!(core.project.sprites[0].keys.len(), 2, "no key authored");
+        assert_eq!(keys_json(&core, 0), before);
+        assert_eq!(core.undo_depth(), 0);
+    }
+
+    #[test]
+    fn sprite_drag_threshold_crossing_moves_by_the_full_delta() {
+        // Wave AA (AA8): the first sub-threshold Move
+        // writes nothing; the Move that crosses applies
+        // the target measured from the PRESS point — the
+        // threshold is not subtracted, so the sprite does
+        // not jump — and the release commits the usual
+        // single undo step through the op.
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+        sprite_drag_down(&mut core, 0, [300.0, 200.0]);
+        assert!(sprite_drag_move(&mut core, [301.0, 200.0]));
+        let live = core.sprite_key_at(0, 0).expect("a key at frame 0");
+        assert!(close([live.x, live.y], [300.0, 200.0]), "live {live:?}");
+        assert!(sprite_drag_move(&mut core, [310.0, 204.0]));
+        let live = core.sprite_key_at(0, 0).expect("a key at frame 0");
+        assert!(close([live.x, live.y], [310.0, 204.0]), "live {live:?}");
+        assert_eq!(core.undo_depth(), 0, "live writes spend no snapshot");
+        sprite_drag_up(&mut core, [310.0, 204.0], false);
+        assert_eq!(core.undo_depth(), 1, "one undo step per drag");
+        assert_eq!(core.status, "Sprite 1 key set at frame 1.");
+        let key = core.sprite_key_at(0, 0).expect("a key at frame 0");
+        assert!(close([key.x, key.y], [310.0, 204.0]), "committed {key:?}");
     }
 
     #[test]

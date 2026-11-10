@@ -173,16 +173,78 @@
 //! yet" empty state now requires both silent — a
 //! state-keyed but unposed figure gets its rows, not a
 //! message denying its keys exist.
+//!
+//! ## Channel-key marks (Wave AA, AA3 — §6.20 (2))
+//!
+//! A figure's graph channel keys (`Project::channels`)
+//! are the third event kind this lane shows. The pose
+//! derivation cannot see them at all: keying a channel
+//! writes no pose, so a figure animated purely from the
+//! Graph panel — the normal way to animate a bend, a
+//! length or a root drift — showed whatever its stored
+//! poses happened to do and no trace of the frames its
+//! channels actually turn on. Each figure row now also
+//! carries its channel-key frames
+//! ([`channel_key_frames`]): the frames holding a key
+//! in ANY channel targeting the figure, every
+//! `ChannelTarget` at parity — root (X and Y), angle,
+//! length and bend mark identically, exactly as the
+//! timeline's marker row already marks every channel
+//! with one glyph. Bend keys, the newest target, are
+//! visible here precisely where angle keys are.
+//!
+//! The mark is the marker row's own: `●` in the
+//! secondary text tone (`marker_glyph_color`'s graph
+//! colour), so a channel key reads as the same event in
+//! both rows of the timeline card. Graph keys live at
+//! fractional times, so "on a frame" is the marker
+//! row's mapping — [`graph_key_frame`]'s rounding
+//! (nearest frame, halves away from zero), imported
+//! from `timeline_marks`, never re-typed here, so the
+//! two rows cannot disagree about which frame a key
+//! sits on; a key rounding outside the timeline marks
+//! nothing, rather than piling onto an end frame. (The
+//! sprite rows above skip fractional keys instead:
+//! sprite keys are frame-indexed storage, graph keys
+//! are timed curves — different data, different honest
+//! rule.) Channels pointing at a figure that no longer
+//! exists mark no row — the graph module's standing
+//! rule for stale channels.
+//!
+//! Coincidences compose without losing an event. The
+//! glyph slot keeps the pose/state precedence (pose `◆`
+//! in the accent, else state `◇` in the secondary
+//! accent, the state border on a pose+state frame
+//! unchanged); a channel key on the same frame adds
+//! its `●` beside the glyph — the marker row already
+//! ships two glyphs in one 30 pt cell at this gap, and
+//! the glyph row here never holds more than two — and
+//! on a pose+state+channel frame the state keeps the
+//! border while the channel takes the second glyph, so
+//! all three kinds stay visible. A channel key alone
+//! shows the lone `●`. On the current frame's tinted
+//! cell the dot keeps the secondary text tone, as the
+//! diamond keeps the accent there — this lane's own
+//! current-frame convention, not the marker row's
+//! white-on-accent one. Cell presses are unchanged
+//! (select + goto — the mark rides the existing cells,
+//! no new element keys). The lane's gating widens with
+//! the marks: rows render when pose keys OR state keys
+//! OR channel keys exist ([`any_channel_keys`]), and
+//! the "No keyframes yet" empty state requires all
+//! three silent — a channel-keyed but unposed figure
+//! gets its rows, not a message denying its keys
+//! exist.
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, Color, El};
 use stykanimate_rs::editor::EditorCore;
-use stykanimate_rs::model::{FigureInstance, SpriteInstance};
+use stykanimate_rs::model::{FigureInstance, Project, SpriteInstance};
 use stykanimate_rs::stats::figure_keyframes;
 
 use crate::rune_sec::design;
 use crate::rune_sec::fx_browser::preset_label_width;
-use crate::rune_sec::timeline_marks::{CHIP_GAP, CHIP_W};
+use crate::rune_sec::timeline_marks::{graph_key_frame, CHIP_GAP, CHIP_W};
 use crate::stage_view::hex_color;
 use crate::State;
 
@@ -333,6 +395,11 @@ pub struct DopeRow {
     /// frames where an animation state key switches
     /// the clip this figure plays (Wave Y, Y11).
     pub state_keys: Vec<usize>,
+    /// The figure's channel-key frames, ascending and
+    /// deduped ([`channel_key_frames`]'s output) — the
+    /// frames holding a graph channel key for this
+    /// figure, any target (Wave AA, AA3).
+    pub channel_keys: Vec<usize>,
 }
 
 /// The shown rows for the current project, in display
@@ -352,6 +419,7 @@ pub fn dope_rows(core: &EditorCore) -> Vec<DopeRow> {
                 selected: fi == core.selected_figure,
                 keys: figure_keyframes(project, fi),
                 state_keys: state_key_frames(fig),
+                channel_keys: channel_key_frames(project, fi),
             }
         })
         .collect()
@@ -406,6 +474,58 @@ pub fn any_state_keys(core: &EditorCore) -> bool {
         .figures
         .iter()
         .any(|fig| !fig.states.is_empty())
+}
+
+/// A figure's channel-key frames (Wave AA, AA3),
+/// ascending and deduped: the frames holding at least
+/// one key in ANY graph channel targeting figure
+/// `fi` — every `ChannelTarget` at parity (root X/Y,
+/// angle, length, bend), the marker row's
+/// target-blind rule per figure. Graph keys live at
+/// fractional times, so each key lands by
+/// [`graph_key_frame`]'s rounding — imported from
+/// `timeline_marks`, the same mapping the marker row
+/// and the graph panel's seek use — and a key rounding
+/// outside the timeline marks nothing. Channels whose
+/// `figure` names no row here (a stale channel, the
+/// graph module's standing ignore rule) contribute
+/// nothing, and several channels keying the same frame
+/// still mark it once: the mark is per-frame, as with
+/// [`state_key_frames`].
+pub fn channel_key_frames(project: &Project, fi: usize) -> Vec<usize> {
+    let count = project.frames.len();
+    let mut frames: Vec<usize> = project
+        .channels
+        .iter()
+        .filter(|ch| ch.figure == fi)
+        .flat_map(|ch| ch.keys.iter())
+        .filter_map(|k| graph_key_frame(k.frame, count))
+        .collect();
+    frames.sort_unstable();
+    frames.dedup();
+    frames
+}
+
+/// Whether `frame` holds one of a row's channel keys.
+/// `channel_keys` is [`channel_key_frames`]'s ascending
+/// output, so this is a binary search — [`is_key`]'s
+/// twin for the graph channel.
+pub fn is_channel_key(channel_keys: &[usize], frame: usize) -> bool {
+    channel_keys.binary_search(&frame).is_ok()
+}
+
+/// Whether ANY figure in the project carries a
+/// channel key that lands on the timeline —
+/// [`any_keyframes`]'s sibling for the graph channel,
+/// so the lane's gating can hear all three kinds of
+/// key (Wave AA, AA3). Keys on stale channels and keys
+/// rounding outside the timeline show no mark, so
+/// they do not speak for the lane either: this is
+/// computed through [`channel_key_frames`] itself,
+/// never a raw channel count.
+pub fn any_channel_keys(core: &EditorCore) -> bool {
+    (0..core.project.figures.len())
+        .any(|fi| !channel_key_frames(&core.project, fi).is_empty())
 }
 
 /// The total width of one figure row (and of the
@@ -599,7 +719,11 @@ pub fn dopesheet_lane(s: &State, t: &Theme) -> El {
     // rows too — a figure can be fully clip-driven
     // (state keys keyed, timeline poses static or even
     // absent), and its rows are where those keys show.
-    let figures_keyed = any_keyframes(core) || any_state_keys(core);
+    // Wave AA (AA3): channel keys speak the same way —
+    // a figure can be fully graph-driven (channels
+    // keyed, timeline poses static or even absent).
+    let figures_keyed =
+        any_keyframes(core) || any_state_keys(core) || any_channel_keys(core);
 
     if core.project.figures.is_empty() && sprite_rows.is_empty() {
         // No figures and no sprites: nothing can have a
@@ -732,22 +856,49 @@ fn figure_row(r: &DopeRow, core: &EditorCore, t: &Theme) -> El {
         // keeps the pose diamond and gains a
         // secondary-accent border, so neither event is
         // lost to the coincidence.
+        // Wave AA (AA3): the graph channel — a channel
+        // key (any target) shows the marker row's dot in
+        // the secondary text tone; beside a pose or
+        // state glyph it rides as the second glyph in a
+        // gap-2 row (the marker row's own two-glyph
+        // cell), so a pose+state+channel frame keeps
+        // the state border AND the dot and all three
+        // events stay visible. A lone kind of any of
+        // the three keeps its historical single text
+        // child — the trees below change only where a
+        // channel key actually sits.
         let state_key = is_state_key(&r.state_keys, frame);
-        if is_key(&r.keys, frame) {
+        let channel_key = is_channel_key(&r.channel_keys, frame);
+        let primary = if is_key(&r.keys, frame) {
             if state_key {
                 cell = cell.border(
                     1.0,
                     crate::rune_sec::app_theme::secondary_accent(t),
                 );
             }
-            cell = cell.child(text("◆").font(type_::LABEL).color(design::accent()));
+            Some(text("◆").font(type_::LABEL).color(design::accent()))
         } else if state_key {
-            cell = cell.child(
+            Some(
                 text("◇")
                     .font(type_::LABEL)
                     .color(crate::rune_sec::app_theme::secondary_accent(t)),
-            );
-        }
+            )
+        } else {
+            None
+        };
+        let dot = if channel_key {
+            Some(text("●").font(type_::LABEL).color(t.text_secondary))
+        } else {
+            None
+        };
+        cell = match (primary, dot) {
+            (Some(glyph), Some(dot)) => {
+                cell.child(row().gap(2.0).center_y().child(glyph).child(dot))
+            }
+            (Some(glyph), None) => cell.child(glyph),
+            (None, Some(dot)) => cell.child(dot),
+            (None, None) => cell,
+        };
         cells = cells.child(cell);
     }
 
@@ -823,10 +974,19 @@ fn sprite_row(r: &SpriteDopeRow, core: &EditorCore, t: &Theme) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stykanimate_rs::graph::{Channel, ChannelTarget, Key};
     use stykanimate_rs::model::{
         FigureDef, FigureInstance, Frame, ImageAsset, InstanceKey, Pose, SpriteInstance,
         StateKey,
     };
+
+    fn channel(figure: usize, target: ChannelTarget, frames: &[f32]) -> Channel {
+        Channel {
+            figure,
+            target,
+            keys: frames.iter().map(|&f| Key::flat(f, 0.0)).collect(),
+        }
+    }
 
     fn figure(name: &str) -> FigureInstance {
         FigureInstance {
@@ -1046,6 +1206,144 @@ mod tests {
         assert!(any_state_keys(&s.core));
         let t = rune::tok::theme(true);
         let _ = dopesheet_lane(&s, &t);
+    }
+
+    #[test]
+    fn channel_key_frames_covers_every_target_at_parity() {
+        // Wave AA (AA3): one key per target kind on
+        // figure 0 — root X, root Y, angle, length,
+        // bend — each marks its frame; the bend key
+        // doubling the angle/length frames still marks
+        // each frame once.
+        let mut s = crate::init();
+        s.core.project.figures = vec![figure("Alpha"), figure("Beta")];
+        s.core.project.frames = (0..4).map(|_| frame(vec![])).collect();
+        s.core.project.channels = vec![
+            channel(0, ChannelTarget::RootX, &[0.0]),
+            channel(0, ChannelTarget::RootY, &[1.0]),
+            channel(0, ChannelTarget::Angle(1), &[2.0]),
+            channel(0, ChannelTarget::Length(1), &[3.0]),
+            channel(0, ChannelTarget::Bend(1), &[2.0, 3.0]),
+            channel(1, ChannelTarget::Bend(0), &[0.0]),
+        ];
+        assert_eq!(channel_key_frames(&s.core.project, 0), vec![0, 1, 2, 3]);
+        assert_eq!(channel_key_frames(&s.core.project, 1), vec![0]);
+        assert!(is_channel_key(&channel_key_frames(&s.core.project, 0), 3));
+        assert!(!is_channel_key(&channel_key_frames(&s.core.project, 1), 3));
+    }
+
+    #[test]
+    fn channel_key_frames_rounds_like_the_marker_row() {
+        // The imported `graph_key_frame` mapping:
+        // nearest frame, halves away from zero; a key
+        // rounding outside the timeline (or a
+        // non-finite one) marks nothing rather than
+        // piling onto an end frame.
+        let mut s = crate::init();
+        s.core.project.figures = vec![figure("Alpha")];
+        s.core.project.frames = (0..4).map(|_| frame(vec![])).collect();
+        s.core.project.channels = vec![channel(
+            0,
+            ChannelTarget::Angle(0),
+            &[0.4, 2.5, 9.2, -1.0, f32::NAN],
+        )];
+        assert_eq!(channel_key_frames(&s.core.project, 0), vec![0, 3]);
+        // A zero-frame project has no cell to mark.
+        s.core.project.frames = Vec::new();
+        assert!(channel_key_frames(&s.core.project, 0).is_empty());
+    }
+
+    #[test]
+    fn stale_channels_and_keyless_channels_mark_nothing() {
+        // A channel pointing past the figure table is
+        // the graph module's standing ignore case: it
+        // opens no row and does not speak for the lane.
+        // A channel with no keys is equally silent.
+        let mut s = crate::init();
+        s.core.project.figures = vec![figure("Alpha")];
+        s.core.project.frames = (0..2).map(|_| frame(vec![])).collect();
+        s.core.project.channels = vec![
+            channel(9, ChannelTarget::Bend(1), &[1.0]),
+            channel(0, ChannelTarget::Angle(0), &[]),
+        ];
+        assert!(channel_key_frames(&s.core.project, 0).is_empty());
+        assert!(!any_channel_keys(&s.core));
+    }
+
+    #[test]
+    fn dope_rows_carry_channel_key_frames() {
+        let mut s = two_figure_state();
+        s.core.project.channels = vec![
+            channel(0, ChannelTarget::Bend(1), &[2.0, 3.0]),
+            channel(1, ChannelTarget::RootX, &[1.0]),
+        ];
+        let rows = dope_rows(&s.core);
+        assert_eq!(rows[0].channel_keys, vec![2, 3]);
+        assert_eq!(rows[1].channel_keys, vec![1]);
+        assert!(any_channel_keys(&s.core));
+    }
+
+    #[test]
+    fn channel_keys_alone_speak_for_the_lane() {
+        // A figure with no poses and no state keys,
+        // animated only by a bend channel: the lane's
+        // gating hears the graph channel, so the "No
+        // keyframes yet" empty state cannot deny the
+        // key (Wave AA, AA3 — Y11's state-key rule, one
+        // channel over). Construction is the assertable
+        // level here (the module's discipline).
+        let mut s = crate::init();
+        s.core.project.figures = vec![figure("Alpha")];
+        s.core.project.frames = vec![frame(vec![]), frame(vec![])];
+        s.core.project.channels = vec![channel(0, ChannelTarget::Bend(2), &[1.0])];
+        assert!(!any_keyframes(&s.core));
+        assert!(!any_state_keys(&s.core));
+        assert!(any_channel_keys(&s.core));
+        for dark in [true, false] {
+            let t = rune::tok::theme(dark);
+            let _ = dopesheet_lane(&s, &t);
+        }
+    }
+
+    #[test]
+    fn lane_constructs_with_channel_coincidences() {
+        // Every cell composition the AA3 marks can
+        // make, across four frames of one figure:
+        // frame 0 pose+channel, frame 1 channel alone,
+        // frame 2 pose+state+channel, frame 3
+        // state+channel. Construction is the assertable
+        // level (the module's discipline); the
+        // derivations under the compositions are pinned
+        // exactly.
+        let mut s = crate::init();
+        let mut fig = figure("Alpha");
+        fig.states = vec![
+            StateKey { frame: 2, clip: 0, offset: 0, speed: 1.0 },
+            StateKey { frame: 3, clip: 0, offset: 0, speed: 1.0 },
+        ];
+        s.core.project.figures = vec![fig];
+        let a = pose(100.0, 10.0);
+        let b = pose(100.0, 25.0);
+        s.core.project.frames = vec![
+            frame(vec![a.clone()]),
+            frame(vec![a.clone()]),
+            frame(vec![b.clone()]),
+            frame(vec![b]),
+        ];
+        s.core.project.channels = vec![
+            channel(0, ChannelTarget::Angle(0), &[0.0]),
+            channel(0, ChannelTarget::Length(1), &[1.0]),
+            channel(0, ChannelTarget::Bend(1), &[2.0]),
+            channel(0, ChannelTarget::RootX, &[3.0]),
+        ];
+        let rows = dope_rows(&s.core);
+        assert_eq!(rows[0].keys, vec![0, 2]);
+        assert_eq!(rows[0].state_keys, vec![2, 3]);
+        assert_eq!(rows[0].channel_keys, vec![0, 1, 2, 3]);
+        for dark in [true, false] {
+            let t = rune::tok::theme(dark);
+            let _ = dopesheet_lane(&s, &t);
+        }
     }
 
     #[test]

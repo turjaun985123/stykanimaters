@@ -101,6 +101,20 @@
 //! numbers a channel list shows next to each row (key count,
 //! value range, frame span). It never snapshots, never writes
 //! the status line and never mutates the project.
+//!
+//! ## Scope: any channel, never a hard-coded target
+//!
+//! Nothing in this module is scoped to a channel target:
+//! every op addresses its channel by index, or by
+//! (figure, target) pair for the range ops, so Angle,
+//! Length, Bend and Root channels are all equally
+//! reachable through the same code. The one angle-scoped
+//! front-end over this library is the shell's keyframe
+//! tools section, whose charter is the selected joint's
+//! angle channel; its module docs carry the scope note
+//! and the audit trail (Wave AA, AA4). The library takes
+//! no part in that choice — the same ops serve the graph
+//! panel's drawn channel, of any target, unchanged.
 
 use crate::editor::EditorCore;
 use crate::graph::{ChannelTarget, Interp, Key};

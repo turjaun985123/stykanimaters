@@ -206,6 +206,35 @@
 //!   the defaults — restores them in one step. The
 //!   MCP twins are `asset_attach` / `clip_asset_attach`
 //!   with their optional transform args (media.rs).
+//! * Sprite opacity (Wave AA, AA1) — keys
+//!   `seg-media-opacity-dn/up`. Z5 gave the image
+//!   payload a stored `opacity` of its own — the
+//!   funnel multiplies it into the item alpha and the
+//!   attach tools write it — but the panel could
+//!   neither see nor change it: the transform
+//!   write-back preserved it through its `..` and
+//!   nothing else reached it. The transform block
+//!   gains a fifth stepper row for it
+//!   (`adjust_media_opacity`, in
+//!   `adjust_media_offset`'s discipline — validate →
+//!   ONE `snapshot()` → mutate → status), at the
+//!   app's one opacity step (0.05 — the style and
+//!   sprite panels' step) with whole-percent rounding
+//!   and the funnel's 0..=1 clamp; the readout is the
+//!   whole-percent form (`format_media_opacity`, the
+//!   figure/style panels' display). The value the
+//!   row shows and steps from is the stored value
+//!   sanitised by the funnel's own rule
+//!   (`sanitise_media_opacity`: non-finite → 1.0,
+//!   clamped), so a hand-edited corrupt value reads
+//!   as what renders and a changing press repairs it.
+//!   The stepper moves ONLY the opacity — the
+//!   transform's `..` preservation now runs in both
+//!   directions. The MCP twin is the `opacity` arg on
+//!   `asset_attach` / `clip_asset_attach` (media.rs).
+//!   This is the media payload's own opacity — NOT
+//!   the export alpha toggle, which stays a standing
+//!   user decision, unbuilt.
 //! * + Segment → `add_segment()` (editor.rs:402) — key
 //!   `add-seg`.
 //! * Delete segment → `delete_segment()` (editor.rs:434) —
@@ -408,6 +437,10 @@ pub const MEDIA_SCALE_MAX: f32 = 8.0;
 /// language), and the stored offset is hard-clamped
 /// to ±180° like a joint limit.
 pub const MEDIA_ROTATE_STEP: f32 = 5.0;
+/// Step for the media opacity stepper (Wave AA,
+/// AA1) — the app's one opacity step: the style
+/// panel's and the sprite panel's `OPACITY_STEP`.
+pub const MEDIA_OPACITY_STEP: f32 = 0.05;
 
 /// Derived view-state for the panel: everything the builder
 /// renders, computed once from the core so the builder stays
@@ -482,6 +515,13 @@ pub struct InspectorSegmentState {
     /// stepper rows. `None` for a text label or no
     /// media (the rows render only for a sprite).
     pub media_transform: Option<MediaTransformState>,
+    /// The attached sprite's stored payload opacity
+    /// (Wave Z, Z5), sanitised by the funnel's rule —
+    /// the value behind the Media section's Opacity
+    /// stepper row (Wave AA, AA1). `Some` exactly when
+    /// `media_transform` is (both read the sprite
+    /// payload); `None` for a text label or no media.
+    pub media_opacity: Option<f32>,
     /// Readout text for the Media section: the attached
     /// sprite's asset name, the text label's content, or
     /// "No media attached" (see `media_label`).
@@ -1246,22 +1286,45 @@ pub fn format_media_scale(scale: f32) -> String {
     }
 }
 
-/// Resolve the selected node's sprite transform for
-/// an edit (Wave Y, P-8): the figure/node indices and
-/// the transform as stored, or `None` with the
+/// The media funnel's sanitisation of a stored
+/// payload opacity (media.rs, Z5): a non-finite
+/// value reads as the 1.0 default, a finite one
+/// clamps to 0..=1. The panel reads and steps from
+/// exactly the value every surface renders at, so
+/// what the Opacity row shows is what the stage
+/// draws.
+pub fn sanitise_media_opacity(opacity: f32) -> f32 {
+    if opacity.is_finite() {
+        opacity.clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
+}
+
+/// Display form of a media opacity value for its
+/// stepper row: the whole-percent form the figure
+/// and style panels use ("100%", "55%", "0%").
+pub fn format_media_opacity(opacity: f32) -> String {
+    format!("{}%", (opacity * 100.0).round() as i32)
+}
+
+/// Resolve the selected node's sprite payload for
+/// an edit (Wave Y, P-8; Wave AA, AA1): the
+/// figure/node indices, the transform as stored and
+/// the payload's stored opacity, or `None` with the
 /// refusal already on the status line — no selection,
 /// a stale node, or media that is not a sprite (none
 /// at all, or a text label, whose editing lives in
 /// the text tool). Shared by all five transform ops
-/// so their refusals cannot drift. Stored values are
-/// sanitised field by field on the way out: a
-/// non-finite value (a hand-edited file is the only
-/// source — the MCP handlers refuse them) reads as
-/// its default, so the op's write repairs it instead
-/// of stepping from NaN forever.
-fn image_media_for_edit(
+/// and the opacity stepper so their refusals cannot
+/// drift. Stored values are sanitised field by field
+/// on the way out: a non-finite value (a hand-edited
+/// file is the only source — the MCP handlers refuse
+/// them) reads as its default, so the op's write
+/// repairs it instead of stepping from NaN forever.
+fn resolve_image_media(
     core: &mut EditorCore,
-) -> Option<(usize, usize, MediaTransformState)> {
+) -> Option<(usize, usize, MediaTransformState, f32)> {
     let Some(ni) = core.selected_node else {
         core.status = "Select a segment first, then adjust its sprite.".into();
         return None;
@@ -1289,13 +1352,15 @@ fn image_media_for_edit(
         // as their identity counterparts and a
         // non-positive scale as 1, so an op's write
         // repairs a corrupt stored value instead of
-        // stepping from NaN forever.
+        // stepping from NaN forever. The opacity is
+        // sanitised by the funnel's own rule (Z5):
+        // `sanitise_media_opacity`.
         Some(SegmentMedia::Image {
             offset,
             scale,
             angle_offset,
             flip,
-            ..
+            opacity,
         }) => Some((
             fi,
             ni,
@@ -1316,6 +1381,7 @@ fn image_media_for_edit(
                 },
                 flip: *flip,
             },
+            sanitise_media_opacity(*opacity),
         )),
         _ => {
             core.status =
@@ -1323,6 +1389,16 @@ fn image_media_for_edit(
             None
         }
     }
+}
+
+/// The transform ops' view of `resolve_image_media`:
+/// the indices and the transform, with the payload
+/// opacity projected away (the transform write-back
+/// preserves it through its `..`, untouched).
+fn image_media_for_edit(
+    core: &mut EditorCore,
+) -> Option<(usize, usize, MediaTransformState)> {
+    resolve_image_media(core).map(|(fi, ni, t, _)| (fi, ni, t))
 }
 
 /// Write a transform back onto the node's sprite
@@ -1476,6 +1552,61 @@ pub fn reset_media_transform(core: &mut EditorCore) {
     core.status = "Sprite transform reset to defaults.".into();
 }
 
+/// Write an opacity back onto the node's sprite
+/// (the armour half of `adjust_media_opacity`:
+/// indices were validated by `resolve_image_media`,
+/// so the `if let`s are unreachable armour, not an
+/// expected path). Only the opacity field moves —
+/// the transform payload rides the `..` untouched,
+/// the mirror of the transform write-back's own
+/// preservation.
+fn store_media_opacity(core: &mut EditorCore, fi: usize, ni: usize, opacity: f32) {
+    if let Some(node) = core
+        .project
+        .figures
+        .get_mut(fi)
+        .and_then(|f| f.def.nodes.get_mut(ni))
+    {
+        if let Some(SegmentMedia::Image {
+            opacity: slot, ..
+        }) = &mut node.media
+        {
+            *slot = opacity;
+        }
+    }
+}
+
+/// Step the selected sprite's stored payload opacity
+/// by `delta` (Wave AA, AA1) — the write behind the
+/// Opacity stepper row, in `adjust_media_offset`'s
+/// discipline: validate → ONE `snapshot()` → mutate →
+/// status, so one press is exactly one undo step.
+/// Refusals are status-only, no snapshot; a press
+/// that lands on the current value (stepping at the
+/// 0 / 1 clamp) is a silent no-op. The stepped value
+/// is clamped, then rounded to whole percents — the
+/// style panel's `opacity_stepped` order — so
+/// repeated presses walk the exact percents the
+/// readout shows instead of accumulating float dust.
+/// The press moves only the opacity: the transform
+/// payload is preserved whole, as the transform ops
+/// preserve the opacity.
+pub fn adjust_media_opacity(core: &mut EditorCore, delta: f32) {
+    let Some((fi, ni, _, cur)) = resolve_image_media(core) else {
+        return;
+    };
+    let new = ((cur + delta).clamp(0.0, 1.0) * 100.0).round() / 100.0;
+    if new == cur {
+        return;
+    }
+    core.snapshot();
+    store_media_opacity(core, fi, ni, new);
+    core.status = format!(
+        "Sprite opacity set to {}.",
+        format_media_opacity(new)
+    );
+}
+
 /// Label for a node shape, naming the polygons `cycle_shape`
 /// steps through (editor.rs:494).
 pub fn shape_label(shape: &Shape) -> String {
@@ -1568,6 +1699,12 @@ pub fn segment_state(core: &EditorCore) -> Option<InspectorSegmentState> {
                 angle_offset: *angle_offset,
                 flip: *flip,
             }),
+            _ => None,
+        },
+        media_opacity: match &node.media {
+            Some(SegmentMedia::Image { opacity, .. }) => {
+                Some(sanitise_media_opacity(*opacity))
+            }
             _ => None,
         },
         media: node.media.clone(),
@@ -2239,8 +2376,13 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
     // Each row's StepForms mirror its op's clamp
     // exactly, like the limit rows above: at a clamp
     // end the step can only no-op, so the button
-    // renders inert.
-    if let Some(mt) = st.media_transform {
+    // renders inert. The Opacity row (Wave AA, AA1)
+    // closes the block under the same rule — it
+    // edits the payload's stored opacity, not the
+    // transform, and renders under the same
+    // sprite-only condition (the two state fields
+    // are `Some` together by construction).
+    if let (Some(mt), Some(media_opacity)) = (st.media_transform, st.media_opacity) {
         panel = panel
             .child(stepper_row(
                 &i18n_wire::tr(&s.core, "segment_media_offset_x"),
@@ -2341,6 +2483,25 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                 t,
                 |s| adjust_media_rotate(&mut s.core, -MEDIA_ROTATE_STEP),
                 |s| adjust_media_rotate(&mut s.core, MEDIA_ROTATE_STEP),
+            ))
+            .child(stepper_row(
+                &i18n_wire::tr(&s.core, "segment_media_opacity"),
+                format_media_opacity(media_opacity),
+                "seg-media-opacity-dn",
+                "seg-media-opacity-up",
+                if media_opacity <= 0.0 {
+                    design::StepForm::Noop
+                } else {
+                    design::StepForm::Live
+                },
+                if media_opacity >= 1.0 {
+                    design::StepForm::Noop
+                } else {
+                    design::StepForm::Live
+                },
+                t,
+                |s| adjust_media_opacity(&mut s.core, -MEDIA_OPACITY_STEP),
+                |s| adjust_media_opacity(&mut s.core, MEDIA_OPACITY_STEP),
             ));
         // Flip + Reset row: the toggle renders active
         // while flipped; Reset rides the same row and
@@ -3508,6 +3669,20 @@ playback_speed: 1.0,
             });
     }
 
+    fn media_opacity_of(core: &EditorCore) -> f32 {
+        match &core.project.figures[core.selected_figure].def.nodes[1].media {
+            Some(SegmentMedia::Image { opacity, .. }) => *opacity,
+            other => panic!("expected image media, got {other:?}"),
+        }
+    }
+
+    fn set_media_opacity(core: &mut EditorCore, opacity: f32) {
+        match &mut core.project.figures[core.selected_figure].def.nodes[1].media {
+            Some(SegmentMedia::Image { opacity: slot, .. }) => *slot = opacity,
+            other => panic!("expected image media, got {other:?}"),
+        }
+    }
+
     #[test]
     fn media_offset_steps_write_in_one_undo_step_each() {
         let mut core = core_with_sprite();
@@ -3674,6 +3849,180 @@ playback_speed: 1.0,
     }
 
     #[test]
+    fn media_opacity_steps_write_in_one_undo_step_each() {
+        let mut core = core_with_sprite();
+        let depth = core.undo_depth();
+        adjust_media_opacity(&mut core, -MEDIA_OPACITY_STEP);
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot per press");
+        assert_eq!(media_opacity_of(&core), 0.95);
+        assert_eq!(core.status, "Sprite opacity set to 95%.");
+        adjust_media_opacity(&mut core, -MEDIA_OPACITY_STEP);
+        assert_eq!(core.undo_depth(), depth + 2);
+        assert_eq!(media_opacity_of(&core), 0.90);
+        core.undo();
+        assert_eq!(media_opacity_of(&core), 0.95, "undo restores the step");
+    }
+
+    #[test]
+    fn media_opacity_steps_clamp_at_both_bounds() {
+        let mut core = core_with_sprite();
+        // Fully opaque: an upward press is silent.
+        let depth = core.undo_depth();
+        core.status = "Sentinel.".into();
+        adjust_media_opacity(&mut core, MEDIA_OPACITY_STEP);
+        assert_eq!(core.undo_depth(), depth, "no snapshot at the ceiling");
+        assert_eq!(core.status, "Sentinel.", "no status churn");
+        // A partial step onto the ceiling still lands.
+        set_media_opacity(&mut core, 0.98);
+        adjust_media_opacity(&mut core, MEDIA_OPACITY_STEP);
+        assert_eq!(media_opacity_of(&core), 1.0);
+        assert_eq!(core.undo_depth(), depth + 1);
+        // Fully transparent: a downward press is silent.
+        set_media_opacity(&mut core, 0.0);
+        let depth = core.undo_depth();
+        core.status = "Sentinel.".into();
+        adjust_media_opacity(&mut core, -MEDIA_OPACITY_STEP);
+        assert_eq!(core.undo_depth(), depth, "no snapshot at the floor");
+        assert_eq!(core.status, "Sentinel.");
+    }
+
+    #[test]
+    fn media_opacity_step_rounds_to_whole_percents() {
+        // An MCP-written off-grid value steps onto the
+        // percent grid the readout shows, like the
+        // style panel's `opacity_stepped`.
+        let mut core = core_with_sprite();
+        set_media_opacity(&mut core, 0.333);
+        adjust_media_opacity(&mut core, MEDIA_OPACITY_STEP);
+        assert_eq!(media_opacity_of(&core), 0.38);
+        adjust_media_opacity(&mut core, -MEDIA_OPACITY_STEP);
+        assert_eq!(media_opacity_of(&core), 0.33);
+    }
+
+    #[test]
+    fn media_opacity_step_repairs_a_non_finite_store() {
+        // The sanitised read is 1.0, so a downward
+        // press writes a real 0.95 over the corrupt
+        // value instead of stepping from NaN forever.
+        let mut core = core_with_sprite();
+        set_media_opacity(&mut core, f32::NAN);
+        let depth = core.undo_depth();
+        adjust_media_opacity(&mut core, -MEDIA_OPACITY_STEP);
+        assert_eq!(core.undo_depth(), depth + 1);
+        assert_eq!(media_opacity_of(&core), 0.95);
+        // An upward press at the sanitised ceiling
+        // changes nothing and stays silent.
+        set_media_opacity(&mut core, f32::INFINITY);
+        let depth = core.undo_depth();
+        core.status = "Sentinel.".into();
+        adjust_media_opacity(&mut core, MEDIA_OPACITY_STEP);
+        assert_eq!(core.undo_depth(), depth);
+        assert_eq!(core.status, "Sentinel.");
+    }
+
+    #[test]
+    fn media_opacity_and_transform_writes_preserve_each_other() {
+        // Z5's guarantee, both directions: an opacity
+        // press leaves the transform payload whole,
+        // and transform presses — Reset included —
+        // leave the stored opacity whole.
+        let mut core = core_with_sprite();
+        let t = MediaTransformState {
+            offset: [6.0, 2.0],
+            scale: 0.5,
+            angle_offset: -30.0,
+            flip: true,
+        };
+        set_media_transform(&mut core, t);
+        set_media_opacity(&mut core, 0.5);
+        adjust_media_opacity(&mut core, -MEDIA_OPACITY_STEP);
+        assert_eq!(media_opacity_of(&core), 0.45);
+        assert_eq!(media_transform_of(&core), t, "transform untouched");
+        adjust_media_scale(&mut core, MEDIA_SCALE_STEP);
+        assert_eq!(media_opacity_of(&core), 0.45, "opacity untouched");
+        reset_media_transform(&mut core);
+        assert!(media_transform_of(&core).is_identity());
+        assert_eq!(media_opacity_of(&core), 0.45, "Reset spares the opacity");
+    }
+
+    #[test]
+    fn media_opacity_refusals_are_status_only() {
+        // No media on the selected node.
+        let mut core = core_with_assets(Some(1), &["hero.png"]);
+        let depth = core.undo_depth();
+        adjust_media_opacity(&mut core, -MEDIA_OPACITY_STEP);
+        assert_eq!(core.undo_depth(), depth);
+        assert!(
+            core.status.contains("carries no sprite"),
+            "refusal explains itself: {}",
+            core.status
+        );
+        // A text label is not a sprite.
+        core.project.figures[core.selected_figure].def.nodes[1].media =
+            Some(SegmentMedia::Text {
+                content: "HEY".into(),
+                size: 24.0,
+            });
+        adjust_media_opacity(&mut core, MEDIA_OPACITY_STEP);
+        assert_eq!(core.undo_depth(), depth);
+        assert!(core.status.contains("carries no sprite"));
+        // No selection.
+        let mut core = core_with_assets(None, &["hero.png"]);
+        let depth = core.undo_depth();
+        adjust_media_opacity(&mut core, -MEDIA_OPACITY_STEP);
+        assert_eq!(core.undo_depth(), depth);
+        assert!(core.status.contains("Select a segment"));
+    }
+
+    #[test]
+    fn segment_state_carries_the_media_opacity_sanitised() {
+        let mut core = core_with_sprite();
+        let st = segment_state(&core).expect("node 1 is selected");
+        assert_eq!(st.media_opacity, Some(1.0), "a fresh attach is opaque");
+        // The state shows the funnel's value, not the
+        // raw store: out-of-range and non-finite
+        // values read as what renders.
+        set_media_opacity(&mut core, 0.5);
+        assert_eq!(segment_state(&core).unwrap().media_opacity, Some(0.5));
+        set_media_opacity(&mut core, 1.7);
+        assert_eq!(segment_state(&core).unwrap().media_opacity, Some(1.0));
+        set_media_opacity(&mut core, -0.25);
+        assert_eq!(segment_state(&core).unwrap().media_opacity, Some(0.0));
+        set_media_opacity(&mut core, f32::NAN);
+        assert_eq!(segment_state(&core).unwrap().media_opacity, Some(1.0));
+        // A text label carries no opacity state.
+        core.project.figures[core.selected_figure].def.nodes[1].media =
+            Some(SegmentMedia::Text {
+                content: "HEY".into(),
+                size: 24.0,
+            });
+        let st = segment_state(&core).expect("node 1 is selected");
+        assert_eq!(st.media_opacity, None);
+        // Neither does a bare segment.
+        let core = core_with_assets(Some(1), &["hero.png"]);
+        let st = segment_state(&core).expect("node 1 is selected");
+        assert_eq!(st.media_opacity, None);
+    }
+
+    #[test]
+    fn format_media_opacity_reads_whole_percents() {
+        assert_eq!(format_media_opacity(1.0), "100%");
+        assert_eq!(format_media_opacity(0.55), "55%");
+        assert_eq!(format_media_opacity(0.05), "5%");
+        assert_eq!(format_media_opacity(0.0), "0%");
+    }
+
+    #[test]
+    fn sanitise_media_opacity_matches_the_funnel_rule() {
+        assert_eq!(sanitise_media_opacity(0.5), 0.5);
+        assert_eq!(sanitise_media_opacity(1.7), 1.0);
+        assert_eq!(sanitise_media_opacity(-0.25), 0.0);
+        assert_eq!(sanitise_media_opacity(f32::NAN), 1.0);
+        assert_eq!(sanitise_media_opacity(f32::INFINITY), 1.0);
+        assert_eq!(sanitise_media_opacity(f32::NEG_INFINITY), 1.0);
+    }
+
+    #[test]
     fn media_transform_labels_resolve_through_the_catalogue() {
         // IA-Y4-1 (the Q7 note): these six keys enter
         // the catalogue through the integrator; until
@@ -3681,13 +4030,17 @@ playback_speed: 1.0,
         // itself and this pin fails BY DESIGN — it
         // passes on insertion, proving the panel's
         // labels are the catalogue's English strings,
-        // byte-identical.
+        // byte-identical. Wave AA (AA1) extends the
+        // pin with the Opacity row's key: the seventh
+        // pair lands via IA-AA1-1, so the pin as a
+        // whole passes only once that IA lands too.
         let core = EditorCore::new();
         for (key, english) in [
             ("segment_media_offset_x", "Sprite offset X"),
             ("segment_media_offset_y", "Sprite offset Y"),
             ("segment_media_scale", "Sprite scale"),
             ("segment_media_rotate", "Sprite rotation"),
+            ("segment_media_opacity", "Sprite opacity"),
             ("segment_media_flip", "Flip sprite"),
             ("segment_media_reset_transform", "Reset transform"),
         ] {
