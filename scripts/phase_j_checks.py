@@ -828,7 +828,18 @@ def entry_field(chunk: str) -> str | None:
 # baseline). Tuple-carried keys remain outside this
 # counter (F6's artefact, above). Floor raised
 # 995 -> 1017 so Wave Z starts from the integrated truth.
-KEY_TOTAL_FLOOR = 1017
+# Wave AA ratchet (AA13's baseline recount, 2026-11-10):
+# on the clean Wave Z closing HEAD (0d32fa8, detached
+# git worktree) this counter reads 1019 total (889
+# static + 130 dynamic, 61 files) — the 1017 floor plus
+# Wave Z's counted growth of 2 (Z4's Setup rest stepper
+# patterns fig-setup-rest-{ni}-up / -dn; zero lost proven
+# by the two-HEAD inventory diff, 5031700 vs 0d32fa8, and
+# check 2 at Wave Z integration). xc-progress-bundle
+# (Z8) rides outside this counter as a tuple-carried key
+# (F6's artefact, above). Floor raised 1017 -> 1019 so
+# Wave AA starts from the integrated truth.
+KEY_TOTAL_FLOOR = 1019
 
 
 def inventory_counts() -> tuple[int, int, int, int]:

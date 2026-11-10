@@ -3,7 +3,7 @@
 //! The Rune shell does NOT adopt `rune-i18n` (audit
 //! `docs/RUNE_API_AUDIT.md` Q12: it would replace a solved problem
 //! with a build.rs + ICU4X stack). It reuses the project's own
-//! table in `stykanimate_rs::i18n` — 28 languages × 693 keys
+//! table in `stykanimate_rs::i18n` — 28 languages × 695 keys
 //! (78 through Phase E; +18 mission-era label keys in Wave 9
 //! and +3 dopesheet keys in Wave 10; Wave R added the
 //! subtitle block, the camera block and `subtitle_speaker`;
