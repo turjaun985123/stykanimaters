@@ -300,6 +300,7 @@ use stykanimate_rs::i18n::Lang;
 
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::icon_btn;
 use crate::rune_sec::playback_controls::SPEEDS;
 use crate::rune_sec::workspaces::{select_workspace, Workspace};
@@ -907,7 +908,7 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
     panel = panel.child(icon_btn(
         "settings-toggle",
         "eye",
-        "Settings",
+        &i18n_wire::tr(core, "settings"),
         open,
         t,
         |s: &mut State| {
@@ -945,7 +946,7 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
                     .w_full()
                     .gap(8.0)
                     .center_y()
-                    .child(design::panel_title(Some("gear"), "Settings", None, t)),
+                    .child(design::panel_title(Some("gear"), &i18n_wire::tr(core, "settings"), None, t)),
             )
             .child(design::divider(t));
 
@@ -968,7 +969,7 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
             .child(design::section_label("Live MCP", t))
             .child(design::toggle_row(
                 "settings-live-mcp",
-                "Live MCP control",
+                &i18n_wire::tr(core, "live_mcp_control"),
                 crate::live_mcp::is_enabled(),
                 t,
                 |s: &mut State| {
@@ -1262,6 +1263,24 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_i18n_keys_exist_and_match_the_english_labels() {
+        // Wave V (V11, from U10's catalogue-hygiene
+        // ledger): the "Settings" toggle + card title and
+        // the "Live MCP control" row resolve through
+        // i18n_wire::tr under pre-existing catalogue keys.
+        // The keys already existed x28, so this pin passes
+        // on its own merits — no IA was owed.
+        let core = EditorCore::new();
+        for (key, english) in [
+            ("settings", "Settings"),
+            ("live_mcp_control", "Live MCP control"),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
+    }
 
     fn core() -> EditorCore {
         EditorCore::new()

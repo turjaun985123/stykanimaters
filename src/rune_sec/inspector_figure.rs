@@ -195,6 +195,7 @@ use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::{btn, danger_btn};
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::icon_btn;
 use crate::stage_view::hex_color;
 use crate::State;
@@ -739,7 +740,7 @@ fn name_field_row(s: &State, t: &Theme) -> El {
         .child(icon_btn(
             "fig-rename",
             "pencil",
-            "Rename",
+            &i18n_wire::tr(&s.core, "rename"),
             false,
             t,
             apply_figure_name,
@@ -1169,6 +1170,21 @@ pub fn inspector_figure(s: &State, t: &Theme) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inspector_figure_i18n_keys_exist_and_match_the_english_labels() {
+        // Wave V (V11, from U10's catalogue-hygiene
+        // ledger): the name row's Rename button resolves
+        // through i18n_wire::tr under the pre-existing
+        // catalogue key (one key serves all four Rename
+        // buttons). The key already existed x28, so this
+        // pin passes on its own merits — no IA was owed.
+        let core = EditorCore::new();
+        for (key, english) in [("rename", "Rename")] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
+    }
 
     #[test]
     fn figure_state_is_none_without_figures() {

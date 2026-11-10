@@ -506,6 +506,72 @@
 //! project file's stamp) — never in classification,
 //! which is the one helper's everywhere.
 //!
+//! ## Wave V (V3) — Home i18n
+//!
+//! The panel's labels and composed readouts now
+//! resolve through the catalogue ([`i18n_wire::tr`]),
+//! the last unwired panel surface after Wave U
+//! completed the panel programme. The composed lines
+//! are `{slot}` templates substituted at the composing
+//! site (the camera `follow_label` precedent): the two
+//! metadata skeletons ([`row_meta_line`]'s light-read
+//! form and [`meta_line`]'s scan form), the totals
+//! skeleton, the missing-audio wrapper and the reopen
+//! label. The count words are one/many key pairs
+//! (`home_figure_one` / `home_figure_many`, …) selected
+//! by [`count_label_tr`], which succeeds the pure
+//! `count_label`: the singular template carries its
+//! own "1", the plural carries `{count}` (the audio
+//! panel's `audio_frames_one` / `audio_frames_many`
+//! shape). The readout helpers gained a leading
+//! `&EditorCore` (the `mute_toggle_parts` precedent);
+//! the row builders, which borrowed no `State`, take
+//! one too, threaded from `home_panel`'s `&s.core`.
+//! Two labels reuse keys that already exist in the
+//! catalogue — the four armed "Discard changes?"
+//! danger forms resolve through `discard_changes`,
+//! and the rename line's confirm through `rename`
+//! (the row's own Rename button at the buttons row is
+//! IA-U10-1 Part 2's site, wired by V11 — deliberately
+//! not touched here). The new `home_*` keys land via
+//! IA-V3-1; until the integrator inserts them the
+//! wired surfaces render the key itself and the
+//! content tests fail — wiring + keys land in one
+//! integration push (the Q7 pattern). The two
+//! `scenes.rs` pins that call [`row_meta_line`] /
+//! [`meta_line`] move to the new signatures via
+//! IA-V3-2 (the IA-U4-2 precedent).
+//!
+//! Classifications the audit settled, with evidence:
+//! - **Status sentences stay English.** Every
+//!   `core.status` write in the dispatch layer
+//!   ("Duplicated project: …", the "… failed: {e}"
+//!   grammar, the discard-gate warnings, the startup
+//!   line) is a status sentence, not a label or a
+//!   readout — the wave-wide discipline every prior
+//!   panel slice kept.
+//! - **[`format_modified`] is machine-read
+//!   notation.** Its "YYYY-MM-DD HH:MM" output is
+//!   parsed back: `project_tools::modified_label`
+//!   splits it on its single space and compares the
+//!   date halves (project_tools.rs, with an `.expect`
+//!   pinning the format). The ISO shape is
+//!   locale-independent by design, so neither the
+//!   format nor the helper changes — it fills the
+//!   templates' `{modified}` slot as data.
+//! - **[`format_fps`] and [`duration_segment`] are
+//!   notation.** A bare/one-decimal number, and the
+//!   compact duration tokens ("0.5s", "10s", "1:05" —
+//!   the SI seconds symbol and the m:ss clock form)
+//!   carry no sentence structure to translate; both
+//!   fill slots as data. `human_size` (project_tools)
+//!   is the same class and outside this panel's
+//!   ownership.
+//! - The JSON field names the light read looks up
+//!   ("figures" / "frames" / "audio") are data keys,
+//!   never labels (U10's ledger reached the same
+//!   verdict for this file's count words).
+//!
 //! ## Integrator wiring (main.rs)
 //!
 //! ```ignore
@@ -534,6 +600,7 @@ use stykanimate_rs::shell;
 
 use crate::chrome_view::{btn, danger_btn};
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::{danger_icon_btn, icon_btn};
 use crate::rune_sec::icons::icon_el;
 use crate::rune_sec::project_tools::{human_size, session_dirty};
@@ -1209,12 +1276,20 @@ pub fn reopen_target<'a>(
 /// is middle-truncated for display only (the press
 /// opens by path, and the full name is on the row
 /// below); short names are returned byte-identical.
-pub fn reopen_label(target: &ProjectInfo) -> String {
-    let prefix = "Reopen ";
-    let room = REOPEN_LABEL_BUDGET - text_width(prefix, label_char_width);
-    format!(
-        "{prefix}{}",
-        truncate_middle(&display_name(&target.name), room, label_char_width)
+pub fn reopen_label(core: &EditorCore, target: &ProjectInfo) -> String {
+    // Wave V (V3): the label is the catalogue template
+    // `home_reopen_label` ("Reopen {name}"). The budget
+    // charges the template's fixed text — everything
+    // but the `{name}` slot — so the room left for the
+    // name is honest in every locale, and the name (the
+    // only user-data slot) is substituted last, after
+    // truncation.
+    let template = i18n_wire::tr(core, "home_reopen_label");
+    let fixed = template.replace("{name}", "");
+    let room = REOPEN_LABEL_BUDGET - text_width(&fixed, label_char_width);
+    template.replace(
+        "{name}",
+        &truncate_middle(&display_name(&target.name), room, label_char_width),
     )
 }
 
@@ -1418,12 +1493,27 @@ fn duration_suffix(frames: usize, fps: f32) -> String {
     }
 }
 
-/// `"<n> figure(s)"` with correct singular.
-fn count_label(n: usize, singular: &str, plural: &str) -> String {
+/// `"<n> figure(s)"` with correct singular, resolved
+/// through the catalogue (Wave V, V3 — the successor
+/// of the pure `count_label` this panel's lines were
+/// composed with until now): the singular is its own
+/// key whose value carries the "1" (`home_figure_one`
+/// = "1 figure"), the plural a `{count}` template
+/// (`home_figure_many` = "{count} figures") — the
+/// audio panel's `audio_frames_one` /
+/// `audio_frames_many` shape, so a locale whose
+/// plural is not formed by suffixation still reads
+/// correctly.
+fn count_label_tr(
+    core: &EditorCore,
+    n: usize,
+    one_key: &str,
+    many_key: &str,
+) -> String {
     if n == 1 {
-        format!("{n} {singular}")
+        i18n_wire::tr(core, one_key)
     } else {
-        format!("{n} {plural}")
+        i18n_wire::tr(core, many_key).replace("{count}", &n.to_string())
     }
 }
 
@@ -1682,20 +1772,34 @@ fn thumb_el(image: &rune::Image) -> El {
 /// for a length) and the row is unchanged rather than
 /// blank.
 pub fn row_meta_line(
+    core: &EditorCore,
     info: &ProjectInfo,
     meta: Option<(usize, usize, u64, SystemTime, usize)>,
 ) -> String {
     match meta {
         Some((figures, frames, size_bytes, modified, missing_audio)) => {
-            let mut line = format!(
-                "{} · {}{} · {} fps · {} · modified {}",
-                count_label(figures, "figure", "figures"),
-                count_label(frames, "frame", "frames"),
-                duration_suffix(frames, info.fps),
-                format_fps(info.fps),
-                human_size(size_bytes),
-                format_modified(Some(modified))
-            );
+            // Wave V (V3): the skeleton is the
+            // catalogue template `home_meta_line`; the
+            // slots are filled by the panel's own
+            // helpers — the count words through
+            // `count_label_tr`, the rest notation that
+            // stays literal in every locale (the module
+            // docs' classification): the duration token,
+            // the fps number, the human size, the ISO
+            // modified stamp.
+            let mut line = i18n_wire::tr(core, "home_meta_line")
+                .replace(
+                    "{figures}",
+                    &count_label_tr(core, figures, "home_figure_one", "home_figure_many"),
+                )
+                .replace(
+                    "{frames}",
+                    &count_label_tr(core, frames, "home_frame_one", "home_frame_many"),
+                )
+                .replace("{duration}", &duration_suffix(frames, info.fps))
+                .replace("{fps}", &format_fps(info.fps))
+                .replace("{size}", &human_size(size_bytes))
+                .replace("{modified}", &format_modified(Some(modified)));
             // Wave S (S7): the missing-audio marker
             // closes the line when the light read's
             // count is non-zero — the only segment the
@@ -1704,13 +1808,13 @@ pub fn row_meta_line(
             // absent entirely (never a "0 missing"
             // placeholder) when every clip's file is
             // present.
-            if let Some(segment) = missing_audio_segment(missing_audio) {
+            if let Some(segment) = missing_audio_segment(core, missing_audio) {
                 line.push_str(" · ");
                 line.push_str(&segment);
             }
             line
         }
-        None => meta_line(info),
+        None => meta_line(core, info),
     }
 }
 
@@ -1723,14 +1827,24 @@ pub fn row_meta_line(
 /// healthy project, a muted-only project and a
 /// no-audio project all render the line the panel has
 /// always rendered. Singular/plural wording is
-/// [`count_label`]'s, the rows' own helper.
-pub fn missing_audio_segment(missing: usize) -> Option<String> {
+/// [`count_label_tr`]'s, the rows' own helper, and
+/// the segment itself is the one shared composition
+/// both metadata lines close with (Wave V, V3: the
+/// `home_missing_audio` template wraps the counted
+/// clips — still this single function, never forked
+/// per line).
+pub fn missing_audio_segment(core: &EditorCore, missing: usize) -> Option<String> {
     if missing == 0 {
         None
     } else {
-        Some(format!(
-            "{} missing",
-            count_label(missing, "audio clip", "audio clips")
+        Some(i18n_wire::tr(core, "home_missing_audio").replace(
+            "{clips}",
+            &count_label_tr(
+                core,
+                missing,
+                "home_audio_clip_one",
+                "home_audio_clip_many",
+            ),
         ))
     }
 }
@@ -1748,18 +1862,29 @@ pub fn missing_audio_segment(missing: usize) -> Option<String> {
 /// counts as a project with 0 figures and 0 frames —
 /// the sums simply never see it, and nothing about it
 /// is guessed (see the module docs). Singular/plural
-/// wording is `count_label`'s — the same helper the
+/// wording is `count_label_tr`'s — the same helper the
 /// rows' own metadata lines use — so exactly 1 is
 /// singular and every other count, 0 included, plural.
-pub fn totals_line(entries_meta: &[(usize, usize)], project_count: usize) -> String {
+pub fn totals_line(
+    core: &EditorCore,
+    entries_meta: &[(usize, usize)],
+    project_count: usize,
+) -> String {
     let figures: usize = entries_meta.iter().map(|(figures, _)| figures).sum();
     let frames: usize = entries_meta.iter().map(|(_, frames)| frames).sum();
-    format!(
-        "{} · {} · {}",
-        count_label(project_count, "project", "projects"),
-        count_label(figures, "figure", "figures"),
-        count_label(frames, "frame", "frames")
-    )
+    i18n_wire::tr(core, "home_totals_line")
+        .replace(
+            "{projects}",
+            &count_label_tr(core, project_count, "home_project_one", "home_project_many"),
+        )
+        .replace(
+            "{figures}",
+            &count_label_tr(core, figures, "home_figure_one", "home_figure_many"),
+        )
+        .replace(
+            "{frames}",
+            &count_label_tr(core, frames, "home_frame_one", "home_frame_many"),
+        )
 }
 
 /// One row's metadata line: real scan data only
@@ -1774,16 +1899,28 @@ pub fn totals_line(entries_meta: &[(usize, usize)], project_count: usize) -> Str
 /// (`ProjectInfo::missing_audio` is `None`) renders no
 /// marker: unknown is not zero, and the line claims no
 /// health the scan did not verify.
-pub fn meta_line(info: &ProjectInfo) -> String {
-    let mut line = format!(
-        "{} · {}{} · {} fps · modified {}",
-        count_label(info.figures, "figure", "figures"),
-        count_label(info.frames, "frame", "frames"),
-        duration_suffix(info.frames, info.fps),
-        format_fps(info.fps),
-        format_modified(info.modified)
-    );
-    if let Some(segment) = info.missing_audio.and_then(missing_audio_segment) {
+pub fn meta_line(core: &EditorCore, info: &ProjectInfo) -> String {
+    // Wave V (V3): the scan skeleton is the catalogue
+    // template `home_meta_line_scan` — the light-read
+    // skeleton minus its `{size}` segment (the scan
+    // never stats for a length); slots as in
+    // [`row_meta_line`].
+    let mut line = i18n_wire::tr(core, "home_meta_line_scan")
+        .replace(
+            "{figures}",
+            &count_label_tr(core, info.figures, "home_figure_one", "home_figure_many"),
+        )
+        .replace(
+            "{frames}",
+            &count_label_tr(core, info.frames, "home_frame_one", "home_frame_many"),
+        )
+        .replace("{duration}", &duration_suffix(info.frames, info.fps))
+        .replace("{fps}", &format_fps(info.fps))
+        .replace("{modified}", &format_modified(info.modified));
+    if let Some(segment) = info
+        .missing_audio
+        .and_then(|missing| missing_audio_segment(core, missing))
+    {
         line.push_str(" · ");
         line.push_str(&segment);
     }
@@ -2410,7 +2547,7 @@ fn recovery_banner(s: &State, t: &Theme) -> El {
         .radius(8.0)
         .fill(accent.alpha(0.18))
         .child(
-            text("Unsaved recovery snapshot is newer than the last save.")
+            text(i18n_wire::tr(&s.core, "home_recovery_banner"))
                 .font(type_::LABEL)
                 .color(t.text)
                 .grow(1.0)
@@ -2423,15 +2560,26 @@ fn recovery_banner(s: &State, t: &Theme) -> El {
         )
         .child(btn(
             "home-recovery-discard",
-            "Discard",
+            &i18n_wire::tr(&s.core, "home_discard"),
             false,
             t,
             discard_recovery_pressed,
         ))
         .child(if armed {
-            danger_btn("recover", "Discard changes?", t, recover_banner_pressed)
+            danger_btn(
+                "recover",
+                &i18n_wire::tr(&s.core, "discard_changes"),
+                t,
+                recover_banner_pressed,
+            )
         } else {
-            btn("recover", "Recover", false, t, recover_banner_pressed)
+            btn(
+                "recover",
+                &i18n_wire::tr(&s.core, "home_recover"),
+                false,
+                t,
+                recover_banner_pressed,
+            )
         })
 }
 
@@ -2472,13 +2620,14 @@ fn row_display_name(name: &str) -> String {
 /// [`HomePanelState::metadata_for`]) preferred, the
 /// scan's line as the fallback.
 fn project_row(
+    core: &EditorCore,
     info: &ProjectInfo,
     i: usize,
     t: &Theme,
     meta: Option<(usize, usize, u64, SystemTime, usize)>,
     thumb: Option<rune::Image>,
 ) -> El {
-    project_row_confirm(info, i, t, meta, false, thumb)
+    project_row_confirm(core, info, i, t, meta, false, thumb)
 }
 
 /// [`project_row`] with the Phase K delete state: while
@@ -2492,6 +2641,7 @@ fn project_row(
 /// Delete button (`home-proj-del-{i}`), which only arms
 /// the deletion ([`arm_delete`]).
 fn project_row_confirm(
+    core: &EditorCore,
     info: &ProjectInfo,
     i: usize,
     t: &Theme,
@@ -2499,7 +2649,19 @@ fn project_row_confirm(
     confirming: bool,
     thumb: Option<rune::Image>,
 ) -> El {
-    project_row_marked(info, i, t, meta, confirming, false, thumb, false, None, false)
+    project_row_marked(
+        core,
+        info,
+        i,
+        t,
+        meta,
+        confirming,
+        false,
+        thumb,
+        false,
+        None,
+        false,
+    )
 }
 
 /// [`project_row_confirm`] with the Phase N current
@@ -2522,6 +2684,7 @@ fn project_row_confirm(
 /// Open button as its danger form under the same key.
 #[allow(clippy::too_many_arguments)]
 fn project_row_marked(
+    core: &EditorCore,
     info: &ProjectInfo,
     i: usize,
     t: &Theme,
@@ -2550,7 +2713,7 @@ fn project_row_marked(
                 )
                 .child(btn(
                     "home-proj-rename-confirm",
-                    "Rename",
+                    &i18n_wire::tr(core, "rename"),
                     false,
                     t,
                     |s: &mut State| {
@@ -2559,7 +2722,7 @@ fn project_row_marked(
                 ))
                 .child(btn(
                     "home-proj-rename-cancel",
-                    "Cancel",
+                    &i18n_wire::tr(core, "home_cancel"),
                     false,
                     t,
                     |s: &mut State| {
@@ -2592,7 +2755,10 @@ fn project_row_marked(
                     .gap(6.0)
                     .grow(1.0)
                     .child(
-                        text(format!("Delete {name}?"))
+                        text(
+                            i18n_wire::tr(core, "home_delete_question")
+                                .replace("{name}", &name),
+                        )
                             .font(type_::TITLE)
                             .color(t.text)
                             .wrap()
@@ -2603,7 +2769,7 @@ fn project_row_marked(
                             .gap(8.0)
                             .child(danger_btn(
                                 "home-proj-del-confirm",
-                                "Delete file",
+                                &i18n_wire::tr(core, "home_delete_file"),
                                 t,
                                 move |s: &mut State| {
                                     dispatch_delete_confirm(
@@ -2615,7 +2781,7 @@ fn project_row_marked(
                             ))
                             .child(btn(
                                 "home-proj-del-cancel",
-                                "Keep",
+                                &i18n_wire::tr(core, "home_keep"),
                                 false,
                                 t,
                                 |s: &mut State| {
@@ -2665,11 +2831,11 @@ fn project_row_marked(
         .gap(8.0)
         .flex_wrap()
         .child(if open_armed {
-            danger_icon_btn(&open_key, "folder-open", "Discard changes?", false, t, move |s: &mut State| {
+            danger_icon_btn(&open_key, "folder-open", &i18n_wire::tr(core, "discard_changes"), false, t, move |s: &mut State| {
                 open_row_pressed(s, &path, &name);
             })
         } else {
-            icon_btn(&open_key, "folder-open", "Open", false, t, move |s: &mut State| {
+            icon_btn(&open_key, "folder-open", &i18n_wire::tr(core, "home_open"), false, t, move |s: &mut State| {
                 // Opening a row stands down any pending
                 // delete confirm (Phase K): the armed row is
                 // never this one — an armed row renders its
@@ -2679,10 +2845,10 @@ fn project_row_marked(
                 open_row_pressed(s, &path, &name);
             })
         })
-        .child(btn(&dup_key, "Duplicate", false, t, move |s: &mut State| {
+        .child(btn(&dup_key, &i18n_wire::tr(core, "home_duplicate"), false, t, move |s: &mut State| {
             dispatch_duplicate(&mut s.core, &dup_path);
         }))
-        .child(btn(&rename_key, "Rename", false, t, move |s: &mut State| {
+        .child(btn(&rename_key, &i18n_wire::tr(core, "rename"), false, t, move |s: &mut State| {
             // Arming a rename replaces this row's
             // rendering, so it stands down the panel's
             // other pending actions: a delete confirm
@@ -2692,7 +2858,7 @@ fn project_row_marked(
             s.confirm_action = None;
             begin_rename(&mut s.home_rename, rename_path.clone(), &rename_name);
         }))
-        .child(btn(&del_key, "Delete", false, t, move |s: &mut State| {
+        .child(btn(&del_key, &i18n_wire::tr(core, "home_delete"), false, t, move |s: &mut State| {
             // Arming a delete likewise stands down a
             // pending rename and any armed session
             // discard (the confirm_delete discipline,
@@ -2711,7 +2877,7 @@ fn project_row_marked(
                     .color(t.text),
             )
             .child(
-                text(row_meta_line(info, meta))
+                text(row_meta_line(core, info, meta))
                     .key(format!("home-proj-meta-{i}"))
                     .font(type_::LABEL)
                     .color(t.text_secondary)
@@ -2736,9 +2902,15 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
     // never opens onto a pre-save scan either.
     home.sync_open_file(current_project_path(&s.core));
     let mut panel = design::panel_col("home-panel", t);
-    panel = panel.child(btn("home", "Home", home.open, t, |s: &mut State| {
-        toggle_open(s);
-    }));
+    panel = panel.child(btn(
+        "home",
+        &i18n_wire::tr(&s.core, "home_toggle"),
+        home.open,
+        t,
+        |s: &mut State| {
+            toggle_open(s);
+        },
+    ));
     if !home.open {
         return panel;
     }
@@ -2773,7 +2945,7 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
             card = card.child(danger_icon_btn(
                 "home-reopen-last",
                 "arrow-rotate-right",
-                "Discard changes?",
+                &i18n_wire::tr(&s.core, "discard_changes"),
                 true,
                 t,
                 move |s: &mut State| {
@@ -2784,7 +2956,7 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
             card = card.child(icon_btn(
                 "home-reopen-last",
                 "arrow-rotate-right",
-                &reopen_label(target),
+                &reopen_label(&s.core, target),
                 true,
                 t,
                 move |s: &mut State| {
@@ -2805,14 +2977,28 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
                 // tail painted behind the New button. The
                 // directory still names itself in the
                 // recovery status lines and the panel docs.
-                "Saved projects",
+                &i18n_wire::tr(&s.core, "home_heading"),
                 None,
                 t,
             ))
             .child(if s.confirm_action == Some(ConfirmAction::NewProject) {
-                danger_icon_btn("home-new", "file", "Discard changes?", false, t, new_project_pressed)
+                danger_icon_btn(
+                    "home-new",
+                    "file",
+                    &i18n_wire::tr(&s.core, "discard_changes"),
+                    false,
+                    t,
+                    new_project_pressed,
+                )
             } else {
-                icon_btn("home-new", "file", "New project", false, t, new_project_pressed)
+                icon_btn(
+                    "home-new",
+                    "file",
+                    &i18n_wire::tr(&s.core, "home_new_project"),
+                    false,
+                    t,
+                    new_project_pressed,
+                )
             }),
     );
     card = card.child(design::divider(t));
@@ -2832,7 +3018,10 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
                     .single_line()
                     .grow(1.0)
                     .color(t.text)
-                    .placeholder("Search projects", t.text_secondary)
+                    .placeholder(
+                        &i18n_wire::tr(&s.core, "home_search_placeholder"),
+                        t.text_secondary,
+                    )
                     .on_edit(|s: &mut State| &mut s.home_panel.search)
                     // Any search edit stands down a
                     // pending delete confirm (Phase K):
@@ -2849,19 +3038,20 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
                     }),
             )
             .child(design::section_label(
-                &format!(
-                    "{} {}",
+                &count_label_tr(
+                    &s.core,
                     shown.len(),
-                    if shown.len() == 1 { "project" } else { "projects" }
+                    "home_project_one",
+                    "home_project_many",
                 ),
                 t,
             ))
             .child(btn(
                 "home-sort",
                 if home.sort_by_name {
-                    "Sort: A–Z"
+                    &i18n_wire::tr(&s.core, "home_sort_name")
                 } else {
-                    "Sort: recent"
+                    &i18n_wire::tr(&s.core, "home_sort_recent")
                 },
                 home.sort_by_name,
                 t,
@@ -2878,9 +3068,9 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
                 "magnifying-glass"
             },
             if home.search.text.is_empty() {
-                "No saved projects yet — use \"Save project\" to add one."
+                &i18n_wire::tr(&s.core, "home_empty_library")
             } else {
-                "No projects match the search."
+                &i18n_wire::tr(&s.core, "home_empty_search")
             },
             t,
         ));
@@ -2916,6 +3106,7 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
             // happened at scan time (see `projects`).
             let thumb = home.thumbnail_for(info);
             rows = rows.child(project_row_marked(
+                &s.core,
                 info,
                 i,
                 t,
@@ -2933,7 +3124,7 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
         // no visible projects the panel keeps its empty
         // message and no footer element is rendered.
         card = card.child(
-            text(totals_line(&metas, shown.len()))
+            text(totals_line(&s.core, &metas, shown.len()))
                 .key("home-totals")
                 .font(type_::LABEL)
                 .color(t.text_secondary)
@@ -3224,7 +3415,7 @@ mod tests {
         assert_eq!(target.path, PathBuf::from("projects/my-film.json"));
         // The label names what will open — the stored
         // name the row shows — not the typed string.
-        assert_eq!(reopen_label(target), "Reopen Demo");
+        assert_eq!(reopen_label(&EditorCore::new(), target), "Reopen Demo");
         // A case variant of the typed name resolves the
         // same way: the slug is case-insensitive by
         // construction. (This test's predecessor pinned
@@ -3265,7 +3456,7 @@ mod tests {
         let target = reopen_target(&entries, Some("Beta"), None).unwrap();
         assert_eq!(target.name, "Beta");
         assert_eq!(target.path, PathBuf::from("projects/beta.json"));
-        assert_eq!(reopen_label(target), "Reopen Beta");
+        assert_eq!(reopen_label(&EditorCore::new(), target), "Reopen Beta");
     }
 
     #[test]
@@ -3348,13 +3539,13 @@ mod tests {
         let mut entry = info("Demo", "projects/demo.json");
         entry.fps = 0.0;
         assert_eq!(
-            meta_line(&entry),
+            meta_line(&EditorCore::new(), &entry),
             "1 figure · 5 frames · 0 fps · modified unknown"
         );
         let stamp =
             SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_117_426);
         assert_eq!(
-            row_meta_line(&entry, Some((3, 12, 1_500, stamp, 0))),
+            row_meta_line(&EditorCore::new(), &entry, Some((3, 12, 1_500, stamp, 0))),
             "3 figures · 12 frames · 0 fps · 1.5 KB · modified 2026-11-08 05:57"
         );
     }
@@ -3380,12 +3571,12 @@ mod tests {
         entry.modified =
             Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_117_426));
         assert_eq!(
-            meta_line(&entry),
+            meta_line(&EditorCore::new(), &entry),
             "3 figures · 12 frames · 0.5s · 24 fps · modified 2026-11-08 05:57"
         );
         let mut single = info("Demo", "projects/demo.json");
         single.frames = 1;
-        assert!(meta_line(&single).starts_with("1 figure · 1 frame"));
+        assert!(meta_line(&EditorCore::new(), &single).starts_with("1 figure · 1 frame"));
     }
 
     /// Minimal project-file JSON with the two arrays the
@@ -3531,16 +3722,16 @@ mod tests {
         // duration (12 frames at the scan's 24 fps →
         // "0.5s") sits between frames and fps.
         assert_eq!(
-            row_meta_line(&entry, Some((3, 12, 1_500, stamp, 0))),
+            row_meta_line(&EditorCore::new(), &entry, Some((3, 12, 1_500, stamp, 0))),
             "3 figures · 12 frames · 0.5s · 24 fps · 1.5 KB · modified 2026-11-08 05:57"
         );
         // No light read: the line is the scan's, unchanged
         // — the old shape exactly, with no size segment
         // (its duration comes from the scan's own numbers:
         // 9 frames at 24 fps → "0.4s").
-        assert_eq!(row_meta_line(&entry, None), meta_line(&entry));
+        assert_eq!(row_meta_line(&EditorCore::new(), &entry, None), meta_line(&EditorCore::new(), &entry));
         assert_eq!(
-            row_meta_line(&entry, None),
+            row_meta_line(&EditorCore::new(), &entry, None),
             "9 figures · 9 frames · 0.4s · 24 fps · modified unknown"
         );
     }
@@ -3549,7 +3740,7 @@ mod tests {
     fn row_meta_line_closes_with_the_missing_audio_marker() {
         // Wave S (S7): a non-zero missing count appends
         // the marker as the line's closing segment —
-        // pluralised by `count_label` — and a zero count
+        // pluralised by `count_label_tr` — and a zero count
         // leaves the line byte-identical to its pre-Wave-S
         // shape (pinned by the tests above; the segment
         // helper itself is pinned here).
@@ -3558,21 +3749,21 @@ mod tests {
         let stamp =
             SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_117_426);
         assert_eq!(
-            row_meta_line(&entry, Some((3, 12, 1_500, stamp, 2))),
+            row_meta_line(&EditorCore::new(), &entry, Some((3, 12, 1_500, stamp, 2))),
             "3 figures · 12 frames · 0.5s · 24 fps · 1.5 KB · modified 2026-11-08 05:57 · 2 audio clips missing"
         );
         assert!(
-            row_meta_line(&entry, Some((3, 12, 1_500, stamp, 1)))
+            row_meta_line(&EditorCore::new(), &entry, Some((3, 12, 1_500, stamp, 1)))
                 .ends_with("· 1 audio clip missing"),
             "a single missing clip singularises"
         );
-        assert_eq!(missing_audio_segment(0), None);
+        assert_eq!(missing_audio_segment(&EditorCore::new(), 0), None);
         assert_eq!(
-            missing_audio_segment(1).as_deref(),
+            missing_audio_segment(&EditorCore::new(), 1).as_deref(),
             Some("1 audio clip missing")
         );
         assert_eq!(
-            missing_audio_segment(3).as_deref(),
+            missing_audio_segment(&EditorCore::new(), 3).as_deref(),
             Some("3 audio clips missing")
         );
     }
@@ -3597,20 +3788,20 @@ mod tests {
 
         entry.missing_audio = Some(2);
         assert_eq!(
-            meta_line(&entry),
+            meta_line(&EditorCore::new(), &entry),
             format!("{} · 2 audio clips missing", BASE)
         );
         // The marker reaches the rendered row through
         // the fallback arm itself, not only via
         // `meta_line` directly.
         assert_eq!(
-            row_meta_line(&entry, None),
+            row_meta_line(&EditorCore::new(), &entry, None),
             format!("{} · 2 audio clips missing", BASE)
         );
 
         entry.missing_audio = Some(1);
         assert_eq!(
-            meta_line(&entry),
+            meta_line(&EditorCore::new(), &entry),
             format!("{} · 1 audio clip missing", BASE)
         );
 
@@ -3618,7 +3809,7 @@ mod tests {
         // found nothing missing — the line is the old
         // shape exactly, no "0 missing" placeholder.
         entry.missing_audio = Some(0);
-        assert_eq!(meta_line(&entry), BASE);
+        assert_eq!(meta_line(&EditorCore::new(), &entry), BASE);
 
         // Unknown is not zero: an entry no scan ever
         // parsed carries `None`, and the line claims no
@@ -3626,7 +3817,7 @@ mod tests {
         // the verified-zero line, by the absence of the
         // marker rather than by a count.
         entry.missing_audio = None;
-        assert_eq!(meta_line(&entry), BASE);
+        assert_eq!(meta_line(&EditorCore::new(), &entry), BASE);
     }
 
     #[test]
@@ -3711,13 +3902,13 @@ mod tests {
         // fallback must never cost the row itself.
         let t = tok::theme(true);
         let entry = info("Demo", "projects/demo.json");
-        let _ = project_row(&entry, 0, &t, None, None);
+        let _ = project_row(&EditorCore::new(), &entry, 0, &t, None, None);
         let stamp =
             SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_117_426);
-        let _ = project_row(&entry, 0, &t, Some((3, 12, 1_500, stamp, 0)), None);
+        let _ = project_row(&EditorCore::new(), &entry, 0, &t, Some((3, 12, 1_500, stamp, 0)), None);
         // And with a missing-audio count: the marker
         // rides the same keyed meta line, no new element.
-        let _ = project_row(&entry, 0, &t, Some((3, 12, 1_500, stamp, 2)), None);
+        let _ = project_row(&EditorCore::new(), &entry, 0, &t, Some((3, 12, 1_500, stamp, 2)), None);
     }
 
     #[test]
@@ -3725,14 +3916,14 @@ mod tests {
         // Fabricated light-read results, in row order:
         // the figures and frames sum across every entry.
         let metas = [(2, 5), (3, 10), (0, 1)];
-        assert_eq!(totals_line(&metas, 3), "3 projects · 5 figures · 16 frames");
+        assert_eq!(totals_line(&EditorCore::new(), &metas, 3), "3 projects · 5 figures · 16 frames");
     }
 
     #[test]
     fn totals_line_singularises_one() {
-        // The wording is `count_label`'s, decided once:
+        // The wording is `count_label_tr`'s, decided once:
         // exactly 1 is singular for all three counts.
-        assert_eq!(totals_line(&[(1, 1)], 1), "1 project · 1 figure · 1 frame");
+        assert_eq!(totals_line(&EditorCore::new(), &[(1, 1)], 1), "1 project · 1 figure · 1 frame");
     }
 
     #[test]
@@ -3741,7 +3932,7 @@ mod tests {
         // read succeeded: the other still counts as a
         // project, contributing 0 figures / 0 frames —
         // its absence from the slice is the whole rule.
-        assert_eq!(totals_line(&[(2, 5)], 2), "2 projects · 2 figures · 5 frames");
+        assert_eq!(totals_line(&EditorCore::new(), &[(2, 5)], 2), "2 projects · 2 figures · 5 frames");
     }
 
     #[test]
@@ -3752,8 +3943,88 @@ mod tests {
         // rows). The builder renders the footer only
         // under a non-empty list, so neither shape can
         // appear beside the empty message.
-        assert_eq!(totals_line(&[], 2), "2 projects · 0 figures · 0 frames");
-        assert_eq!(totals_line(&[], 0), "0 projects · 0 figures · 0 frames");
+        assert_eq!(totals_line(&EditorCore::new(), &[], 2), "2 projects · 0 figures · 0 frames");
+        assert_eq!(totals_line(&EditorCore::new(), &[], 0), "0 projects · 0 figures · 0 frames");
+    }
+
+    #[test]
+    fn home_i18n_keys_exist_and_match_the_english() {
+        // Wave V (V3): every key this panel wires, with
+        // the English it must resolve to (templates in
+        // their raw stored form). The `home_*` keys land
+        // via IA-V3-1 — until the integrator inserts
+        // them, `tr` falls back to the key itself and
+        // `key_in_table` reports them missing, so this
+        // pin (and the content tests above, which
+        // assert the composed English lines) passes
+        // only after IA-V3-1 lands (the Q7 pattern).
+        // The last two pairs reuse keys that already
+        // exist in the catalogue — those assertions
+        // pass today.
+        let core = EditorCore::new();
+        let pairs: &[(&str, &str)] = &[
+            ("home_toggle", "Home"),
+            ("home_heading", "Saved projects"),
+            ("home_new_project", "New project"),
+            ("home_search_placeholder", "Search projects"),
+            ("home_sort_recent", "Sort: recent"),
+            ("home_sort_name", "Sort: A–Z"),
+            (
+                "home_empty_library",
+                "No saved projects yet — use \"Save project\" to add one.",
+            ),
+            ("home_empty_search", "No projects match the search."),
+            (
+                "home_recovery_banner",
+                "Unsaved recovery snapshot is newer than the last save.",
+            ),
+            ("home_recover", "Recover"),
+            ("home_discard", "Discard"),
+            ("home_open", "Open"),
+            ("home_duplicate", "Duplicate"),
+            ("home_delete", "Delete"),
+            ("home_delete_file", "Delete file"),
+            ("home_keep", "Keep"),
+            ("home_cancel", "Cancel"),
+            ("home_delete_question", "Delete {name}?"),
+            ("home_reopen_label", "Reopen {name}"),
+            ("home_figure_one", "1 figure"),
+            ("home_figure_many", "{count} figures"),
+            ("home_frame_one", "1 frame"),
+            ("home_frame_many", "{count} frames"),
+            ("home_project_one", "1 project"),
+            ("home_project_many", "{count} projects"),
+            ("home_audio_clip_one", "1 audio clip"),
+            ("home_audio_clip_many", "{count} audio clips"),
+            (
+                "home_meta_line",
+                "{figures} · {frames}{duration} · {fps} fps · {size} · modified {modified}",
+            ),
+            (
+                "home_meta_line_scan",
+                "{figures} · {frames}{duration} · {fps} fps · modified {modified}",
+            ),
+            ("home_totals_line", "{projects} · {figures} · {frames}"),
+            ("home_missing_audio", "{clips} missing"),
+            ("discard_changes", "Discard changes?"),
+            ("rename", "Rename"),
+        ];
+        for (key, english) in pairs {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(&i18n_wire::tr(&core, key), english, "key {key}");
+        }
+        // The wrapper composition spot-check: the
+        // counted clips land inside the marker template
+        // (the line-level compositions are pinned by
+        // the content tests above).
+        assert_eq!(
+            missing_audio_segment(&core, 1).as_deref(),
+            Some("1 audio clip missing")
+        );
+        assert_eq!(
+            missing_audio_segment(&core, 3).as_deref(),
+            Some("3 audio clips missing")
+        );
     }
 
     #[test]
@@ -3763,8 +4034,8 @@ mod tests {
         // armed row's confirm line both construct.
         let t = tok::theme(true);
         let entry = info("Demo", "projects/demo.json");
-        let _ = project_row_confirm(&entry, 0, &t, None, false, None);
-        let _ = project_row_confirm(&entry, 0, &t, None, true, None);
+        let _ = project_row_confirm(&EditorCore::new(), &entry, 0, &t, None, false, None);
+        let _ = project_row_confirm(&EditorCore::new(), &entry, 0, &t, None, true, None);
     }
 
     #[test]
@@ -3799,15 +4070,15 @@ mod tests {
         // confirm line constructs on the marked shell.
         let t = tok::theme(true);
         let entry = info("Demo", "projects/demo.json");
-        let _ = project_row_marked(&entry, 0, &t, None, false, false, None, false, None, false);
-        let _ = project_row_marked(&entry, 0, &t, None, false, true, None, false, None, false);
-        let _ = project_row_marked(&entry, 0, &t, None, true, true, None, false, None, false);
+        let _ = project_row_marked(&EditorCore::new(), &entry, 0, &t, None, false, false, None, false, None, false);
+        let _ = project_row_marked(&EditorCore::new(), &entry, 0, &t, None, false, true, None, false, None, false);
+        let _ = project_row_marked(&EditorCore::new(), &entry, 0, &t, None, true, true, None, false, None, false);
         // The Wave 4 states construct too: the rename
         // line (with its field buffer) and the armed
         // Open re-render.
         let edit = TextEdit::new("Demo");
-        let _ = project_row_marked(&entry, 0, &t, None, false, false, None, true, Some(&edit), false);
-        let _ = project_row_marked(&entry, 0, &t, None, false, false, None, false, None, true);
+        let _ = project_row_marked(&EditorCore::new(), &entry, 0, &t, None, false, false, None, true, Some(&edit), false);
+        let _ = project_row_marked(&EditorCore::new(), &entry, 0, &t, None, false, false, None, false, None, true);
     }
 
     #[test]
@@ -4129,10 +4400,10 @@ mod tests {
     fn reopen_label_truncates_long_names_to_its_budget() {
         // Short names keep the exact historical label
         // (also pinned by the reopen resolution tests).
-        assert_eq!(reopen_label(&info("Beta", "projects/beta.json")), "Reopen Beta");
+        assert_eq!(reopen_label(&EditorCore::new(), &info("Beta", "projects/beta.json")), "Reopen Beta");
         // A long stored name is middle-truncated so the
         // button fits the card; the prefix is never cut.
-        let label = reopen_label(&info(
+        let label = reopen_label(&EditorCore::new(), &info(
             "A Project Name That Runs Far Beyond The Card Edge",
             "projects/long.json",
         ));
@@ -4736,7 +5007,7 @@ mod tests {
         assert!(!shown.contains('\n'), "{shown}");
         assert!(text_width(&shown, title_char_width) <= ROW_NAME_BUDGET);
         // And through the reopen label.
-        let label = reopen_label(&info("A\nB", "projects/ab.json"));
+        let label = reopen_label(&EditorCore::new(), &info("A\nB", "projects/ab.json"));
         assert_eq!(label, "Reopen A B");
     }
 }

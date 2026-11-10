@@ -363,12 +363,40 @@
 //! segment's media or a sprite instance still
 //! references cannot be removed — detach it first.
 //! The panel now holds 61 rows.
+//!
+//! Wave V (V5) i18n, 2026-11-10: the panel's display prose
+//! resolves through the i18n catalogue at RENDER time, while
+//! the canonical data above ([`group_rows`], [`section_rows`],
+//! [`section_note`], [`shortcut_rows`]) stays English
+//! `&'static str` pairs byte-identical — the command
+//! palette's drift guard and this file's row census pin
+//! those pairs, so they remain the canonical source the
+//! renderer translates FROM. [`help_text_key`] maps each
+//! canonical display string to its `help_*` key and
+//! [`help_text`] renders `tr` for it (the audio panel's
+//! `health_word_tr` resolver shape); the header meta is a
+//! `{slot}` template composed by [`header_meta`] (the
+//! camera `follow_label` precedent). Two strings are
+//! deliberately NOT wired here: the panel title "Help" is
+//! U10's WIRE site for the catalogue's existing `help` key
+//! (IA-U10-1 Part 2 names this exact call; V11/integrator
+//! apply it), and the Features label "Live MCP control" is
+//! U10's WIRE candidate for the existing `live_mcp_control`
+//! key — minting a competing `help_*` key for either would
+//! fork the catalogue decision. The key-cap labels
+//! (`Ctrl+Z`, `Alt+1`, …) stay canonical: they name
+//! physical keys, are shared with the menu shortcut hints,
+//! and are identifiers, not prose. Keys land via IA-V5-1;
+//! until they do, `tr` falls back to the key itself and the
+//! pin below fails by design (the Q7 pattern: wiring and
+//! keys land together at integration).
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
 
 /// The keyboard shortcuts that are real in this shell, as
 /// (key label, action) rows, grouped by section in panel
@@ -615,17 +643,269 @@ pub fn group_rows() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+/// The catalogue key for one canonical display string, or
+/// `None` when the string is deliberately not wired (see
+/// below). The canonical data ([`group_rows`],
+/// [`section_rows`], [`section_note`]) stays English — the
+/// command palette's drift guard and this file's row
+/// census pin those pairs — so localisation resolves the
+/// string to its key here, at render time, in the audio
+/// panel's `health_word_tr` resolver shape. NOT wired, by
+/// decision (see the module docs): the panel title "Help"
+/// (U10's WIRE site for the existing `help` key, IA-U10-1)
+/// and the Features label "Live MCP control" (U10's WIRE
+/// candidate for the existing `live_mcp_control` key) are
+/// absent from this table on purpose — both are existing
+/// catalogue keys whose wiring is V11's catalogue-hygiene
+/// call, and a competing `help_*` key would fork it. The
+/// key-cap labels never reach this table: they name
+/// physical keys and are identifiers, not prose. Keys land
+/// via IA-V5-1 (the Q7 pattern).
+fn help_text_key(english: &str) -> Option<&'static str> {
+    Some(match english {
+        // Section titles.
+        "Shortcuts" => "help_section_shortcuts",
+        "Workspaces" => "help_section_workspaces",
+        "Posing" => "help_section_posing",
+        "Timeline" => "help_section_timeline",
+        "Drawing" => "help_section_drawing",
+        "Features" => "help_section_features",
+        // Section descriptions.
+        "General editing keys — all but Ctrl+K pause while typing in a text field" => {
+            "help_section_shortcuts_desc"
+        }
+        "Workspace switching keys — paused while typing in a text field" => {
+            "help_section_workspaces_desc"
+        }
+        "Keys that change how stage drags behave and what the stage shows — paused while typing in a text field" => {
+            "help_section_posing_desc"
+        }
+        "Playback and frame keys — paused while typing in a text field" => {
+            "help_section_timeline_desc"
+        }
+        "Freehand drawing keys" => "help_section_drawing_desc",
+        "Features on buttons, panels and the stage — none of these is a keyboard shortcut" => {
+            "help_section_features_desc"
+        }
+        // The Drawing section's note.
+        "No keyboard shortcuts yet. Draw mode exists in the core and stage drags paint while it is on, but no key toggles it." => {
+            "help_drawing_note"
+        }
+        // Shortcuts actions ("Redo" serves two rows).
+        "Undo" => "help_act_undo",
+        "Redo" => "help_act_redo",
+        "Quick save" => "help_act_quick_save",
+        "Open the command palette" => "help_act_open_palette",
+        "Next result in the command palette (palette open)" => "help_act_palette_next",
+        "Previous result in the command palette (palette open)" => "help_act_palette_prev",
+        "Run the selected command (command palette open)" => "help_act_palette_run",
+        "Close the open menu or command palette" => "help_act_close_menu_or_palette",
+        "Delete the selected stroke, particle event or segment" => "help_act_delete_selected",
+        // Workspaces actions.
+        "Switch to the Animate workspace" => "help_act_workspace_animate",
+        "Switch to the Draw workspace" => "help_act_workspace_draw",
+        "Switch to the Graph workspace" => "help_act_workspace_graph",
+        "Switch to the Effects workspace" => "help_act_workspace_effects",
+        "Switch to the Audio workspace" => "help_act_workspace_audio",
+        "Switch to the 3D workspace" => "help_act_workspace_3d",
+        "Switch to the Export workspace" => "help_act_workspace_export",
+        "Switch to the Home workspace" => "help_act_workspace_home",
+        // Posing actions.
+        "Toggle camera mode" => "help_act_toggle_camera_mode",
+        "Toggle onion skin" => "help_act_toggle_onion_skin",
+        // Timeline actions.
+        "Play / pause" => "help_act_play_pause",
+        "Previous frame (wraps around)" => "help_act_prev_frame_wrap",
+        "Next frame (wraps around)" => "help_act_next_frame_wrap",
+        "Add a frame after the current one" => "help_act_add_frame",
+        "Insert an inbetween frame" => "help_act_insert_inbetween",
+        // Features labels ("Live MCP control" is absent on
+        // purpose — see this fn's docs).
+        "Loop playback" => "help_feature_loop_playback",
+        "Playback speed" => "help_feature_playback_speed",
+        "Keyframe jump" => "help_feature_keyframe_jump",
+        "Timeline ruler" => "help_feature_timeline_ruler",
+        "Dopesheet" => "help_feature_dopesheet",
+        "Clear keys in loop range" => "help_feature_clear_keys_in_loop_range",
+        "Shift graph channel" => "help_feature_shift_graph_channel",
+        "Delete graph channel" => "help_feature_delete_graph_channel",
+        "Loop range steppers" => "help_feature_loop_range_steppers",
+        "Camera key delete" => "help_feature_camera_key_delete",
+        "Swap frames" => "help_feature_swap_frames",
+        "View zoom" => "help_feature_view_zoom",
+        "Stroke selection" => "help_feature_stroke_selection",
+        "Right-press selects" => "help_feature_right_press_selects",
+        "Stroke simplify" => "help_feature_stroke_simplify",
+        "Stroke opacity" => "help_feature_stroke_opacity",
+        "Particles panel" => "help_feature_particles_panel",
+        "Mute audio clips" => "help_feature_mute_audio_clips",
+        "Audio clip selection" => "help_feature_audio_clip_selection",
+        "3D preview" => "help_feature_3d_preview",
+        "3D figure on the stage" => "help_feature_3d_figure_on_stage",
+        "Bend steppers" => "help_feature_bend_steppers",
+        "Split FX clip" => "help_feature_split_fx_clip",
+        "Hide FX clips" => "help_feature_hide_fx_clips",
+        "Mirror whole figure" => "help_feature_mirror_whole_figure",
+        "Head ring size" => "help_feature_head_ring_size",
+        "Frame rate & stage size" => "help_feature_frame_rate_stage_size",
+        "Delete project file" => "help_feature_delete_project_file",
+        "Reload from disk" => "help_feature_reload_from_disk",
+        "Palette recents" => "help_feature_palette_recents",
+        "Range export" => "help_feature_range_export",
+        "Project assets" => "help_feature_project_assets",
+        "Attach asset to segment" => "help_feature_attach_asset_to_segment",
+        "Sprites" => "help_feature_sprites",
+        "MCP stdio server" => "help_feature_mcp_stdio_server",
+        // Features actions.
+        "Transport Loop button or the command palette" => "help_feature_loop_playback_desc",
+        "Transport gauge button cycles 0.25×, 0.5×, 1×, 1.5×, 2×" => {
+            "help_feature_playback_speed_desc"
+        }
+        "Prev key / Next key transport buttons — or click a timeline marker (◆ camera, ● graph)" => {
+            "help_feature_keyframe_jump_desc"
+        }
+        "Second labels above the frame chips" => "help_feature_timeline_ruler_desc",
+        "Timeline — one row per figure; ◆ marks that figure's keyframes; click a cell to go to that frame and select the figure" => {
+            "help_feature_dopesheet_desc"
+        }
+        "Keyframes — eraser button clears the selected joint's keys inside the loop range" => {
+            "help_feature_clear_keys_in_loop_range_desc"
+        }
+        "Graph panel — Shift −1 / +1 buttons move every key in the channel; Keyframes Fill range copies the current key across the loop range" => {
+            "help_feature_shift_graph_channel_desc"
+        }
+        "Graph panel — Delete channel button removes the drawn channel" => {
+            "help_feature_delete_graph_channel_desc"
+        }
+        "Timeline — the loop range's only home: Set loop button, Start / End steppers and Clear below the frame chips" => {
+            "help_feature_loop_range_steppers_desc"
+        }
+        "Camera panel — Delete key button removes the camera key at the current frame" => {
+            "help_feature_camera_key_delete_desc"
+        }
+        "Frame ops — Swap with previous / next buttons or the command palette; camera, particle and graph keys follow the swap" => {
+            "help_feature_swap_frames_desc"
+        }
+        "Stage — the mouse wheel zooms the view, not the camera; the stage overlay's Fit / Centre / 1:1 and −/+ steer the same view, and the Camera panel authors the real camera" => {
+            "help_feature_view_zoom_desc"
+        }
+        "Click a stroke on the stage to select it" => "help_feature_stroke_selection_desc",
+        "Stage — right-press a figure to select it and its joint" => {
+            "help_feature_right_press_selects_desc"
+        }
+        "Stroke inspector — Simplify button reduces the selected stroke's points" => {
+            "help_feature_stroke_simplify_desc"
+        }
+        "Draw workspace — stroke panel opacity steppers; brushes record opacity on strokes, and the stage and exports honour it" => {
+            "help_feature_stroke_opacity_desc"
+        }
+        "Effects workspace — add, select and delete particle events" => {
+            "help_feature_particles_panel_desc"
+        }
+        "Audio panel — Mute button, command palette or Edit menu; muted clips are excluded from playback and exports" => {
+            "help_feature_mute_audio_clips_desc"
+        }
+        "Click a clip row — the effects then act on that clip" => {
+            "help_feature_audio_clip_selection_desc"
+        }
+        "3D workspace — live preview of the 3D figure; drag to orbit, Grid toggle shows the ground grid" => {
+            "help_feature_3d_preview_desc"
+        }
+        "3D workspace — follows the open 3D session: the stage itself draws the 3D figure and its ground grid, like the panel preview" => {
+            "help_feature_3d_figure_on_stage_desc"
+        }
+        "Segment inspector buttons bend the selected segment by −5°, −1°, +1° or +5°" => {
+            "help_feature_bend_steppers_desc"
+        }
+        "Effects workspace — Split at playhead button or the command palette" => {
+            "help_feature_split_fx_clip_desc"
+        }
+        "Effects workspace — FX panel Hide button keeps a clip in the project but out of the stage and exports; the timeline clips lane dims muted and hidden spans" => {
+            "help_feature_hide_fx_clips_desc"
+        }
+        "Pose tools or command palette — Mirror figure (all frames)" => {
+            "help_feature_mirror_whole_figure_desc"
+        }
+        "Figure inspector — −/+ steppers scale the project's head ring" => {
+            "help_feature_head_ring_size_desc"
+        }
+        "Scene panel — Frame rate stepper and Stage size width / height steppers" => {
+            "help_feature_frame_rate_stage_size_desc"
+        }
+        "Home workspace — Delete on a project row, then confirm" => {
+            "help_feature_delete_project_file_desc"
+        }
+        "Project tools — Reload from disk button re-reads the saved file" => {
+            "help_feature_reload_from_disk_desc"
+        }
+        "Command palette — recent commands are remembered between sessions" => {
+            "help_feature_palette_recents_desc"
+        }
+        "Export panel — SVG and Spritesheet now take the loop range too" => {
+            "help_feature_range_export_desc"
+        }
+        "Scene panel — a Placed media readout counts the project's assets in use; the asset list itself is managed with the MCP tools assets_list, asset_info, asset_import, asset_rename, asset_attach and asset_remove — an asset a figure segment, a movieclip definition's segment or a sprite still uses cannot be removed, detach it first (a movieclip definition's segment media is read with clip_get_node_media and detached with clip_clear_node_media)" => {
+            "help_feature_project_assets_desc"
+        }
+        "Segment inspector — attach an image from the project's assets to the selected segment, or clear the segment's image; MCP clients use asset_attach" => {
+            "help_feature_attach_asset_to_segment_desc"
+        }
+        "Sprites panel — free-floating images from the project's assets, each placed with keyframed position, rotation and scale: add an instance from the panel, select it, and step its transform keys at the current frame (the stage draws an outline and label; exports render the real image). MCP clients use sprite_list, sprite_add, sprite_remove, sprite_set_key and sprite_delete_key. An image fixed to a segment is attached from the segment inspector instead" => {
+            "help_feature_sprites_desc"
+        }
+        "The mcp_server program serves the same core tools over stdio (JSON-RPC, one message per line) to clients that launch it — it works on its own copy of a project and never sees or drives this editor window" => {
+            "help_feature_mcp_stdio_server_desc"
+        }
+        "Settings — on by default, started at launch; the Live MCP control toggle lets MCP clients and other programs on this computer drive this running editor in full at http://127.0.0.1:32117/mcp: the core tools edit the project, and the live-only shell_* tools drive the window itself — workspace, playback, view, selection, theme and panels (the full tool list is in docs/MCP.md). There is no password: any program on this computer can drive the editor and its window while this is on, so turn it off here when you do not want that" => {
+            "help_feature_live_mcp_control_desc"
+        }
+        _ => return None,
+    })
+}
+
+/// Render one canonical display string in the core's
+/// current language: its catalogue translation when
+/// [`help_text_key`] wires it, the canonical English
+/// otherwise (the deliberate exclusions — see
+/// [`help_text_key`]).
+fn help_text(core: &EditorCore, english: &'static str) -> String {
+    match help_text_key(english) {
+        Some(key) => i18n_wire::tr(core, key),
+        None => english.to_string(),
+    }
+}
+
+/// The header meta line: the open project's name, frame
+/// count and fps, composed from the `help_meta` template
+/// (Wave V, V5; the camera `follow_label` shape — numeric
+/// slots are substituted before `{name}`, so a project
+/// name containing slot text is never re-scanned). Until
+/// IA-V5-1 lands the key, `tr` falls back to the key itself
+/// and the pin below fails by design (the Q7 pattern).
+fn header_meta(core: &EditorCore) -> String {
+    let fps = core.project.fps;
+    let fps_txt = if fps.fract() == 0.0 {
+        format!("{}", fps as i64)
+    } else {
+        format!("{fps:.1}")
+    };
+    i18n_wire::tr(core, "help_meta")
+        .replace("{frames}", &core.frame_count().to_string())
+        .replace("{fps}", &fps_txt)
+        .replace("{name}", &core.project.name)
+}
+
 /// One shortcut row: a kit `kbd` chip, then the action it
 /// performs. Only for rows whose first column names a real
 /// key (the Shortcuts, Workspaces, Posing and Timeline
 /// sections) — Features rows render through
 /// [`feature_row`] instead.
-fn shortcut_row(key: &str, action: &str, t: &Theme) -> El {
+fn shortcut_row(core: &EditorCore, key: &str, action: &'static str, t: &Theme) -> El {
     row()
         .gap(8.0)
         .center_y()
         .child(design::kbd(key, t))
-        .child(text(action.to_string()).font(type_::LABEL).color(t.text))
+        .child(text(help_text(core, action)).font(type_::LABEL).color(t.text))
 }
 
 /// One Features row: the feature name as plain text, then
@@ -633,12 +913,12 @@ fn shortcut_row(key: &str, action: &str, t: &Theme) -> El {
 /// feature, not a key, so it must not wear a `kbd` chip —
 /// a chip would claim a keyboard binding that does not
 /// exist (p14 §3).
-fn feature_row(label: &str, action: &str, t: &Theme) -> El {
+fn feature_row(core: &EditorCore, label: &'static str, action: &'static str, t: &Theme) -> El {
     row()
         .gap(8.0)
         .center_y()
-        .child(text(label.to_string()).font(type_::LABEL).color(t.text))
-        .child(text(action.to_string()).font(type_::LABEL).color(t.text))
+        .child(text(help_text(core, label)).font(type_::LABEL).color(t.text))
+        .child(text(help_text(core, action)).font(type_::LABEL).color(t.text))
 }
 
 /// One help section: a title, its description, then either
@@ -650,7 +930,10 @@ fn feature_row(label: &str, action: &str, t: &Theme) -> El {
 /// `t.text`, the kit's header treatment), and the rows
 /// split by kind: true-key sections get `kbd` chips,
 /// Features rows stay plain text (see [`feature_row`]).
-fn help_section(name: &str, description: &str, t: &Theme) -> El {
+fn help_section(core: &EditorCore, name: &'static str, description: &'static str, t: &Theme) -> El {
+    // Branching, the header icon and the element key stay
+    // keyed on the canonical English `name`; only the
+    // displayed title and description translate.
     let header_icon = if name == "Shortcuts" { "key" } else { "list" };
     let mut section = col()
         .key(format!("help-section-{}", name.to_lowercase()))
@@ -660,10 +943,15 @@ fn help_section(name: &str, description: &str, t: &Theme) -> El {
                 .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(design::panel_title(Some(header_icon), name, None, t)),
+                .child(design::panel_title(
+                    Some(header_icon),
+                    &help_text(core, name),
+                    None,
+                    t,
+                )),
         )
         .child(
-            text(description.to_string())
+            text(help_text(core, description))
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         );
@@ -671,18 +959,18 @@ fn help_section(name: &str, description: &str, t: &Theme) -> El {
     if rows.is_empty() {
         if let Some(note) = section_note(name) {
             section = section.child(
-                text(note.to_string())
+                text(help_text(core, note))
                     .font(type_::LABEL)
                     .color(t.text_secondary),
             );
         }
     } else if name == "Features" {
         for (label, action) in rows {
-            section = section.child(feature_row(label, action, t));
+            section = section.child(feature_row(core, label, action, t));
         }
     } else {
         for (key, action) in rows {
-            section = section.child(shortcut_row(key, action, t));
+            section = section.child(shortcut_row(core, key, action, t));
         }
     }
     section
@@ -693,41 +981,37 @@ fn help_section(name: &str, description: &str, t: &Theme) -> El {
 /// six sections from [`group_rows`]. Pure: it builds
 /// elements from `core` and never calls an op on it.
 pub fn help_panel(core: &EditorCore, t: &Theme) -> El {
-    let fps = core.project.fps;
-    let fps_txt = if fps.fract() == 0.0 {
-        format!("{}", fps as i64)
-    } else {
-        format!("{fps:.1}")
-    };
-    let meta = format!(
-        "{} · {} frames · {} fps",
-        core.project.name,
-        core.frame_count(),
-        fps_txt
-    );
+    let meta = header_meta(core);
     let mut panel = design::panel_col("help-panel", t)
         .child(
             row()
                 .w_full()
                 .gap(8.0)
                 .center_y()
+                // The title resolves through the catalogue's
+                // existing `help` key (U10's WIRE site, filed
+                // as IA-V11-1 and applied at Wave V
+                // integration; English byte-identical).
                 .child(design::panel_title(
                     Some("circle-question"),
-                    "Help",
+                    &i18n_wire::tr(core, "help"),
                     Some(&meta),
                     t,
                 )),
         )
         .child(design::divider(t));
     for (name, description) in group_rows() {
-        panel = panel.child(help_section(name, description, t));
+        panel = panel.child(help_section(core, name, description, t));
     }
     panel
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{group_rows, section_note, section_rows, shortcut_rows};
+    use super::{
+        group_rows, header_meta, help_text_key, i18n_wire, section_note, section_rows,
+        shortcut_rows, EditorCore,
+    };
 
     #[test]
     fn shortcut_rows_has_exactly_61_rows() {
@@ -1489,5 +1773,105 @@ mod tests {
                 "empty description for {name}"
             );
         }
+    }
+
+    #[test]
+    fn help_i18n_keys_exist_and_match_the_canonical_strings() {
+        // Wave V (V5): every display-prose string the panel
+        // renders resolves through `help_text_key` to a
+        // `help_*` key whose catalogue English is
+        // byte-identical to the canonical string. The set
+        // is enumerated from the canonical data itself —
+        // section names and descriptions, every row's
+        // action, the Features labels, and the Drawing
+        // note — so a future row added without a key fails
+        // here. The key-cap labels of the true-key
+        // sections are NOT in the set: they name physical
+        // keys (identifiers, not prose). Exactly one
+        // deliberate exclusion: the Features label "Live
+        // MCP control", U10's WIRE candidate for the
+        // existing `live_mcp_control` key (V11's call).
+        // The keys land via IA-V5-1, so this pin passes
+        // only once that IA lands — until then `tr` falls
+        // back to the key itself and `key_in_table` is
+        // false (the Q7 pattern: wiring and keys land
+        // together at integration).
+        let core = EditorCore::new();
+        let mut prose: Vec<&'static str> = Vec::new();
+        for (name, description) in group_rows() {
+            prose.push(name);
+            prose.push(description);
+            for (label, action) in section_rows(name) {
+                if name == "Features" {
+                    prose.push(label);
+                }
+                prose.push(action);
+            }
+            if let Some(note) = section_note(name) {
+                prose.push(note);
+            }
+        }
+        let mut unresolved: Vec<&'static str> = Vec::new();
+        let mut keyed: Vec<(&'static str, &'static str)> = Vec::new();
+        for english in prose {
+            match help_text_key(english) {
+                Some(key) => {
+                    // One key may not serve two different
+                    // strings (the catalogue value could
+                    // not equal both); the same string
+                    // twice ("Redo") is fine.
+                    if let Some((_, other)) =
+                        keyed.iter().find(|(k, _)| *k == key)
+                    {
+                        assert_eq!(
+                            *other, english,
+                            "i18n key {key} serves two different strings"
+                        );
+                    }
+                    keyed.push((key, english));
+                    assert!(
+                        i18n_wire::key_in_table(key),
+                        "missing i18n key: {key}"
+                    );
+                    assert_eq!(i18n_wire::tr(&core, key), english);
+                }
+                None => {
+                    if !unresolved.contains(&english) {
+                        unresolved.push(english);
+                    }
+                }
+            }
+        }
+        assert_eq!(unresolved, ["Live MCP control"]);
+    }
+
+    #[test]
+    fn help_meta_template_exists_and_composes_byte_identically() {
+        // Wave V (V5): the header meta resolves through
+        // the `help_meta` template key (IA-V5-1) and
+        // composing it reproduces exactly the line the
+        // pre-wiring `format!` printed. Passes only once
+        // IA-V5-1 lands (the Q7 pattern, as above).
+        let core = EditorCore::new();
+        assert!(i18n_wire::key_in_table("help_meta"), "missing i18n key: help_meta");
+        assert_eq!(
+            i18n_wire::tr(&core, "help_meta"),
+            "{name} · {frames} frames · {fps} fps"
+        );
+        let fps = core.project.fps;
+        let fps_txt = if fps.fract() == 0.0 {
+            format!("{}", fps as i64)
+        } else {
+            format!("{fps:.1}")
+        };
+        assert_eq!(
+            header_meta(&core),
+            format!(
+                "{} · {} frames · {} fps",
+                core.project.name,
+                core.frame_count(),
+                fps_txt
+            )
+        );
     }
 }

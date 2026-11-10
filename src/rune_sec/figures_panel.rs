@@ -195,6 +195,7 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{self, V2};
 
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::{chip_btn, chip_btn_inert, icon_btn, icon_only_btn};
 use crate::rune_sec::icons::icon_el;
 use crate::stage_view::{hex_color, ngon};
@@ -1008,7 +1009,7 @@ pub fn figures_panel(s: &State, t: &Theme) -> El {
     let mut panel = design::panel_col("figures-panel", t)
         .child(
             design::header_row("figures-panel-header")
-                .child(design::panel_title(None, "Figures", Some(&count), t))
+                .child(design::panel_title(None, &i18n_wire::tr(core, "figures"), Some(&count), t))
                 .child(crate::chrome_view::btn(
                     "fig-collapse",
                     if collapsed { "Show" } else { "Hide" },
@@ -1016,7 +1017,7 @@ pub fn figures_panel(s: &State, t: &Theme) -> El {
                     t,
                     |s| s.figures_panel.collapsed = !s.figures_panel.collapsed,
                 ))
-                .child(crate::chrome_view::btn("add-figure", "+ Figure", false, t, |s| {
+                .child(crate::chrome_view::btn("add-figure", &i18n_wire::tr(core, "add_figure"), false, t, |s| {
                     s.core.add_figure()
                 })),
         )
@@ -1139,6 +1140,24 @@ pub fn figures_panel(s: &State, t: &Theme) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn figures_i18n_keys_exist_and_match_the_english_labels() {
+        // Wave V (V11, from U10's catalogue-hygiene
+        // ledger): the panel title and the add-figure
+        // button resolve through i18n_wire::tr under
+        // pre-existing catalogue keys. The keys already
+        // existed x28, so this pin passes on its own
+        // merits — no IA was owed.
+        let core = EditorCore::new();
+        for (key, english) in [
+            ("figures", "Figures"),
+            ("add_figure", "+ Figure"),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
+    }
 
     #[test]
     fn panel_state_defaults_to_expanded() {

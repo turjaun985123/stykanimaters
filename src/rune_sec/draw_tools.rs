@@ -196,6 +196,7 @@ use stykanimate_rs::paint::ShapeKind;
 
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::{chip_btn, icon_btn};
 use crate::State;
 
@@ -818,7 +819,7 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
         .child(icon_btn("smooth-strokes", "bezier-curve", "Smooth", false, t, |s| {
             smooth_current_frame(&mut s.core);
         }))
-        .child(icon_btn("clear-drawing", "trash-can", "Clear drawing", false, t, |s| {
+        .child(icon_btn("clear-drawing", "trash-can", &i18n_wire::tr(core, "clear_drawing"), false, t, |s| {
             // The stroke panel's press, not the bare core
             // op: it remaps `stroke_selected` over the
             // removed indices, so the selection cannot
@@ -1018,6 +1019,21 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn draw_tools_i18n_keys_exist_and_match_the_english_labels() {
+        // Wave V (V11, from U10's catalogue-hygiene
+        // ledger): the Clear drawing button resolves
+        // through i18n_wire::tr under the pre-existing
+        // catalogue key. The key already existed x28, so
+        // this pin passes on its own merits — no IA was
+        // owed.
+        let core = EditorCore::new();
+        for (key, english) in [("clear_drawing", "Clear drawing")] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
+    }
 
     #[test]
     fn brush_names_match_the_core_library_order() {

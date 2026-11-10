@@ -16,6 +16,19 @@
 //! studio layout around the stage. Everything delegates to
 //! `stykanimate_rs::editor::EditorCore` — the engine is
 //! untouched.
+//!
+//! Wave V (V4): the three labels this file renders
+//! directly — the waveform card's title and the two
+//! column splitters' help labels — resolve through the
+//! i18n catalogue (`rune_sec::i18n_wire::tr`; keys filed
+//! as IA-V4-1). A full string census of this file and
+//! `src/shell.rs` (wave-v/findings/v4.md) found nothing
+//! else rendered here: the app-bar / transport /
+//! workspace-selector / status-strip labels live in
+//! their own modules and were wired there, and
+//! `shell.rs` is a data module whose every production
+//! literal is a file name, a JSON field name, an error
+//! string or persisted workspace-name data.
 
 mod chrome_view;
 mod live_mcp;
@@ -1138,7 +1151,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                         .center_y()
                         .child(rune_sec::design::panel_title(
                             Some("wave-square"),
-                            "Waveform",
+                            &rune_sec::i18n_wire::tr(core, "waveform_title"),
                             None,
                             &t,
                         )),
@@ -1312,7 +1325,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         );
         main_row = main_row.child(rune_sec::design::v_splitter(
             "split-left",
-            "Drag to resize the left panel column",
+            &rune_sec::i18n_wire::tr(core, "splitter_resize_left"),
             &t,
             |_s, dx| {
                 let mut prefs = stykanimate_rs::shell::load_layout();
@@ -1325,7 +1338,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     if s.show_right {
         main_row = main_row.child(rune_sec::design::v_splitter(
             "split-right",
-            "Drag to resize the right panel column",
+            &rune_sec::i18n_wire::tr(core, "splitter_resize_right"),
             &t,
             |_s, dx| {
                 let mut prefs = stykanimate_rs::shell::load_layout();
@@ -1661,5 +1674,41 @@ mod key_routing_tests {
         // Delete is claimed (the op no-ops safely — status
         // only — when nothing deletable is selected).
         assert!(press(&mut s, &plain(Key::Delete)));
+    }
+}
+
+/// Wave V (V4) — shell-chrome i18n pin: the three labels
+/// `view` renders directly in this file (the waveform
+/// card's title, the two column splitters' help labels)
+/// resolve through the catalogue under the keys IA-V4-1
+/// files. The pin passes only after the integrator
+/// inserts IA-V4-1 into `src/i18n.rs` (the Q7 pattern) —
+/// until then `tr` falls back to the key text and this
+/// test is red by design; the wiring and the keys land
+/// in the same integration push, and with the keys in
+/// the English rendering is byte-identical to the
+/// literals it replaced.
+#[cfg(test)]
+mod chrome_i18n_tests {
+    use crate::rune_sec::i18n_wire;
+    use stykanimate_rs::editor::EditorCore;
+
+    #[test]
+    fn chrome_i18n_keys_exist_and_match_the_english_labels() {
+        let core = EditorCore::new();
+        for (key, english) in [
+            ("waveform_title", "Waveform"),
+            (
+                "splitter_resize_left",
+                "Drag to resize the left panel column",
+            ),
+            (
+                "splitter_resize_right",
+                "Drag to resize the right panel column",
+            ),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
     }
 }

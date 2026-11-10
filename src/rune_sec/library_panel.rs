@@ -345,6 +345,7 @@ use stykanimate_rs::model::{self, FigureDef};
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
 use crate::rune_sec::figures_panel;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
 use crate::rune_sec::icons::icon_el;
 use crate::stage_view::{hex_color, ngon};
@@ -615,6 +616,17 @@ pub fn library_file_for(name: &str) -> PathBuf {
     stykanimate_rs::library_ops::library_file_for(name)
 }
 
+/// The file backing the saved entry DISPLAYED as
+/// `name`, resolved through the stored-name rule —
+/// see [`stykanimate_rs::library_ops::library_entry_file`].
+/// [`delete_saved`] resolves through this, not
+/// [`library_file_for`]: the name a row shows is
+/// stored inside its file (Wave V, V1) and need not
+/// be its file's stem ("Styk" lives in `styk.json`).
+pub fn library_entry_file(name: &str) -> PathBuf {
+    stykanimate_rs::library_ops::library_entry_file(name)
+}
+
 /// Pure index clamp: keep a library selection valid for a
 /// library of `len` entries — `0` when empty, otherwise at
 /// most `len - 1`; an in-range index is returned unchanged.
@@ -652,7 +664,10 @@ pub fn delete_saved(core: &mut EditorCore, i: usize) {
         core.status = format!("\"{name}\" is built in and can't be deleted.");
         return;
     }
-    match std::fs::remove_file(library_file_for(&name)) {
+    // The displayed name is not necessarily the file's
+    // stem (Wave V, V1) — resolve the backing file
+    // through [`library_entry_file`].
+    match std::fs::remove_file(library_entry_file(&name)) {
         Ok(()) => {
             core.library.remove(i);
             clamp_library_index(core);
@@ -1275,7 +1290,7 @@ fn entry_row(entry: &LibraryRow, s: &State, t: &Theme) -> El {
         buttons = buttons.child(icon_btn(
             &format!("library-rename-{i}"),
             "pencil",
-            "Rename",
+            &i18n_wire::tr(&s.core, "rename"),
             false,
             t,
             move |s: &mut State| start_rename(s, i),
@@ -1485,6 +1500,21 @@ pub fn library_panel(s: &State, t: &Theme) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn library_i18n_keys_exist_and_match_the_english_labels() {
+        // Wave V (V11, from U10's catalogue-hygiene
+        // ledger): the entry row's Rename button resolves
+        // through i18n_wire::tr under the pre-existing
+        // catalogue key (one key serves all four Rename
+        // buttons). The key already existed x28, so this
+        // pin passes on its own merits — no IA was owed.
+        let core = EditorCore::new();
+        for (key, english) in [("rename", "Rename")] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
+    }
 
     #[test]
     fn state_defaults_expanded() {

@@ -2980,7 +2980,7 @@ mod tests {
         let meta = crate::rune_sec::home_panel::project_metadata(&info.path)
             .expect("the saved file light-reads");
         assert_eq!(meta.4, 1, "the light read counts one missing clip");
-        let line = crate::rune_sec::home_panel::row_meta_line(info, Some(meta));
+        let line = crate::rune_sec::home_panel::row_meta_line(&s.core, info, Some(meta));
         assert!(
             line.ends_with("· 1 audio clip missing"),
             "the row's meta line closes with the marker: {line}"
@@ -3067,10 +3067,10 @@ mod tests {
         );
         let meta = s.home_panel.metadata_for(&info.path);
         assert!(meta.is_none(), "the panel state's light read refuses it too");
-        let line = crate::rune_sec::home_panel::row_meta_line(info, meta);
+        let line = crate::rune_sec::home_panel::row_meta_line(&s.core, info, meta);
         assert_eq!(
             line,
-            crate::rune_sec::home_panel::meta_line(info),
+            crate::rune_sec::home_panel::meta_line(&s.core, info),
             "the row renders the scan-fallback line"
         );
         assert!(

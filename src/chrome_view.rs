@@ -360,7 +360,7 @@ pub fn app_bar(s: &State, t: &Theme) -> El {
             s.core.save()
         }))
         .child(if s.confirm_action == Some(ConfirmAction::OpenProject) {
-            danger_icon_btn("load", "folder-open", "Discard changes?", false, t, load_pressed)
+            danger_icon_btn("load", "folder-open", &i18n_wire::tr(core, "discard_changes"), false, t, load_pressed)
         } else {
             icon_btn("load", "folder-open", &i18n_wire::tr(core, "load"), false, t, load_pressed)
         })
@@ -579,6 +579,9 @@ mod tests {
             "add_frame",
             "duplicate_frame",
             "delete_frame",
+            // Wave V (V11): the app bar's discard prompt,
+            // wired from U10's catalogue-hygiene ledger.
+            "discard_changes",
         ] {
             assert!(i18n_wire::key_in_table(key), "label key {key} not in table");
         }
@@ -594,6 +597,7 @@ mod tests {
         assert_eq!(i18n_wire::tr(&core, "prev_frame"), "Previous frame");
         assert_eq!(i18n_wire::tr(&core, "next_frame"), "Next frame");
         assert_eq!(i18n_wire::tr(&core, "delete_frame"), "Delete");
+        assert_eq!(i18n_wire::tr(&core, "discard_changes"), "Discard changes?");
     }
 
     /// The Phase N family members construct under both

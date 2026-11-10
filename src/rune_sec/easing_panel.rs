@@ -72,6 +72,7 @@ use stykanimate_rs::model::Easing;
 
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::PRESS_SCALE;
 use crate::State;
 
@@ -334,7 +335,7 @@ pub fn easing_panel(s: &State, t: &Theme) -> El {
                 .w_full()
                 .gap(design::PANEL_GAP)
                 .center_y()
-                .child(design::panel_title(Some("chart-line"), "Easing", None, t)),
+                .child(design::panel_title(Some("chart-line"), &i18n_wire::tr(core, "easing"), None, t)),
         )
         .child(design::divider(t));
 
@@ -458,6 +459,20 @@ pub fn easing_panel(s: &State, t: &Theme) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn easing_i18n_keys_exist_and_match_the_english_labels() {
+        // Wave V (V11, from U10's catalogue-hygiene
+        // ledger): the panel title resolves through
+        // i18n_wire::tr under the pre-existing catalogue
+        // key. The key already existed x28, so this pin
+        // passes on its own merits — no IA was owed.
+        let core = EditorCore::new();
+        for (key, english) in [("easing", "Easing")] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
+    }
 
     fn assert_endpoints(curve: &[f32], what: &str) {
         assert!(curve.len() >= 2, "{what}: too few samples");

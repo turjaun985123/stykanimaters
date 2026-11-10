@@ -193,6 +193,7 @@ use rune::{row, text, El};
 
 use crate::chrome_view::{btn, btn_inert};
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::icon_btn;
 use crate::rune_sec::timeline_marks::graph_key_frame;
 use crate::State;
@@ -735,18 +736,18 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
     if let Some(range) = loop_range {
         let (start_inert, end_inert) = loop_jump_inert(Some(range), frame_count);
         let start_btn = if start_inert {
-            btn_inert("pb-loop-start", "Go to start", t)
+            btn_inert("pb-loop-start", &i18n_wire::tr(core, "go_to_start"), t)
         } else {
-            btn("pb-loop-start", "Go to start", false, t, |s| {
+            btn("pb-loop-start", &i18n_wire::tr(core, "go_to_start"), false, t, |s| {
                 if let Some((a, _)) = loop_jump_targets(&s.core) {
                     s.core.goto(a);
                 }
             })
         };
         let end_btn = if end_inert {
-            btn_inert("pb-loop-end", "Go to end", t)
+            btn_inert("pb-loop-end", &i18n_wire::tr(core, "go_to_end"), t)
         } else {
-            btn("pb-loop-end", "Go to end", false, t, |s| {
+            btn("pb-loop-end", &i18n_wire::tr(core, "go_to_end"), false, t, |s| {
                 if let Some((_, b)) = loop_jump_targets(&s.core) {
                     s.core.goto(b);
                 }
@@ -816,7 +817,7 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
         row()
             .gap(6.0)
             .center_y()
-            .child(btn("tween", "Tween play", tween_on, t, |s| {
+            .child(btn("tween", &i18n_wire::tr(core, "tween_play"), tween_on, t, |s| {
                 s.core.toggle_tween_playback();
             }))
             .child(design::section_label(
@@ -902,6 +903,25 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
 mod tests {
     use super::*;
     use stykanimate_rs::editor::EditorCore;
+
+    #[test]
+    fn playback_i18n_keys_exist_and_match_the_english_labels() {
+        // Wave V (V11, from U10's catalogue-hygiene
+        // ledger): the loop-jump pair and the tween
+        // toggle resolve through i18n_wire::tr under
+        // pre-existing catalogue keys. The keys already
+        // existed x28, so this pin passes on its own
+        // merits — no IA was owed.
+        let core = EditorCore::new();
+        for (key, english) in [
+            ("go_to_start", "Go to start"),
+            ("go_to_end", "Go to end"),
+            ("tween_play", "Tween play"),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
+    }
     use stykanimate_rs::graph::{Channel, ChannelTarget, Key};
 
     /// A demo core (5 frames) with the demo's own camera

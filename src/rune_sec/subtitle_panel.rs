@@ -97,6 +97,23 @@
 //!   sentences stay English: they are messages in the
 //!   ops' voice, not labels, and the shell localises
 //!   no status sentence.
+//! * The composed readouts resolve the same way (Wave
+//!   V, V2): the cue row's window line, the detail
+//!   block's range line and cue title, the scale
+//!   stepper's value and the style block's colour line
+//!   are `{slot}` template keys (`subtitle_row_label`,
+//!   `subtitle_range_line`, `subtitle_cue_title`,
+//!   `subtitle_scale_value`, `subtitle_color_readout`
+//!   — IA-V2-1), substituted at the composing site in
+//!   the camera `follow_label` idiom. The words inside
+//!   the range and colour lines still come from their
+//!   own keys (`frames`, `subtitle_frames_unit`,
+//!   `subtitle_text`, `subtitle_box`), carried through
+//!   slots. What stays literal: the speaker prefix is
+//!   the renderers' own composition
+//!   (`subtitles::subtitle_display_lines`), the hex
+//!   readout (`#RRGGBB`) and the bare stepper numbers
+//!   are notation.
 //! * The cue text field is the kit's one field
 //!   construction, which is single-line: a multi-line
 //!   cue's line breaks ride in the buffer verbatim and
@@ -106,6 +123,22 @@
 //! * Cue frames are NOT clamped to the timeline (the
 //!   core ops' rule): a cue may start or end past the
 //!   last frame, and the end stepper has no upper bound.
+//! * The style block's colour reach (Wave V, V6 audit):
+//!   the swatch rows set only the palette's eight
+//!   colours, so each colour also carries RGB channel
+//!   steppers (the style inspector's Phase F idiom,
+//!   [`SUBTITLE_RGB_STEP`] grain) under its swatches —
+//!   any `0xRRGGBB` value, including one set over MCP
+//!   that marks no swatch, is reachable and adjustable
+//!   here, through the same style op. The audit found
+//!   NO other gap: `SubtitleStyle` has exactly four
+//!   fields (position, font scale, text colour, box
+//!   colour) and all four now have full-reach controls.
+//!   There is no background or opacity field in the
+//!   model to control — `box_color` IS the backing
+//!   (drawn as outline / offset stamps; no surface
+//!   draws a filled box, see `subtitles.rs`) — so no
+//!   such control exists, and none is faked.
 //! * Drag-to-move for cues is the lane's named remainder
 //!   (P32): no per-block drag machinery exists in the
 //!   timeline to extend, and this panel does not fake
@@ -128,13 +161,17 @@
 //! `subtitle-text-colors` / `subtitle-box-colors`
 //! (swatch rows), `subtitle-text-color-{ci}` /
 //! `subtitle-box-color-{ci}` (swatches 0–7),
+//! `subtitle-text-{r,g,b}-row` /
+//! `subtitle-box-{r,g,b}-row` (channel stepper rows,
+//! Wave V, V6) with `subtitle-text-{r,g,b}-dn` /
+//! `-up` and `subtitle-box-{r,g,b}-dn` / `-up`,
 //! `subtitle-file` (file root), `subtitle-path` (path
 //! field), `subtitle-export-srt` / `subtitle-export-vtt`,
 //! `subtitle-import-srt` / `subtitle-import-vtt`.
 //! No existing key is renamed or removed.
 
 use rune::tok::{type_, Theme};
-use rune::{col, row, text, El, TextEdit};
+use rune::{col, el, row, text, El, TextEdit};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::subtitles::{
     sort_subtitle_cues, subtitles_from_srt, subtitles_from_vtt, subtitles_to_srt,
@@ -245,33 +282,43 @@ impl Default for SubtitlePanelState {
 /// half-open range's covered frames), then the cue's
 /// text with its line breaks flattened to spaces — the
 /// row is one truncated line, and the detail block
-/// below carries the text whole.
-pub fn cue_row_label(cue: &SubtitleCue) -> String {
+/// below carries the text whole. The window skeleton
+/// is the `subtitle_row_label` template key (Wave V,
+/// V2), substituted here; the cue text — user data —
+/// is substituted LAST, so a cue whose text literally
+/// reads `{start}` is never re-scanned for slots (the
+/// camera `follow_label` rule).
+pub fn cue_row_label(core: &EditorCore, cue: &SubtitleCue) -> String {
     // A credited cue's row carries its speaker as the
     // `Name: ` prefix — the same composition the
     // renderers draw (subtitles::subtitle_display_lines),
-    // panel-local per IA-R21-5.
+    // panel-local per IA-R21-5. The prefix is the
+    // renderers' own composition, not a panel template:
+    // the row mirrors the stage and does not fork it.
     let text = match &cue.speaker {
         Some(name) => format!("{name}: {}", cue.text.replace('\n', " ")),
         None => cue.text.replace('\n', " "),
     };
-    format!("{}–{} · {}", cue.start_frame + 1, cue.end_frame, text)
+    i18n_wire::tr(core, "subtitle_row_label")
+        .replace("{start}", &(cue.start_frame + 1).to_string())
+        .replace("{end}", &cue.end_frame.to_string())
+        .replace("{text}", &text)
 }
 
 /// The detail block's range line: the same window as
 /// [`cue_row_label`], with the cue's length spelled
-/// out. The two words resolve through the i18n tables
-/// (`frames` + `subtitle_frames_unit`); the numbers
-/// and the window punctuation are locale-invariant.
+/// out. The line is the `subtitle_range_line` template
+/// key (Wave V, V2); the two words ride in slots from
+/// their own keys (`frames` + `subtitle_frames_unit`)
+/// and the numbers are locale-invariant, so the
+/// template is punctuation and slot order only.
 pub fn cue_range_line(core: &EditorCore, cue: &SubtitleCue) -> String {
-    format!(
-        "{} {}–{} · {} {}",
-        i18n_wire::tr(core, "frames"),
-        cue.start_frame + 1,
-        cue.end_frame,
-        cue.end_frame - cue.start_frame,
-        i18n_wire::tr(core, "subtitle_frames_unit")
-    )
+    i18n_wire::tr(core, "subtitle_range_line")
+        .replace("{frames}", &i18n_wire::tr(core, "frames"))
+        .replace("{start}", &(cue.start_frame + 1).to_string())
+        .replace("{end}", &cue.end_frame.to_string())
+        .replace("{count}", &(cue.end_frame - cue.start_frame).to_string())
+        .replace("{unit}", &i18n_wire::tr(core, "subtitle_frames_unit"))
 }
 
 /// The live selection resolved: the selected cue's
@@ -374,14 +421,65 @@ pub fn stepped_scale(style: SubtitleStyle, dir: i32) -> f32 {
 }
 
 /// The scale stepper's readout: the sanitised scale
-/// at tenth precision, the stepping grain.
-pub fn scale_readout(style: SubtitleStyle) -> String {
-    format!("{:.1}×", style.sanitised().font_scale)
+/// at tenth precision, the stepping grain. The number
+/// is formatted here and rides the `{value}` slot of
+/// the `subtitle_scale_value` template (Wave V, V2 —
+/// the `frame_duration_value` shape).
+pub fn scale_readout(core: &EditorCore, style: SubtitleStyle) -> String {
+    i18n_wire::tr(core, "subtitle_scale_value")
+        .replace("{value}", &format!("{:.1}", style.sanitised().font_scale))
 }
 
 /// A stored colour as the readout's `#RRGGBB`.
 pub fn hex_label(rgb: u32) -> String {
     format!("#{rgb:06X}")
+}
+
+/// Per-press channel step for the style block's RGB
+/// channel steppers (Wave V, V6): the style
+/// inspector's grain (`inspector_style::RGB_STEP`),
+/// named locally because each panel owns its
+/// constants — the VALUE matches, so every colour
+/// stepper in the shell moves alike.
+pub const SUBTITLE_RGB_STEP: i32 = 8;
+
+/// Channel `channel` (0 = R, 1 = G, 2 = B) of a
+/// `0xRRGGBB` colour. An out-of-range channel reads
+/// 0 — the steppers only ever pass 0–2, and
+/// [`stepped_channel`] refuses out-of-range channels
+/// outright.
+pub fn channel_value(rgb: u32, channel: usize) -> u8 {
+    match channel {
+        0 => ((rgb >> 16) & 0xFF) as u8,
+        1 => ((rgb >> 8) & 0xFF) as u8,
+        2 => (rgb & 0xFF) as u8,
+        _ => 0,
+    }
+}
+
+/// A `0xRRGGBB` colour with channel `channel` stepped
+/// one press in `dir` (−1 / +1): the channel moves by
+/// [`SUBTITLE_RGB_STEP`], clamped to 0..=255, the
+/// other channels untouched. An out-of-range channel
+/// index returns the colour unchanged, as does a step
+/// at the clamp bound — the step handlers treat
+/// "unchanged" as no change and spend no undo step.
+pub fn stepped_channel(rgb: u32, channel: usize, dir: i32) -> u32 {
+    if channel > 2 {
+        return rgb;
+    }
+    let shift = 16 - 8 * channel as u32;
+    let stepped =
+        (channel_value(rgb, channel) as i32 + dir * SUBTITLE_RGB_STEP).clamp(0, 255) as u32;
+    (rgb & !(0xFF << shift)) | (stepped << shift)
+}
+
+/// The pure-channel preview colour for a channel
+/// row's mini-swatch: the channel's own value in its
+/// own slot, the style inspector's idiom.
+pub fn channel_preview(value: u8, channel: usize) -> u32 {
+    let shift = 16 - 8 * (channel.min(2)) as u32;
+    (value as u32) << shift
 }
 
 /// Whether the text session still names the cue it
@@ -683,6 +781,41 @@ pub fn set_box_color(s: &mut State, rgb: u32) {
     let _ = s.core.set_subtitle_style(style);
 }
 
+/// Step the subtitle style's text colour one channel
+/// press (channel 0 = R, 1 = G, 2 = B — see
+/// [`stepped_channel`]) through
+/// `EditorCore::set_subtitle_style`: one undo step,
+/// the op's own status. A press that changes nothing
+/// (the channel already at its clamp bound, a bad
+/// channel index) spends no step — the row renders
+/// that direction inert, and this guard is the
+/// backstop. Together with the swatches this gives
+/// the colour its full reach: the swatches land the
+/// palette, the steppers walk anywhere from there,
+/// including onto colours no swatch carries.
+pub fn step_text_channel(s: &mut State, channel: usize, dir: i32) {
+    let mut style = s.core.subtitle_style();
+    let next = stepped_channel(style.text_color, channel, dir);
+    if next == style.text_color {
+        return;
+    }
+    style.text_color = next;
+    let _ = s.core.set_subtitle_style(style);
+}
+
+/// Step the subtitle style's box colour one channel
+/// press; the box half of [`step_text_channel`]'s
+/// discipline.
+pub fn step_box_channel(s: &mut State, channel: usize, dir: i32) {
+    let mut style = s.core.subtitle_style();
+    let next = stepped_channel(style.box_color, channel, dir);
+    if next == style.box_color {
+        return;
+    }
+    style.box_color = next;
+    let _ = s.core.set_subtitle_style(style);
+}
+
 /// Which subtitle file format a File-block button
 /// speaks: the SRT and WebVTT converters are separate
 /// functions with separate refusal disciplines (the
@@ -866,7 +999,7 @@ pub fn subtitle_section(s: &State, t: &Theme) -> El {
                     .w_full()
                     .on_press(move |s: &mut State| select_cue(s, i))
                     .child(
-                        text(cue_row_label(cue))
+                        text(cue_row_label(core, cue))
                             .font(type_::BODY)
                             .color(t.text)
                             .grow(1.0)
@@ -917,13 +1050,13 @@ fn detail_block(s: &State, t: &Theme) -> El {
         .w_full()
         .gap(8.0)
         .child(
-            text(format!(
-                "{} {}",
-                i18n_wire::tr(&s.core, "subtitle_cue"),
-                i + 1
-            ))
-                .font(type_::TITLE)
-                .color(t.text),
+            text(
+                i18n_wire::tr(&s.core, "subtitle_cue_title")
+                    .replace("{cue}", &i18n_wire::tr(&s.core, "subtitle_cue"))
+                    .replace("{index}", &(i + 1).to_string()),
+            )
+            .font(type_::TITLE)
+            .color(t.text),
         )
         .child(
             text(cue_range_line(&s.core, &cue))
@@ -1087,8 +1220,75 @@ fn detail_block(s: &State, t: &Theme) -> El {
 /// palette — set over MCP — still reads here even
 /// though no swatch marks it). Every press is one
 /// `set_subtitle_style` call: one undo step.
+/// One RGB channel stepper row of the style block
+/// (Wave V, V6): the channel's name, a mini-swatch of
+/// the channel's own intensity, the − button, the
+/// value in the kit's `stepper_value` readout and the
+/// + button — the style inspector's channel-row
+/// idiom, stepping by [`SUBTITLE_RGB_STEP`] through
+/// the style op via `step`. A direction the channel
+/// cannot move (0 down, 255 up) renders inert (the
+/// kit's `StepForm::Noop`). Keys are `{stem}-row` /
+/// `{stem}-dn` / `{stem}-up`.
+fn style_channel_row(
+    stem: &str,
+    label: &str,
+    rgb: u32,
+    channel: usize,
+    step: fn(&mut State, usize, i32),
+    t: &Theme,
+) -> El {
+    let value = channel_value(rgb, channel);
+    let swatch = el()
+        .size(12.0, 12.0)
+        .radius(3.0)
+        .fill(crate::stage_view::hex_color(channel_preview(value, channel)).unwrap_or(t.bg));
+    row()
+        .key(format!("{stem}-row"))
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(
+            text(label)
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .grow(1.0),
+        )
+        .child(swatch)
+        .child(design::step_btn(
+            &format!("{stem}-dn"),
+            "−",
+            if value == 0 {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            t,
+            move |s: &mut State| step(s, channel, -1),
+        ))
+        .child(design::stepper_value(&value.to_string(), t))
+        .child(design::step_btn(
+            &format!("{stem}-up"),
+            "+",
+            if value == 255 {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            t,
+            move |s: &mut State| step(s, channel, 1),
+        ))
+}
+
 fn style_block(s: &State, t: &Theme) -> El {
     let style = s.core.subtitle_style();
+    // The channel rows' names, resolved once (Wave V,
+    // V6 — IA-V6-1's keys).
+    let channel_names = [
+        i18n_wire::tr(&s.core, "subtitle_red"),
+        i18n_wire::tr(&s.core, "subtitle_green"),
+        i18n_wire::tr(&s.core, "subtitle_blue"),
+    ];
     let mut text_colors = row().key("subtitle-text-colors").gap(4.0).center_y();
     for (ci, &rgb) in SUBTITLE_PALETTE.iter().enumerate() {
         text_colors = text_colors.child(design::swatch(
@@ -1157,7 +1357,7 @@ fn style_block(s: &State, t: &Theme) -> El {
                         .grow(1.0),
                 )
                 .child(btn("subtitle-scale-dn", "−", false, t, |s| step_scale(s, -1)))
-                .child(design::stepper_value(&scale_readout(style), t))
+                .child(design::stepper_value(&scale_readout(&s.core, style), t))
                 .child(btn("subtitle-scale-up", "+", false, t, |s| step_scale(s, 1))),
         )
         .child(
@@ -1170,6 +1370,30 @@ fn style_block(s: &State, t: &Theme) -> El {
                 ))
                 .child(text_colors),
         )
+        .child(style_channel_row(
+            "subtitle-text-r",
+            &channel_names[0],
+            style.text_color,
+            0,
+            step_text_channel,
+            t,
+        ))
+        .child(style_channel_row(
+            "subtitle-text-g",
+            &channel_names[1],
+            style.text_color,
+            1,
+            step_text_channel,
+            t,
+        ))
+        .child(style_channel_row(
+            "subtitle-text-b",
+            &channel_names[2],
+            style.text_color,
+            2,
+            step_text_channel,
+            t,
+        ))
         .child(
             row()
                 .gap(8.0)
@@ -1180,14 +1404,38 @@ fn style_block(s: &State, t: &Theme) -> El {
                 ))
                 .child(box_colors),
         )
+        .child(style_channel_row(
+            "subtitle-box-r",
+            &channel_names[0],
+            style.box_color,
+            0,
+            step_box_channel,
+            t,
+        ))
+        .child(style_channel_row(
+            "subtitle-box-g",
+            &channel_names[1],
+            style.box_color,
+            1,
+            step_box_channel,
+            t,
+        ))
+        .child(style_channel_row(
+            "subtitle-box-b",
+            &channel_names[2],
+            style.box_color,
+            2,
+            step_box_channel,
+            t,
+        ))
         .child(
-            text(format!(
-                "{} {} · {} {}",
-                i18n_wire::tr(&s.core, "subtitle_text"),
-                hex_label(style.text_color),
-                i18n_wire::tr(&s.core, "subtitle_box"),
-                hex_label(style.box_color)
-            ))
+            text(
+                i18n_wire::tr(&s.core, "subtitle_color_readout")
+                    .replace("{text}", &i18n_wire::tr(&s.core, "subtitle_text"))
+                    .replace("{text_hex}", &hex_label(style.text_color))
+                    .replace("{box}", &i18n_wire::tr(&s.core, "subtitle_box"))
+                    .replace("{box_hex}", &hex_label(style.box_color)),
+            )
             .font(type_::LABEL)
             .color(t.text_secondary)
             .wrap()
@@ -1323,13 +1571,22 @@ mod tests {
 
     #[test]
     fn labels_speak_the_ops_voice() {
-        assert_eq!(cue_row_label(&cue(0, 24, "Hello.")), "1–24 · Hello.");
+        let s = cue_state(Vec::new());
+        assert_eq!(cue_row_label(&s.core, &cue(0, 24, "Hello.")), "1–24 · Hello.");
         assert_eq!(
-            cue_row_label(&cue(4, 6, "one\ntwo")),
+            cue_row_label(&s.core, &cue(4, 6, "one\ntwo")),
             "5–6 · one two",
             "line breaks flatten for the one-line row"
         );
-        let s = cue_state(Vec::new());
+        // A credited cue's row carries the renderers'
+        // speaker prefix inside the template's text
+        // slot (Wave V, V2 composed spot check).
+        let mut credited = cue(0, 24, "Hello.");
+        credited.speaker = Some("NOVA".to_string());
+        assert_eq!(
+            cue_row_label(&s.core, &credited),
+            "1–24 · NOVA: Hello."
+        );
         assert_eq!(
             cue_range_line(&s.core, &cue(0, 24, "x")),
             "Frames 1–24 · 24 frame(s)"
@@ -1369,10 +1626,11 @@ mod tests {
 
     #[test]
     fn scale_steps_in_tenths_and_holds_the_clamp() {
+        let s = cue_state(Vec::new());
         let style = SubtitleStyle::default();
         assert_eq!(stepped_scale(style, 1), 1.1);
         assert_eq!(stepped_scale(style, -1), 0.9);
-        assert_eq!(scale_readout(style), "1.0×");
+        assert_eq!(scale_readout(&s.core, style), "1.0×");
         let lo = SubtitleStyle {
             font_scale: SUBTITLE_FONT_SCALE_MIN,
             ..SubtitleStyle::default()
@@ -1383,7 +1641,7 @@ mod tests {
             ..SubtitleStyle::default()
         };
         assert_eq!(stepped_scale(hi, 1), SUBTITLE_FONT_SCALE_MAX);
-        assert_eq!(scale_readout(hi), "3.0×");
+        assert_eq!(scale_readout(&s.core, hi), "3.0×");
         // An off-grid stored scale steps a full tenth
         // from its nearest tenth (1.25 reads as 1.3 on
         // the grid, so + lands on 1.4 and − on 1.2).
@@ -1402,7 +1660,7 @@ mod tests {
         // (English) core resolves it to the exact
         // literal it replaced — English rendering is
         // byte-identical to the pre-i18n panel.
-        const LABELS: [(&str, &str); 31] = [
+        const LABELS: [(&str, &str); 34] = [
             ("subtitles", "Subtitles"),
             ("subtitle_none", "No subtitles in this project."),
             ("subtitle_add", "Add cue"),
@@ -1437,6 +1695,13 @@ mod tests {
             ("subtitle_export_vtt", "Export VTT"),
             ("subtitle_import_srt", "Import SRT"),
             ("subtitle_import_vtt", "Import VTT"),
+            // Wave V (V6): the channel rows' names —
+            // these three resolve only once IA-V6-1
+            // lands the keys in the catalogue (the
+            // integrator's insertion, roster order).
+            ("subtitle_red", "Red"),
+            ("subtitle_green", "Green"),
+            ("subtitle_blue", "Blue"),
         ];
         let s = cue_state(Vec::new());
         for (key, english) in LABELS {
@@ -1445,6 +1710,39 @@ mod tests {
                 "{key} missing from the catalogue"
             );
             assert_eq!(i18n_wire::tr(&s.core, key), english, "{key} in English");
+        }
+        // The composed readouts' template keys (Wave
+        // V, V2 — IA-V2-1): present in the catalogue
+        // and resolving in English to their stored
+        // template, slots intact. This section passes
+        // only after IA-V2-1 lands — until then tr()
+        // falls back to the key itself (the Q7
+        // pattern). The composed spot checks through
+        // the public helpers live in
+        // labels_speak_the_ops_voice (row + range
+        // lines) and scale_steps_in_tenths (the scale
+        // value); the cue title and colour line
+        // compose inline in their views and are
+        // pinned by their stored templates here.
+        const TEMPLATES: [(&str, &str); 5] = [
+            ("subtitle_row_label", "{start}–{end} · {text}"),
+            ("subtitle_cue_title", "{cue} {index}"),
+            (
+                "subtitle_range_line",
+                "{frames} {start}–{end} · {count} {unit}",
+            ),
+            ("subtitle_scale_value", "{value}×"),
+            (
+                "subtitle_color_readout",
+                "{text} {text_hex} · {box} {box_hex}",
+            ),
+        ];
+        for (key, template) in TEMPLATES {
+            assert!(
+                i18n_wire::key_in_table(key),
+                "{key} missing from the catalogue"
+            );
+            assert_eq!(i18n_wire::tr(&s.core, key), template, "{key} template");
         }
         assert_eq!(DEFAULT_CUE_TEXT, i18n_wire::tr(&s.core, "subtitle_new"));
         // The translated tables genuinely translate:
@@ -1624,6 +1922,106 @@ mod tests {
         step_scale(&mut s, -1);
         assert_eq!(s.core.undo_depth(), depth);
         assert!(s.core.status.contains("smallest"));
+    }
+
+    #[test]
+    fn channel_stepping_moves_one_channel_by_the_grain() {
+        // Wave V (V6): the pure stepper behind the
+        // channel rows.
+        assert_eq!(channel_value(0x123456, 0), 0x12);
+        assert_eq!(channel_value(0x123456, 1), 0x34);
+        assert_eq!(channel_value(0x123456, 2), 0x56);
+        assert_eq!(stepped_channel(0x123456, 0, 1), 0x1A3456);
+        assert_eq!(stepped_channel(0x123456, 1, -1), 0x122C56);
+        assert_eq!(stepped_channel(0x123456, 2, 1), 0x12345E);
+        // The clamps hold and the other channels never
+        // move.
+        assert_eq!(stepped_channel(0xFF3456, 0, 1), 0xFF3456);
+        assert_eq!(stepped_channel(0x003456, 0, -1), 0x003456);
+        assert_eq!(stepped_channel(0x1234FE, 2, 1), 0x1234FF);
+        // A bad channel index is identity.
+        assert_eq!(stepped_channel(0x123456, 3, 1), 0x123456);
+        assert_eq!(channel_value(0x123456, 3), 0);
+        // The mini-swatch previews carry the channel's
+        // own value in its own slot.
+        assert_eq!(channel_preview(0xAB, 0), 0xAB0000);
+        assert_eq!(channel_preview(0xAB, 1), 0x00AB00);
+        assert_eq!(channel_preview(0xAB, 2), 0x0000AB);
+    }
+
+    #[test]
+    fn style_channel_steppers_round_trip_and_persist() {
+        // Wave V (V6): the channel rows' handlers,
+        // against a colour no swatch carries (the gap
+        // the audit found: an MCP-set colour the panel
+        // could display but never adjust).
+        let mut s = cue_state(Vec::new());
+        let off_palette = SubtitleStyle {
+            text_color: 0x123456,
+            box_color: 0x000000,
+            ..SubtitleStyle::default()
+        };
+        s.core.set_subtitle_style(off_palette).unwrap();
+        let depth = s.core.undo_depth();
+        // One press: exactly one channel moves by the
+        // grain, exactly one undo step is spent.
+        step_text_channel(&mut s, 1, 1);
+        assert_eq!(s.core.subtitle_style().text_color, 0x123C56);
+        assert_eq!(s.core.undo_depth(), depth + 1);
+        step_box_channel(&mut s, 0, 1);
+        assert_eq!(s.core.subtitle_style().box_color, 0x080000);
+        assert_eq!(s.core.undo_depth(), depth + 2);
+        // A press at the clamp bound spends nothing,
+        // and neither does a bad channel index.
+        step_box_channel(&mut s, 2, -1);
+        step_text_channel(&mut s, 7, 1);
+        assert_eq!(s.core.undo_depth(), depth + 2);
+        assert_eq!(s.core.subtitle_style().box_color, 0x080000);
+        // The steppers walk a colour ONTO a palette
+        // value from off-palette (caption yellow's red
+        // channel is already 0xFF; its green walks
+        // 0xD9 from 0xD1 in one press).
+        let mut s = cue_state(Vec::new());
+        s.core
+            .set_subtitle_style(SubtitleStyle {
+                text_color: 0xFFD100,
+                ..SubtitleStyle::default()
+            })
+            .unwrap();
+        step_text_channel(&mut s, 1, 1);
+        assert_eq!(s.core.subtitle_style().text_color, 0xFFD900);
+        step_text_channel(&mut s, 2, 1);
+        assert_eq!(s.core.subtitle_style().text_color, 0xFFD908);
+        // Persistence: the stepped style is the stored
+        // project field — it survives the project's
+        // own serialisation round-trip verbatim.
+        let json = serde_json::to_string(&s.core.project).unwrap();
+        let back: stykanimate_rs::model::Project = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.subtitle_style, s.core.subtitle_style());
+        // And the step is a real undo step: undoing
+        // restores the colour the press started from.
+        s.core.undo();
+        assert_eq!(s.core.subtitle_style().text_color, 0xFFD900);
+    }
+
+    #[test]
+    fn style_block_constructs_with_an_off_palette_colour() {
+        // Construction-level (the kit's discipline, as
+        // in section_constructs_on_every_state_branch):
+        // the channel rows render for a colour that
+        // marks no swatch, on both themes.
+        let mut s = cue_state(Vec::new());
+        s.core
+            .set_subtitle_style(SubtitleStyle {
+                text_color: 0x123456,
+                box_color: 0xABCDEF,
+                ..SubtitleStyle::default()
+            })
+            .unwrap();
+        for dark in [true, false] {
+            let t = rune::tok::theme(dark);
+            let _ = subtitle_section(&s, &t);
+        }
     }
 
     #[test]
