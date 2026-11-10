@@ -1425,6 +1425,81 @@ pub struct EncodeProgressEvent {
 pub type EncodeProgressCallback<'a> =
     Option<&'a (dyn Fn(EncodeProgressEvent) + Sync)>;
 
+/// One progress update from the **render phase** of a frame
+/// sequence export (Wave V, V12): the loop that renders each
+/// authored frame and writes it as its own file
+/// (`frame-XXXX.png` / `frame-XXXX.jpg`). It is the
+/// render-phase counterpart of [`EncodeProgressEvent`] —
+/// and a separate type by construction, so the two phases'
+/// counts can never be conflated (the conflation U11's
+/// encode contract was written to exclude).
+///
+/// `rendered_frames` is the render loop's own count of
+/// frames rendered **and written** so far. `total_frames`
+/// is the number of authored frames the export will write
+/// (the whole timeline for a full export, `to - from + 1`
+/// for a range export, after clamping) — exactly the count
+/// the export returns on success. Sequence exports render
+/// authored frames, never sampled times, so neither count
+/// depends on the project fps.
+///
+/// Delivery contract for the `*_with_render_progress`
+/// entries:
+///
+/// - Delivery is deterministic and synchronous, unlike the
+///   encode phase (whose intermediate count is ffmpeg's
+///   wall-clock business): every event fires from the
+///   caller's thread, exactly one event per written frame.
+///   After frame `k` of `total` is written, an event fires
+///   with `rendered_frames == k` — `finished == false` for
+///   `k < total`, and the final frame's event is the
+///   terminal one (below) rather than an unfinished event.
+///   A successful export of `total` frames therefore
+///   delivers exactly `total` events, strictly increasing.
+/// - Exactly one terminal event fires, and only when the
+///   export is about to return `Ok`:
+///   `rendered_frames == total_frames`, `finished == true`,
+///   delivered last, after the final frame's file is
+///   written. A hooked full export of an empty project
+///   returns `Ok(0)` and fires exactly one event — that
+///   terminal, at `(0, 0)` — after creating the directory.
+/// - A refused call (invalid scale, out-of-timeline range)
+///   fires no event and writes nothing, exactly as the
+///   plain entries behave. A frame whose render or write
+///   fails mid-loop propagates the historical error and
+///   fires no terminal event; events already delivered
+///   stay delivered (each was true when sent) and are
+///   never retracted.
+/// - `finished` closes the **whole export** here: a
+///   sequence's frame files are final output and nothing
+///   runs after the loop — the deliberate contrast with
+///   the encode phase, whose terminal event closes only
+///   the video encode (an MP4's audio mux can still fail
+///   afterwards).
+/// - Passing no callback (every pre-existing entry point)
+///   runs the export exactly as before.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RenderProgressEvent {
+    /// Frames rendered and written so far.
+    pub rendered_frames: usize,
+    /// Authored frames the export will write in total.
+    pub total_frames: usize,
+    /// True only on the single terminal event (see above).
+    pub finished: bool,
+}
+
+/// The render-progress hook accepted by the
+/// `*_with_render_progress` sequence export entries:
+/// `None`, or a shared reference to a callable invoked
+/// with each [`RenderProgressEvent`]. Every event is
+/// invoked from the caller's thread (sequence exports run
+/// synchronously; there is no worker or drainer thread),
+/// and a panicking callback cannot fail the export — the
+/// panic is contained at the call site and that event is
+/// dropped.
+pub type RenderProgressCallback<'a> =
+    Option<&'a (dyn Fn(RenderProgressEvent) + Sync)>;
+
 /// The outcome of a successful MP4 export, full or range:
 /// the frames written, and the audible clips that had to be
 /// left out because their files are missing. A non-empty
@@ -1780,6 +1855,17 @@ pub fn export_mp4_range_scaled_with_encode_progress(
 /// drainer thread (which would risk the child blocking on a
 /// full progress pipe).
 fn report_encode_progress(progress: EncodeProgressCallback<'_>, event: EncodeProgressEvent) {
+    if let Some(callback) = progress {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(event)));
+    }
+}
+
+/// Deliver one render-progress event to the hook, if any —
+/// the sequence exports' counterpart of
+/// [`report_encode_progress`], with the same containment:
+/// a panicking observer drops that one event and can never
+/// fail the export.
+fn report_render_progress(progress: RenderProgressCallback<'_>, event: RenderProgressEvent) {
     if let Some(callback) = progress {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(event)));
     }
@@ -3826,11 +3912,39 @@ pub fn export_sheet_range_scaled(
 
 /// Export every frame as `frame-0001.png`, `frame-0002.png`, ... in `dir`.
 pub fn export_png_sequence(project: &Project, dir: &Path) -> std::io::Result<usize> {
+    export_png_sequence_with_render_progress(project, dir, None)
+}
+
+/// [`export_png_sequence`] with a render-phase progress
+/// hook ([`RenderProgressCallback`]): the callback observes
+/// every frame the render loop writes (see
+/// [`RenderProgressEvent`] for the delivery contract). An
+/// empty project creates the directory, fires only the
+/// terminal event at `(0, 0)` and returns `Ok(0)`.
+pub fn export_png_sequence_with_render_progress(
+    project: &Project,
+    dir: &Path,
+    progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
     if project.frames.is_empty() {
         std::fs::create_dir_all(dir)?;
+        report_render_progress(
+            progress,
+            RenderProgressEvent {
+                rendered_frames: 0,
+                total_frames: 0,
+                finished: true,
+            },
+        );
         return Ok(0);
     }
-    export_png_sequence_range(project, 0, project.frames.len() - 1, dir)
+    export_png_sequence_range_with_render_progress(
+        project,
+        0,
+        project.frames.len() - 1,
+        dir,
+        progress,
+    )
 }
 
 /// Export the authored frames `from..=to` (inclusive, clamped to
@@ -3845,14 +3959,46 @@ pub fn export_png_sequence_range(
     to: usize,
     dir: &Path,
 ) -> std::io::Result<usize> {
+    export_png_sequence_range_with_render_progress(project, from, to, dir, None)
+}
+
+/// [`export_png_sequence_range`] with a render-phase
+/// progress hook ([`RenderProgressCallback`]).
+pub fn export_png_sequence_range_with_render_progress(
+    project: &Project,
+    from: usize,
+    to: usize,
+    dir: &Path,
+    progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
     let (from, to) = clamp_frame_range(project, from, to)?;
     std::fs::create_dir_all(dir)?;
-    for i in from..=to {
+    let total = to - from + 1;
+    for (written, i) in (from..=to).enumerate() {
         let img = render_frame(project, i);
         img.save(dir.join(format!("frame-{:04}.png", i + 1)))
             .map_err(std::io::Error::other)?;
+        let done = written + 1;
+        if done < total {
+            report_render_progress(
+                progress,
+                RenderProgressEvent {
+                    rendered_frames: done,
+                    total_frames: total,
+                    finished: false,
+                },
+            );
+        }
     }
-    Ok(to - from + 1)
+    report_render_progress(
+        progress,
+        RenderProgressEvent {
+            rendered_frames: total,
+            total_frames: total,
+            finished: true,
+        },
+    );
+    Ok(total)
 }
 
 /// Export every frame as `frame-0001.png`, `frame-0002.png`,
@@ -3867,12 +4013,42 @@ pub fn export_png_sequence_scaled(
     dir: &Path,
     scale: f32,
 ) -> std::io::Result<usize> {
+    export_png_sequence_scaled_with_render_progress(project, dir, scale, None)
+}
+
+/// [`export_png_sequence_scaled`] with a render-phase
+/// progress hook ([`RenderProgressCallback`]). The scale
+/// is validated before anything is written or reported,
+/// exactly as in the plain entry; an empty project
+/// creates the directory, fires only the terminal event
+/// at `(0, 0)` and returns `Ok(0)`.
+pub fn export_png_sequence_scaled_with_render_progress(
+    project: &Project,
+    dir: &Path,
+    scale: f32,
+    progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
     let scale = check_export_scale(scale)?;
     if project.frames.is_empty() {
         std::fs::create_dir_all(dir)?;
+        report_render_progress(
+            progress,
+            RenderProgressEvent {
+                rendered_frames: 0,
+                total_frames: 0,
+                finished: true,
+            },
+        );
         return Ok(0);
     }
-    export_png_sequence_range_scaled(project, 0, project.frames.len() - 1, dir, scale)
+    export_png_sequence_range_scaled_with_render_progress(
+        project,
+        0,
+        project.frames.len() - 1,
+        dir,
+        scale,
+        progress,
+    )
 }
 
 /// Export the authored frames `from..=to` (inclusive, clamped
@@ -3890,25 +4066,87 @@ pub fn export_png_sequence_range_scaled(
     dir: &Path,
     scale: f32,
 ) -> std::io::Result<usize> {
+    export_png_sequence_range_scaled_with_render_progress(project, from, to, dir, scale, None)
+}
+
+/// [`export_png_sequence_range_scaled`] with a
+/// render-phase progress hook
+/// ([`RenderProgressCallback`]).
+pub fn export_png_sequence_range_scaled_with_render_progress(
+    project: &Project,
+    from: usize,
+    to: usize,
+    dir: &Path,
+    scale: f32,
+    progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
     let scale = check_export_scale(scale)?;
     let (from, to) = clamp_frame_range(project, from, to)?;
     std::fs::create_dir_all(dir)?;
-    for i in from..=to {
+    let total = to - from + 1;
+    for (written, i) in (from..=to).enumerate() {
         let img = render_frame_scaled(project, i, scale)?;
         img.save(dir.join(format!("frame-{:04}.png", i + 1)))
             .map_err(std::io::Error::other)?;
+        let done = written + 1;
+        if done < total {
+            report_render_progress(
+                progress,
+                RenderProgressEvent {
+                    rendered_frames: done,
+                    total_frames: total,
+                    finished: false,
+                },
+            );
+        }
     }
-    Ok(to - from + 1)
+    report_render_progress(
+        progress,
+        RenderProgressEvent {
+            rendered_frames: total,
+            total_frames: total,
+            finished: true,
+        },
+    );
+    Ok(total)
 }
 
 /// Export every authored frame as `frame-0001.jpg`, `frame-0002.jpg`,
 /// ... in `dir` (JPEG, quality 90).
 pub fn export_jpeg_sequence(project: &Project, dir: &Path) -> std::io::Result<usize> {
+    export_jpeg_sequence_with_render_progress(project, dir, None)
+}
+
+/// [`export_jpeg_sequence`] with a render-phase progress
+/// hook ([`RenderProgressCallback`]): the callback
+/// observes every frame the render loop writes (see
+/// [`RenderProgressEvent`] for the delivery contract). An
+/// empty project creates the directory, fires only the
+/// terminal event at `(0, 0)` and returns `Ok(0)`.
+pub fn export_jpeg_sequence_with_render_progress(
+    project: &Project,
+    dir: &Path,
+    progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
     if project.frames.is_empty() {
         std::fs::create_dir_all(dir)?;
+        report_render_progress(
+            progress,
+            RenderProgressEvent {
+                rendered_frames: 0,
+                total_frames: 0,
+                finished: true,
+            },
+        );
         return Ok(0);
     }
-    export_jpeg_sequence_range(project, 0, project.frames.len() - 1, dir)
+    export_jpeg_sequence_range_with_render_progress(
+        project,
+        0,
+        project.frames.len() - 1,
+        dir,
+        progress,
+    )
 }
 
 /// Export the authored frames `from..=to` (inclusive, clamped to
@@ -3923,16 +4161,48 @@ pub fn export_jpeg_sequence_range(
     to: usize,
     dir: &Path,
 ) -> std::io::Result<usize> {
+    export_jpeg_sequence_range_with_render_progress(project, from, to, dir, None)
+}
+
+/// [`export_jpeg_sequence_range`] with a render-phase
+/// progress hook ([`RenderProgressCallback`]).
+pub fn export_jpeg_sequence_range_with_render_progress(
+    project: &Project,
+    from: usize,
+    to: usize,
+    dir: &Path,
+    progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
     let (from, to) = clamp_frame_range(project, from, to)?;
     std::fs::create_dir_all(dir)?;
-    for i in from..=to {
+    let total = to - from + 1;
+    for (written, i) in (from..=to).enumerate() {
         let img = render_frame(project, i);
         let path = dir.join(format!("frame-{:04}.jpg", i + 1));
         let mut file = std::fs::File::create(&path)?;
         let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, 90);
         encoder.encode_image(&img).map_err(std::io::Error::other)?;
+        let done = written + 1;
+        if done < total {
+            report_render_progress(
+                progress,
+                RenderProgressEvent {
+                    rendered_frames: done,
+                    total_frames: total,
+                    finished: false,
+                },
+            );
+        }
     }
-    Ok(to - from + 1)
+    report_render_progress(
+        progress,
+        RenderProgressEvent {
+            rendered_frames: total,
+            total_frames: total,
+            finished: true,
+        },
+    );
+    Ok(total)
 }
 
 /// Export every authored frame as `frame-0001.jpg`, `frame-0002.jpg`,
@@ -3949,15 +4219,46 @@ pub fn export_jpeg_sequence_scaled(
     dir: &Path,
     scale: f32,
 ) -> std::io::Result<usize> {
+    export_jpeg_sequence_scaled_with_render_progress(project, dir, scale, None)
+}
+
+/// [`export_jpeg_sequence_scaled`] with a render-phase
+/// progress hook ([`RenderProgressCallback`]). At exactly
+/// 1.0 the call routes through
+/// [`export_jpeg_sequence_with_render_progress`], hook
+/// included; an empty project at any other scale creates
+/// the directory, fires only the terminal event at
+/// `(0, 0)` and returns `Ok(0)`.
+pub fn export_jpeg_sequence_scaled_with_render_progress(
+    project: &Project,
+    dir: &Path,
+    scale: f32,
+    progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
     let scale = check_export_scale(scale)?;
     if scale == 1.0 {
-        return export_jpeg_sequence(project, dir);
+        return export_jpeg_sequence_with_render_progress(project, dir, progress);
     }
     if project.frames.is_empty() {
         std::fs::create_dir_all(dir)?;
+        report_render_progress(
+            progress,
+            RenderProgressEvent {
+                rendered_frames: 0,
+                total_frames: 0,
+                finished: true,
+            },
+        );
         return Ok(0);
     }
-    export_jpeg_sequence_range_scaled(project, 0, project.frames.len() - 1, dir, scale)
+    export_jpeg_sequence_range_scaled_with_render_progress(
+        project,
+        0,
+        project.frames.len() - 1,
+        dir,
+        scale,
+        progress,
+    )
 }
 
 /// Export the authored frames `from..=to` (inclusive, clamped to
@@ -3977,20 +4278,59 @@ pub fn export_jpeg_sequence_range_scaled(
     dir: &Path,
     scale: f32,
 ) -> std::io::Result<usize> {
+    export_jpeg_sequence_range_scaled_with_render_progress(project, from, to, dir, scale, None)
+}
+
+/// [`export_jpeg_sequence_range_scaled`] with a
+/// render-phase progress hook
+/// ([`RenderProgressCallback`]). At exactly 1.0 the call
+/// routes through
+/// [`export_jpeg_sequence_range_with_render_progress`],
+/// hook included.
+pub fn export_jpeg_sequence_range_scaled_with_render_progress(
+    project: &Project,
+    from: usize,
+    to: usize,
+    dir: &Path,
+    scale: f32,
+    progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
     let scale = check_export_scale(scale)?;
     if scale == 1.0 {
-        return export_jpeg_sequence_range(project, from, to, dir);
+        return export_jpeg_sequence_range_with_render_progress(
+            project, from, to, dir, progress,
+        );
     }
     let (from, to) = clamp_frame_range(project, from, to)?;
     std::fs::create_dir_all(dir)?;
-    for i in from..=to {
+    let total = to - from + 1;
+    for (written, i) in (from..=to).enumerate() {
         let img = render_frame_scaled(project, i, scale)?;
         let path = dir.join(format!("frame-{:04}.jpg", i + 1));
         let mut file = std::fs::File::create(&path)?;
         let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, 90);
         encoder.encode_image(&img).map_err(std::io::Error::other)?;
+        let done = written + 1;
+        if done < total {
+            report_render_progress(
+                progress,
+                RenderProgressEvent {
+                    rendered_frames: done,
+                    total_frames: total,
+                    finished: false,
+                },
+            );
+        }
     }
-    Ok(to - from + 1)
+    report_render_progress(
+        progress,
+        RenderProgressEvent {
+            rendered_frames: total,
+            total_frames: total,
+            finished: true,
+        },
+    );
+    Ok(total)
 }
 
 /// Encode the given frame times as an APNG (animated PNG) at the
@@ -6040,12 +6380,18 @@ mod trail_tests {
 mod range_export_tests {
     use super::{
         drain_ffmpeg_progress, export_apng, export_apng_range, export_gif, export_gif_range,
-        export_jpeg_sequence, export_jpeg_sequence_range, export_mp4, export_mp4_range,
+        export_jpeg_sequence, export_jpeg_sequence_range,
+        export_jpeg_sequence_range_scaled_with_render_progress,
+        export_jpeg_sequence_scaled_with_render_progress, export_mp4, export_mp4_range,
         export_mp4_range_scaled, export_mp4_range_with_encode_progress, export_mp4_scaled,
         export_mp4_with_encode_progress, export_png_sequence, export_png_sequence_range,
+        export_png_sequence_range_scaled_with_render_progress,
+        export_png_sequence_range_with_render_progress,
+        export_png_sequence_scaled_with_render_progress, export_png_sequence_with_render_progress,
         export_sheet_range, export_spritesheet, export_svg_range, export_webm_range,
         export_webm_range_scaled, export_webm_scaled, export_webm_scaled_with_encode_progress,
         parse_ffmpeg_progress_frame, render_frame, EncodeProgressEvent, Mp4ExportOutcome,
+        RenderProgressEvent,
     };
     use crate::model::{AudioClip, Project};
     use image::AnimationDecoder as _;
@@ -6459,6 +6805,293 @@ mod range_export_tests {
             );
             last = event.encoded_frames;
         }
+    }
+
+    /// The exact event stream a successful hooked sequence
+    /// export of `total` frames must deliver (Wave V, V12):
+    /// one event per written frame, unfinished until the
+    /// final frame's event, which is the single terminal at
+    /// (total, total). Delivery is synchronous, so — unlike
+    /// the encode contract above, whose intermediate count
+    /// is wall-clock business — the FULL stream is pinned.
+    fn expected_render_events(total: usize) -> Vec<RenderProgressEvent> {
+        (1..=total)
+            .map(|done| RenderProgressEvent {
+                rendered_frames: done,
+                total_frames: total,
+                finished: done == total,
+            })
+            .collect()
+    }
+
+    /// A render-progress sink in the U11 idiom: the shared
+    /// event vector plus the callback that fills it.
+    fn render_event_sink()
+    -> (
+        std::sync::Arc<std::sync::Mutex<Vec<RenderProgressEvent>>>,
+        impl Fn(RenderProgressEvent),
+    ) {
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let callback = move |event: RenderProgressEvent| {
+            sink.lock().unwrap().push(event);
+        };
+        (events, callback)
+    }
+
+    #[test]
+    fn png_sequence_range_render_progress_fires_per_frame_and_terminates_once() {
+        // Wave V (V12): frames 1..=3 of the 5-frame fixture —
+        // authored frames, so the stream is exact and no fps
+        // is involved. Files keep their authored indices.
+        let project = tiny_project();
+        let (events, callback) = render_event_sink();
+        let dir = temp_dir("png-progress-range");
+        let n = export_png_sequence_range_with_render_progress(
+            &project,
+            1,
+            3,
+            &dir,
+            Some(&callback),
+        )
+        .unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(*events.lock().unwrap(), expected_render_events(3));
+        for name in ["frame-0002.png", "frame-0003.png", "frame-0004.png"] {
+            assert!(dir.join(name).is_file(), "missing {name}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn png_sequence_render_progress_covers_the_full_timeline() {
+        let project = tiny_project();
+        let total = project.frames.len();
+        let (events, callback) = render_event_sink();
+        let dir = temp_dir("png-progress-full");
+        let n = export_png_sequence_with_render_progress(&project, &dir, Some(&callback))
+            .unwrap();
+        assert_eq!(n, total);
+        assert_eq!(*events.lock().unwrap(), expected_render_events(total));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn png_sequence_scaled_render_progress_reports_authored_frames() {
+        // The scaled funnel reports the same authored-frame
+        // counts — scale changes the rasters, never the
+        // stream. The full scaled entry's empty/range
+        // plumbing rides the same hooked range entry.
+        let project = tiny_project();
+        let (events, callback) = render_event_sink();
+        let dir = temp_dir("png-progress-scaled");
+        let n = export_png_sequence_range_scaled_with_render_progress(
+            &project,
+            0,
+            1,
+            &dir,
+            2.0,
+            Some(&callback),
+        )
+        .unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(*events.lock().unwrap(), expected_render_events(2));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (events, callback) = render_event_sink();
+        let dir = temp_dir("png-progress-scaled-full");
+        let n = export_png_sequence_scaled_with_render_progress(
+            &project,
+            &dir,
+            0.5,
+            Some(&callback),
+        )
+        .unwrap();
+        assert_eq!(n, project.frames.len());
+        assert_eq!(
+            *events.lock().unwrap(),
+            expected_render_events(project.frames.len())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn jpeg_sequence_render_progress_survives_the_scale_one_route_through() {
+        // At exactly 1.0 the scaled entries route through
+        // the unscaled hooked entries — the hook must reach
+        // the render loop, not be dropped at the route.
+        let project = tiny_project();
+        let total = project.frames.len();
+        let (events, callback) = render_event_sink();
+        let dir = temp_dir("jpeg-progress-one");
+        let n = export_jpeg_sequence_scaled_with_render_progress(
+            &project,
+            &dir,
+            1.0,
+            Some(&callback),
+        )
+        .unwrap();
+        assert_eq!(n, total);
+        assert_eq!(*events.lock().unwrap(), expected_render_events(total));
+        assert!(dir.join("frame-0001.jpg").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn jpeg_sequence_range_scaled_render_progress_reports_authored_frames() {
+        let project = tiny_project();
+        let (events, callback) = render_event_sink();
+        let dir = temp_dir("jpeg-progress-scaled");
+        let n = export_jpeg_sequence_range_scaled_with_render_progress(
+            &project,
+            2,
+            4,
+            &dir,
+            2.0,
+            Some(&callback),
+        )
+        .unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(*events.lock().unwrap(), expected_render_events(3));
+        assert!(dir.join("frame-0005.jpg").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_project_render_progress_fires_only_the_terminal() {
+        // The Ok(0) success: exactly one event — the
+        // terminal at (0, 0) — after the directory is
+        // created, on both the unscaled and scaled entries.
+        let mut project = tiny_project();
+        project.frames.clear();
+        let (events, callback) = render_event_sink();
+        let dir = temp_dir("png-progress-empty");
+        let n = export_png_sequence_with_render_progress(&project, &dir, Some(&callback))
+            .unwrap();
+        assert_eq!(n, 0);
+        assert!(dir.is_dir());
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![RenderProgressEvent {
+                rendered_frames: 0,
+                total_frames: 0,
+                finished: true,
+            }]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (events, callback) = render_event_sink();
+        let dir = temp_dir("png-progress-empty-scaled");
+        let n = export_png_sequence_scaled_with_render_progress(
+            &project,
+            &dir,
+            2.0,
+            Some(&callback),
+        )
+        .unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![RenderProgressEvent {
+                rendered_frames: 0,
+                total_frames: 0,
+                finished: true,
+            }]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refused_sequence_render_progress_fires_nothing() {
+        // Refusals keep the plain entries' contract exactly:
+        // an invalid scale is refused before anything is
+        // written or reported (no directory either), and an
+        // inverted range errors in the clamp with no event.
+        let project = tiny_project();
+        let (events, callback) = render_event_sink();
+        let dir = temp_dir("png-progress-refused-scale");
+        let refused = export_png_sequence_scaled_with_render_progress(
+            &project,
+            &dir,
+            0.0,
+            Some(&callback),
+        );
+        assert!(refused.is_err());
+        assert!(events.lock().unwrap().is_empty());
+        assert!(!dir.exists(), "a refused call creates no directory");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (events, callback) = render_event_sink();
+        let dir = temp_dir("png-progress-refused-range");
+        let refused = export_png_sequence_range_with_render_progress(
+            &project,
+            3,
+            1,
+            &dir,
+            Some(&callback),
+        );
+        assert!(refused.is_err());
+        assert!(events.lock().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_frame_write_reports_no_terminal_render_event() {
+        // Frame 2's target path is a directory, so its save
+        // fails after frame 1 was written and reported: the
+        // error propagates in the historical voice, the one
+        // true event stays delivered, and no terminal fires.
+        let project = tiny_project();
+        let (events, callback) = render_event_sink();
+        let dir = temp_dir("png-progress-failure");
+        std::fs::create_dir_all(dir.join("frame-0002.png")).unwrap();
+        let failed = export_png_sequence_range_with_render_progress(
+            &project,
+            0,
+            2,
+            &dir,
+            Some(&callback),
+        );
+        assert!(failed.is_err());
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![RenderProgressEvent {
+                rendered_frames: 1,
+                total_frames: 3,
+                finished: false,
+            }]
+        );
+        assert!(dir.join("frame-0001.png").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn panicking_render_observer_cannot_fail_the_export() {
+        // The containment mirrors the encode hook's: every
+        // event is attempted, every panic is dropped at the
+        // call site, and the export completes in full.
+        let project = tiny_project();
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = attempts.clone();
+        let callback = move |_event: RenderProgressEvent| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            panic!("observer exploded");
+        };
+        let dir = temp_dir("png-progress-panic");
+        let n = export_png_sequence_range_with_render_progress(
+            &project,
+            0,
+            2,
+            &dir,
+            Some(&callback),
+        )
+        .unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+        for name in ["frame-0001.png", "frame-0002.png", "frame-0003.png"] {
+            assert!(dir.join(name).is_file(), "missing {name}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
