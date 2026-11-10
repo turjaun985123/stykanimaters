@@ -26,7 +26,7 @@ Actions workflow: a cached release build, the full test suite in
 the release profile, and a stripped binary package uploaded as
 the `stykanimaters-linux-x86_64` artifact (both binaries —
 `stykanimate-rs`, the editor, and `mcp_server` — plus
-SHA256SUMS). Download it from the repo's Actions tab and run
+SHA256SUMS.txt). Download it from the repo's Actions tab and run
 `./stykanimate-rs`. (The earlier GPUI editor was run and
 screenshot-verified this way on a real Linux desktop; the Rune
 shell has been run and screenshot-verified the same way
@@ -98,7 +98,9 @@ present and fall back to a folder-based flow when neither exists.
   one relative angle per node, plus optional per-node **bends**
   (curved segments, rendered through an arc midpoint); a project
   is figures + frames + fps + stage size + camera keys, graph
-  channels, FX clips, audio clips, sprites/texts and weather.
+  channels, FX clips, audio clips, sprites/texts, weather and
+  subtitles (timed cues with an optional per-cue speaker
+  credit and a project-wide subtitle style).
 - **Posing** — forward kinematics for the whole rig; dragging a
   hand or foot runs two-bone IK (unreachable-target clamping,
   per-limb bend direction); dragging any other joint rotates its
@@ -210,11 +212,20 @@ present and fall back to a folder-based flow when neither exists.
     figures, and Stick Nodes animation containers
     `.nodemc`/`.stknds` (sprites/texts modelled as keyframed
     tracks with real pixel extraction; joins baked at import).
+    Image assets import from PNG or JPEG files, detected by
+    content rather than by file name.
   - *Export:* `.piv` v2/v3/v4/v5, `.stk`, `.nodes`, `.stknds`,
     plus PNG sequence, GIF, MP4, WebM, APNG, JPEG sequence, SVG
     and spritesheets. MP4/WebM can also be exported for a frame
     range (video-only), and APNG/JPEG sequence exports take a
-    frame range too.
+    frame range too. The raster exports (PNG sequence, GIF,
+    MP4, WebM, APNG and spritesheets) also accept an optional
+    output scale — a true re-render at the scaled size, not a
+    resample.
+  - *Subtitles:* cues import and export as SRT and WebVTT;
+    speaker credits ride WebVTT voice tags (SRT has no speaker
+    syntax, and an SRT export reports how many credits it
+    could not write).
   - A cross-format fixture corpus (`tests/fixtures/`) generated
     with the original's encoders guards the importers.
 - **Projects & shell** — named projects under `./projects/`

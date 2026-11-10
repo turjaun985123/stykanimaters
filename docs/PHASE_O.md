@@ -447,29 +447,108 @@ the CI-only rule): **gate PASS — all 10 checks
 green** (`scripts/phase_j_checks.py`), MCP census
 PASS, overflow-scan self-test PASS.
 
-The one proof still owed is artifact-level: the
-p05 §2 scan table over a real headless dispatch.
-Q12 completed the scan set as a machine-enforced
-contract (`SCAN_SET` in `scripts/overflow_scan.py`:
-13 required trees spanning the repaired surfaces —
-default, draw-open, graph-duplicates, three-d,
-three-d-stage, fx-split-mid, loop-range,
-palette-open, fx-selected, effects-open, audio-open,
-and the subtitle lane's two trees, promoted to
-required when the workflow gained them); the tool
-scans every dump a dispatch produces, and a debrief
-missing a required tree now fails as INCOMPLETE
-instead of reading clean. The settings scenes' dumps
-ride the same dispatch and the same scan; they are
-not SCAN_SET-required entries, so O-1's artifact
-proof rests on the scan's output for those dumps
-plus its in-file model pins (§3). The scan
-itself runs on CI artifacts, which do not exist
-until a headless dispatch succeeds on the
-integrated tree — see §11 for the CI position.
-When that dispatch lands, its table belongs in
-QA_RUNE §17's record and this section's debt is
-discharged.
+The one proof still owed at close-out was
+artifact-level: the p05 §2 scan table over a real
+headless dispatch. Q12 completed the scan set as a
+machine-enforced contract (`SCAN_SET` in
+`scripts/overflow_scan.py`: 13 required trees
+spanning the repaired surfaces — default, draw-open,
+graph-duplicates, three-d, three-d-stage,
+fx-split-mid, loop-range, palette-open, fx-selected,
+effects-open, audio-open, and the subtitle lane's
+two trees, promoted to required when the workflow
+gained them); the tool scans every dump a dispatch
+produces, and a debrief missing a required tree
+fails as INCOMPLETE instead of reading clean. The
+settings scenes' dumps ride the same dispatch and
+the same scan; they are not SCAN_SET-required
+entries, so O-1's artifact proof rests on the
+scan's output for those dumps plus its in-file
+model pins (§3).
+
+**That table is now written — the debt is
+discharged (Wave S, S8).** Source: **Headless Rune
+probe run `42759195547`**, completed **SUCCESS** on
+`59cb0bec36b80648c9f9fe0dfd7d30cd6266d5c3`
+(`59cb0be`, the Wave R integrated tree — it
+contains the integrated Wave P+Q tree `911cf77` as
+an ancestor, so every Phase O repair is in it),
+artifact `headless-probe-output` (204 files, 34
+`tree-*.json` dumps). Method: exactly p05 §2 as
+kept — `python3 scripts/overflow_scan.py --dir
+<artifact dir>` (content / card / window rules,
+0.5 pt tolerance, the closed exemption list). The
+scan exited 0; its final line reads `OVERFLOW
+SCAN: CLEAN (0 hits, scan set complete)`. Per
+§2's output shape each scene's hit list is empty,
+so the table records the verdict per scene:
+
+| Scene tree | Window | Elements | SCAN_SET | Non-exempt hits | Verdict |
+|---|---|---|---|---|---|
+| tree-audio-open.json | 1440×900 | 408 | required | 0 | CLEAN |
+| tree-build-open.json | 1440×900 | 376 | — | 0 | CLEAN |
+| tree-clips-populated.json | 1440×900 | 1224 | — | 0 | CLEAN |
+| tree-default-1280.json | 1280×720 | 1161 | — | 0 | CLEAN |
+| tree-default-light-1280.json | 1280×720 | 1161 | — | 0 | CLEAN |
+| tree-default-light.json | 1440×900 | 1161 | — | 0 | CLEAN |
+| tree-default.json | 1440×900 | 1161 | required | 0 | CLEAN |
+| tree-dopesheet-keys.json | 1440×900 | 1238 | — | 0 | CLEAN |
+| tree-draw-open.json | 1440×900 | 461 | required | 0 | CLEAN |
+| tree-effects-open.json | 1440×900 | 562 | required | 0 | CLEAN |
+| tree-export-open.json | 1440×900 | 408 | — | 0 | CLEAN |
+| tree-frame-3.json | 1440×900 | 1161 | — | 0 | CLEAN |
+| tree-fx-selected.json | 1440×900 | 643 | required | 0 | CLEAN |
+| tree-fx-split-mid.json | 1440×900 | 698 | required | 0 | CLEAN |
+| tree-graph-duplicates.json | 1440×900 | 446 | required | 0 | CLEAN |
+| tree-graph-open.json | 1440×900 | 407 | — | 0 | CLEAN |
+| tree-home-populated.json | 1440×900 | 375 | — | 0 | CLEAN |
+| tree-home.json | 1440×900 | 291 | — | 0 | CLEAN |
+| tree-library-populated.json | 1440×900 | 1160 | — | 0 | CLEAN |
+| tree-loop-range.json | 1440×900 | 1196 | required | 0 | CLEAN |
+| tree-menu-open.json | 1440×900 | 1169 | — | 0 | CLEAN |
+| tree-palette-open.json | 1440×900 | 1225 | required | 0 | CLEAN |
+| tree-playing.json | 1440×900 | 1161 | — | 0 | CLEAN |
+| tree-selected.json | 1440×900 | 1334 | — | 0 | CLEAN |
+| tree-settings-open-error.json | 1440×900 | 1326 | — | 0 | CLEAN |
+| tree-settings-open-light.json | 1440×900 | 1325 | — | 0 | CLEAN |
+| tree-settings-open.json | 1440×900 | 1325 | — | 0 | CLEAN |
+| tree-sprites-populated.json | 1440×900 | 1174 | — | 0 | CLEAN |
+| tree-strokes-populated.json | 1440×900 | 514 | — | 0 | CLEAN |
+| tree-subtitles-populated.json | 1440×900 | 1169 | required | 0 | CLEAN |
+| tree-subtitles-top.json | 1440×900 | 1169 | required | 0 | CLEAN |
+| tree-three-d-1280.json | 1280×720 | 433 | — | 0 | CLEAN |
+| tree-three-d-stage.json | 1440×900 | 433 | required | 0 | CLEAN |
+| tree-three-d.json | 1440×900 | 433 | required | 0 | CLEAN |
+
+Per-item evidence — the repaired rows p05 §3
+named, measured in these dumps (the right edge of
+the row's subtree: the row element and everything
+under its path; the budget is the §2 content edge
+including the 0.5 pt tolerance):
+
+| Item | Repaired row(s) | Tree(s) | p05 §3 (pre-fix) | Measured now | Budget | Verdict |
+|---|---|---|---|---|---|---|
+| O-1 | settings language chips (28 per tree) | settings-open, settings-open-light, settings-open-error | worst chip `settings-lang-sl` at 1463.0 (+51.0 past the content edge, +23.0 past the window); he 1450.5, it 1428.5, pl 1427.0 | worst chip in each tree is `settings-lang-fr` at **1392.5**; the four named offenders now end at 1185.5 (sl), 1148.0 (he), 1158.0 (it), 1150.5 (pl) | 1412.5 | CLEAN — 0 hits |
+| O-3 | `layer-row-0` | default | overflow ≥ +134 (children reaching ≈466) | subtree ends **304.0** — the row box is exactly the 276 pt content width (x 28..304) | 304.5 (left) | CLEAN — 0 hits |
+| O-4 | `draw-brushes`, `draw-tools-row`, `draw-shapes`, `draw-stamp-params`, `draw-stamp-params-2`, `draw-stamp-params-3` | draw-open | +563 / +374.5 / +132.5 / +42 | every subtree ends **1412.0** | 1412.5 | CLEAN — 0 hits |
+| O-5 | `graph-actions`, `graph-presets`, `keyframe-presets`, `keyframe-actions`, `keyframe-clipboard` | graph-duplicates (`keyframe-actions` also in default) | +305.5 / +13.5 / +45 / +11.5 / +2.8 | every subtree ends **1412.0** | 1412.5 | CLEAN — 0 hits |
+| O-6 | `wx-kind` | default, effects-open | +118.3 (`wx-seg-5` ended 1530.3, past the window) | ends **1412.0** in both trees | 1412.5 | CLEAN — 0 hits |
+| O-7 | `orbit-3d`, `cam-frame-3d` | three-d, three-d-stage | +49 / +37.5 | **1168.0** / **1198.5** in both trees | 1412.5 | CLEAN — 0 hits |
+| O-8 | `fx-nudge`; `pb-next-key`; `pb-loop-end` | fx-split-mid; audio-open (also default); loop-range | +27.5 / +17.6 / +36 | **1412.0** / **1166.5** / **1354.0** | 1412.5 | CLEAN — 0 hits |
+| O-9 | `pose-apply-all`; `cam-delete-key` | default | +16.5 (ended 1428.5); +29.4 (ended 1441.4, past the window) | **1272.4** / **1193.9** | 1412.5 | CLEAN — 0 hits |
+
+A note on reading the wrapped rows: a
+`flex_wrap()` row's own box spans the full card
+content width by design, so its subtree ends
+exactly at the content edge (1412.0 against the
+1412.5 tolerance edge) — the scanner's hit test
+(no descendant past the tolerance edge, none
+outside its card, none past the window) is the
+verdict, and it reads zero on every row. The rows
+that do not fill their card (O-7, O-8's playback
+pair, O-9, O-1's chips) end with real headroom, as
+measured above. QA_RUNE §17's matching row closes
+on this same evidence.
 
 **CI, stated once and exactly.** The last completed
 master CI run before Wave R was on `0b75051`
@@ -478,7 +557,11 @@ during Wave Q). The integrated Wave P+Q tree's CI
 (`911cf77`) is in flight; this close-out claims no
 verdict for it. Everything above is therefore
 stated as *in the tree and locally gated*, which is
-what the evidence supports.
+what the evidence supports. (Postscript, Wave S:
+the headless dispatch that statement waited for
+has since landed and succeeded — run `42759195547`
+on `59cb0be` — and its scan table, written above,
+is the artifact-level proof this section owed.)
 
 ## 11. Honest remainders
 

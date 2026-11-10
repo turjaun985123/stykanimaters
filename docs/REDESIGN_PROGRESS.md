@@ -2545,3 +2545,1548 @@ content-comparison gate left that list on
 2026-11-10 by the user's own word and are
 R21/R22 above. And sound remains
 user-verified only.
+
+### 6.13 Wave S — parity + proof burn-down 3: Wave R's remainders closed, scale completed, losses surfaced (2026-11-10)
+
+Ordered 2026-11-10 (11:03 +06) as a
+re-issue of the standing continuous order:
+"assign 20 agents continuous write code if
+ci gets error then fix that". Twenty
+agents, one owner per file, integrator
+surfaces via filed actions (board:
+`~/workspace/wave-s/BOARD.md`; findings:
+`~/workspace/wave-s/findings/`). The
+board's base is the Wave R integrated
+tree `59cb0be`; the working base is
+`85898b4`, that tree plus its round-2 CI
+fix. This section was written from all
+nineteen sibling findings (s1–s16,
+s18–s20; s17 is this section), each read
+in full. Every status below is
+IMPLEMENTED (in tree, uncommitted at
+write time), and the CI frame is stated
+once, exactly, here. **The Wave R tree
+(`59cb0be`): headless 42759195547 GREEN.**
+Build round 1 (42759195059) FAILED on
+one bin-test compile error — a
+`sorted.dedup()` on a `[u32; 8]` array in
+a subtitle-panel palette pin, latent
+since Wave Q because every earlier round
+had died at the lib target first; fixed
+in `85898b4` (the test collects into a
+Vec; the assertion is unchanged). Build
+round 2 (42759845639, on `85898b4`)
+FAILED further along: everything
+compiled, 1,562 lib tests passed, and
+exactly one failed — R20's `set_style`
+refusal test, whose own unwrap of
+`serde_json::from_str` on a `1e999`
+literal panicked because serde_json
+refuses that literal itself ("number out
+of range") before the handler under test
+ever ran; the integrator fixed the test
+in `14bd9b3` (committed alone, mid-wave:
+the leg is now the always-reachable
+1e300 f64→f32 overflow, same refusal
+sentence, plus a guarded `1e999` leg).
+Build round 3 (42760562852, on
+`14bd9b3`) completed FAILED one step
+deeper still: the lib (1,563/1,563) and
+bin (2,102/2,102) suites were both fully
+green — the R20 fix holds — and the sole
+failure was an integration test,
+`full_fixture_round_trip_is_lossless_per_section`
+(`tests/wave_p_roundtrip.rs`), another
+latent test-side typo: its non-vacuity
+marker `"ünïcode-♪.ogg"` omitted the
+fixture's `audio/` path prefix, so the
+quoted substring could never occur in
+the serialised project; fixture and
+serialisation were always correct.
+Fixed in `1d724a2`; build round 4
+(42761122064, on `1d724a2`) is **in
+flight at writing**. **Wave S itself
+has no CI verdict**: nothing below is
+called shipped, and its first verdict
+comes on the integration push.
+
+**Export-panel i18n closed (S1).** R5's
+filed no-key gaps are closed: sixteen
+keys appended as one block in all 28
+tables — the six section headings
+(Images / Animation / Video / Project
+formats / Bundles / Recent exports), the
+JPEG / APNG / Contact sheet buttons, the
+`.nodes` / `.stknds` buttons, All
+frames, the two bundle buttons, the
+empty-state line and the header subtitle
+— wired at sixteen sites through `tr()`
+with English byte-identical (the pin's
+pair list grows from R5's five to
+twenty-one). The catalogue moves **152 →
+168 keys × 28** (verified mechanically:
+identical sequences, no value == key,
+zero loss; genuine translations in the
+eight translated tables). What S1 did
+NOT wire is filed as seven
+value-vs-label discrepancies, neither
+side changed: `export_png` / `export_gif`
+/ `export_mp4` ("Export PNG" in the
+catalogue vs the button "PNG", and its
+siblings), `export_stk`, `export_piv`
+(one key, four versioned labels
+".piv v2"–".piv v5"), `hud_loop` ("Loop"
+vs "Loop range"), and `export_centre` —
+a key with no call site anywhere in the
+shell, retained under zero key loss
+while the header line it half-covered is
+now `export_subtitle`. S1 files the
+three options (panel-shaped short keys
+later; change catalogue values after a
+consumer audit; change the panel labels
+— a UI wording call) for whoever
+decides. R5's class C stands as a
+remainder: the panel's sentence-length
+copy (guidance notes, recaps, the
+history `row_line` / `age_label`
+strings, `ExportOp::label()`'s format
+names) remains English with no keys.
+
+**The next panel wired (S14).** S14
+audited every file under
+`src/rune_sec/` for unwired
+constructor-label literals against
+existing `tr` sites and chose the worst:
+**the 3D panel** — 34 wireable labels at
+49 call sites, zero prior wiring
+(frame_ops ≈26 and audio_panel ≈29 are
+the recorded runners-up). All 34 are
+wired through `tr()` with English
+byte-identical — nine section captions,
+the session toggle (its helper now takes
+`&EditorCore`, the CamKeyRow::label
+precedent), the view / limb / bake
+buttons in both their dimmed and live
+branches, the library controls and three
+empty states — with handlers, layout and
+the 29-key element set untouched.
+Locale-invariant notation stays literal
+by the R6 rule (the title `3D`, the `3/4`
+preset, the `RotX +15` step labels, the
+−/+ steppers). The 34 `threed_*` keys
+themselves are **IA-S14-1** (below): the
+panel's pin passes only once the
+integrator inserts them, the established
+Q7 pattern of wiring and keys landing
+together. The panel's composed readouts
+(`session_summary`, `joint_position_text`,
+`camera_readout_text`) stay English —
+they are format-template text, and
+wiring them means placeholder template
+keys, a future slice's call.
+
+**Speaker proof completed (S2, S3,
+S12).** Wave R shipped the speaker field
+with converters pinned but no renderer
+proof; this wave closes that on every
+surface. **S2** seeds a new scene,
+`subtitles-speaker` (registry
+index 31; one credited cue, "The light
+is still on.", speaker `"NOVA"`, default
+Bottom style, playhead parked as in
+`subtitles-populated`), with layout
+**fact 34** keeping the scenes document
+truthful (its tree's inventory is the
+populated tree's; the lane is in it) —
+scenes 31 → **32**. Its census leg
+measures the prefix as line widening:
+the credited line runs (4·28 − 1)·4 =
+444 units against the bare text's 348,
+and the gate is span ≥ 396 units — the
+census's usual conservative fraction,
+derived analytically like its floors
+before it; the first headless run
+prints the measured span (≈440
+expected), and S2 names the derivation,
+not the gate, as the thing to
+re-examine if it lands far off. **S3**
+gives the subtitle lane its block
+labels: one composition site
+(`block_label`, beside `block_shows_text`)
+prefixes `Name: ` for credited cues,
+display only — block geometry derives
+from frames alone (pinned: a credited
+cue's `cue_rect` equals its uncredited
+twin's), the drag identity guard keeps
+comparing the raw stored text, and
+uncredited labels are byte-identical to
+today's, multi-line bodies unflattened
+exactly as the lane has always shown
+them. **S12** pins the two lib surfaces
+in five tests: the SVG `<text>` contents
+of a credited two-line cue are exactly
+`["MARA: First line", "Second line"]`
+(prefix on the first line only, no added
+line); the raster band's row extent is
+exactly the uncredited render's while
+its width grows by ≥ 48 px of the
+nominal ~96; a WebVTT voice tag imported
+through the core renders with the
+prefix; and the SRT leg is the
+non-regression — a credited cue's SRT
+carries raw text and no name anywhere.
+The stage's own pixel proof is S2's
+census (the stage bands are bin-crate,
+the R12 boundary), so each surface's
+proof sits where it can actually run.
+
+**Export scale completed (S4, S5), and
+its burn-in pinned (S11).** R10's filed
+next step is done: every remaining
+export format now scales. **S4** adds
+the six animation entries —
+`export_gif[_range]_scaled`,
+`export_apng[_range]_scaled`,
+`export_sheet[_range]_scaled` — each
+validating through `check_export_scale`
+FIRST (before any clamp or filesystem
+work, the PNG sequence's own order) and
+each delegating to its unscaled
+counterpart at exactly 1.0, so the 1.0
+byte-identity is structural, not a
+re-derivation; pins cover scaled
+dimensions, tile-byte equality with the
+scaled frame funnel, three-way 1.0 byte
+identity and refusal of 0 / negative /
+NaN / ∞ with no file left behind.
+**S5** adds the four video entries
+(`export_mp4[_range]_scaled`,
+`export_webm[_range]_scaled`) on the same
+conventions — the MP4 audio mux is
+untouched; audio does not scale — and
+routes the MCP `render` tool's `scale`
+argument for gif / apng / spritesheet /
+mp4 / webm (present-vs-absent parsing,
+never defaulted into the unscaled call;
+replies gain no field, and with `scale`
+absent every call and reply is
+byte-identical to pre-wave behaviour).
+`export_file` was deliberately not given
+a scale argument — it has none for any
+format today, and its `mp4_range` /
+`webm_range` remain the video-range
+surface. **S11** supplies IA-R10-3's
+missing pixel pin at last: four legs
+deriving the scaled burn-in's geometry
+from the shared constants (face 20·s
+rows, edge offset 28·s, stack step 24·s)
+and asserting both the derived ranges
+and the relation to the same project's
+measured 1.0 render — face doubling at
+2.0 and halving at 0.5, the speaker
+prefix scaling with its line (same rows,
+~3.1× the column extent), and the stack
+step doubling without the two faces
+colliding. No defect was found by
+inspection: the three `* scale` sites
+stand in the tree exactly as the IA
+prescribed. Standing remainders: the
+contact sheet and the JPEG sequence
+remain 1.0-only (the contact sheet's
+writer is a different one, with its own
+size notion — scaling it is a separate
+design question); video container
+dimensions are not ffprobe-pinned (CI
+does not guarantee ffprobe, and the
+codebase is written to tolerate its
+absence); odd output dimensions at
+fractional scales inherit libx264's
+even-dimension rule exactly as an
+odd-sized stage already does unscaled.
+
+**The documented loss, surfaced (S9).**
+Wave R documented that SRT export drops
+cue speakers (the format has no speaker
+syntax); the loss is now visible at the
+moment it happens. The core gains a
+counted export, `subtitles_to_srt_counted`,
+returning the document and its
+`speakers_dropped` count from the same
+pass — `subtitles_to_srt` is a one-line
+delegate, so the text output is
+byte-identical by construction and no
+existing caller or pin moved. The
+counting rule is deliberately not the
+WebVTT guard's: a stored name counts
+when it is a real credit (non-empty
+after trim), even one a voice tag could
+not carry. Over MCP,
+`subtitle_export_srt`'s reply gains
+`speakers_dropped: N` **only when
+positive** — additive, absent otherwise,
+the rest of the reply byte-identical —
+and the panel's SRT success line grows
+the clause "— N speaker credit(s) not
+written (SRT has no speaker syntax).",
+its zero-drop and WebVTT lines
+byte-identical to before. The VTT paths
+are untouched. Import-side, the loss
+still surfaces only as `changed: true`
+(R21's settlement) — export-side was
+this slice's board.
+
+**Home's missing-audio badge (S7) and
+the close-flush composition (S13).**
+**S7** audited first: the badge was
+ABSENT — Home's rows carried no audio
+signal at all, and missing audio
+surfaced only after opening (the P14
+status note, the P15 export report, the
+Audio panel's marked rows). It now
+rides the panel's existing light read:
+the same parse that counts figures and
+frames deserialises only the `audio`
+array and classifies it with the ONE
+shared helper (`audio::missing_audio_clips`)
+the open note, the export path and the
+Audio panel already use, so the marker
+can never disagree with what opening
+the project would report; a non-zero
+count closes the row's meta line with
+"· N audio clip(s) missing", and at
+zero the line is byte-identical to its
+pre-wave shape. The scope is stated in
+the module docs: light-read rows only
+(the scan-fallback line has no audio
+data, and a health claim there would be
+least trustworthy), no full `Project`
+load per row (the light read exists to
+avoid exactly that), zero new element
+keys. **S13** pins the P19 × R22
+interaction that had no pin — the
+flush form of the P42 spurious offer:
+an edit made after a save and then
+undone leaves `edit_count` standing
+while the project is again exactly the
+saved content, so the close-flush
+writes a snapshot of the just-saved
+project, strictly newer by mtime. Four
+pins drive the real verdict function on
+flush-shaped state (identical → no
+offer, with the mtime-only verdict
+asserted WOULD offer; differing →
+offer; corrupted after close → offer,
+fail-open; Discard deletes and flips
+the verdict). The one link not claimed
+is named precisely: the real flush
+writes only through the CWD-relative
+`./projects` and there is no
+directory-parameterised flush entry, so
+the single-call composition (real flush
+→ verdict) belongs in the integration
+binary `tests/wave_p_close_guard.rs`,
+where P19 already solved the CWD
+problem — filed as a test-only
+follow-up in the ledger, not papered
+over.
+
+**Phase O's last proof, discharged
+(S8).** The p05 §2 scan table owed
+since R11 is written into
+`docs/PHASE_O.md` §10 from the real
+dispatch — headless run 42759195547's
+artifact (204 files, 34 `tree-*.json`
+dumps, on `59cb0be`): the scanner reads
+**CLEAN — 0 non-exempt hits on all 34
+trees, scan set complete** (all 13
+then-required trees present, so the
+debrief is complete by the
+machine-enforced contract, not clean on
+whatever happened to be there). Every
+repaired row was re-measured in the
+dumps: the worst settings chip now ends
+at 1392.5 (pre-fix 1463.0, past the
+window), `cam-delete-key` at 1193.9
+(was 1441.4), `layer-row-0` exactly at
+the 304.0 content edge, the wrapped
+draw / graph / weather / fx rows ending
+exactly at the 1412.0 content edge; one
+absence is recorded, not smoothed —
+`graph-actions` does not render in
+tree-default (its proof tree is
+graph-duplicates, as p05 named). The
+table proves the 1440×900 and 1280×720
+headless font metrics only; p05's own
+caveat stands.
+
+**The tall-stack question, answered
+(S20).** The subtitle-stack off-stage
+remainder carried since the Tauri line
+("raster clips ~the 13th line, SVG off
+its viewBox ~the 7th") **does not
+reproduce on this tree — the verdict is
+PARITY, and no production code was
+changed**. All three surfaces place
+every line at the same centre from the
+shared helpers (the SVG writer restates
+the centre formula inline, term-for-term
+identical — verified constant by
+constant, sanitisation included), so
+the first clipped line is the same line
+everywhere at any stage height. The
+arithmetic is now pinned in
+`src/subtitles.rs`'s tests: at the
+default style a 200-unit stage holds 7
+full lines + 1 partial (the 9th paints
+nothing), 400 holds 16 + 0 (the
+boundary case, (400 − 16) / 24 = 16
+exactly), 540 holds 21 + 1, 720 holds
+29 + 1, and the margin does not scale
+with font scale (at scale 2.0 on 200:
+3 full + 1 partial). What stands as a
+remainder is the product question, not
+a defect: no wrap, pagination or stack
+cap exists on any surface, so beyond
+the ceiling far lines are uniformly
+unpaintable — whether an over-tall
+stack should shrink, scroll or refuse
+is a decision, not a parity fix.
+
+**The verification ring (S6, S10, S15,
+S16, S18, S19).** **S6** closes the
+raster's determinism gap with five
+A-B-A byte-identity legs — plain frame,
+subtitled frame, credited cue,
+segment-text alpha at 0.35, and the
+subtitled frame at scale 2.0 and 0.5 —
+each with a provably-different B render
+interleaved; its header also corrects
+the record on P47 (the older suite pins
+raster REPEAT only, not the A-B-A its
+successor's header credited it with).
+No nondeterminism was found by
+construction review, and no leg was
+weakened. **S10** legs JPEG parity end
+to end (four tests): import by content
+from a file named `photo.bin`, stored
+bytes verbatim through save → load with
+dims intact, rendered pixels after the
+round trip (JPEG centre within ±16 per
+channel — a tolerance derived from the
+codec, with the PNG control asserted
+EXACT — and the SVG embed decoding back
+to exactly the stored bytes under the
+`image/jpeg` MIME), and the
+magic-over-garbage refusal persisting
+nothing. **S18** composes the wave's
+features (four tests): credited cue +
+range export at scale 2.0 (files
+pixel-identical to the direct scaled
+renders, differing from the control
+only inside the scaled band, and only
+on the cue's frames); JPEG asset +
+credited cues + non-default style
+round-tripping byte-identically through
+both serialisation and the real file
+path; the speaker surviving the
+VTT → SRT → VTT flow with SRT as the
+only lossy hop; and segment-text alpha
+and a speaker subtitle composing in one
+frame independently (disjoint pixel
+populations; the blend count EXACTLY
+equal between credited and uncredited
+renders). **S19** applied the wave's
+two docs actions (the ledger's (2) and
+(3)) and swept every description-bearing
+surface: exactly two tool descriptions
+changed all wave (`render`,
+`subtitle_export_srt`), both rows now
+aligned verbatim, census and gate
+check 9 green after the edits.
+**S16** applied IA-S2-1 in full (below)
+and records the sequencing as one
+unit: S2's scene, the census leg, the
+workflow dumps and the required
+SCAN_SET entry land together or CI
+fails by design. **S15** recounts —
+its numbers are the verification
+paragraph's, below — and records the
+gate working as intended mid-wave:
+check 8 went red with exactly the right
+message while S2's scene existed before
+S16's workflow half, and green again
+when it landed.
+
+**Integration ledger — every Integrator
+Action filed across the findings.**
+(1) **IA-S2-1** (S16 applies:
+`.github/workflows/headless.yml` +
+`scripts/overflow_scan.py`): both tree
+loops gain `subtitles-speaker`, the
+mirrored snap pair is added, and
+`tree-subtitles-speaker.json` enters
+SCAN_SET as **required** — CLOSED
+inside the wave by S16; the set stands
+at 14 entries, 14 required, 0 pending.
+(2) **IA-S5-1** (`docs/MCP.md`'s
+`render` row: one sentence inserted,
+verbatim) — CLOSED inside the wave by
+S19. (3) **IA-S9-1** (`docs/MCP.md`'s
+`subtitle_export_srt` Purpose cell
+replaced with the tool's new
+description, verbatim) — CLOSED inside
+the wave by S19. (4) **IA-S9-2**
+(integrator applies): S9's panel status
+pins, exact code in s9.md, inserted
+into `src/rune_sec/subtitle_panel.rs`'s
+test module after
+`export_writes_the_document_and_import_replaces_once`
+— S9 was barred from that test region
+because the integrator's palette-pin
+fix sits there. (5) **IA-S1-1** and
+(6) **IA-S15-1** are the same edit seen
+from two slices: `src/rune_sec/i18n_wire.rs`'s
+header count moves off its stale 152 —
+S15 supplies the exact replacement
+text in both forms (202 if IA-S14-1
+lands in the same integration, 168 if
+it is deferred); apply once, with the
+final count. (7) **IA-S14-1**
+(integrator inserts into `src/i18n.rs`):
+S14's 34 `threed_*` keys as one block
+× 28 tables after S1's block, genuine
+translations in the eight translated
+tables per contract 6 — the catalogue
+becomes **202 × 28**; S15's companion
+note rides with it (`src/i18n.rs`'s own
+module-doc line "168 keys" moves to 202
+in the same commit). Until it lands,
+S14's wiring resolves through the
+catalogue fallback and its pin cannot
+pass — expected, per the Q7 pattern.
+(8) **IA-S8-1** (integrator applies):
+the `docs/QA_RUNE.md` §17 row for the
+p05 §2 scan table is replaced with the
+closure row, exact text in s8.md.
+(9) **IA-S20-1** (optional hygiene, zero
+behaviour change): `src/svg.rs`'s
+`append_subtitles` may retire its
+inline restatement of the centre
+formula and call
+`subtitle_line_center_y` directly —
+exact replacement in s20.md; the
+writer's existing pins are the proof
+that output is byte-identical. It is
+not a divergence fix; it retires the
+one place a future divergence could be
+born. (10) **S13's follow-up**
+(test-only, no code owed): the
+one-call close-flush → verdict
+composition pin recommended into
+`tests/wave_p_close_guard.rs` (see the
+S13 paragraph). No actions were filed
+by S3, S4, S6, S7, S10, S11, S12 or
+S18.
+
+**Verification — awaiting CI.** Counts
+are S15's, recounted on the settled
+live tree (HEAD `14bd9b3` plus all
+landings), not taken from siblings'
+claims: the gate reads **PASS — all
+checks green (10/10)**; the MCP census
+reads **381 tools** (44 + 319 + 9 + 4 +
+5), 16/16 checks PASS, and
+`MCP_SURFACE_FLOOR` stays 381 (S5/S9
+changed behaviour and descriptions,
+never the surface); **element keys 980**
+(864 static + 116 dynamic) with zero
+loss per key against HEAD, and
+`KEY_TOTAL_FLOOR` is ratcheted 979 →
+980 to equal the verified count — the
++1 over R15's 979 is
+`subtitle-speaker-field`, added by Wave
+R's own integration (IA-R21-5) after
+R15's recount, verified by S15 on a
+clean base worktree. Palette commands
+134; curated icons 163; headless scenes
+**32**; State 48 fields over 22 full
+literals. The i18n catalogue in tree
+reads **168 keys × 28** — exactly S1's
++16 block over the 152 base, sequences
+identical, base sequence preserved in
+full — and becomes 202 when IA-S14-1
+lands (labelled post-integration
+arithmetic wherever it appears; S15
+verified `grep -c threed_ src/i18n.rs`
+= 0 in tree). SCAN_SET stands at 14
+required / 0 pending with its
+self-test green (S16). S19 re-ran the
+census and the gate after its docs
+edits: both green, check 9's doc sync
+exact. CI — the integration push's
+Build, Test & Binary plus a headless
+dispatch — is the proof of everything
+above, including S2's analytically
+derived census gate and S11's derived
+geometry.
+
+**Honest remainders.** (1) The standing
+user decisions stand exactly as §6.12
+left them — white-on-accent contrast,
+the panel splitter, File-menu Save As,
+the two "New project" results,
+`tab_visits_controls`, project-swap
+undo, the skew channel, the whole-figure
+pose transform, MCP `write_recovery`,
+the waveform call; this wave touched
+none of them, per its contract 9. (2)
+**GIF import stays undecided**: the
+funnel still refuses GIF deliberately;
+widening the accepted set is a scope
+decision for the user, not a parity
+fix. (3) **A panel export-scale control
+remains unbuilt by design** (IA-R10-2's
+product decision): the core and MCP
+scale surface is now complete — png,
+png_sequence, gif, apng, spritesheet,
+mp4, webm — and no control was invented
+to front it. Ranged `export_bundle`
+likewise stands: S5 confirms the
+bundle's PNG member carries no scale
+routing this wave and stays at 1.0.
+(4) S1's seven value-vs-label
+discrepancies stand for a catalogue
+decision (the export-panel paragraph
+above); the sentence-length class C
+copy stands with them. (5) S14's
+composed readouts stay English, and the
+next unwired panels are named in
+s14.md for a future slice (audio_panel
+the natural next pick; frame_ops,
+inspector_segment, fx_clips,
+particles_panel behind it). (6) S13's
+composition gap stands until the
+follow-up pin in (10) lands: the flush
+half of its pins is seamed at
+`write_recovery_in`, the flush's own
+dirty/clean behaviour is P19's pin, and
+the verdict half is driven for real —
+the unproven link is the composition
+itself, stated, not hidden. (7) No
+subtitle stack cap exists (the S20
+paragraph): uniformly unpaintable past
+the pinned ceiling is now the proven
+behaviour, and changing it is a product
+decision. (8) S10's ±16 JPEG tolerance
+and S2's census span gate are both
+calibrated by derivation, not by a run;
+if CI contradicts either, the findings
+name the number to revisit (the
+tolerance; the span derivation) — and
+S10's leg-1 verbatim-bytes assert
+already isolates persistence from
+decode either way. (9) S7's badge
+deliberately does not ride the
+scan-fallback meta line, and names a
+count, not paths (the open verdict and
+the Audio panel name paths already).
+(10) §6.12 remainders closed here: R5's
+export-panel no-key gaps (S1 — the
+discrepancy half stands, per (4));
+IA-R10-3's unpinned scaled burn-in
+(S11); IA-R21-4's renderer proof (S2's
+census for the stage, S12 for SVG +
+raster, S3 for the lane's labels); the
+p05 §2 scan table (S8 — the last item
+R11 left open); the tall-stack
+off-stage question (S20: parity, no
+divergence to fix); and R10's filed
+scaled-funnel next step (S4/S5). And
+sound remains user-verified only.
+
+### 6.14 Wave T — i18n completion, the scale matrix closed, proof deepening (2026-11-10)
+
+Ordered 2026-11-10 (11:22 +06) as a
+re-issue of the standing continuous
+order — the sixth time the user has
+issued it: "assign 20 agents continuous
+write code if ci gets error then fix
+that". Twenty agents, one owner per
+file, integrator surfaces via filed
+actions (board:
+`~/workspace/wave-t/BOARD.md`; findings:
+`~/workspace/wave-t/findings/`). The
+board's base is the settled Wave S tree
+— HEAD `e0eea5a` plus Wave S's
+uncommitted landings plus the F2
+finisher's IA package — and F2's files
+(`src/i18n.rs`,
+`src/rune_sec/i18n_wire.rs`,
+`docs/QA_RUNE.md`, `src/svg.rs`,
+`tests/wave_p_close_guard.rs`, the
+subtitle panel's test region) were
+frozen to this wave's agents. This
+section was written from all nineteen
+sibling findings (t1–t16, t18–t20; t17
+is this section), each read in full, and
+from the F2 findings
+(`~/workspace/wave-s/findings/f2.md`).
+Every status below is IMPLEMENTED (in
+tree, uncommitted at write time), and
+the CI frame is stated once, exactly,
+here.
+
+**The Wave S CI frame, completed.**
+Rounds 1–3 are §6.13's record. Build
+round 4 (42761122064, on `1d724a2`)
+FAILED: five undo-census tests died in
+setup because R7's hand-rolled 1×1 PNG
+fixture carries a bad IDAT CRC — it
+passed while asset import checked magic
+only, and Wave R's decode-checked import
+funnel (R9) rightly refuses it. Fixed in
+`e0eea5a` (the fixture is now
+encoder-made via the image crate, the
+wave_r_e2e idiom; import strictness
+unchanged). Build round 5 (42761838001,
+on `e0eea5a`) FAILED one level deeper:
+the failing target was again
+`tests/wave_r_undo_census.rs`, which ran
+19 tests with 15 passed and 4 failed —
+`census_mutating_misc_spend_one_step`,
+`census_mutating_fx_particles_audio_spend_one_step`,
+`census_exceptions_spend_no_step_but_really_write`,
+`census_figure_library_rename_spends_no_step`.
+The integrator's fix (`7f9bce5`,
+verified against the failed log at
+writing) names four causes, all
+test-side: the audio_split leg's stale
+args (it passed no clip index; the
+handler requires one), an exceptions
+witness asserting absolute undo depth 0
+after a setup whose clip_create
+legitimately spends a step (now measured
+relatively, like the fig3/figlib
+witnesses), figlib legs hardcoding
+'Styk' where the library names disk
+entries by file stem and the save
+lower-cases it to 'styk', and the
+suite's legs racing on parallel threads
+over the shared CWD-relative
+`./library`, `./projects` and `./import`
+stores (the suite is now serialised on a
+static mutex, the wave_p_close_guard
+precedent). Build round 6 (42762884625,
+on `7f9bce5`) is **in flight at
+writing**. The Wave S integration push
+does not exist at writing: **the Wave S
+tree stands as integrated in tree, push
+pending integrator** — the runs above
+are the pre-integration fix chain on
+committed trees that carry none of the
+Wave S landings (39 paths uncommitted at
+writing, Wave T's landings among them).
+Wave S's integration ledger itself is
+closed by F2 (below). **Wave T itself
+has no CI verdict**: nothing below is
+called shipped, and its first verdict
+comes on the integration push.
+
+**Export class-C i18n wired (T1).** The
+export panel's sentence-length copy —
+R5's class C, which §6.13 left standing
+— is wired where it is honestly
+wireable: 35 new keys at 35 production
+call sites, 26 plain + 9 templates
+(`{from}`/`{to}`, `{count}`,
+`{frames}`/`{width}`/`{height}`/`{fps}`,
+`{name}`/`{size}`/`{age}`), English
+byte-identical, filed as IA-T1-1. Of 58
+inventoried user-visible strings, 23 are
+filed, not forced: the 19 unique
+range-action status literals and the 5
+recap builders stay English because they
+are machine-read — `export_failed` and
+`toasts::classify_status` parse their
+English shapes, so a translated failure
+would be misread as success in every
+non-English locale — and
+`ExportOp::name()` values are slot data,
+not label sites. The notation buttons
+and the `Loop range` toggle are excluded
+(the toggle is one of S1's seven
+discrepancies, contract 8). The pins
+pass only after IA-T1-1 lands (the Q7
+pattern), and `export_centre` remains
+without a call site, untouched.
+
+**Audio panel wired (T2).** All 33 label
+sites resolve through the catalogue: 31
+constructor labels in the view + the
+mute helper's 2. The exact recount
+corrects S14's audit (31 + 2, not ≈26 +
+2 — the panel_title meta, the name-field
+placeholder and the icon-only Delete
+clip help label were not itemised
+there). `audio_clip_count` is the
+block's one template (`{count}`, the
+camera `follow_label` precedent). The
+helper change — `mute_toggle_parts`
+gains `&EditorCore` and returns a
+resolved `String` label, the S14
+`toggle_label` precedent — has a second
+caller in `menus.rs`, filed as IA-T2-2
+with four exact edits: **the tree does
+not compile until IA-T2-2 lands in the
+same integration pass as this wiring.**
+Excluded: status sentences, composed
+readouts, and `effects_settings_line()`
+(a 144-char class-C sentence, named as
+the first item if a class-C pass ever
+covers this panel). menus.rs's own
+Edit-menu labels stay English — not this
+slice's file, not in the roster.
+
+**Frame ops wired (T3).** 24 distinct
+labels at 41 call sites, all inside the
+panel's one render function; no helper
+needed a signature change. The count
+reconciles with S14's ≈26 exactly: the
+difference is the two hold-multiplier
+labels (`×0.5`, `×2`), classified as
+notation here and left literal with the
+stepper glyphs. The three dynamic
+readouts (`range_label`,
+`duration_label`, the Insert count) stay
+English — template-key work, named for a
+future pass. IA-T3-1 files the 24
+`frame_*` keys; the pin passes only
+after it lands.
+
+**Segment inspector wired (T4).** The
+sweep reproduces S14's count exactly: 24
+label-constructor literals, becoming 22
+distinct `segment_*` keys at 25 call
+sites (Length/Thickness/Bend each serve
+two sites through one key). One composed
+label is wired in the same pass: the
+populated header title becomes the
+template `segment_title_node` (`Segment
+{index}`, substituted via `.replace()`,
+the camera precedent). Legacy lookalike
+keys (`add_segment`, `shape`,
+`delete_segment`) were deliberately not
+reused — the wave discipline is
+panel-prefixed keys. Degree steppers and
+the readout content of
+`shape_label`/`media_label`/`format_topology`
+stay as classified in t4.md. IA-T4-1
+files the block.
+
+**FX clips wired (T5).** 28 distinct
+labels at 30 sites — S14's 24 plus the
+empty-state line, the no-selection
+guidance line, the anchor hint and the
+two gradient state labels, each itemised
+in t5.md so the count is auditable. The
+flagged kind-name case is settled with
+reasons: the snake-case kind name is the
+engine's serialised/MCP vocabulary,
+never a literal in this file; the
+display kind name is
+`fx_browser::kind_label`'s output,
+another module's function, used here
+only in dynamic readouts — wiring it is
+fx_browser's slice if ever ordered, and
+T5 verified nothing parses its output
+back, so no serialisation hazard blocks
+that future slice. IA-T5-1 files the 28
+`fx_*` keys, none a template.
+
+**Home's scan-fallback line gains the
+marker (T6).** §6.13 remainder (9) is
+closed: the scan already holds the whole
+parsed project at the moment it builds
+its summary, so `ScanSummary` gains the
+missing-audio count from the one shared
+classification
+(`audio::missing_audio_clips` — the diff
+adds zero `.exists()` calls and exactly
+one helper invocation), and
+`ProjectInfo` gains `missing_audio:
+Option<usize>`. The `Option` is the
+honesty discipline made structural:
+`Some(0)` is verified health, `None` is
+unknown-not-zero for entries no scan
+ever parsed, an unparseable file still
+produces no row at all, and both
+`Some(0)` and `None` leave the fallback
+line byte-identical to its pre-Wave-T
+shape — for opposite reasons, pinned
+separately. The fallback marker inherits
+the scan cache's staleness contract
+(re-verified when the project file's
+stamp moves), the same contract every
+other scan field carries; the light-read
+line remains render-time-fresh. No IA
+filed.
+
+**JPEG sequence takes scale (T7).**
+`export_jpeg_sequence_scaled` + its
+range sibling land in export.rs
+mirroring the PNG-sequence scaled
+entries: `check_export_scale` runs
+before delegation, clamping and any
+filesystem work; at exactly 1.0 each
+entry delegates to its unscaled
+counterpart (byte-identical by
+construction); the scaled path is a true
+re-render through `render_frame_scaled`
+at the standing quality 90. The render
+tool's `jpeg` arm gains the 4-way (range
+× scale) routing in the png_sequence
+shape, and the render description/schema
+now list `jpeg` among the
+scale-accepting formats. With this slice
+the scale matrix is complete at the
+core/MCP level: every raster render
+format accepts `scale`; `svg` is the
+only no-scale format, by nature. IA-T7-1
+files the docs sentence for T18.
+`export_file` has no JPEG-sequence
+format and no scale argument for any
+format — nothing to route there.
+
+**Bundle scale: audited, validated,
+pinned (T8).** The brief's premise had
+already landed: Wave R's IA-R10-1 routed
+`scale` in `tool_export_bundle` (the PNG
+member already called the scaled entry;
+schema and description already declared
+it), and there is no bundle code in
+export.rs at all — the bundle is
+orchestrated entirely in the MCP
+handler. The real gaps were two: no
+up-front validation (a bad scale
+surfaced only as an `ok:false` member
+result after `create_dir_all`, leaving a
+**partial bundle behind a successful
+call**, and a non-number scale was
+silently treated as absent), and no pins
+anywhere for bundle-scale behaviour.
+Both are closed in mcp_io.rs only: a
+present scale is validated before any
+write (non-number refuses in the MCP
+helpers' voice; a number whose f32 cast
+is not positive-finite refuses with
+`check_export_scale`'s exact sentence —
+`0`, negatives and `1e300` alike, both
+bundle kinds), and three pins prove the
+PNG member doubles at 2.0 with every
+other member byte-identical, absent ==
+explicit 1.0 byte-for-byte, and invalid
+scales leaving not even the directory
+behind. IA-T8-1 files the whole-row docs
+replacement for T18. The JPEG member
+stays 1.0 by the board's scoping —
+routing it would be a cross-slice
+dependency on T7's same-wave entry;
+whole-bundle scaling is a follow-up if
+wanted.
+
+**SVG determinism combos (T9).** Three
+A-B-A byte-identity legs in a new tests
+file extend R12/S6's discipline to the
+combined paths: (a) credited multi-line
+cues — the `<text>` contents are exactly
+`["MARA: First line", "Second line", "We
+go now."]`, prefix on the first line
+only, and B (speaker renamed) differs in
+the prefix path specifically; (b) a JPEG
+asset embed beside a PNG control — each
+payload base64-decodes to the stored
+bytes verbatim, and B's recolour is
+proven local to the PNG asset; (c) both
++ rain + a changed Top/1.5 style — the
+weather disc count tracks
+`weather_particles` exactly at amounts
+40 and 55 while the subtitle contents
+stay equal across A and B. The audit
+found no nondeterminism source (no map
+iteration reaches the document; weather
+is a pure function of seeded hashes) and
+no leg was stopped or weakened.
+
+**MCP render e2e through the real
+registry (T10).** S18 proved credited
+cue + range + scale at the core entry;
+this suite drives the identical
+combination through the layer S18 never
+exercised — registry dispatch,
+`tool_render`'s argument parsing and
+legacy-spelling resolution, R13's
+pre-write range validation, S5's scale
+routing. Four legs: the framed-spelling
+range render at 2.0 writes exactly
+`frame-0002.png`…`frame-0005.png` at
+960×800, byte-identical to the direct
+scaled renders, with the "Ana: " prefix
+widening proven on both ink extents
+inside the scaled band and out-of-cue
+frames byte-identical to the control;
+the past-end refusal asserts R13's
+sentence verbatim with nothing written;
+the scale-0 refusal asserts
+`check_export_scale`'s sentence in the
+tool's `render to {path} failed:` voice,
+nothing written; the legacy `from`/`to`
+spelling drives the same scaled credited
+render. Undo depth is unchanged across
+every call.
+
+**Lane speaker pixel proof (T11).** The
+subtitle census gains the lane leg S3's
+remainder named: on the speaker snap
+pair, the `subtitle-cue-0` block rects
+are read from BOTH tree dumps and must
+agree within 1.0 pt before any pixel is
+measured (geometry is frames-only, so a
+label can never move the block). One
+measured fact shapes the gates: on the
+real populated snap the uncredited
+25-char label already saturates the
+block's 158 pt text run at ~6.3 pt/char,
+so the credited 28-char string truncates
+— ink extent cannot isolate the prefix
+in the lane, unlike the stage leg. The
+leg therefore gates label DIFFERENCE
+(`diff_count` inside the block ≥
+`LANE_DIFF_FLOOR = 200`) and label INK
+(near-white ≥ `LANE_INK_FLOOR = 100`),
+with both extents printed every run for
+the first-run ratchet; the floors are
+analytic, in S2's style, at ~1/3–1/4 of
+the measured populated ink (≈400 px at
+1×). Crop mode reports the leg as not
+run, by design — the crop snaps are
+`--crop stage`, and the lane lives below
+the stage; the full-window set the
+workflow's census step consumes carries
+the leg as a hard gate. The self-test
+extends 7 → 10 expects, all PASS,
+including a negative where the geometry
+gate stays green while the label gate
+fails by name. T11's harness-scale
+observation is carried under remainders
+(6).
+
+**Home missing-audio headless scene
+(T12).** Scenes CAN seed disk state —
+the `home-populated` precedent (real
+save op + the save press's recents
+follow-up) — and this scene extends it:
+one project ("Vanished Take") saved with
+one unmuted clip whose file exists
+nowhere. The clip is a direct
+`project.audio` write before the save,
+the honest exception, justified in
+t12.md: `add_audio_clip` takes its path
+from the first file in `./audio/` and
+adds nothing when there is none, so a
+missing-file clip is unreachable through
+ops — it is exactly the state a user
+reaches by deleting a file after adding
+it, which is the state S7's marker
+exists to surface. The panel's own light
+read, never the scene, produces the
+count. Fact 35 is the layout table's
+first TEXT fact (`home-proj-meta-0`'s
+text ends with "· 1 audio clip missing"
+— the marker is text, not structure),
+the registry stands at 33 scenes, and a
+unit pin proves the seeded row carries
+the marker through the panel's own
+scan/metadata/line path. IA-T12-1 files
+the headless wiring for T16, including
+the judgement call on a tree-text grep
+step (the geometry scanner reads only
+path/rect/key and cannot assert text) —
+T16 applied it as proposed. The marker's
+pixel proof is not in this slice: the
+tree-text proof is the rendered string
+itself, which a pixel leg is not. The
+scan-fallback line cannot occur on this
+scene by construction (the saved file
+light-reads cleanly); its headless proof
+would need a scene whose file defeats
+the light read, which no honest fixture
+currently produces.
+
+**Undo-census extension for Wave S's
+changes (T13).** The audit — every Wave
+S finding grepped, both candidate
+handlers cross-checked, S19's
+description sweep as the second witness
+— finds exactly two MCP-surface
+behaviour changes in Wave S, on a
+surface that stayed 381 tools all wave:
+`subtitle_export_srt`'s reply shape
+(S9's `speakers_dropped`, present only
+when > 0; the tool was and stays
+read-only) and `render`'s scale routing
+widened to gif/apng/spritesheet/mp4/webm
+(S5; reply shape unchanged). Eight
+registry-level legs pin both: the SRT
+reply both ways (field absent/present,
+exact key sets, written file == the
+plain export, 0 steps), a VTT control
+leg (the field never appears there; the
+voice tag does), gif + spritesheet
+scaled renders at 0 steps, the combined
+range+scale arm, and both refusals
+(scale 0; range past end) at 0 steps
+with nothing written. Deliberately not
+pinned: S4's core entries (reached only
+through `render`), `export_file` (no
+scale argument exists), and the
+mp4/webm/apng scaled arms — they rest on
+S5's in-module pins, stated plainly in
+t13.md, because a census leg must not
+make the suite depend on ffmpeg's
+presence in CI.
+
+**README truth pass (T14).** Four edits,
+each verified against the tree: the
+checksum file is `SHA256SUMS.txt`, not
+`SHA256SUMS` (the workflow writes the
+former); the document-model sentence now
+includes subtitles (timed cues, optional
+per-cue speaker, project-wide style) —
+the README had never mentioned subtitles
+anywhere; image assets import from PNG
+or JPEG by content, not file name (R9,
+previously unstated); the export bullet
+records the optional output scale as a
+true re-render, and a new Formats
+sub-bullet covers SRT/WebVTT
+import/export with WebVTT voice-tag
+speakers and the SRT export's
+dropped-credit report. The scale list
+deliberately excludes T7/T8's formats —
+in flight at T14's read, not in the
+settled tree; a future pass can extend
+it once they integrate. Everything else
+audited TRUE (the Rune pin, CI
+behaviour, 27 FX kinds by name, 28
+locales, MCP 381 + protocol version, the
+headless flags). Two flags are reported,
+not edited: no LICENSE/COPYING file
+exists in the repo root (the
+GPL-3.0-or-later claim rests on
+Cargo.toml's `license` field — adding
+the text file is a one-line future
+slice), and the build-from-source
+section's framing speaks to contributors
+under this repo's CI-only discipline
+rather than to end users (flagged, not
+conflated, not rewritten). The verified
+scene count (32 at T14's read, before
+T12's scene) is recorded in t14.md.
+
+**Gate/census maintenance (T15).** No
+script edits — and that is the finding:
+on a clean detached-worktree baseline at
+HEAD `e0eea5a` and again on the settled
+live tree, the gate reads PASS 10/10 and
+the census 16/16, so both floors already
+equal their verified counts
+(`KEY_TOTAL_FLOOR` stays 980 — S15's
+ratchet, re-verified here at clean HEAD
+itself, the +1 over R15's 979 being
+`subtitle-speaker-field` from Wave R's
+own integration; `MCP_SURFACE_FLOOR`
+stays 381). The forensic accounting is
+T15's table: tools 381, palette 134,
+icons 163, element keys 864 + 116 = 980
+with zero loss per key across the whole
+uncommitted stack, scenes 31 → 33 (S2's
+speaker scene + T12's, layout facts
+1..=35), State 48/22, census scan set
+152 → 161 files (the +9 are Wave S's
+five and Wave T's four new test files).
+The mid-wave check-8 transient
+(home-missing-audio registered but in no
+tree loop) is diagnosed in t15.md as
+neither side wrong — the instrument
+caught exactly the blind spot it exists
+for, and it resolved when T16's half
+landed, the S15 precedent. T15's i18n
+count: 202 in tree; the six Wave T IA
+blocks are pending integrator-side
+arithmetic (158 keys → 360), stated as
+such and not made a floor.
+
+**Overflow/headless maintenance (T16).**
+IA-T12-1 applied in full: both tree
+loops in headless.yml gain
+`home-missing-audio`; SCAN_SET gains
+`tree-home-missing-audio.json` as
+**required** from the start (the Q12/S2
+one-step precedent) and stands at 15
+entries, 15 required, 0 pending; the
+IA's proposed tree-text grep step was
+added exactly as written (fail-soft,
+verdict in
+`headless-out/home-missing-audio-marker.txt`),
+because the geometry scanner cannot
+assert element text; the tree file joins
+the Summary step's headline list; the
+scanner's prose recount moves to 36
+trees / 33 scenes. T16 also verified T11
+needs no workflow change — the speaker
+snap pair the lane leg consumes has been
+dumped since IA-S2-1. The sequencing
+warning stands in t16.md: T12's scene,
+these dumps, the required SCAN_SET entry
+and the gate's coverage check are one
+unit and must land in the same
+integration push.
+
+**MCP docs sync (T18).** IA-T7-1 and
+IA-T8-1 applied verbatim: the `render`
+row's scale sentence now includes `jpeg`
+(and only `svg` takes no scale); the
+`export_bundle` row is replaced whole
+with the source-verbatim form (the
+member-content paragraph, the PNG-member
+scale sentence with its
+refuse-before-write clause, Optional
+gains `scale`). Both rows byte-verified
+against the sources post-edit. The drift
+sweep found nothing else: Wave T has
+exactly two MCP-surface writers (T7, T8,
+both in mcp_io.rs), every other IA is a
+key block or the menus call-site, and
+the docs' "Render formats" note makes no
+scale claim. Census stays 381; the
+gate's check 9 doc-sync passes.
+
+**Cross-feature e2e: scaled animated
+exports with subtitles (T19).** Four
+legs on a subtitled fixture close the
+loop S4/S5/S11 opened: the GIF at 2.0
+decodes frame-by-frame — frames outside
+the cue's half-open range hold zero face
+ink, the in-range face spans the derived
+36..=44 rows at the doubled edge offset
+against the 1.0 control, frame 2's face
+rows equal frame 1's exactly, and a
+third uncredited export proves the
+prefix specifically (credited column
+extent ≥ 2× uncredited); the APNG at 0.5
+reads (240, 200) with 4 frames at the
+wire level (acTL/fcTL chunk-walked) and
+its first frame — the PNG default image
+— is byte-equal to the direct 0.5
+render, burn-in inside the compared
+bytes; the spritesheet at 2.0 has every
+tile byte-equal to the direct scaled
+render of its frame, burn-in included on
+the subtitled tiles; and S4's 1.0
+byte-identity trios are repeated on this
+fixture, where every frame carries the
+credited burn-in. Decode limits are
+stated, not hidden: GIF is
+palette-quantised (geometry + relations
+only, no byte claims), and APNG frames
+2–4 carry no pixel assertion (no APNG
+frame decoder in the test target — a
+dependency question for the integrator,
+stated in the suite header).
+
+**Particles panel wired (T20).** The
+sweep finds exactly S14's count — 24
+label-constructor literals — splitting
+into 16 wireable labels (wired, IA-T20-1
+files the `particles_*` block) and 8
+locale-invariant notation literals
+(stepper `−`/`+`, the nudge pad's
+arrows) left literal per the R6
+precedent. Both view functions already
+take `&State`, so no signature changed
+anywhere. The kind names
+(`burst`/`sparkle`/`smoke`) are excluded
+with the brief's own warning honoured:
+they are the export/MCP serialised
+vocabulary, and translating them would
+corrupt that surface. Composed readouts
+(row labels, anchor text, the detail
+title, the header count meta) stay
+English — template-key work beyond a
+label pass, the standing S14 remainder
+for this panel.
+
+**Wave S's ledger, closed by F2.** The
+F2 finisher applied all six items of the
+Wave S IA package on the Wave S tree
+(base `1d724a2` + the wave's landings),
+nothing stopped-on: (i) **IA-S14-1** —
+S14's 34 `threed_*` keys as one block ×
+28 tables, genuine translations in the
+eight translated tables (only legitimate
+English-identical values remain there:
+`IK` in all eight, DE
+`Position`/`Orbit`/`Arm L`/`Arm R`, FR
+`Position`, each matching an in-table
+precedent), placed immediately after the
+`export_subtitle` entry — the end of
+S1's export block, per the IA's own
+wording (the tables' literal last key is
+`subtitle_import_vtt`; the pre-edit
+168-key sequence is preserved verbatim
+around the insertion, parser-proven) —
+the catalogue becoming **202 × 28**;
+(ii) **IA-S15-1** — `i18n_wire.rs`'s
+header and `src/i18n.rs`'s module-doc
+line moved to 202 (S15's 202-variant
+text verbatim); (iii) **IA-S8-1** — the
+QA_RUNE §17 row replaced with S8's
+closure row verbatim ("verified — table
+in PHASE_O §10"); (iv) **IA-S9-2** —
+S9's panel status pin inserted verbatim
+into the subtitle panel's test module
+after
+`export_writes_the_document_and_import_replaces_once`;
+(v) **IA-S20-1** — svg.rs's
+`append_subtitles` retires its inline
+centre-formula restatement for the
+shared helpers, the STOP condition
+checked first (no pin asserted the old
+structure; output byte-identical by
+construction); (vi) **S13's follow-up**
+— the one-call close-flush → verdict
+composition test landed in
+`tests/wave_p_close_guard.rs`
+(`close_flush_of_undone_edit_offers_nothing_at_next_launch`:
+save + recents in a CWD temp dir, a core
+made dirty the P42 way — counted edit,
+mutate, undo — asserted serialised-equal
+to the save with the counter standing at
+1, the REAL `flush_recovery_on_close()`,
+and the content gate's verdict
+**false**). F2's verification: the
+parser proof above, gate PASS 10/10
+(element keys 981 by the gate's count at
+that later settled state, floor ≥ 980
+holding either way), census 381 PASS,
+overflow and subtitle-census self-tests
+PASS. F2's one remainder: no module-doc
+paragraph for the threed block was added
+to `src/i18n.rs` (IA-S15-1 specified
+only the count line) — a one-minute
+symmetry follow-up if the integrator
+wants it. With F2, §6.13's ledger items
+(4)–(10) are all discharged; items
+(1)–(3) were closed inside Wave S
+itself.
+
+**Integration ledger — every Integrator
+Action filed across Wave T's findings.**
+(1) **IA-T1-1** (integrator inserts into
+`src/i18n.rs`): T1's 35 export class-C
+keys (26 plain + 9 templates) as one
+block × 28 tables in roster order,
+genuine translations in the eight
+translated tables — the catalogue
+becomes 237 on this block alone. (2)
+**IA-T2-1**: T2's 33 `audio_*` keys (one
+template, `audio_clip_count`). (3)
+**IA-T2-2** (integrator applies to
+`src/rune_sec/menus.rs`): the
+`mute_item_parts` call-site adjustment
+for `mute_toggle_parts`' new signature —
+four exact edits in t2.md; **the tree
+does not compile until this lands in the
+same pass as T2's wiring**. (4)
+**IA-T3-1**: T3's 24 `frame_*` keys (no
+templates). (5) **IA-T4-1**: T4's 22
+`segment_*` keys (one template,
+`segment_title_node` — the `{index}`
+placeholder and its braces survive every
+table). (6) **IA-T5-1**: T5's 28 `fx_*`
+keys (no templates). (7) **IA-T20-1**:
+T20's 16 `particles_*` keys (no
+templates). Items (1), (2), (4), (5),
+(6), (7) total **158 keys**; with all
+six blocks the catalogue becomes **360 ×
+28** — T15's pending arithmetic,
+labelled as such wherever it appears,
+until the inserted tables are recounted.
+The count docs (`src/i18n.rs` /
+`i18n_wire.rs`) move to the settled
+total in the same pass — the board's
+integration step, not an IA. Until the
+blocks land, the six panels' pins cannot
+pass — expected, per the Q7 pattern. (8)
+**IA-T7-1** (`docs/MCP.md`'s `render`
+row: one sentence replaced) — CLOSED
+inside the wave by T18. (9) **IA-T8-1**
+(`docs/MCP.md`'s `export_bundle` row:
+whole-row replacement) — CLOSED inside
+the wave by T18. (10) **IA-T12-1** (T16
+applies:
+`.github/workflows/headless.yml` +
+`scripts/overflow_scan.py`) — CLOSED
+inside the wave by T16, including the
+proposed tree-text grep step applied as
+written; SCAN_SET stands at 15 entries,
+15 required, 0 pending. No actions were
+filed by T6, T9, T10, T11, T13 or T19.
+
+**Verification — awaiting CI.** Counts
+are T15's, recounted on the settled live
+tree (HEAD `e0eea5a` plus all Wave
+S/F2/Wave T landings) against a clean
+detached-worktree baseline at HEAD, not
+taken from siblings' claims: the gate
+reads **PASS — all checks green
+(10/10)**; the MCP census reads **381
+tools** (44 + 319 + 9 + 4 + 5), 16/16
+checks PASS, and both floors stay where
+S15 put them — `MCP_SURFACE_FLOOR` 381,
+`KEY_TOTAL_FLOOR` 980 (T15 edited
+neither script; the floors equal the
+verified counts). **Element keys 980**
+(864 static + 116 dynamic), zero loss
+per key against HEAD across the whole
+uncommitted stack (the gate's check 2
+over the full stack is the proof).
+Palette commands 134; curated icons 163;
+headless scenes **33** (layout facts
+1..=35 sequential, 35 strings); State 48
+fields over 22 full literals. The i18n
+catalogue in tree reads **202 keys ×
+28** — S1's 16 + F2's 34 over the 152
+base, sequences identical ×28 — and
+becomes **360 × 28** when the six Wave T
+IA blocks land (pending arithmetic, per
+T15; not verified from the tree and not
+a floor). The census scan set reads 161
+files (117 under src/, 44 under tests/;
+the +9 over HEAD are Wave S's five and
+Wave T's four test files). SCAN_SET
+stands at 15 required / 0 pending with
+its self-test green (T16), and the
+subtitle census self-test reads PASS
+(10/10) with T11's lane leg (T11). CI —
+the integration push's Build, Test &
+Binary plus a headless dispatch — is the
+proof of everything above, including
+T11's analytic lane floors, the F2
+package's pins, and T2's wiring once
+IA-T2-2 lands beside it.
+
+**Honest remainders.** (1) The standing
+user decisions stand exactly as §6.13
+left them — white-on-accent contrast,
+the panel splitter, File-menu Save As,
+the two "New project" results,
+`tab_visits_controls`, project-swap
+undo, the skew channel, the whole-figure
+pose transform, MCP `write_recovery`,
+the waveform call; this wave touched
+none of them, per its contract 8. (2)
+S1's seven value-vs-label discrepancies
+stand — neither side changed — and T1's
+class-(c) classes stand with them: the
+export panel's status sentences and
+recap builders stay English because
+their shapes are machine-read by the
+toast classifier, and localising that
+grammar is a shell-wide decision, not a
+panel slice; the `Loop range` toggle is
+untouched as one of the seven. (3) **GIF
+import stays undecided**: the funnel
+still refuses GIF deliberately; widening
+the accepted set is a scope decision for
+the user. (4) **A panel export-scale
+control remains unbuilt by design**: the
+core/MCP scale surface is now complete
+for every raster render format, and no
+control was invented to front it. The
+bundle's JPEG member stays 1.0 (T8's
+scoping; the docs now promise exactly
+what the source does), so whole-bundle
+scaling is a follow-up if the user wants
+it. (5) No subtitle stack cap exists
+(the S20 remainder): uniformly
+unpaintable past the pinned ceiling
+stays the proven behaviour, and changing
+it is a product decision. (6) **Analytic
+gates still await their first real
+measurements**: S2's stage span gate
+(§6.13 remainder (8)) has still never
+run — no CI run has produced the speaker
+snap — and T11's lane floors join it;
+both print their measured values on the
+first integration headless run and
+ratchet to ~1/3 of measured then. T11
+also records a harness observation the
+integrator should read before that run:
+run 42759195547's census transcript
+itself FAILED — its snaps are 2880×1800
+(2×) against 1440×900-point tree
+geometry, so bands read at point rows
+found zero diffs, and a 40 pt stage-rect
+drift stands between the seeded and
+default trees — while the census step's
+fail-soft setting kept the workflow
+green. The lane leg follows the script's
+single existing contract (tree points
+are snap pixels, as every leg assumes);
+if the integration run's snaps again
+come out 2×, all legs misread together
+and the transcript shows it — the fix
+belongs to the probe/workflow side, not
+to one leg inventing a second coordinate
+system. (7) T14's flags stand: no
+LICENSE/COPYING file in the repo root (a
+one-line future slice), and the README's
+build-from-source framing — flagged, not
+rewritten. The README's export-scale
+list deliberately excludes the JPEG
+sequence and the bundle PNG member until
+T7/T8 integrate (T14's remainder). (8)
+English residue by design: menus.rs's
+own menu labels (T2), the audio panel's
+`effects_settings_line()` class-C
+sentence (T2), the composed readouts of
+the segment, FX and particles panels
+(T4/T5/T20), the export panel's
+`export_centre` key still without a call
+site (T1), and the FX display kind names
+— fx_browser's surface if ever ordered
+(T5). (9) Proof limits stated by their
+slices: T19's APNG frames 2–4 are
+wire-level only; T12's marker proof is
+tree text, not pixels; T13's census legs
+witness gif/spritesheet for the widened
+render routing, the apng/mp4/webm arms
+resting on S5's in-module pins; T10's
+pixel assertions inherit S18's
+calibrated bands. (10) §6.13 remainders
+closed here: S7's scan-fallback gap (T6)
+and the Home badge's missing headless
+proof (T12, in tree-text form); S3's
+lane pixel proof (T11); the scale
+matrix's last two gaps — the JPEG
+sequence (T7) and the bundle PNG
+member's validation (T8); S14's named
+next panels, all five wired (T2 audio,
+T3 frame_ops, T4 inspector_segment, T5
+fx_clips, T20 particles) plus the export
+panel's class-C copy (T1); the undo
+census extended over Wave S's two MCP
+behaviour changes (T13); the README's
+staleness (T14). And sound remains
+user-verified only.
