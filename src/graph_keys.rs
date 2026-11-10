@@ -243,7 +243,7 @@ pub fn duplicate_channel_to_figure(
     // destination figure must actually have that node, or the
     // cloned channel would drive nothing.
     let node_index = match source.target {
-        ChannelTarget::Angle(n) | ChannelTarget::Length(n) => Some(n),
+        ChannelTarget::Angle(n) | ChannelTarget::Length(n) | ChannelTarget::Bend(n) => Some(n),
         ChannelTarget::RootX | ChannelTarget::RootY => None,
     };
     if let Some(n) = node_index {
@@ -609,17 +609,19 @@ pub fn fill_keys_in_range(
 }
 
 /// Human label for a channel target, in UI casing: "Root X",
-/// "Root Y", "Angle 3", "Length 3". This mirrors the graph
-/// panel's own `channel_label` (in `rune_sec/graph_panel.rs`)
-/// string for string — that helper lives in the shell crate
-/// and cannot be reused from the library, so the formatting is
-/// duplicated here and the two must be kept in step.
+/// "Root Y", "Angle 3", "Length 3", "Bend 3". This mirrors
+/// the graph panel's own `channel_label` (in
+/// `rune_sec/graph_panel.rs`) string for string — that
+/// helper lives in the shell crate and cannot be reused
+/// from the library, so the formatting is duplicated here
+/// and the two must be kept in step.
 pub fn target_label(target: ChannelTarget) -> String {
     match target {
         ChannelTarget::RootX => "Root X".to_string(),
         ChannelTarget::RootY => "Root Y".to_string(),
         ChannelTarget::Angle(n) => format!("Angle {n}"),
         ChannelTarget::Length(n) => format!("Length {n}"),
+        ChannelTarget::Bend(n) => format!("Bend {n}"),
     }
 }
 
@@ -868,6 +870,7 @@ fn gk_target_json(target: ChannelTarget) -> Value {
         ChannelTarget::RootY => json!({ "target": "root_y", "node": null, "target_label": "Root Y" }),
         ChannelTarget::Angle(n) => json!({ "target": "angle", "node": n, "target_label": target_label(target) }),
         ChannelTarget::Length(n) => json!({ "target": "length", "node": n, "target_label": target_label(target) }),
+        ChannelTarget::Bend(n) => json!({ "target": "bend", "node": n, "target_label": target_label(target) }),
     }
 }
 

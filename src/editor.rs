@@ -8,7 +8,7 @@ use crate::export::{
     export_spritesheet as render_sheet, export_webm as render_webm,
 };
 use crate::model::{
-    aim_node, apply_ik, dist, evaluate, FigureDef, NodeDef, Project, V2,
+    aim_node, apply_ik, dist, evaluate, norm_deg, FigureDef, NodeDef, Project, SetRestMode, V2,
 };
 use std::path::PathBuf;
 
@@ -18,6 +18,10 @@ pub enum DragKind {
     Ik(usize),
     Aim(usize),
     Camera,
+    /// Wave Y (Y8, P-10): setup-mode drags — the Ik/Aim
+    /// solvers driven against the figure's rest angles.
+    SetupIk(usize),
+    SetupAim(usize),
 }
 
 /// Wave 7: what a draw-mode drag does — paint a stroke with the
@@ -45,6 +49,11 @@ pub struct EditorCore {
     /// from a press that changed nothing and post the
     /// gesture-end recap only for the former.
     drag_pose_before: Option<crate::model::Pose>,
+    /// Wave Y (Y8): the grabbed figure's rest angles
+    /// captured at a setup drag's start, for
+    /// `end_drag`'s recap decision — `drag_pose_before`'s
+    /// setup twin.
+    drag_rest_before: Option<Vec<f32>>,
     /// Wave P (P6): the camera in effect when a camera drag
     /// began — `end_drag`'s comparison baseline for its pan
     /// recap, mirroring `drag_pose_before`.
@@ -108,6 +117,14 @@ pub struct EditorCore {
     pub library_index: usize,
     /// Draw mode: canvas drags paint brush strokes on this frame.
     pub draw_mode: bool,
+    /// Wave Y (Y8, P-10): setup (rigging) mode — while
+    /// on, the stage draws every figure at its rest pose
+    /// and stage drags drive the solvers against rest
+    /// angles instead of the current frame's pose (see
+    /// `begin_drag`'s setup branch). Runtime-only, like
+    /// `draw_mode`; the figure inspector's toggle is its
+    /// only writer.
+    pub setup_mode: bool,
     drawing: bool,
     /// Wave 7: the active draw tool (brush or eraser).
     pub draw_tool: DrawTool,
@@ -258,6 +275,7 @@ impl EditorCore {
             camera_mode: false,
             camera_last: None,
             drag_pose_before: None,
+            drag_rest_before: None,
             drag_camera_before: None,
             status: "Drag a joint to pose. Hands and feet use IK; drag the hips to move.".into(),
             undo: Vec::new(),
@@ -276,6 +294,7 @@ impl EditorCore {
             library: Self::load_library(),
             library_index: 0,
             draw_mode: false,
+            setup_mode: false,
             drawing: false,
             draw_tool: DrawTool::Brush,
             brush_index: 0,
@@ -489,9 +508,23 @@ impl EditorCore {
 
     /// Hit test in stage coordinates. Returns (figure, node).
     pub fn hit_test(&self, p: V2) -> Option<(usize, usize)> {
+        self.hit_test_impl(p, false)
+    }
+
+    /// Wave Y (Y8, P-10): the hit test, against the current
+    /// frame's positions or — in setup mode — the rest-pose
+    /// positions the stage actually draws.
+    fn hit_test_impl(&self, p: V2, setup: bool) -> Option<(usize, usize)> {
         let mut best: Option<(usize, usize, f32)> = None;
         for fi in 0..self.project.figures.len() {
-            for (ni, joint) in self.positions(self.current, fi).iter().enumerate() {
+            for (ni, joint) in (if setup {
+                self.setup_positions(fi)
+            } else {
+                self.positions(self.current, fi)
+            })
+            .iter()
+            .enumerate()
+            {
                 let d = dist(p, *joint);
                 if d <= 13.0 && best.map(|(_, _, bd)| d < bd).unwrap_or(true) {
                     best = Some((fi, ni, d));
@@ -501,9 +534,37 @@ impl EditorCore {
         best.map(|(fi, ni, _)| (fi, ni))
     }
 
+    /// Joint positions of figure `fi` as setup mode
+    /// draws and hit-tests them: the figure's rest pose,
+    /// rooted where the current frame's pose roots it
+    /// (the rest pose has no root of its own — roots
+    /// live in frame poses, so the frame's root is the
+    /// anchor a rigging session edits around).
+    pub fn setup_positions(&self, fi: usize) -> Vec<V2> {
+        let fig = &self.project.figures[fi];
+        let root = self.project.frames[self.current].poses[fi].root;
+        evaluate(&fig.def, &fig.def.rest_pose(root))
+    }
+
+    /// [`setup_positions`] at a fractional frame, for
+    /// the stage's display pass: the root comes from
+    /// the sampled pose at `frame_f`, the angles are
+    /// the rest angles.
+    pub fn setup_positions_f(&self, frame_f: f32, fi: usize) -> Vec<V2> {
+        let fig = &self.project.figures[fi];
+        let poses = self.project.poses_at(frame_f);
+        evaluate(&fig.def, &fig.def.rest_pose(poses[fi].root))
+    }
+
     pub fn begin_drag(&mut self, p: V2) -> bool {
         if self.playing {
             return false;
+        }
+        // Wave Y (Y8, P-10): in setup mode the stage
+        // shows rest poses, so the press hit-tests those
+        // and the gesture edits rest angles.
+        if self.setup_mode {
+            return self.begin_setup_drag(p);
         }
         let Some((fi, ni)) = self.hit_test(p) else {
             return false;
@@ -535,6 +596,68 @@ impl EditorCore {
         true
     }
 
+    /// Begin a setup-mode stage drag (Wave Y, Y8;
+    /// SpriteLoop GAP P-10): `begin_drag` against the
+    /// rest pose. The press hit-tests the setup
+    /// positions of every figure and selects what it
+    /// grabs, exactly like a frame drag; Aim and IK then
+    /// drive the same solvers against a scratch rest
+    /// pose (see `drag_to`'s setup arms), and each move
+    /// writes the solved angles back as the figure's
+    /// rest angles, clamped through each node's joint
+    /// limits — rest data must satisfy the rig's own
+    /// limits, where frame poses are performance data
+    /// and stay unclamped as they have always been. One
+    /// snapshot per gesture, taken only once the press
+    /// is known to start a real setup drag.
+    ///
+    /// A press on the root joint starts no drag: the
+    /// rest pose has no root position (roots live in
+    /// frame poses), so there is nothing for the
+    /// solvers to edit — the press is consumed (returns
+    /// true, so the shell does not fall through to the
+    /// sprite / stroke pick over a joint the user
+    /// plainly grabbed) with a status saying so, and
+    /// takes NO snapshot.
+    pub fn begin_setup_drag(&mut self, p: V2) -> bool {
+        if self.playing {
+            return false;
+        }
+        let Some((fi, ni)) = self.hit_test_impl(p, true) else {
+            return false;
+        };
+        if self.project.figures[fi].locked {
+            self.status = "Figure is locked — unlock it in the figures list.".into();
+            return false;
+        }
+        if self.project.figures[fi].def.nodes[ni].parent.is_none() {
+            self.status =
+                "The rest pose has no root position — roots live in frame poses.".into();
+            self.selected_figure = fi;
+            self.selected_node = Some(ni);
+            return true;
+        }
+        self.snapshot();
+        self.selected_figure = fi;
+        self.selected_node = Some(ni);
+        let fig = &self.project.figures[fi];
+        let has_grandparent = fig.def.nodes[ni]
+            .parent
+            .and_then(|par| fig.def.nodes[par].parent)
+            .is_some();
+        let kind = if fig.def.nodes[ni].ik_end && has_grandparent {
+            DragKind::SetupIk(ni)
+        } else {
+            DragKind::SetupAim(ni)
+        };
+        self.drag_rest_before = Some(
+            fig.def.nodes.iter().map(|n| n.rest_angle).collect(),
+        );
+        self.dragging = Some(kind);
+        self.drag_to(p);
+        true
+    }
+
     /// Start a camera drag (camera mode): snapshots once, then
     /// `drag_to` pans the key at the current frame.
     pub fn begin_camera_drag(&mut self, p: V2) {
@@ -561,6 +684,28 @@ impl EditorCore {
             self.camera_last = Some(p);
             return;
         }
+        // Wave Y (Y8, P-10): setup kinds solve against a
+        // scratch pose seeded from the rest angles and
+        // write the solved angles back as rest angles;
+        // the frame pose is never touched.
+        if let DragKind::SetupIk(end) | DragKind::SetupAim(end) = kind {
+            let fi = self.selected_figure;
+            let root = self.project.frames[self.current].poses[fi].root;
+            let mut scratch = self.project.figures[fi].def.rest_pose(root);
+            {
+                let def = &self.project.figures[fi].def;
+                if matches!(kind, DragKind::SetupIk(_)) {
+                    apply_ik(def, &mut scratch, end, p);
+                } else {
+                    aim_node(def, &mut scratch, end, p);
+                }
+            }
+            let fig = &mut self.project.figures[fi];
+            for (node, angle) in fig.def.nodes.iter_mut().zip(scratch.angles.iter()) {
+                node.rest_angle = node.clamp_angle(*angle);
+            }
+            return;
+        }
         let fi = self.selected_figure;
         let frame = self.current;
         let fig = &self.project.figures[fi];
@@ -574,6 +719,9 @@ impl EditorCore {
             DragKind::Aim(node) => {
                 aim_node(&fig.def, pose, node, p);
             }
+            // Setup kinds returned above, before the
+            // frame pose was borrowed.
+            DragKind::SetupIk(_) | DragKind::SetupAim(_) => {}
         }
     }
 
@@ -594,6 +742,7 @@ impl EditorCore {
         let kind = self.dragging.take();
         self.camera_last = None;
         let pose_before = self.drag_pose_before.take();
+        let rest_before = self.drag_rest_before.take();
         let camera_before = self.drag_camera_before.take();
         match kind {
             Some(DragKind::Camera) => {
@@ -605,6 +754,28 @@ impl EditorCore {
                     {
                         self.status =
                             format!("Camera key moved at frame {}.", self.current + 1);
+                    }
+                }
+            }
+            Some(DragKind::SetupIk(_)) | Some(DragKind::SetupAim(_)) => {
+                if let Some(before) = rest_before {
+                    let fi = self.selected_figure;
+                    let changed = self
+                        .project
+                        .figures
+                        .get(fi)
+                        .map(|f| {
+                            f.def.nodes.len() == before.len()
+                                && f.def
+                                    .nodes
+                                    .iter()
+                                    .zip(before.iter())
+                                    .any(|(n, b)| (n.rest_angle - b).abs() > 0.01)
+                        })
+                        .unwrap_or(false);
+                    if changed {
+                        self.status =
+                            format!("Rest pose edited for figure {}.", fi + 1);
                     }
                 }
             }
@@ -2916,7 +3087,7 @@ impl EditorCore {
                     .get_mut(self.selected_figure)
                     .and_then(|f| f.def.nodes.get_mut(node_idx))
                 {
-                    node.media = Some(crate::model::SegmentMedia::Image { asset });
+                    node.media = Some(crate::model::SegmentMedia::Image { asset, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
                     self.status = format!("Sprite attached (asset {}).", asset + 1);
                 }
             }
@@ -4971,6 +5142,65 @@ impl EditorCore {
         self.snapshot();
         self.project.figures[fi].states.retain(|k| k.frame != frame);
         self.status = format!("Figure {} state key at frame {} removed.", fi + 1, frame + 1);
+        true
+    }
+
+    /// Wave Y (Y7, P-10): set figure `fi`'s rest (setup)
+    /// pose from the pose the stage currently shows for
+    /// it — the timeline pose at the current frame (clips
+    /// and state keys applied), or the rest pose itself
+    /// when the timeline carries no pose for the figure.
+    /// With `rebase`, every authored angle store shifts
+    /// by the rest delta so the animation keeps its
+    /// content against the new rig; without it, only the
+    /// rest angles change (absolute). One snapshot on a
+    /// real change; refusals (unknown figure, a malformed
+    /// timeline pose) and the already-rest no-op take
+    /// none. The math is [`Project::set_rest_from_pose`].
+    pub fn set_rest_from_pose(&mut self, fi: usize, rebase: bool) -> bool {
+        if fi >= self.project.figures.len() {
+            self.status = format!("No figure {} to set the rest pose of.", fi + 1);
+            return false;
+        }
+        let poses = self.project.poses_at(self.current as f32);
+        let pose = match poses.get(fi) {
+            Some(p) => p.clone(),
+            None => self.project.figures[fi].def.rest_pose([0.0, 0.0]),
+        };
+        let n = self.project.figures[fi].def.nodes.len();
+        if pose.angles.len() != n || !pose.angles.iter().all(|a| a.is_finite()) {
+            self.status = "Set rest pose failed: the current pose is malformed.".into();
+            return false;
+        }
+        let rest = self.project.figures[fi].def.rest_angles();
+        let already_rest = pose
+            .angles
+            .iter()
+            .zip(rest.iter())
+            .all(|(a, b)| (norm_deg(*a) - b).abs() < 1e-4);
+        if already_rest {
+            return false;
+        }
+        self.snapshot();
+        let mode = if rebase {
+            SetRestMode::Rebase
+        } else {
+            SetRestMode::Absolute
+        };
+        let _ = self.project.set_rest_from_pose(fi, &pose, mode);
+        self.status = if rebase {
+            format!(
+                "Figure {} rest pose set from frame {}; the animation was rebased onto the new rest.",
+                fi + 1,
+                self.current + 1
+            )
+        } else {
+            format!(
+                "Figure {} rest pose set from frame {} (absolute — the timeline is unchanged).",
+                fi + 1,
+                self.current + 1
+            )
+        };
         true
     }
 
@@ -11151,5 +11381,150 @@ mod wave15_graph_interp_tests {
             core.status
         );
         assert_eq!(core.edits_since_autosave(), edits, "still no snapshot");
+    }
+}
+
+#[cfg(test)]
+mod wave_y_p10_tests {
+    use super::*;
+
+    fn project_json(core: &EditorCore) -> String {
+        serde_json::to_string(&core.project).expect("project serialises")
+    }
+
+    /// Move the current frame's pose off the rest pose
+    /// without spending an undo step (a direct write, as
+    /// a corrupt or hand-edited project would carry).
+    fn displace_current_pose(core: &mut EditorCore) {
+        core.project.frames[0].poses[0].angles[5] += 30.0;
+    }
+
+    #[test]
+    fn set_rest_from_pose_takes_exactly_one_undo_step() {
+        let mut core = EditorCore::new();
+        displace_current_pose(&mut core);
+        let expected_rest = core.project.frames[0].poses[0].angles.clone();
+        let before = project_json(&core);
+        assert_eq!(core.undo_depth(), 0);
+        assert!(core.set_rest_from_pose(0, true));
+        assert_eq!(core.undo_depth(), 1, "one snapshot for the whole rebase");
+        assert!(core.status.contains("rebased"), "status: {}", core.status);
+        let stored = core.project.figures[0].def.rest_angles();
+        assert!(
+            stored
+                .iter()
+                .zip(expected_rest.iter())
+                .all(|(a, b)| (norm_deg(*a) - norm_deg(*b)).abs() < 1e-3),
+            "the stored rest is the current frame pose's angles"
+        );
+        core.undo();
+        assert_eq!(project_json(&core), before, "one undo restores everything");
+    }
+
+    #[test]
+    fn set_rest_absolute_mode_leaves_the_timeline_untouched() {
+        let mut core = EditorCore::new();
+        displace_current_pose(&mut core);
+        let frames_before =
+            serde_json::to_string(&core.project.frames).expect("frames serialise");
+        let rest_before = core.project.figures[0].def.rest_angles();
+        assert!(core.set_rest_from_pose(0, false));
+        assert_eq!(core.undo_depth(), 1);
+        assert!(core.status.contains("absolute"), "status: {}", core.status);
+        assert_eq!(
+            serde_json::to_string(&core.project.frames).expect("frames serialise"),
+            frames_before,
+            "absolute mode never touches the timeline"
+        );
+        let rest_after = core.project.figures[0].def.rest_angles();
+        assert!(
+            (rest_after[5] - rest_before[5]).abs() > 1.0,
+            "the rest itself moved"
+        );
+    }
+
+    #[test]
+    fn set_rest_refusals_and_no_op_take_no_snapshot() {
+        let mut core = EditorCore::new();
+        // Unknown figure: refusal with a status, no step.
+        assert!(!core.set_rest_from_pose(9, true));
+        assert_eq!(core.undo_depth(), 0);
+        assert!(core.status.contains("No figure 10"), "status: {}", core.status);
+        // Already-rest: the current frame pose IS the rest
+        // pose — a silent no-op.
+        let root = core.project.frames[0].poses[0].root;
+        core.project.frames[0].poses[0] = core.project.figures[0].def.rest_pose(root);
+        let status_before = core.status.clone();
+        assert!(!core.set_rest_from_pose(0, true));
+        assert_eq!(core.undo_depth(), 0);
+        assert_eq!(core.status, status_before, "no status churn on a no-op");
+        // Malformed poses refuse at the Project level (the
+        // editor op reads its pose from the timeline, so a
+        // short or non-finite pose can only arrive through
+        // a corrupt project — drive the core op directly).
+        let short = crate::model::Pose {
+            root: [0.0, 0.0],
+            angles: vec![0.0; 2],
+        };
+        assert!(core
+            .project
+            .set_rest_from_pose(0, &short, SetRestMode::Rebase)
+            .is_none());
+        let mut nan = core.project.figures[0].def.rest_pose([0.0, 0.0]);
+        nan.angles[0] = f32::NAN;
+        assert!(core
+            .project
+            .set_rest_from_pose(0, &nan, SetRestMode::Absolute)
+            .is_none());
+        assert_eq!(core.undo_depth(), 0);
+    }
+
+    #[test]
+    fn setup_drag_edits_rest_angles_not_the_frame_pose() {
+        let mut core = EditorCore::new();
+        core.setup_mode = true;
+        let frame_before =
+            serde_json::to_string(&core.project.frames[0].poses[0]).expect("pose serialises");
+        let rest_before = core.project.figures[0].def.rest_angles();
+        // Grab the right-hand joint (node 6) where setup
+        // mode draws it, then pull it away.
+        let hand = core.setup_positions(0)[6];
+        assert!(core.begin_drag(hand), "the press starts a setup drag");
+        assert_eq!(core.undo_depth(), 1, "one snapshot per setup gesture");
+        core.drag_to([hand[0] + 45.0, hand[1] + 30.0]);
+        core.end_drag();
+        let rest_after = core.project.figures[0].def.rest_angles();
+        assert!(
+            rest_before
+                .iter()
+                .zip(rest_after.iter())
+                .any(|(a, b)| (a - b).abs() > 0.01),
+            "the drag wrote rest angles"
+        );
+        assert_eq!(
+            serde_json::to_string(&core.project.frames[0].poses[0]).expect("pose serialises"),
+            frame_before,
+            "the frame pose is never touched by a setup drag"
+        );
+        assert!(
+            core.status.contains("Rest pose edited"),
+            "status: {}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn setup_press_on_the_root_is_consumed_without_a_snapshot() {
+        let mut core = EditorCore::new();
+        core.setup_mode = true;
+        let root_joint = core.setup_positions(0)[0];
+        assert!(core.begin_drag(root_joint), "the root press is consumed");
+        assert_eq!(core.undo_depth(), 0, "no snapshot for a root press");
+        assert!(core.dragging.is_none(), "no drag begins");
+        assert!(
+            core.status.contains("no root position"),
+            "status: {}",
+            core.status
+        );
     }
 }

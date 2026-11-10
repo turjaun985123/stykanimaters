@@ -71,6 +71,51 @@ pub fn bend_mid(a: V2, b: V2, bend_rad: f32) -> V2 {
     [mid[0] + n[0] * off, mid[1] + n[1] * off]
 }
 
+/// Point at fraction `t` (0..=1) of the circular arc from `a`
+/// to `b` whose total bend is `bend_rad` — the arc [`bend_mid`]
+/// samples at t = 0.5 (Wave Y, Y9 — GAP proposal P-11, the
+/// strip-warp spine sampler). `bend_mid`'s offset is the
+/// sagitta of exactly this circle, so the closed form is:
+/// with chord length L, unit chord direction d, left normal
+/// n (bend_mid's convention) and theta = `bend_rad`,
+/// P(t) = mid + d * L*sin((t-1/2)*theta) / (2 sin(theta/2))
+///      + n * L*sin(t*theta/2)*sin((1-t)*theta/2) / sin(theta/2).
+/// The product form keeps both terms numerically stable as
+/// theta -> 0 (no difference of near-equal cosines scaled by
+/// a huge radius). Exactness anchors: t <= 0 returns `a`,
+/// t >= 1 returns `b`, and t == 0.5 delegates to `bend_mid`
+/// verbatim — a consumer sampling the arc at K = 2 gets
+/// bend_mid's own point, bit for bit. Zero bend and a
+/// degenerate chord fall back to the chord lerp. The domain
+/// is bend_mid's own: |bend_rad| < 2*pi.
+pub fn bend_arc_point(a: V2, b: V2, bend_rad: f32, t: f32) -> V2 {
+    if t <= 0.0 {
+        return a;
+    }
+    if t >= 1.0 {
+        return b;
+    }
+    if t == 0.5 {
+        return bend_mid(a, b, bend_rad);
+    }
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
+    if bend_rad == 0.0 || len < 0.001 {
+        return [a[0] + d[0] * t, a[1] + d[1] * t];
+    }
+    let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+    let dir = [d[0] / len, d[1] / len];
+    let n = [-dir[1], dir[0]];
+    let half = bend_rad / 2.0;
+    let s = half.sin();
+    let along = len * ((t - 0.5) * bend_rad).sin() / (2.0 * s);
+    let out = len * (t * half).sin() * ((1.0 - t) * half).sin() / s;
+    [
+        mid[0] + dir[0] * along + n[0] * out,
+        mid[1] + dir[1] * along + n[1] * out,
+    ]
+}
+
 pub fn norm_deg(a: f32) -> f32 {
     let mut a = a % 360.0;
     if a > 180.0 {
@@ -111,11 +156,69 @@ impl Default for NodeStyle {
     }
 }
 
+fn default_media_scale() -> f32 {
+    1.0
+}
+
+fn media_offset_is_default(offset: &[f32; 2]) -> bool {
+    *offset == [0.0, 0.0]
+}
+
+fn media_scale_is_default(scale: &f32) -> bool {
+    *scale == 1.0
+}
+
+fn media_angle_is_default(angle_offset: &f32) -> bool {
+    *angle_offset == 0.0
+}
+
+fn media_flip_is_default(flip: &bool) -> bool {
+    !*flip
+}
+
 /// Media attached to a segment: a sprite from the project's asset
 /// table, or a text label drawn along the segment.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SegmentMedia {
-    Image { asset: usize },
+    Image {
+        asset: usize,
+        /// Local transform (Wave Y, P-8): where the image
+        /// sits relative to the segment it rides, on top of
+        /// the segment's own placement — composed in the one
+        /// placement funnel (`media::media_items`), so the
+        /// stage placeholder, the raster exporter and the SVG
+        /// exporter all follow together. The four fields
+        /// below are that transform; each serde-defaults to
+        /// the identity component and is skipped on write
+        /// while it holds it, so a pre-transform file (whose
+        /// `Image` payloads name only `asset`) loads as the
+        /// identity transform, and a project whose media all
+        /// carry the identity serialises byte-identically to
+        /// a pre-transform file.
+        ///
+        /// Translation of the image centre, in stage units,
+        /// expressed in the segment's own frame: `offset[0]`
+        /// along the segment direction (parent end → node
+        /// end), `offset[1]` along its normal.
+        #[serde(default, skip_serializing_if = "media_offset_is_default")]
+        offset: [f32; 2],
+        /// Uniform multiplier on the fitted quad (1.0 = the
+        /// historical fit: width = segment length, height =
+        /// width / asset aspect).
+        #[serde(default = "default_media_scale", skip_serializing_if = "media_scale_is_default")]
+        scale: f32,
+        /// Extra rotation of the image about its own centre,
+        /// in degrees (stage space, y-down — the sprite-key
+        /// angle convention), applied after the offset.
+        #[serde(default, skip_serializing_if = "media_angle_is_default")]
+        angle_offset: f32,
+        /// Mirror the image along the segment axis: the end
+        /// of the image that sat at the parent end now sits
+        /// at the node end. (Composed as a reversed source u
+        /// range — see `media::media_items`.)
+        #[serde(default, skip_serializing_if = "media_flip_is_default")]
+        flip: bool,
+    },
     Text { content: String, size: f32 },
 }
 
@@ -230,6 +333,21 @@ impl NodeDef {
     pub fn has_limits(&self) -> bool {
         self.min_angle.is_some() || self.max_angle.is_some()
     }
+
+    /// The anatomical one-way range (min, max) the
+    /// humanoid constructor ships on its elbows (Wave X,
+    /// P-4): flexion to +160°, a 10° grace past straight.
+    /// One source for the range: `FigureDef::humanoid`
+    /// writes it through this constant and the segment
+    /// inspector's preset row applies it (Wave Y, Y12) —
+    /// the two can never drift apart.
+    pub const ELBOW_LIMITS: (f32, f32) = (-10.0, 160.0);
+
+    /// The anatomical one-way range (min, max) the
+    /// humanoid constructor ships on its knees: flexion
+    /// to −160°, a 10° grace past straight. See
+    /// [`NodeDef::ELBOW_LIMITS`] for the one-source rule.
+    pub const KNEE_LIMITS: (f32, f32) = (-160.0, 10.0);
 }
 
 fn default_thickness() -> f32 {
@@ -309,12 +427,12 @@ impl FigureDef {
         // limits. Only the solvers and graph channels enforce
         // these — stored poses are never rewritten.
         for i in [4, 6] {
-            nodes[i].min_angle = Some(-10.0);
-            nodes[i].max_angle = Some(160.0);
+            nodes[i].min_angle = Some(NodeDef::ELBOW_LIMITS.0);
+            nodes[i].max_angle = Some(NodeDef::ELBOW_LIMITS.1);
         }
         for i in [8, 10] {
-            nodes[i].min_angle = Some(-160.0);
-            nodes[i].max_angle = Some(10.0);
+            nodes[i].min_angle = Some(NodeDef::KNEE_LIMITS.0);
+            nodes[i].max_angle = Some(NodeDef::KNEE_LIMITS.1);
         }
         FigureDef { nodes }
     }
@@ -400,6 +518,101 @@ impl FigureDef {
             angles: self.nodes.iter().map(|n| n.rest_angle).collect(),
         }
     }
+
+    /// The rig's rest (setup) angles, one per node, in node
+    /// order — the vector form of the `rest_angle` fields.
+    pub fn rest_angles(&self) -> Vec<f32> {
+        self.nodes.iter().map(|n| n.rest_angle).collect()
+    }
+
+    /// Overwrite the rest angles from `angles`, zipped by node
+    /// (callers pass exactly one angle per node), and return
+    /// the angles that were replaced. Only the `rest_angle`
+    /// fields change.
+    pub fn set_rest_angles(&mut self, angles: &[f32]) -> Vec<f32> {
+        let old = self.rest_angles();
+        for (node, a) in self.nodes.iter_mut().zip(angles.iter()) {
+            node.rest_angle = *a;
+        }
+        old
+    }
+}
+
+/// How [`Project::set_rest_from_pose`] treats the stored
+/// animation when a figure's rest (setup) pose is replaced
+/// (Wave Y, P-10; GAP2 §3.1's two modes, user-chosen).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetRestMode {
+    /// Shift every authored angle in the three angle stores
+    /// (`Frame.poses`, rig-matching `ClipDef.frames`, and the
+    /// figure's `Angle` channels) by the per-node rest delta
+    /// `new − old`, so every pose keeps its offset from the
+    /// rest stance: the animation's content is preserved
+    /// against the new rig, a frame that held the old rest
+    /// pose now holds the new one, and the evaluated poses
+    /// re-anchor rigidly (each node's relative angle moves by
+    /// exactly the delta). GAP2 §3.1(a) writes the shift as
+    /// `(old_rest − new_rest)` "so existing animation is
+    /// visually unchanged" — that is the delta-stored-pose
+    /// formula; this engine's poses are absolute (GAP2 §2.1),
+    /// where the shift that preserves the animation against
+    /// the stance is `new − old`, and `(old − new)` would move
+    /// every evaluated pose by −delta and preserve nothing.
+    /// See `~/workspace/wave-y/findings/y7.md` §3.
+    Rebase,
+    /// Set the rest angles and leave every stored angle
+    /// untouched (the behaviour an importer or constructor
+    /// write always had, now an explicit choice): evaluated
+    /// playback is bit-identical, and only the rest stance
+    /// itself — Reset's target, future seeded poses, clip-fit
+    /// padding — changes, its evaluated world positions moving
+    /// by exactly the rest delta.
+    Absolute,
+}
+
+/// What [`Project::set_rest_from_pose`] did, for status lines
+/// and pins: the rest angles before and after, the per-node
+/// delta the rebase applied, and how many of the project's
+/// clips and channels the rebase carried (always 0 in
+/// `Absolute` mode).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetRestOutcome {
+    pub old_rest: Vec<f32>,
+    pub new_rest: Vec<f32>,
+    pub delta: Vec<f32>,
+    pub clips_rebased: usize,
+    pub channels_rebased: usize,
+}
+
+/// Add `delta` (one entry per node) onto a pose's stored
+/// angles, in place, WITHOUT re-wrapping — the graph module's
+/// rule for angle values, and what makes the rebase's offset
+/// invariant hold by exact addition. A pose shorter than the
+/// delta (a misfit store) shifts only the angles it has.
+fn shift_pose_angles(pose: &mut Pose, delta: &[f32]) {
+    for (a, d) in pose.angles.iter_mut().zip(delta.iter()) {
+        *a += d;
+    }
+}
+
+/// Was `clip` authored on the rig `fig_def` whose rest angles
+/// are `old_rest`? Clip creation clones the figure's def into
+/// the clip, so an authored clip matches bit for bit: same
+/// node count, same parent map, and its def's rest angles
+/// exactly the figure's old rest. A clip from another rig —
+/// or the same shape carrying a different rest — is not this
+/// figure's animation and never rebases with it. (Two figures
+/// sharing one identical rig share this identity: a clip
+/// authored on either is authored on the rig.)
+fn clip_rig_matches(fig_def: &FigureDef, old_rest: &[f32], clip: &ClipDef) -> bool {
+    clip.def.nodes.len() == fig_def.nodes.len()
+        && clip
+            .def
+            .nodes
+            .iter()
+            .zip(fig_def.nodes.iter())
+            .all(|(c, f)| c.parent == f.parent)
+        && clip.def.nodes.iter().map(|c| c.rest_angle).eq(old_rest.iter().copied())
 }
 
 /// One figure's pose in one frame: root position plus one relative
@@ -1272,6 +1485,89 @@ impl Project {
         }
     }
 
+    /// Replace figure `fi`'s rest (setup) angles with
+    /// `pose`'s angles (Wave Y, Y7, P-10; GAP2 §3.1). The
+    /// pose's root is ignored — rest is angles only, and no
+    /// root anywhere moves. In [`SetRestMode::Rebase`] the
+    /// per-node delta (`new − old`, shortest path) is added
+    /// WITHOUT re-wrapping onto every stored angle in the
+    /// three angle stores — `Frame.poses`, the frames of
+    /// every clip authored on this figure's rig (see
+    /// `clip_rig_matches`), and the figure's `Angle` graph
+    /// channels (key values only; tangents, being slopes,
+    /// are invariant under a constant shift) — so every
+    /// pose keeps its offset from the rest stance and the
+    /// animation's content is preserved against the new
+    /// rig. In [`SetRestMode::Absolute`] only the rest
+    /// angles change and evaluated playback is identical.
+    /// State keys carry no angles and are never touched:
+    /// state-driven poses ride the shift through the clip
+    /// store itself.
+    ///
+    /// Refuses — `None`, no mutation — on an unknown
+    /// figure, an angle count that mismatches the rig, or
+    /// any non-finite source angle. New rest angles are
+    /// stored through [`norm_deg`].
+    pub fn set_rest_from_pose(
+        &mut self,
+        fi: usize,
+        pose: &Pose,
+        mode: SetRestMode,
+    ) -> Option<SetRestOutcome> {
+        let fig = self.figures.get(fi)?;
+        let n = fig.def.nodes.len();
+        if pose.angles.len() != n || !pose.angles.iter().all(|a| a.is_finite()) {
+            return None;
+        }
+        let old_rest = fig.def.rest_angles();
+        let new_rest: Vec<f32> = pose.angles.iter().map(|a| norm_deg(*a)).collect();
+        let delta: Vec<f32> = new_rest
+            .iter()
+            .zip(old_rest.iter())
+            .map(|(nw, od)| norm_deg(nw - od))
+            .collect();
+        let mut clips_rebased = 0usize;
+        let mut channels_rebased = 0usize;
+        if mode == SetRestMode::Rebase {
+            for frame in self.frames.iter_mut() {
+                if let Some(p) = frame.poses.get_mut(fi) {
+                    shift_pose_angles(p, &delta);
+                }
+            }
+            let fig_def = self.figures[fi].def.clone();
+            for clip in self.clips.iter_mut() {
+                if clip_rig_matches(&fig_def, &old_rest, clip) {
+                    for p in clip.frames.iter_mut() {
+                        shift_pose_angles(p, &delta);
+                    }
+                    clip.def.set_rest_angles(&new_rest);
+                    clips_rebased += 1;
+                }
+            }
+            for ch in self.channels.iter_mut() {
+                if ch.figure == fi {
+                    if let crate::graph::ChannelTarget::Angle(node) = ch.target {
+                        if let Some(d) = delta.get(node) {
+                            let d = *d;
+                            for k in ch.keys.iter_mut() {
+                                k.value += d;
+                            }
+                            channels_rebased += 1;
+                        }
+                    }
+                }
+            }
+        }
+        self.figures[fi].def.set_rest_angles(&new_rest);
+        Some(SetRestOutcome {
+            old_rest,
+            new_rest,
+            delta,
+            clips_rebased,
+            channels_rebased,
+        })
+    }
+
     /// Total playback length in seconds, honouring frame durations.
     pub fn total_seconds(&self) -> f32 {
         self.frames.iter().map(|f| f.duration).sum::<f32>() / self.fps.max(1.0)
@@ -1413,6 +1709,55 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bend_arc_point_anchors_and_shape() {
+        // Wave Y (Y9, GAP P-11): the strip-warp spine sampler.
+        // Anchors are EXACT: the endpoints are the segment's
+        // own joints and the midpoint is bend_mid verbatim —
+        // a K = 2 sampling of the arc must reproduce the
+        // two-piece split the line renderer has always made.
+        let a = [100.0, 100.0];
+        let b = [200.0, 100.0];
+        for bend in [0.9, -0.9, 2.0] {
+            assert_eq!(bend_arc_point(a, b, bend, 0.0), a, "t=0 is a");
+            assert_eq!(bend_arc_point(a, b, bend, 1.0), b, "t=1 is b");
+            assert_eq!(
+                bend_arc_point(a, b, bend, 0.5),
+                bend_mid(a, b, bend),
+                "t=0.5 is bend_mid verbatim"
+            );
+        }
+        // Zero bend is the chord itself.
+        assert_eq!(bend_arc_point(a, b, 0.0, 0.25), [125.0, 100.0]);
+        assert_eq!(bend_arc_point(a, b, 0.0, 0.75), [175.0, 100.0]);
+        // A positive bend bulges toward bend_mid's left
+        // normal (here +y, screen-down): quarter points sit
+        // off the chord on that side, symmetric about the
+        // midpoint, and lower than the midpoint's own bulge.
+        let q1 = bend_arc_point(a, b, 2.0, 0.25);
+        let q3 = bend_arc_point(a, b, 2.0, 0.75);
+        let mid = bend_arc_point(a, b, 2.0, 0.5);
+        assert!(q1[1] > 100.0 && q3[1] > 100.0, "bulge side: {q1:?} {q3:?}");
+        assert!(
+            (q1[1] - q3[1]).abs() < 0.01,
+            "quarter offsets symmetric: {q1:?} {q3:?}"
+        );
+        assert!(
+            q1[1] < mid[1],
+            "quarter bulge below the midpoint's: {q1:?} vs {mid:?}"
+        );
+        // The quarter points also advance along the chord.
+        assert!(q1[0] > 100.0 && q1[0] < 150.0, "q1 advances: {q1:?}");
+        assert!(q3[0] > 150.0 && q3[0] < 200.0, "q3 advances: {q3:?}");
+        // A negative bend bulges the other way.
+        let nq = bend_arc_point(a, b, -2.0, 0.25);
+        assert!(nq[1] < 100.0, "negative bend flips the bulge: {nq:?}");
+        assert!(
+            (nq[1] - (200.0 - q1[1])).abs() < 0.01,
+            "negative bend mirrors the positive arc: {nq:?} vs {q1:?}"
+        );
+    }
 
     #[test]
     fn head_ring_radius_is_pinned() {
@@ -2777,16 +3122,68 @@ mod wave12_c4_serde_pins {
         // every saved file uses; the asset index must come back
         // exactly, including index 0 (the first asset).
         for media in [
-            SegmentMedia::Image { asset: 0 },
-            SegmentMedia::Image { asset: 7 },
+            SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false },
+            SegmentMedia::Image { asset: 7, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false },
             SegmentMedia::Text { content: "héllo \"world\"".to_string(), size: 14.5 },
         ] {
             let json = serde_json::to_string(&media).unwrap();
             let back: SegmentMedia = serde_json::from_str(&json).unwrap();
             assert_eq!(back, media, "round trip changed {media:?}");
         }
-        let json = serde_json::to_string(&SegmentMedia::Image { asset: 2 }).unwrap();
+        let json = serde_json::to_string(&SegmentMedia::Image { asset: 2, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }).unwrap();
         assert_eq!(json, r#"{"Image":{"asset":2}}"#);
+    }
+
+    #[test]
+    fn wave_y_segment_media_transform_serde_defaults_and_skips() {
+        // Wave Y (Y3, GAP P-8): a pre-transform file — the
+        // `Image` payload names only `asset` — loads with the
+        // identity local transform...
+        let back: SegmentMedia =
+            serde_json::from_str(r#"{"Image":{"asset":2}}"#).unwrap();
+        assert_eq!(
+            back,
+            SegmentMedia::Image {
+                asset: 2,
+                offset: [0.0, 0.0],
+                scale: 1.0,
+                angle_offset: 0.0,
+                flip: false,
+            }
+        );
+        // ...and writes back byte-identically (every transform
+        // field skips while it holds its identity value), so
+        // untransformed projects see no save-file churn.
+        assert_eq!(serde_json::to_string(&back).unwrap(), r#"{"Image":{"asset":2}}"#);
+        // A non-identity transform round-trips exactly.
+        let m = SegmentMedia::Image {
+            asset: 1,
+            offset: [3.0, -2.0],
+            scale: 2.0,
+            angle_offset: 45.0,
+            flip: true,
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(serde_json::from_str::<SegmentMedia>(&json).unwrap(), m);
+        // A partial transform object fills its remaining
+        // fields from the defaults, and re-writes with only
+        // the non-default field present.
+        let back: SegmentMedia =
+            serde_json::from_str(r#"{"Image":{"asset":1,"scale":2.0}}"#).unwrap();
+        assert_eq!(
+            back,
+            SegmentMedia::Image {
+                asset: 1,
+                offset: [0.0, 0.0],
+                scale: 2.0,
+                angle_offset: 0.0,
+                flip: false,
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&back).unwrap(),
+            r#"{"Image":{"asset":1,"scale":2.0}}"#
+        );
     }
 
     #[test]
@@ -2814,7 +3211,7 @@ mod wave12_c4_serde_pins {
         };
         project.figures[0].def.nodes[1].style = styled;
         project.figures[0].def.nodes[1].media =
-            Some(SegmentMedia::Image { asset: 2 });
+            Some(SegmentMedia::Image { asset: 2, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
         project.figures[0].def.nodes[2].media = Some(SegmentMedia::Text {
             content: "label".to_string(),
             size: 12.0,
@@ -2888,7 +3285,7 @@ mod wave12_c4_serde_pins {
         assert_eq!(back.figures[0].def.nodes[1].style, styled);
         assert_eq!(
             back.figures[0].def.nodes[1].media,
-            Some(SegmentMedia::Image { asset: 2 })
+            Some(SegmentMedia::Image { asset: 2, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false })
         );
         assert_eq!(
             back.assets[2].name, "third.png",
@@ -3417,5 +3814,281 @@ mod wave_x_p6_key_enrichment {
         assert!(back.flip_x && back.flip_y);
         assert_eq!(back.scale_y, 0.75);
         assert_eq!((back.pivot_x, back.pivot_y), (0.25, 0.75));
+    }
+}
+
+#[cfg(test)]
+mod wave_y_p10_setup_pose_tests {
+    use super::*;
+    use crate::graph::{Channel, ChannelTarget, Key};
+
+    fn json<T: serde::Serialize>(v: &T) -> String {
+        serde_json::to_string(v).expect("serialises")
+    }
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-3
+    }
+
+    /// A pose holding `rest` with one node's angle moved.
+    fn moved_pose(rest: &[f32], node: usize, add: f32) -> Pose {
+        let mut angles = rest.to_vec();
+        angles[node] += add;
+        Pose {
+            root: [480.0, 470.0],
+            angles,
+        }
+    }
+
+    fn authored_clip(p: &Project, name: &str) -> ClipDef {
+        let def = p.figures[0].def.clone();
+        let rest = def.rest_angles();
+        ClipDef {
+            name: name.into(),
+            def: def.clone(),
+            frames: vec![def.rest_pose([480.0, 470.0]), moved_pose(&rest, 5, 12.0)],
+            loop_mode: ClipLoop::Loop,
+        }
+    }
+
+    #[test]
+    fn rebase_shifts_frames_clips_and_channels_by_the_rest_delta() {
+        let mut p = Project::new_demo();
+        let n = p.figures[0].def.nodes.len();
+        // Frame 0 becomes the exact rest copy for this pin.
+        let root = p.frames[0].poses[0].root;
+        p.frames[0].poses[0] = p.figures[0].def.rest_pose(root);
+        // Bends are not an angle store: plant some and pin
+        // them untouched.
+        p.frames[1].bends = vec![vec![0.3; n]];
+        let bends_before = json(&p.frames[1].bends);
+        // A second figure, for the other-figure channel.
+        let mut second = p.figures[0].clone();
+        second.name = "Second".into();
+        p.figures.push(second);
+        for f in p.frames.iter_mut() {
+            let pose = f.poses[0].clone();
+            f.poses.push(pose);
+        }
+        // Clips: one authored on the rig, one other-rig
+        // (a node short), one same-shape/other-rest.
+        p.clips.push(authored_clip(&p, "authored"));
+        let mut other_rig = authored_clip(&p, "other-rig");
+        other_rig.def.nodes.pop();
+        p.clips.push(other_rig);
+        let mut other_rest = authored_clip(&p, "other-rest");
+        other_rest.def.nodes[3].rest_angle += 7.0;
+        p.clips.push(other_rest);
+        let other_rig_before = json(&p.clips[1]);
+        let other_rest_before = json(&p.clips[2]);
+        // Channels: the figure's Angle channel on node 5,
+        // plus RootX / Length / other-figure channels that
+        // must not move.
+        p.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(5),
+            keys: vec![Key::flat(0.0, 10.0), Key::flat(4.0, 50.0)],
+        });
+        p.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: vec![Key::flat(0.0, 100.0)],
+        });
+        p.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Length(5),
+            keys: vec![Key::flat(0.0, 40.0)],
+        });
+        p.channels.push(Channel {
+            figure: 1,
+            target: ChannelTarget::Angle(5),
+            keys: vec![Key::flat(0.0, 20.0)],
+        });
+        let mid_before = p.channels[0].value_at(2.0);
+        let bystanders_before = json(&p.channels[1..]);
+
+        let old_rest = p.figures[0].def.rest_angles();
+        let frame0_node2_before = p.frames[0].poses[0].angles[2];
+        let frame1_node5_before = p.frames[1].poses[0].angles[5];
+        let clip_frame1_before = p.clips[0].frames[1].angles[5];
+        let new_pose = moved_pose(&old_rest, 5, 30.0);
+        let out = p
+            .set_rest_from_pose(0, &new_pose, SetRestMode::Rebase)
+            .expect("rebase applies");
+        assert_eq!(out.old_rest, old_rest);
+        assert!(out
+            .new_rest
+            .iter()
+            .zip(new_pose.angles.iter())
+            .all(|(a, b)| approx(*a, norm_deg(*b))));
+        let d5 = out.delta[5];
+        assert!(approx(d5, 30.0), "delta carried verbatim: {d5}");
+        assert_eq!(out.clips_rebased, 1);
+        assert_eq!(out.channels_rebased, 1);
+        // Frames shifted by delta; roots never move.
+        assert!(approx(p.frames[1].poses[0].angles[5], frame1_node5_before + d5));
+        assert!(approx(p.frames[0].poses[0].angles[2], frame0_node2_before + out.delta[2]));
+        assert_eq!(p.frames[1].poses[0].root, [494.0, 470.0]);
+        // Frame 0 (the rest copy) is now the new rest.
+        assert!(p.frames[0].poses[0]
+            .angles
+            .iter()
+            .zip(out.new_rest.iter())
+            .all(|(a, b)| approx(*a, *b)));
+        // Bends untouched.
+        assert_eq!(json(&p.frames[1].bends), bends_before);
+        // The authored clip shifted and took the new rest;
+        // the other clips are byte-identical.
+        assert!(approx(p.clips[0].frames[1].angles[5], clip_frame1_before + d5));
+        assert_eq!(p.clips[0].def.rest_angles(), out.new_rest);
+        assert_eq!(json(&p.clips[1]), other_rig_before);
+        assert_eq!(json(&p.clips[2]), other_rest_before);
+        // The Angle channel's values shifted by exactly the
+        // node's delta, tangents untouched, mid-segment
+        // value moved by delta.
+        assert!(approx(p.channels[0].keys[0].value, 10.0 + d5));
+        assert!(approx(p.channels[0].keys[1].value, 50.0 + d5));
+        assert_eq!(p.channels[0].keys[0].in_tan, 0.0);
+        assert!(approx(p.channels[0].value_at(2.0), mid_before + d5));
+        // RootX / Length / other-figure channels identical.
+        assert_eq!(json(&p.channels[1..]), bystanders_before);
+    }
+
+    #[test]
+    fn rebase_preserves_the_animation_relative_to_the_stance() {
+        let mut p = Project::new_demo();
+        let def_before = p.figures[0].def.clone();
+        let old_rest = def_before.rest_angles();
+        let offsets_before: Vec<Vec<V2>> = p
+            .frames
+            .iter()
+            .map(|f| {
+                let pose = &f.poses[0];
+                let off = Pose {
+                    root: pose.root,
+                    angles: pose
+                        .angles
+                        .iter()
+                        .zip(old_rest.iter())
+                        .map(|(a, r)| a - r)
+                        .collect(),
+                };
+                evaluate(&def_before, &off)
+            })
+            .collect();
+        let new_pose = moved_pose(&old_rest, 5, 30.0);
+        p.set_rest_from_pose(0, &new_pose, SetRestMode::Rebase)
+            .expect("rebase applies");
+        let def_after = p.figures[0].def.clone();
+        let new_rest = def_after.rest_angles();
+        for (i, f) in p.frames.iter().enumerate() {
+            let pose = &f.poses[0];
+            let off = Pose {
+                root: pose.root,
+                angles: pose
+                    .angles
+                    .iter()
+                    .zip(new_rest.iter())
+                    .map(|(a, r)| a - r)
+                    .collect(),
+            };
+            let world = evaluate(&def_after, &off);
+            for (a, b) in world.iter().zip(offsets_before[i].iter()) {
+                assert!(approx(a[0], b[0]) && approx(a[1], b[1]), "frame {i} moved");
+            }
+        }
+    }
+
+    #[test]
+    fn absolute_mode_changes_only_the_rest_angles() {
+        let mut p = Project::new_demo();
+        p.tween_playback = true;
+        p.clips.push(authored_clip(&p, "authored"));
+        p.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(5),
+            keys: vec![Key::flat(0.0, 10.0)],
+        });
+        let stores_before = json(&(&p.frames, &p.clips, &p.channels));
+        let at_int_before = json(&p.poses_at(0.0));
+        let at_frac_before = json(&p.poses_at(2.5));
+        let old_rest = p.figures[0].def.rest_angles();
+        let stance_before = evaluate(
+            &p.figures[0].def,
+            &p.figures[0].def.rest_pose([480.0, 470.0]),
+        );
+        let new_pose = moved_pose(&old_rest, 5, 30.0);
+        let out = p
+            .set_rest_from_pose(0, &new_pose, SetRestMode::Absolute)
+            .expect("absolute applies");
+        assert_eq!(out.clips_rebased, 0);
+        assert_eq!(out.channels_rebased, 0);
+        assert_eq!(json(&(&p.frames, &p.clips, &p.channels)), stores_before);
+        assert_eq!(json(&p.poses_at(0.0)), at_int_before);
+        assert_eq!(json(&p.poses_at(2.5)), at_frac_before);
+        let new_rest = p.figures[0].def.rest_angles();
+        assert!(new_rest
+            .iter()
+            .zip(out.new_rest.iter())
+            .all(|(a, b)| approx(*a, *b)));
+        assert!(approx(new_rest[5] - old_rest[5], out.delta[5]));
+        let stance_after = evaluate(
+            &p.figures[0].def,
+            &p.figures[0].def.rest_pose([480.0, 470.0]),
+        );
+        assert!(
+            stance_before
+                .iter()
+                .zip(stance_after.iter())
+                .any(|(a, b)| !approx(a[0], b[0]) || !approx(a[1], b[1])),
+            "the rest stance itself moved"
+        );
+    }
+
+    #[test]
+    fn state_keys_ride_the_rebase_through_the_clip_store() {
+        let mut p = Project::new_demo();
+        p.clips.push(authored_clip(&p, "authored"));
+        p.figures[0].states = vec![StateKey {
+            frame: 2,
+            clip: 0,
+            offset: 1,
+            speed: 2.0,
+        }];
+        let keys_before = json(&p.figures[0].states);
+        let timeline_before = p.poses_at(0.0)[0].angles.clone();
+        let driven_before = p.poses_at(3.0)[0].angles.clone();
+        let old_rest = p.figures[0].def.rest_angles();
+        let new_pose = moved_pose(&old_rest, 5, 30.0);
+        let out = p
+            .set_rest_from_pose(0, &new_pose, SetRestMode::Rebase)
+            .expect("rebase applies");
+        let d = out.delta[5];
+        let timeline_after = p.poses_at(0.0)[0].angles.clone();
+        let driven_after = p.poses_at(3.0)[0].angles.clone();
+        assert!(approx(timeline_after[5], timeline_before[5] + d));
+        assert!(approx(driven_after[5], driven_before[5] + d));
+        assert_eq!(json(&p.figures[0].states), keys_before);
+    }
+
+    #[test]
+    fn set_rest_refuses_bad_inputs_and_changes_nothing() {
+        let mut p = Project::new_demo();
+        let before = json(&p);
+        let rest = p.figures[0].def.rest_angles();
+        let good = moved_pose(&rest, 5, 30.0);
+        assert!(p.set_rest_from_pose(9, &good, SetRestMode::Rebase).is_none());
+        let short = Pose {
+            root: [0.0, 0.0],
+            angles: vec![0.0; 2],
+        };
+        assert!(p.set_rest_from_pose(0, &short, SetRestMode::Rebase).is_none());
+        let mut nan = good.clone();
+        nan.angles[0] = f32::NAN;
+        assert!(p.set_rest_from_pose(0, &nan, SetRestMode::Absolute).is_none());
+        let mut inf = good.clone();
+        inf.angles[1] = f32::INFINITY;
+        assert!(p.set_rest_from_pose(0, &inf, SetRestMode::Rebase).is_none());
+        assert_eq!(json(&p), before);
     }
 }

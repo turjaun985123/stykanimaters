@@ -2,11 +2,12 @@
 //! graph editor.
 //!
 //! A [`Channel`] animates one scalar property of one figure over
-//! time — its root X, its root Y, one node's relative angle, or one
-//! node's segment length — as a list of [`Key`]s joined by cubic
-//! Hermite splines. Each key carries the slope of the curve entering
-//! it (`in_tan`) and leaving it (`out_tan`), in value-units per
-//! frame, so an editor can offer the usual broken-tangent handles.
+//! time — its root X, its root Y, one node's relative angle, one
+//! node's segment length, or one node's segment bend — as a list
+//! of [`Key`]s joined by cubic Hermite splines. Each key carries
+//! the slope of the curve entering it (`in_tan`) and leaving it
+//! (`out_tan`), in value-units per frame, so an editor can offer
+//! the usual broken-tangent handles.
 //!
 //! Why [`apply_channels`] returns defs as well as poses: [`Pose`]
 //! holds only a root position and per-node angles — segment lengths
@@ -17,6 +18,13 @@
 //! `evaluate(&result.defs[fi], &result.poses[fi])` gives the final
 //! joint positions. Defs are always returned (plain clones when no
 //! length channel exists) so callers have a single code path.
+//!
+//! Bends live in neither: they are per-frame render data
+//! (`Frame::bends`, read interpolated by `Project::bends_at`), so
+//! bend channels override a third returned vector, seeded from
+//! `bends_at` — the project's own bends when no bend channel
+//! exists, so callers keep the same single code path. Bends stay
+//! render-only: no channel writes pose or def data for them.
 //!
 //! Channels are pure data: nothing here mutates the project, and
 //! channels pointing at a figure or node index that no longer exists
@@ -40,6 +48,11 @@ pub enum ChannelTarget {
     /// Segment length of node `n`, in stage units (the `FigureDef`
     /// convention — see the module docs for why this lands in defs).
     Length(usize),
+    /// Segment bend of node `n`, in radians (the `Frame::bends`
+    /// convention). Bends are render-only data — they live in
+    /// neither `Pose` nor `FigureDef` — so a bend channel
+    /// overrides the result's bend rows (see [`ChannelResult`]).
+    Bend(usize),
 }
 
 /// How a channel segment is interpolated. The mode lives on the
@@ -677,6 +690,14 @@ pub fn scale_key_values(keys: &mut [Key], factor: f32, pivot: f32) {
 pub struct ChannelResult {
     pub poses: Vec<Pose>,
     pub defs: Vec<FigureDef>,
+    /// Per-figure, per-node segment bends (radians) at the
+    /// evaluated frame: the project's `bends_at` rows with any
+    /// bend channels applied. A row is empty when the figure is
+    /// straight at this frame and no bend channel targets it —
+    /// the `bends_at` convention — and is expanded to the
+    /// figure's node count (zero-filled) when a bend channel
+    /// writes into it.
+    pub bends: Vec<Vec<f32>>,
 }
 
 /// Find the channel for (`figure`, `target`) in `channels`, or
@@ -705,14 +726,23 @@ pub fn channel_mut<'a>(
 
 /// Evaluate every channel at `frame_f` on top of the project's own
 /// animation: start from `project.poses_at(frame_f)`, then override
-/// root, angle and length components per channel. Length results
-/// are clamped to a minimum of 1.0. Angle results are clamped to
-/// the target node's joint limits (`NodeDef::clamp_angle`); a node
-/// without limits receives the channel value unmodified. See the
-/// module docs for the full contract.
+/// root, angle, length and bend components per channel. Length
+/// results are clamped to a minimum of 1.0. Angle results are
+/// clamped to the target node's joint limits
+/// (`NodeDef::clamp_angle`); a node without limits receives the
+/// channel value unmodified. Bend results are not clamped: the
+/// model stores bends unclamped (the ±0.7 rad limit is an
+/// authoring-panel discipline, not a model rule). See the module
+/// docs for the full contract.
 pub fn apply_channels(project: &Project, channels: &[Channel], frame_f: f32) -> ChannelResult {
     let mut poses = project.poses_at(frame_f);
     let mut defs: Vec<FigureDef> = project.figures.iter().map(|f| f.def.clone()).collect();
+    // Bend rows start from the project's own interpolated bends,
+    // so a project with no bend channels evaluates exactly as it
+    // did before bend channels existed.
+    let mut bends: Vec<Vec<f32>> = (0..project.figures.len())
+        .map(|fi| project.bends_at(frame_f, fi))
+        .collect();
     for ch in channels {
         let v = ch.value_at(frame_f);
         match ch.target {
@@ -750,9 +780,28 @@ pub fn apply_channels(project: &Project, channels: &[Channel], frame_f: f32) -> 
                     }
                 }
             }
+            ChannelTarget::Bend(n) => {
+                if let Some(row) = bends.get_mut(ch.figure) {
+                    // A straight figure's row is empty (the
+                    // `bends_at` convention); grow it to the
+                    // figure's node count, zero-filled, so the
+                    // channel has a slot to write. A node index
+                    // past the def is stale and ignored, like
+                    // every other target.
+                    let nodes = defs.get(ch.figure).map_or(0, |d| d.nodes.len());
+                    if n < nodes {
+                        row.resize(nodes, 0.0);
+                        row[n] = v;
+                    }
+                }
+            }
         }
     }
-    ChannelResult { poses, defs }
+    ChannelResult {
+        poses,
+        defs,
+        bends,
+    }
 }
 
 #[cfg(test)]
@@ -923,6 +972,136 @@ mod tests {
             "unlimited node keeps the raw (un-re-wrapped) channel value, got {}",
             out.poses[0].angles[3]
         );
+    }
+
+    #[test]
+    fn bend_channel_overrides_the_bend_rows() {
+        // Wave Y (P-7): the demo project carries no bend data,
+        // so every row starts straight (empty, the `bends_at`
+        // convention).
+        let project = Project::new_demo();
+        assert!(project.bends_at(0.0, 0).is_empty());
+        let channels = vec![
+            channel(ChannelTarget::Bend(1), vec![Key::flat(0.0, 0.5)]),
+            // Interpolated like any other channel: 0 -> 0.6 over
+            // 4 frames with flat tangents reads 0.3 at frame 2.
+            channel(
+                ChannelTarget::Bend(2),
+                vec![Key::flat(0.0, 0.0), Key::flat(4.0, 0.6)],
+            ),
+        ];
+        let out = apply_channels(&project, &channels, 2.0);
+        let nodes = project.figures[0].def.nodes.len();
+        assert_eq!(out.bends.len(), 1, "one bend row per figure");
+        assert_eq!(out.bends[0].len(), nodes, "row grown to node count");
+        assert!(approx(out.bends[0][1], 0.5), "constant bend applied");
+        assert!(approx(out.bends[0][2], 0.3), "bend interpolates");
+        assert!(approx(out.bends[0][3], 0.0), "unbent nodes stay straight");
+        // Bends are render-only: bend channels touch neither
+        // the poses nor the defs.
+        let base = apply_channels(&project, &[], 2.0);
+        assert_eq!(out.poses[0].root, base.poses[0].root);
+        assert_eq!(out.poses[0].angles, base.poses[0].angles);
+        assert!(approx(
+            out.defs[0].nodes[1].length,
+            base.defs[0].nodes[1].length
+        ));
+    }
+
+    #[test]
+    fn bend_channel_composes_with_the_other_targets() {
+        let project = Project::new_demo();
+        let channels = vec![
+            channel(ChannelTarget::RootX, vec![Key::flat(0.0, 123.0)]),
+            channel(ChannelTarget::Angle(1), vec![Key::flat(0.0, 45.0)]),
+            channel(ChannelTarget::Length(1), vec![Key::flat(0.0, 99.0)]),
+            channel(ChannelTarget::Bend(1), vec![Key::flat(0.0, -0.35)]),
+        ];
+        let out = apply_channels(&project, &channels, 0.0);
+        assert!(approx(out.poses[0].root[0], 123.0), "root X overridden");
+        assert!(approx(out.poses[0].angles[1], 45.0), "angle overridden");
+        assert!(approx(out.defs[0].nodes[1].length, 99.0), "length overridden");
+        assert!(
+            approx(out.bends[0][1], -0.35),
+            "bend lands alongside the rest, got {}",
+            out.bends[0][1]
+        );
+        // The project's own bend data is never mutated.
+        assert!(project.bends_at(0.0, 0).is_empty());
+    }
+
+    #[test]
+    fn bend_channel_overrides_frame_bends_and_later_channel_wins() {
+        let mut project = Project::new_demo();
+        let nodes = project.figures[0].def.nodes.len();
+        project.frames[0].bends = vec![vec![0.25; nodes]];
+        // No channels: the result carries the project's own bends.
+        let plain = apply_channels(&project, &[], 0.0);
+        assert!(approx(plain.bends[0][1], 0.25), "frame bends pass through");
+        let channels = vec![
+            channel(ChannelTarget::Bend(1), vec![Key::flat(0.0, 0.5)]),
+            channel(ChannelTarget::Bend(1), vec![Key::flat(0.0, -0.5)]),
+        ];
+        let out = apply_channels(&project, &channels, 0.0);
+        assert!(approx(out.bends[0][1], -0.5), "later channel wins");
+        assert!(
+            approx(out.bends[0][2], 0.25),
+            "other nodes keep the frame bends"
+        );
+    }
+
+    #[test]
+    fn stale_bend_channels_are_ignored_not_fatal() {
+        let project = Project::new_demo();
+        let channels = vec![
+            Channel {
+                figure: 99,
+                target: ChannelTarget::Bend(1),
+                keys: vec![Key::flat(0.0, 0.5)],
+            },
+            channel(ChannelTarget::Bend(999), vec![Key::flat(0.0, 0.5)]),
+        ];
+        let out = apply_channels(&project, &channels, 0.0);
+        assert_eq!(out.bends.len(), 1);
+        assert!(out.bends[0].is_empty(), "nothing overridden");
+    }
+
+    #[test]
+    fn bend_target_serde_round_trips_like_the_other_variants() {
+        // Externally tagged, like Angle/Length: {"Bend":2}.
+        let ch = channel(ChannelTarget::Bend(2), vec![Key::flat(0.0, 0.5)]);
+        let json = serde_json::to_string(&ch).expect("channel serialises");
+        assert!(json.contains("\"Bend\":2"), "tagged shape: {json}");
+        let back: Channel = serde_json::from_str(&json).expect("channel parses back");
+        assert_eq!(back, ch);
+        // A channel saved before the variant existed — an old
+        // shape only, no `interp` field on its key — still
+        // parses unchanged.
+        let old = r#"{"figure":0,"target":{"Length":1},"keys":[{"frame":0.0,"value":99.0,"in_tan":0.0,"out_tan":0.0}]}"#;
+        let back: Channel = serde_json::from_str(old).expect("old shape parses");
+        assert_eq!(back.target, ChannelTarget::Length(1));
+    }
+
+    #[test]
+    fn no_bend_channels_evaluates_exactly_as_before() {
+        // A project WITH frame bends and root/length channels
+        // but no bend channel: the result's bend rows are
+        // `bends_at`'s own rows, byte for byte.
+        let mut project = Project::new_demo();
+        let nodes = project.figures[0].def.nodes.len();
+        project.frames[0].bends = vec![vec![0.25; nodes]];
+        let channels = vec![
+            channel(ChannelTarget::RootX, vec![Key::flat(0.0, 123.0)]),
+            channel(ChannelTarget::Length(1), vec![Key::flat(0.0, 99.0)]),
+        ];
+        let out = apply_channels(&project, &channels, 0.0);
+        assert_eq!(out.bends[0], project.bends_at(0.0, 0));
+        // And with no channels at all, poses and bends are the
+        // plain evaluation's.
+        let plain = apply_channels(&project, &[], 0.0);
+        assert_eq!(plain.bends, vec![project.bends_at(0.0, 0)]);
+        assert!(approx(plain.poses[0].root[0], 480.0));
+        assert!(approx(plain.poses[0].root[1], 470.0));
     }
 
     #[test]
