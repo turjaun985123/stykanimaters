@@ -543,6 +543,40 @@
 //! that forced the graph channel list's bound. The
 //! shell's other per-item lists (figures, layers,
 //! clips) are unbounded the same way.
+//!
+//! ## Wave U i18n (agent U1)
+//!
+//! Every label and composed readout in this panel
+//! resolves through `i18n_wire::tr` (the subtitle /
+//! camera / 3D / Wave T idiom): the panel title, the
+//! bulk / frame / selection row labels and button
+//! labels, the selected-stroke row captions and
+//! stepper help labels, the preset rows and nib
+//! segmented control, the empty state, and — as
+//! `{slot}` template keys substituted with
+//! `.replace()` at the composing site (the camera
+//! `follow_label` precedent) — the composed readouts:
+//! [`tool_text`], [`strokes_header`],
+//! [`stroke_summary`] (base + clause fragments),
+//! [`selection_readout`], [`measure_readout`],
+//! [`spray_hint`], [`nib_text`], the `Frame {n}` row
+//! label, the `Brush preset · {name}` heading and the
+//! `Preset nib angle` line. The value formatters
+//! [`scatter_text`] / [`smoothing_text`] /
+//! [`nib_label`] gained an `&EditorCore` parameter for
+//! the lookup (the T2 `mute_toggle_parts` precedent).
+//! English is byte-identical once IA-U1-1 lands; until
+//! then `tr` falls back to the key itself (the Q7
+//! pattern — the pin test below says so). Status
+//! sentences stay English (they are handler feedback,
+//! not labels — including the `Stroke {n} scatter
+//! {v}.` status, whose sentence frame stays English
+//! while its `{v}` comes from the shared readout
+//! formatter [`scatter_text`]), as do the pure number
+//! formats ([`width_text`], [`opacity_text`],
+//! [`opacity_label`], the `{w:.1}` stepper value) and
+//! the notation glyphs (`−` / `+` steppers, the `#n`
+//! row position).
 
 use rune::tok::{type_, Theme};
 use rune::{el, row, text, El};
@@ -552,6 +586,7 @@ use stykanimate_rs::paint::{Brush, Nib};
 
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
 use crate::stage_view::hex_color;
 use crate::State;
@@ -718,21 +753,30 @@ pub fn opacity_text(opacity: f32) -> String {
 
 /// Scatter radius: `Off` at 0 (marks land exactly on the
 /// recorded path), otherwise the radius in stage units.
-pub fn scatter_text(scatter: f32) -> String {
+/// The `Off` word resolves through the catalogue
+/// (Wave U, U1); the radius itself is notation.
+pub fn scatter_text(core: &EditorCore, scatter: f32) -> String {
     if scatter <= 0.0 {
-        "Off".to_string()
+        i18n_wire::tr(core, "stroke_off")
     } else {
         width_text(scatter)
     }
 }
 
-/// Short display label for a nib kind.
-pub fn nib_label(nib: Nib) -> &'static str {
-    match nib {
-        Nib::Round => "Round",
-        Nib::Square => "Square",
-        Nib::Calligraphy => "Calligraphy",
-    }
+/// Short display label for a nib kind — display only:
+/// nothing parses these names back (the nib itself is
+/// the `paint::Nib` enum wherever it is stored or
+/// matched), so they resolve through the catalogue
+/// (Wave U, U1).
+pub fn nib_label(core: &EditorCore, nib: Nib) -> String {
+    i18n_wire::tr(
+        core,
+        match nib {
+            Nib::Round => "stroke_nib_round",
+            Nib::Square => "stroke_nib_square",
+            Nib::Calligraphy => "stroke_nib_calligraphy",
+        },
+    )
 }
 
 /// The segmented control's element key for a nib.
@@ -748,21 +792,25 @@ pub fn nib_key(nib: Nib) -> &'static str {
 /// when it is non-zero (a round nib's angle is meaningless
 /// and several presets leave it 0 — `Square`, not
 /// `Square · 0°`).
-pub fn nib_text(brush: &Brush) -> String {
+pub fn nib_text(core: &EditorCore, brush: &Brush) -> String {
     if brush.nib == Nib::Round || brush.nib_angle == 0.0 {
-        nib_label(brush.nib).to_string()
+        nib_label(core, brush.nib)
     } else {
-        format!("{} · {:.0}°", nib_label(brush.nib), brush.nib_angle)
+        i18n_wire::tr(core, "stroke_nib_with_angle")
+            .replace("{nib}", &nib_label(core, brush.nib))
+            .replace("{angle}", &format!("{:.0}", brush.nib_angle))
     }
 }
 
 /// Smoothing display: `Off` at 0 Chaikin iterations, else
-/// the pass count.
-pub fn smoothing_text(smoothing: usize) -> String {
+/// the pass count (singular / plural catalogue forms,
+/// Wave U, U1).
+pub fn smoothing_text(core: &EditorCore, smoothing: usize) -> String {
     match smoothing {
-        0 => "Off".to_string(),
-        1 => "1 pass".to_string(),
-        n => format!("{n} passes"),
+        0 => i18n_wire::tr(core, "stroke_off"),
+        1 => i18n_wire::tr(core, "stroke_smoothing_one"),
+        n => i18n_wire::tr(core, "stroke_smoothing_many")
+            .replace("{count}", &n.to_string()),
     }
 }
 
@@ -771,15 +819,15 @@ pub fn smoothing_text(smoothing: usize) -> String {
 /// model's own terms (`model::SprayMark`, model.rs:473 —
 /// the seed is per-stroke, the radius and opacity come from
 /// the brush, editor.rs:2303).
-pub fn spray_hint(brush: &Brush) -> Option<String> {
+pub fn spray_hint(core: &EditorCore, brush: &Brush) -> Option<String> {
     if brush.scatter <= 0.0 {
         return None;
     }
-    Some(format!(
-        "Spray brush: strokes record a spray mark (radius {}, opacity {}).",
-        width_text(brush.scatter),
-        opacity_text(brush.opacity)
-    ))
+    Some(
+        i18n_wire::tr(core, "stroke_spray_hint")
+            .replace("{radius}", &width_text(brush.scatter))
+            .replace("{opacity}", &opacity_text(brush.opacity)),
+    )
 }
 
 /// The draw-tool readout: which tool is active and which
@@ -788,9 +836,9 @@ pub fn spray_hint(brush: &Brush) -> Option<String> {
 pub fn tool_text(core: &EditorCore) -> String {
     let brush = core.active_brush();
     if core.draw_tool_is_eraser() {
-        format!("Tool: Eraser (sized by {})", brush.name)
+        i18n_wire::tr(core, "stroke_tool_eraser").replace("{name}", brush.name)
     } else {
-        format!("Tool: Brush ({})", brush.name)
+        i18n_wire::tr(core, "stroke_tool_brush").replace("{name}", brush.name)
     }
 }
 
@@ -817,11 +865,9 @@ pub fn frame_stroke_count(core: &EditorCore) -> usize {
 
 /// The stroke-list header: `Strokes · Frame {n} · {count}`.
 pub fn strokes_header(core: &EditorCore) -> String {
-    format!(
-        "Strokes · Frame {} · {}",
-        core.current + 1,
-        frame_stroke_count(core)
-    )
+    i18n_wire::tr(core, "stroke_strokes_header")
+        .replace("{frame}", &(core.current + 1).to_string())
+        .replace("{count}", &frame_stroke_count(core).to_string())
 }
 
 /// One stroke row's summary: point count and base width,
@@ -835,26 +881,27 @@ pub fn strokes_header(core: &EditorCore) -> String {
 /// never reaches the scatter dab path, so its stored
 /// `scatter` is not reported (Wave 12, agent D3 — the
 /// same refusal [`selected_stroke_scatter`] applies).
-pub fn stroke_summary(stroke: &Stroke) -> String {
-    let mut out = format!(
-        "{} pts · w {}",
-        stroke.points.len(),
-        width_text(stroke.width)
-    );
+pub fn stroke_summary(core: &EditorCore, stroke: &Stroke) -> String {
+    let mut out = i18n_wire::tr(core, "stroke_summary_base")
+        .replace("{points}", &stroke.points.len().to_string())
+        .replace("{width}", &width_text(stroke.width));
     if !stroke.widths.is_empty() {
-        out.push_str(" · taper");
+        out.push_str(&i18n_wire::tr(core, "stroke_summary_taper"));
     }
     if stroke.fill.is_some() {
-        out.push_str(" · filled");
+        out.push_str(&i18n_wire::tr(core, "stroke_summary_filled"));
     }
     if let Some(mark) = &stroke.spray {
-        out.push_str(&format!(
-            " · spray r{} · {}",
-            width_text(mark.radius),
-            opacity_text(mark.opacity)
-        ));
+        out.push_str(
+            &i18n_wire::tr(core, "stroke_summary_spray")
+                .replace("{radius}", &width_text(mark.radius))
+                .replace("{opacity}", &opacity_text(mark.opacity)),
+        );
     } else if stroke.scatter > 0.0 {
-        out.push_str(&format!(" · scatter r{}", width_text(stroke.scatter)));
+        out.push_str(
+            &i18n_wire::tr(core, "stroke_summary_scatter")
+                .replace("{radius}", &width_text(stroke.scatter)),
+        );
     }
     out
 }
@@ -891,7 +938,7 @@ pub fn stroke_rows(core: &EditorCore) -> Vec<StrokeRow> {
                 project_index: idx,
                 position: k + 1,
                 color: stroke.color,
-                summary: stroke_summary(stroke),
+                summary: stroke_summary(core, stroke),
             }
         })
         .collect()
@@ -1011,20 +1058,27 @@ pub fn step_selection(cur: Option<usize>, total: usize, dir: i32) -> Option<usiz
 pub fn selection_readout(core: &EditorCore, selected: Option<usize>) -> String {
     let total = core.project.strokes.len();
     if total == 0 {
-        return "No strokes".to_string();
+        return i18n_wire::tr(core, "stroke_readout_empty");
     }
     match selected.filter(|&i| i < total) {
         Some(i) => {
             // `i < total`, so the stroke — and its frame —
             // exist; the fallback is unreachable.
             let frame = stroke_frame_of(core, i).unwrap_or(0);
-            format!("Stroke {} of {} · frame {}", i + 1, total, frame + 1)
+            i18n_wire::tr(core, "stroke_readout_selected")
+                .replace("{index}", &(i + 1).to_string())
+                .replace("{total}", &total.to_string())
+                .replace("{frame}", &(frame + 1).to_string())
         }
-        None => format!(
-            "No stroke selected · {} stroke{}",
-            total,
-            if total == 1 { "" } else { "s" }
-        ),
+        None => i18n_wire::tr(
+            core,
+            if total == 1 {
+                "stroke_readout_none_one"
+            } else {
+                "stroke_readout_none_many"
+            },
+        )
+        .replace("{count}", &total.to_string()),
     }
 }
 
@@ -1083,13 +1137,13 @@ pub fn stroke_measure(core: &EditorCore, index: usize) -> Option<StrokeMeasure> 
 pub fn measure_readout(core: &EditorCore, selected: Option<usize>) -> Option<String> {
     let i = selected.filter(|&i| i < core.project.strokes.len())?;
     let m = stroke_measure(core, i)?;
-    Some(format!(
-        "Stroke {}: {} pts · {:.0} long · frame {}",
-        i + 1,
-        m.points,
-        m.length,
-        m.frame + 1
-    ))
+    Some(
+        i18n_wire::tr(core, "stroke_measure_line")
+            .replace("{index}", &(i + 1).to_string())
+            .replace("{points}", &m.points.to_string())
+            .replace("{length}", &format!("{:.0}", m.length))
+            .replace("{frame}", &(m.frame + 1).to_string()),
+    )
 }
 
 /// One width-stepper press moves a stroke's width by
@@ -1421,7 +1475,7 @@ pub fn set_selected_stroke_scatter(
     let new = scatter_after(core.project.strokes[i].scatter, dir);
     core.snapshot();
     core.project.strokes[i].scatter = new;
-    core.status = format!("Stroke {} scatter {}.", i + 1, scatter_text(new));
+    core.status = format!("Stroke {} scatter {}.", i + 1, scatter_text(core, new));
     true
 }
 
@@ -1763,7 +1817,12 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
             .w_full()
             .gap(8.0)
             .center_y()
-            .child(design::panel_title(None, "Stroke inspector", None, t)),
+            .child(design::panel_title(
+                None,
+                &i18n_wire::tr(core, "stroke_title"),
+                None,
+                t,
+            )),
     );
     panel = panel.child(design::divider(t));
 
@@ -1778,7 +1837,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
             .gap(8.0)
             .center_y()
             .child(
-                text("All strokes")
+                text(i18n_wire::tr(core, "stroke_all_strokes"))
                     .font(type_::LABEL)
                     .color(t.text)
                     .grow(1.0),
@@ -1786,7 +1845,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
             .child(icon_btn(
                 "stroke-recolor-all",
                 "palette",
-                "Recolour all",
+                &i18n_wire::tr(core, "stroke_recolour_all"),
                 false,
                 t,
                 |s| {
@@ -1796,7 +1855,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
             .child(icon_btn(
                 "stroke-delete-all",
                 "trash-can",
-                "Delete all",
+                &i18n_wire::tr(core, "stroke_delete_all"),
                 false,
                 t,
                 |s| {
@@ -1819,15 +1878,18 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
             .gap(8.0)
             .center_y()
             .child(
-                text(format!("Frame {}", core.current + 1))
-                    .font(type_::LABEL)
-                    .color(t.text)
-                    .grow(1.0),
+                text(
+                    i18n_wire::tr(core, "stroke_frame_row")
+                        .replace("{frame}", &(core.current + 1).to_string()),
+                )
+                .font(type_::LABEL)
+                .color(t.text)
+                .grow(1.0),
             )
             .child(icon_btn(
                 "stroke-recolor-frame",
                 "palette",
-                "Frame colour",
+                &i18n_wire::tr(core, "stroke_frame_colour"),
                 false,
                 t,
                 |s| {
@@ -1837,7 +1899,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
             .child(icon_btn(
                 "stroke-delete-frame",
                 "trash-can",
-                "Delete frame",
+                &i18n_wire::tr(core, "stroke_delete_frame"),
                 false,
                 t,
                 |s| {
@@ -1885,7 +1947,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
             .child(icon_only_btn(
                 "stroke-sel-prev",
                 "chevron-left",
-                "Previous stroke",
+                &i18n_wire::tr(core, "stroke_prev"),
                 26.0, false,
                 t,
                 |s| {
@@ -1895,7 +1957,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
             .child(icon_only_btn(
                 "stroke-sel-next",
                 "chevron-right",
-                "Next stroke",
+                &i18n_wire::tr(core, "stroke_next"),
                 26.0, false,
                 t,
                 |s| {
@@ -1905,14 +1967,14 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
             .child(icon_btn(
                 "stroke-sel-goto",
                 "crosshairs",
-                "Go to frame",
+                &i18n_wire::tr(core, "stroke_goto_frame"),
                 false,
                 t,
                 |s| {
                     goto_selected_stroke_frame(s);
                 },
             ))
-            .child(icon_only_btn("stroke-sel-clear", "xmark", "Clear selection", 26.0, false, t, |s| {
+            .child(icon_only_btn("stroke-sel-clear", "xmark", &i18n_wire::tr(core, "stroke_clear_selection"), 26.0, false, t, |s| {
                 clear_stroke_selection(s);
             })),
     );
@@ -1942,7 +2004,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                 .gap(8.0)
                 .center_y()
                 .child(
-                    text("Width")
+                    text(i18n_wire::tr(core, "stroke_width"))
                         .font(type_::LABEL)
                         .color(t.text_secondary)
                         .grow(1.0),
@@ -1950,7 +2012,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                 .child(icon_only_btn(
                     "stroke-width-dn",
                     "chevron-down",
-                    "Decrease width",
+                    &i18n_wire::tr(core, "stroke_width_dec"),
                     26.0, false,
                     t,
                     |s| {
@@ -1962,7 +2024,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                 .child(icon_only_btn(
                     "stroke-width-up",
                     "chevron-up",
-                    "Increase width",
+                    &i18n_wire::tr(core, "stroke_width_inc"),
                     26.0, false,
                     t,
                     |s| {
@@ -1988,7 +2050,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                 .gap(8.0)
                 .center_y()
                 .child(
-                    text("Opacity")
+                    text(i18n_wire::tr(core, "stroke_opacity"))
                         .font(type_::LABEL)
                         .color(t.text_secondary)
                         .grow(1.0),
@@ -1996,7 +2058,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                 .child(icon_only_btn(
                     "stroke-opacity-dn",
                     "chevron-down",
-                    "Decrease opacity",
+                    &i18n_wire::tr(core, "stroke_opacity_dec"),
                     26.0, false,
                     t,
                     |s| {
@@ -2008,7 +2070,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                 .child(icon_only_btn(
                     "stroke-opacity-up",
                     "chevron-up",
-                    "Increase opacity",
+                    &i18n_wire::tr(core, "stroke_opacity_inc"),
                     26.0, false,
                     t,
                     |s| {
@@ -2038,7 +2100,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                 .gap(8.0)
                 .center_y()
                 .child(
-                    text("Scatter")
+                    text(i18n_wire::tr(core, "stroke_scatter"))
                         .font(type_::LABEL)
                         .color(t.text_secondary)
                         .grow(1.0),
@@ -2046,7 +2108,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                 .child(icon_only_btn(
                     "stroke-scatter-dn",
                     "chevron-down",
-                    "Decrease scatter",
+                    &i18n_wire::tr(core, "stroke_scatter_dec"),
                     26.0, false,
                     t,
                     |s| {
@@ -2054,11 +2116,11 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                         set_selected_stroke_scatter(&mut s.core, sel, -1);
                     },
                 ))
-                .child(design::stepper_value(&scatter_text(sc), t))
+                .child(design::stepper_value(&scatter_text(core, sc), t))
                 .child(icon_only_btn(
                     "stroke-scatter-up",
                     "chevron-up",
-                    "Increase scatter",
+                    &i18n_wire::tr(core, "stroke_scatter_inc"),
                     26.0, false,
                     t,
                     |s| {
@@ -2078,7 +2140,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
         panel = panel.child(icon_btn(
             "stroke-simplify",
             "wand-magic-sparkles",
-            "Simplify",
+            &i18n_wire::tr(core, "stroke_simplify"),
             false,
             t,
             |s| simplify_selected(s),
@@ -2086,7 +2148,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
     }
 
     panel = panel.child(design::section_label(
-        &format!("Brush preset · {}", brush.name),
+        &i18n_wire::tr(core, "stroke_preset_heading").replace("{name}", brush.name),
         t,
     ));
     panel = panel.child(
@@ -2099,16 +2161,13 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
     // but step the preset selection — the line says so
     // before the user presses anything.
     panel = panel.child(
-        text(
-            "Stepping a value or picking a nib selects another library preset \
-             — presets are bundles, so every value follows the preset.",
-        )
-        .font(type_::LABEL)
-        .color(t.text_secondary),
+        text(i18n_wire::tr(core, "stroke_preset_hint"))
+            .font(type_::LABEL)
+            .color(t.text_secondary),
     );
 
     panel = panel.child(param_row(
-        "Preset size",
+        &i18n_wire::tr(core, "stroke_preset_size"),
         width_text(brush.width),
         "brush-size-dec",
         "brush-size-inc",
@@ -2116,7 +2175,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
         t,
     ));
     panel = panel.child(param_row(
-        "Preset opacity",
+        &i18n_wire::tr(core, "stroke_preset_opacity"),
         opacity_text(brush.opacity),
         "brush-opacity-dec",
         "brush-opacity-inc",
@@ -2124,8 +2183,8 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
         t,
     ));
     panel = panel.child(param_row(
-        "Preset scatter",
-        scatter_text(brush.scatter),
+        &i18n_wire::tr(core, "stroke_preset_scatter"),
+        scatter_text(core, brush.scatter),
         "brush-scatter-dec",
         "brush-scatter-inc",
         Param::Scatter,
@@ -2140,11 +2199,11 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
         .key("brush-nib-row")
         .gap(4.0)
         .center_y()
-        .child(text("Preset nib").font(type_::LABEL).color(t.text));
+        .child(text(i18n_wire::tr(core, "stroke_preset_nib")).font(type_::LABEL).color(t.text));
     for nib in NIB_ORDER {
         nib_row = nib_row.child(btn(
             nib_key(nib),
-            nib_label(nib),
+            &nib_label(core, nib),
             brush.nib == nib,
             t,
             move |s: &mut State| {
@@ -2154,21 +2213,24 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
     }
     panel = panel.child(nib_row);
     panel = panel.child(
-        text(format!("Preset nib angle · {:.0}°", brush.nib_angle))
-            .font(type_::LABEL)
-            .color(t.text_secondary),
+        text(
+            i18n_wire::tr(core, "stroke_preset_nib_angle")
+                .replace("{angle}", &format!("{:.0}", brush.nib_angle)),
+        )
+        .font(type_::LABEL)
+        .color(t.text_secondary),
     );
 
     panel = panel.child(param_row(
-        "Preset smoothing",
-        smoothing_text(brush.smoothing),
+        &i18n_wire::tr(core, "stroke_preset_smoothing"),
+        smoothing_text(core, brush.smoothing),
         "brush-smoothing-dec",
         "brush-smoothing-inc",
         Param::Smoothing,
         t,
     ));
 
-    if let Some(hint) = spray_hint(&brush) {
+    if let Some(hint) = spray_hint(core, &brush) {
         panel = panel.child(text(hint).font(type_::LABEL).color(t.text_secondary));
     }
 
@@ -2180,16 +2242,20 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
         .center_y()
         .child(design::section_label(&strokes_header(core), t).grow(1.0));
     if !rows.is_empty() {
-        header = header.child(btn("strokes-clear", "Clear frame", false, t, |s| {
-            clear_frame_strokes_press(s)
-        }));
+        header = header.child(btn(
+            "strokes-clear",
+            &i18n_wire::tr(core, "stroke_clear_frame"),
+            false,
+            t,
+            |s| clear_frame_strokes_press(s),
+        ));
     }
     panel = panel.child(header);
 
     if rows.is_empty() {
         panel = panel.child(design::empty_state(
             "paintbrush",
-            "No strokes on this frame.",
+            &i18n_wire::tr(core, "stroke_none_on_frame"),
             t,
         ));
     } else {
@@ -2255,7 +2321,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                     )
                     .child(btn(
                         &format!("stroke-del-{idx}"),
-                        "Delete",
+                        &i18n_wire::tr(core, "stroke_delete"),
                         false,
                         t,
                         move |s: &mut State| {
@@ -2299,23 +2365,117 @@ mod tests {
         assert_eq!(width_text(2.5), "2.5");
         assert_eq!(opacity_text(1.0), "100%");
         assert_eq!(opacity_text(0.5), "50%");
-        assert_eq!(scatter_text(0.0), "Off");
-        assert_eq!(scatter_text(12.0), "12");
-        assert_eq!(smoothing_text(0), "Off");
-        assert_eq!(smoothing_text(1), "1 pass");
-        assert_eq!(smoothing_text(3), "3 passes");
+        let core = EditorCore::new();
+        assert_eq!(scatter_text(&core, 0.0), "Off");
+        assert_eq!(scatter_text(&core, 12.0), "12");
+        assert_eq!(smoothing_text(&core, 0), "Off");
+        assert_eq!(smoothing_text(&core, 1), "1 pass");
+        assert_eq!(smoothing_text(&core, 3), "3 passes");
+    }
+
+    #[test]
+    fn stroke_i18n_keys_exist_and_match_the_english_labels() {
+        // Wave U (U1): every label and composed readout
+        // in this panel resolves through `i18n_wire::tr`
+        // under a `stroke_*` key (IA-U1-1). This pin
+        // passes only after IA-U1-1 lands — until then
+        // `tr` falls back to the key itself (the Q7
+        // pattern) — and the pre-existing content tests
+        // of the wired helpers above and below share
+        // that condition: wiring + keys land in one
+        // integration push. Template keys are asserted
+        // in their stored `{slot}` form, like the
+        // camera pin's `camera_following_figure`.
+        let core = EditorCore::new();
+        for (key, english) in [
+            ("stroke_off", "Off"),
+            ("stroke_nib_round", "Round"),
+            ("stroke_nib_square", "Square"),
+            ("stroke_nib_calligraphy", "Calligraphy"),
+            ("stroke_nib_with_angle", "{nib} · {angle}°"),
+            ("stroke_smoothing_one", "1 pass"),
+            ("stroke_smoothing_many", "{count} passes"),
+            (
+                "stroke_spray_hint",
+                "Spray brush: strokes record a spray mark (radius {radius}, opacity {opacity}).",
+            ),
+            ("stroke_tool_brush", "Tool: Brush ({name})"),
+            ("stroke_tool_eraser", "Tool: Eraser (sized by {name})"),
+            ("stroke_strokes_header", "Strokes · Frame {frame} · {count}"),
+            ("stroke_summary_base", "{points} pts · w {width}"),
+            ("stroke_summary_taper", " · taper"),
+            ("stroke_summary_filled", " · filled"),
+            ("stroke_summary_spray", " · spray r{radius} · {opacity}"),
+            ("stroke_summary_scatter", " · scatter r{radius}"),
+            ("stroke_readout_empty", "No strokes"),
+            (
+                "stroke_readout_selected",
+                "Stroke {index} of {total} · frame {frame}",
+            ),
+            (
+                "stroke_readout_none_one",
+                "No stroke selected · {count} stroke",
+            ),
+            (
+                "stroke_readout_none_many",
+                "No stroke selected · {count} strokes",
+            ),
+            (
+                "stroke_measure_line",
+                "Stroke {index}: {points} pts · {length} long · frame {frame}",
+            ),
+            ("stroke_title", "Stroke inspector"),
+            ("stroke_all_strokes", "All strokes"),
+            ("stroke_recolour_all", "Recolour all"),
+            ("stroke_delete_all", "Delete all"),
+            ("stroke_frame_row", "Frame {frame}"),
+            ("stroke_frame_colour", "Frame colour"),
+            ("stroke_delete_frame", "Delete frame"),
+            ("stroke_prev", "Previous stroke"),
+            ("stroke_next", "Next stroke"),
+            ("stroke_goto_frame", "Go to frame"),
+            ("stroke_clear_selection", "Clear selection"),
+            ("stroke_width", "Width"),
+            ("stroke_width_dec", "Decrease width"),
+            ("stroke_width_inc", "Increase width"),
+            ("stroke_opacity", "Opacity"),
+            ("stroke_opacity_dec", "Decrease opacity"),
+            ("stroke_opacity_inc", "Increase opacity"),
+            ("stroke_scatter", "Scatter"),
+            ("stroke_scatter_dec", "Decrease scatter"),
+            ("stroke_scatter_inc", "Increase scatter"),
+            ("stroke_simplify", "Simplify"),
+            ("stroke_preset_heading", "Brush preset · {name}"),
+            (
+                "stroke_preset_hint",
+                "Stepping a value or picking a nib selects another library preset — presets are bundles, so every value follows the preset.",
+            ),
+            ("stroke_preset_size", "Preset size"),
+            ("stroke_preset_opacity", "Preset opacity"),
+            ("stroke_preset_scatter", "Preset scatter"),
+            ("stroke_preset_nib", "Preset nib"),
+            ("stroke_preset_nib_angle", "Preset nib angle · {angle}°"),
+            ("stroke_preset_smoothing", "Preset smoothing"),
+            ("stroke_clear_frame", "Clear frame"),
+            ("stroke_none_on_frame", "No strokes on this frame."),
+            ("stroke_delete", "Delete"),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
     }
 
     #[test]
     fn nib_text_shows_angle_only_when_it_matters() {
         let lib = lib();
         let by_name = |name: &str| lib.iter().find(|b| b.name == name).copied().unwrap();
-        assert_eq!(nib_text(&by_name("Pen")), "Round");
+        let core = EditorCore::new();
+        assert_eq!(nib_text(&core, &by_name("Pen")), "Round");
         // Square at 0°: no angle shown.
-        assert_eq!(nib_text(&by_name("Brush")), "Square");
-        assert_eq!(nib_text(&by_name("Paint Brush")), "Square · 45°");
-        assert_eq!(nib_text(&by_name("Calligraphy")), "Calligraphy · 30°");
-        assert_eq!(nib_text(&by_name("Calligraphy L")), "Calligraphy · 315°");
+        assert_eq!(nib_text(&core, &by_name("Brush")), "Square");
+        assert_eq!(nib_text(&core, &by_name("Paint Brush")), "Square · 45°");
+        assert_eq!(nib_text(&core, &by_name("Calligraphy")), "Calligraphy · 30°");
+        assert_eq!(nib_text(&core, &by_name("Calligraphy L")), "Calligraphy · 315°");
     }
 
     #[test]
@@ -2371,8 +2531,9 @@ mod tests {
         assert_eq!(first_index_with_nib(&lib, Nib::Round), Some(0));
         assert_eq!(first_index_with_nib(&lib, Nib::Calligraphy), Some(3));
         assert_eq!(first_index_with_nib(&lib, Nib::Square), Some(4));
+        let core = EditorCore::new();
         for nib in NIB_ORDER {
-            assert!(!nib_label(nib).is_empty());
+            assert!(!nib_label(&core, nib).is_empty());
             assert!(nib_key(nib).starts_with("brush-nib-"));
         }
     }
@@ -2408,11 +2569,12 @@ mod tests {
     fn spray_hint_only_for_scatter_brushes() {
         let lib = lib();
         let spray = lib.iter().find(|b| b.name == "Spray").unwrap();
+        let core = EditorCore::new();
         assert_eq!(
-            spray_hint(spray),
+            spray_hint(&core, spray),
             Some("Spray brush: strokes record a spray mark (radius 12, opacity 50%).".to_string())
         );
-        assert_eq!(spray_hint(&lib[0]), None);
+        assert_eq!(spray_hint(&core, &lib[0]), None);
     }
 
     #[test]
@@ -2441,18 +2603,19 @@ mod tests {
 
     #[test]
     fn stroke_summary_reports_points_width_fill_and_spray() {
+        let core = EditorCore::new();
         let plain = plain_stroke(0, 3);
-        assert_eq!(stroke_summary(&plain), "3 pts · w 4");
+        assert_eq!(stroke_summary(&core, &plain), "3 pts · w 4");
         let mut filled = plain_stroke(0, 12);
         filled.fill = Some(0xFF_0000);
-        assert_eq!(stroke_summary(&filled), "12 pts · w 4 · filled");
+        assert_eq!(stroke_summary(&core, &filled), "12 pts · w 4 · filled");
         let mut sprayed = plain_stroke(0, 20);
         sprayed.spray = Some(SprayMark {
             seed: 42,
             radius: 12.0,
             opacity: 0.5,
         });
-        assert_eq!(stroke_summary(&sprayed), "20 pts · w 4 · spray r12 · 50%");
+        assert_eq!(stroke_summary(&core, &sprayed), "20 pts · w 4 · spray r12 · 50%");
     }
 
     #[test]
@@ -3778,16 +3941,17 @@ mod tests {
         // A per-point taper is admitted in the summary
         // (Wave 12, D3): before this, nothing in the
         // panel showed the `widths` vec existed.
+        let core = EditorCore::new();
         let mut tapered = plain_stroke(0, 3);
         tapered.widths = vec![2.0, 4.0, 2.0];
-        assert_eq!(stroke_summary(&tapered), "3 pts · w 4 · taper");
+        assert_eq!(stroke_summary(&core, &tapered), "3 pts · w 4 · taper");
         // An ordinary stroke with scatter on reports
         // its radius, in the spray clause's format.
         let mut scattered = plain_stroke(0, 6);
         scattered.scatter = 5.0;
-        assert_eq!(stroke_summary(&scattered), "6 pts · w 4 · scatter r5");
+        assert_eq!(stroke_summary(&core, &scattered), "6 pts · w 4 · scatter r5");
         // Scatter off (the serde default): no clause.
-        assert_eq!(stroke_summary(&plain_stroke(0, 6)), "6 pts · w 4");
+        assert_eq!(stroke_summary(&core, &plain_stroke(0, 6)), "6 pts · w 4");
         // A spray stroke reports its mark, never its
         // stored scatter — even a non-zero one.
         let mut sprayed = plain_stroke(0, 20);
@@ -3798,7 +3962,7 @@ mod tests {
             opacity: 0.5,
         });
         assert_eq!(
-            stroke_summary(&sprayed),
+            stroke_summary(&core, &sprayed),
             "20 pts · w 4 · spray r12 · 50%"
         );
     }

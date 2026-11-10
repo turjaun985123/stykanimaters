@@ -171,7 +171,19 @@
 //!   `−` / `+` distance steppers. The composed readouts
 //!   (`session_summary`, `joint_position_text`,
 //!   `camera_readout_text`) are dynamic text, not labels,
-//!   and stay English this wave.
+//!   and stayed English this wave.
+//!
+//! - Localisation (Wave U, U9): the composed readouts
+//!   now resolve through the table too, as `{slot}`
+//!   template keys substituted with `.replace()` at the
+//!   composing site (the camera `follow_label`
+//!   precedent; IA-U9-1): `threed_no_session`,
+//!   `threed_session_summary`, `threed_pose_b_marked`,
+//!   `threed_pose_b_not_marked`, `threed_joint_position`,
+//!   `threed_camera_readout`. English output is
+//!   byte-identical, pinned by
+//!   `threed_readout_templates_exist_and_compose_byte_identically`.
+//!   Status sentences stay English.
 
 use rune::tok::{type_, Theme};
 use rune::{canvas, row, text, Drag, El, LineCap, Phase, Shape, Tx};
@@ -599,9 +611,21 @@ pub fn toggle_label(core: &EditorCore, in_session: bool) -> String {
 /// One line describing the session for the panel header:
 /// figure, selected joint, and whether pose B (the bake
 /// animation target) is marked. Pure over the core.
+///
+/// Wave U (U9): the line resolves through the i18n table
+/// like the panel's labels — `threed_no_session` for the
+/// no-session sentence, the `threed_session_summary`
+/// template (`{figure}` / `{joint}` / `{state}` slots
+/// substituted with `.replace()`, the camera
+/// `follow_label` precedent) with the pose-B state word
+/// itself keyed (`threed_pose_b_marked` /
+/// `threed_pose_b_not_marked`). The keys land via
+/// IA-U9-1; until then `tr` falls back to the key itself
+/// (the Q7 pattern). English output is byte-identical
+/// to the pre-wiring format string.
 pub fn session_summary(core: &EditorCore) -> String {
     match &core.fig3 {
-        None => "No 3D session — Enter 3D to pose the humanoid.".into(),
+        None => i18n_wire::tr(core, "threed_no_session"),
         Some(st) => {
             let joint = st
                 .figure
@@ -609,16 +633,15 @@ pub fn session_summary(core: &EditorCore) -> String {
                 .get(st.selected)
                 .map(|n| n.name.as_str())
                 .unwrap_or("?");
-            format!(
-                "{} · joint {} · pose B {}",
-                st.figure.name,
-                joint,
-                if st.pose_b.is_some() {
-                    "marked"
-                } else {
-                    "not marked"
-                }
-            )
+            let state = if st.pose_b.is_some() {
+                i18n_wire::tr(core, "threed_pose_b_marked")
+            } else {
+                i18n_wire::tr(core, "threed_pose_b_not_marked")
+            };
+            i18n_wire::tr(core, "threed_session_summary")
+                .replace("{figure}", &st.figure.name)
+                .replace("{joint}", joint)
+                .replace("{state}", &state)
         }
     }
 }
@@ -655,7 +678,10 @@ pub fn selected_joint_position(core: &EditorCore) -> Option<[f32; 3]> {
 /// z .."` with two decimals per axis ([`fmt_fixed`]).
 /// `None` without a session. Recomputed from the live
 /// session at every panel build, so it follows both
-/// selection and pose changes.
+/// selection and pose changes. Wave U (U9): the line is
+/// the `threed_joint_position` template (`{name}` /
+/// `{x}` / `{y}` / `{z}` slots, IA-U9-1), English
+/// byte-identical to the pre-wiring format string.
 pub fn joint_position_text(core: &EditorCore) -> Option<String> {
     let st = core.fig3.as_ref()?;
     let p = selected_joint_position(core)?;
@@ -665,12 +691,13 @@ pub fn joint_position_text(core: &EditorCore) -> Option<String> {
         .get(st.selected)
         .map(|n| n.name.as_str())
         .unwrap_or("?");
-    Some(format!(
-        "{name} · x {} · y {} · z {}",
-        fmt_fixed(p[0], 2),
-        fmt_fixed(p[1], 2),
-        fmt_fixed(p[2], 2)
-    ))
+    Some(
+        i18n_wire::tr(core, "threed_joint_position")
+            .replace("{name}", name)
+            .replace("{x}", &fmt_fixed(p[0], 2))
+            .replace("{y}", &fmt_fixed(p[1], 2))
+            .replace("{z}", &fmt_fixed(p[2], 2)),
+    )
 }
 
 /// The camera orbit readout line: azimuth, elevation and
@@ -705,12 +732,16 @@ pub fn joint_position_text(core: &EditorCore) -> Option<String> {
 /// and `frame_camera_points`).
 pub fn camera_readout_text(core: &EditorCore) -> Option<String> {
     let cam = &core.fig3.as_ref()?.camera;
-    Some(format!(
-        "azimuth {}° · elevation {}° · distance {}",
-        fmt_fixed(cam.yaw.rem_euclid(360.0), 1),
-        fmt_fixed(cam.pitch, 1),
-        fmt_fixed(cam.distance, 2)
-    ))
+    // Wave U (U9): the line is the `threed_camera_readout`
+    // template (`{azimuth}` / `{elevation}` / `{distance}`
+    // slots, IA-U9-1), English byte-identical to the
+    // pre-wiring format string.
+    Some(
+        i18n_wire::tr(core, "threed_camera_readout")
+            .replace("{azimuth}", &fmt_fixed(cam.yaw.rem_euclid(360.0), 1))
+            .replace("{elevation}", &fmt_fixed(cam.pitch, 1))
+            .replace("{distance}", &fmt_fixed(cam.distance, 2)),
+    )
 }
 
 /// The 3D preview canvas's element key (Phase L). A named
@@ -1481,6 +1512,79 @@ mod tests {
             assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
             assert_eq!(i18n_wire::tr(&core, key), english);
         }
+    }
+
+    #[test]
+    fn threed_readout_templates_exist_and_compose_byte_identically() {
+        // Wave U (U9): the composed readouts resolve
+        // through `{slot}` template keys (IA-U9-1), the
+        // camera `follow_label` shape. The stored values
+        // must carry the slots verbatim, and composing
+        // them with representative values must reproduce
+        // the exact English lines the readouts printed
+        // before the wiring. Like the label pin above,
+        // this passes only once IA-U9-1 lands — until
+        // then `tr` falls back to the key itself and
+        // `key_in_table` is false (the Q7 pattern: wiring
+        // and keys land together at integration). The
+        // readouts' own behaviour tests
+        // (`session_summary_names_figure_joint_and_pose_b`,
+        // `camera_readout_tracks_presets_and_orbit`, …)
+        // pin the same English lines end to end and
+        // likewise resolve once the IA lands.
+        let core = EditorCore::new();
+        for (key, stored) in [
+            (
+                "threed_no_session",
+                "No 3D session — Enter 3D to pose the humanoid.",
+            ),
+            (
+                "threed_session_summary",
+                "{figure} · joint {joint} · pose B {state}",
+            ),
+            ("threed_pose_b_marked", "marked"),
+            ("threed_pose_b_not_marked", "not marked"),
+            (
+                "threed_joint_position",
+                "{name} · x {x} · y {y} · z {z}",
+            ),
+            (
+                "threed_camera_readout",
+                "azimuth {azimuth}° · elevation {elevation}° · distance {distance}",
+            ),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), stored);
+        }
+        // Composition spot checks: composed from the
+        // stored templates exactly as the readout
+        // functions compose them, the lines are
+        // byte-identical to the pre-wiring format output.
+        assert_eq!(
+            i18n_wire::tr(&core, "threed_session_summary")
+                .replace("{figure}", "Humanoid")
+                .replace("{joint}", "head")
+                .replace(
+                    "{state}",
+                    &i18n_wire::tr(&core, "threed_pose_b_not_marked")
+                ),
+            "Humanoid · joint head · pose B not marked"
+        );
+        assert_eq!(
+            i18n_wire::tr(&core, "threed_joint_position")
+                .replace("{name}", "head")
+                .replace("{x}", "1.00")
+                .replace("{y}", "2.50")
+                .replace("{z}", "-3.25"),
+            "head · x 1.00 · y 2.50 · z -3.25"
+        );
+        assert_eq!(
+            i18n_wire::tr(&core, "threed_camera_readout")
+                .replace("{azimuth}", "90.0")
+                .replace("{elevation}", "0.0")
+                .replace("{distance}", "400.00"),
+            "azimuth 90.0° · elevation 0.0° · distance 400.00"
+        );
     }
 
     #[test]

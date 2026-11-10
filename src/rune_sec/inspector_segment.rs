@@ -244,6 +244,24 @@
 //! (`media_label`), the Index line (`format_topology`)
 //! and the Bend readout line (`format_bend_readout`)
 //! are dynamic content, not label arguments.
+//!
+//! Localisation (Wave U, U7): those composed readout
+//! lines now resolve through template keys (IA-U7-1),
+//! the camera `follow_label` idiom — the helpers take
+//! `&EditorCore` first, exactly like `follow_label`:
+//! `media_label` (the `segment_media_*` keys, one per
+//! slot state), `format_topology` (the
+//! `segment_topology*` keys — the line template
+//! composes the parent/root and child/children parts,
+//! each composed from its own key) and
+//! `format_bend_readout` (`segment_bend_readout`,
+//! "Bend {degrees}°"). English output is byte-identical
+//! to the pre-wiring strings, pinned by the extended
+//! `segment_i18n_keys_exist_and_match_the_english_labels`
+//! and the helpers' own tests — all of which resolve
+//! only once IA-U7-1 lands (the Q7 pattern). The shape
+//! names stay English by standing rule: `shape_label`'s
+//! values are model vocabulary, not labels.
 
 use rune::tok::{type_, Theme};
 use rune::{row, text, Color, El};
@@ -558,10 +576,15 @@ pub fn bend_degrees(core: &EditorCore) -> Option<f32> {
 /// `-0.0 == 0.0`, so the remap costs nothing). The
 /// single formatter behind the `seg-bend-readout`
 /// line, so the wording lives in exactly one place
-/// (and is unit testable without elements).
-pub fn format_bend_readout(deg: f32) -> String {
+/// (and is unit testable without elements). Wave U
+/// (U7): the wording resolves through the
+/// `segment_bend_readout` template key ("Bend
+/// {degrees}°", IA-U7-1); the `{degrees}` slot takes
+/// [`format_whole_number`]'s display form verbatim.
+pub fn format_bend_readout(core: &EditorCore, deg: f32) -> String {
     let deg = if deg == 0.0 { 0.0 } else { deg };
-    format!("Bend {}°", format_whole_number(deg))
+    i18n_wire::tr(core, "segment_bend_readout")
+        .replace("{degrees}", &format_whole_number(deg))
 }
 
 /// Straighten the selected node's segment: set its
@@ -630,19 +653,30 @@ pub const ASSET_BUTTON_CAP: usize = 8;
 /// name/content is never touched. A stored asset index
 /// past the end of the table (a stale import, a hand-
 /// edited file) reads as missing rather than panicking
-/// or inventing a name.
-pub fn media_label(media: &Option<SegmentMedia>, assets: &[ImageAsset]) -> String {
+/// or inventing a name. Wave U (U7): each slot state
+/// resolves through its own key (the `segment_media_*`
+/// keys, IA-U7-1) — the conditional-key idiom the
+/// camera `follow_label` uses; the `{name}` / `{content}`
+/// slots take the fitted display copies above as data.
+pub fn media_label(
+    core: &EditorCore,
+    media: &Option<SegmentMedia>,
+    assets: &[ImageAsset],
+) -> String {
     match media {
-        None => "No media attached".to_string(),
+        None => i18n_wire::tr(core, "segment_media_none"),
         Some(SegmentMedia::Image { asset }) => match assets.get(*asset) {
-            Some(a) => format!("Sprite: {}", fit_segment_header_name(&a.name)),
-            None => format!("Sprite: asset {} (missing)", *asset + 1),
+            Some(a) => i18n_wire::tr(core, "segment_media_sprite")
+                .replace("{name}", &fit_segment_header_name(&a.name)),
+            None => i18n_wire::tr(core, "segment_media_sprite_missing")
+                .replace("{index}", &(*asset + 1).to_string()),
         },
         Some(SegmentMedia::Text { content, .. }) => {
             if content.is_empty() {
-                "Text label (empty)".to_string()
+                i18n_wire::tr(core, "segment_media_text_empty")
             } else {
-                format!("Text: {}", fit_segment_header_name(content))
+                i18n_wire::tr(core, "segment_media_text")
+                    .replace("{content}", &fit_segment_header_name(content))
             }
         }
     }
@@ -843,7 +877,7 @@ pub fn segment_state(core: &EditorCore) -> Option<InspectorSegmentState> {
         bend_deg,
         color: node.color,
         shape_label: shape_label(&node.shape),
-        media_label: media_label(&node.media, &core.project.assets),
+        media_label: media_label(core, &node.media, &core.project.assets),
         attached_asset: match &node.media {
             Some(SegmentMedia::Image { asset }) => Some(*asset),
             _ => None,
@@ -883,18 +917,36 @@ pub fn segment_topology(core: &EditorCore) -> Option<(usize, Option<usize>, usiz
 /// mid-tree node, "Node 0 · root · 3 children" for the
 /// origin. The single formatter behind the line, so the
 /// wording lives in exactly one place (and is unit
-/// testable without elements).
-pub fn format_topology(node: usize, parent: Option<usize>, children: usize) -> String {
+/// testable without elements). Wave U (U7): the line
+/// resolves through the `segment_topology` template
+/// key (IA-U7-1) and composes exactly as before — the
+/// `{parent}` slot takes the parent part
+/// (`segment_topology_parent`, or `segment_topology_root`
+/// at the origin) and the `{children}` slot the child
+/// part (`segment_topology_one_child` for exactly one,
+/// `segment_topology_children` otherwise), each
+/// composed from its own key first.
+pub fn format_topology(
+    core: &EditorCore,
+    node: usize,
+    parent: Option<usize>,
+    children: usize,
+) -> String {
     let parent_part = match parent {
-        Some(p) => format!("parent {p}"),
-        None => "root".to_string(),
+        Some(p) => i18n_wire::tr(core, "segment_topology_parent")
+            .replace("{parent}", &p.to_string()),
+        None => i18n_wire::tr(core, "segment_topology_root"),
     };
     let child_part = if children == 1 {
-        "1 child".to_string()
+        i18n_wire::tr(core, "segment_topology_one_child")
     } else {
-        format!("{children} children")
+        i18n_wire::tr(core, "segment_topology_children")
+            .replace("{count}", &children.to_string())
     };
-    format!("Node {node} · {parent_part} · {child_part}")
+    i18n_wire::tr(core, "segment_topology")
+        .replace("{node}", &node.to_string())
+        .replace("{parent}", &parent_part)
+        .replace("{children}", &child_part)
 }
 
 /// The parent of node `ni` in a figure definition, or
@@ -1113,7 +1165,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
     // belt-and-braces, not an expected path.
     if let Some((ni, parent, children)) = segment_topology(&s.core) {
         panel = panel.child(
-            text(format_topology(ni, parent, children))
+            text(format_topology(&s.core, ni, parent, children))
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         );
@@ -1125,7 +1177,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
     // `if let` mirrors the Index line's idiom.
     if let Some(deg) = bend_degrees(&s.core) {
         panel = panel.child(
-            text(format_bend_readout(deg))
+            text(format_bend_readout(&s.core, deg))
                 .key("seg-bend-readout")
                 .font(type_::LABEL)
                 .color(t.text_secondary),
@@ -1617,13 +1669,22 @@ mod tests {
 
     #[test]
     fn format_topology_names_root_parent_and_children() {
-        assert_eq!(format_topology(0, None, 3), "Node 0 · root · 3 children");
+        // Wave U (U7): the formatter composes through
+        // the `segment_topology*` template keys, so —
+        // like the i18n pin below — this resolves only
+        // once IA-U7-1 lands (until then `tr` falls back
+        // to the key itself; the Q7 pattern).
+        let core = EditorCore::new();
         assert_eq!(
-            format_topology(3, Some(1), 1),
+            format_topology(&core, 0, None, 3),
+            "Node 0 · root · 3 children"
+        );
+        assert_eq!(
+            format_topology(&core, 3, Some(1), 1),
             "Node 3 · parent 1 · 1 child"
         );
         assert_eq!(
-            format_topology(2, Some(1), 0),
+            format_topology(&core, 2, Some(1), 0),
             "Node 2 · parent 1 · 0 children"
         );
     }
@@ -1900,11 +1961,14 @@ mod tests {
 
     #[test]
     fn format_bend_readout_shows_whole_degrees_with_sign() {
-        assert_eq!(format_bend_readout(0.0), "Bend 0°");
-        assert_eq!(format_bend_readout(-0.0), "Bend 0°");
-        assert_eq!(format_bend_readout(20.053_523), "Bend 20°");
-        assert_eq!(format_bend_readout(-20.053_523), "Bend -20°");
-        assert_eq!(format_bend_readout(40.107_046), "Bend 40°");
+        // Wave U (U7): IA-U7-1-dependent, like the
+        // format_topology test above.
+        let core = EditorCore::new();
+        assert_eq!(format_bend_readout(&core, 0.0), "Bend 0°");
+        assert_eq!(format_bend_readout(&core, -0.0), "Bend 0°");
+        assert_eq!(format_bend_readout(&core, 20.053_523), "Bend 20°");
+        assert_eq!(format_bend_readout(&core, -20.053_523), "Bend -20°");
+        assert_eq!(format_bend_readout(&core, 40.107_046), "Bend 40°");
     }
 
     #[test]
@@ -1922,12 +1986,16 @@ mod tests {
         assert_eq!(format_whole_number(f32::NAN), "NaN");
         assert_eq!(format_deg_display(40.107_046), "40.1°");
         assert_eq!(format_deg_display(1e20), "1.0e20°");
-        assert_eq!(format_bend_readout(1e20), "Bend 1.0e20°");
-        assert_eq!(format_bend_readout(-1e20), "Bend -1.0e20°");
+        // The readout lines compose through the Wave U
+        // (U7) template key: IA-U7-1-dependent, like the
+        // format_bend_readout test above.
+        let core = EditorCore::new();
+        assert_eq!(format_bend_readout(&core, 1e20), "Bend 1.0e20°");
+        assert_eq!(format_bend_readout(&core, -1e20), "Bend -1.0e20°");
         for s in [
             format_whole_number(1e30),
             format_deg_display(-1e30),
-            format_bend_readout(1e30),
+            format_bend_readout(&core, 1e30),
         ] {
             assert!(
                 s.chars().count() <= DISPLAY_NUMBER_MAX_CHARS + 5,
@@ -2347,21 +2415,26 @@ playback_speed: 1.0,
 
     #[test]
     fn media_label_names_each_slot_state() {
+        // Wave U (U7): each slot state composes through
+        // its own `segment_media_*` key, so this is
+        // IA-U7-1-dependent, like the i18n pin below.
+        let core = EditorCore::new();
         let assets = vec![asset("hero.png"), asset("cape.png")];
-        assert_eq!(media_label(&None, &assets), "No media attached");
+        assert_eq!(media_label(&core, &None, &assets), "No media attached");
         assert_eq!(
-            media_label(&Some(SegmentMedia::Image { asset: 1 }), &assets),
+            media_label(&core, &Some(SegmentMedia::Image { asset: 1 }), &assets),
             "Sprite: cape.png"
         );
         // A stored index past the table reads as
         // missing — never a panic, never an invented
         // name.
         assert_eq!(
-            media_label(&Some(SegmentMedia::Image { asset: 7 }), &assets),
+            media_label(&core, &Some(SegmentMedia::Image { asset: 7 }), &assets),
             "Sprite: asset 8 (missing)"
         );
         assert_eq!(
             media_label(
+                &core,
                 &Some(SegmentMedia::Text {
                     content: "Hello".into(),
                     size: 14.0
@@ -2372,6 +2445,7 @@ playback_speed: 1.0,
         );
         assert_eq!(
             media_label(
+                &core,
                 &Some(SegmentMedia::Text {
                     content: String::new(),
                     size: 14.0
@@ -2398,6 +2472,10 @@ playback_speed: 1.0,
 
     #[test]
     fn segment_state_carries_the_media_surface() {
+        // The readout strings compose through the Wave
+        // U (U7) `segment_media_*` keys —
+        // IA-U7-1-dependent, like the media_label test
+        // above.
         // Fresh: no assets, no media.
         let core = core_with_selection(Some(1));
         let st = segment_state(&core).unwrap();
@@ -2418,6 +2496,8 @@ playback_speed: 1.0,
 
     #[test]
     fn segment_state_rereads_external_media_edits() {
+        // The readout strings are IA-U7-1-dependent,
+        // like the test above.
         // An MCP attach / clear writes the same model
         // fields; the panel holds no cache, so the next
         // `segment_state` call reports the new media.
@@ -2556,6 +2636,13 @@ playback_speed: 1.0,
         // one template: the pin holds its stored form,
         // placeholders intact (the camera
         // `camera_following_figure` precedent).
+        //
+        // Wave U (U7) extends the pin with the composed
+        // readouts' keys: the last eleven pairs below
+        // land via IA-U7-1, so the pin as a whole passes
+        // only once that IA lands too. Templates are
+        // asserted in their stored form, placeholders
+        // intact, like `segment_title_node`.
         let core = EditorCore::new();
         for (key, english) in [
             ("segment_title", "Segment"),
@@ -2583,6 +2670,24 @@ playback_speed: 1.0,
             ("segment_clear_media", "Clear media"),
             ("segment_add", "+ Segment"),
             ("segment_delete", "Delete segment"),
+            // Wave U (U7) readout keys — IA-U7-1.
+            (
+                "segment_topology",
+                "Node {node} · {parent} · {children}",
+            ),
+            ("segment_topology_parent", "parent {parent}"),
+            ("segment_topology_root", "root"),
+            ("segment_topology_one_child", "1 child"),
+            ("segment_topology_children", "{count} children"),
+            ("segment_bend_readout", "Bend {degrees}°"),
+            ("segment_media_none", "No media attached"),
+            ("segment_media_sprite", "Sprite: {name}"),
+            (
+                "segment_media_sprite_missing",
+                "Sprite: asset {index} (missing)",
+            ),
+            ("segment_media_text", "Text: {content}"),
+            ("segment_media_text_empty", "Text label (empty)"),
         ] {
             assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
             assert_eq!(i18n_wire::tr(&core, key), english);

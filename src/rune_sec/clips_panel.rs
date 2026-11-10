@@ -209,6 +209,31 @@
 //! the same match, and the session section offers only
 //! Exit — never the mutating frame controls — while the
 //! session is stale or its clip is gone.
+//!
+//! Wave U (full i18n): every label and composed readout
+//! in this panel resolves through `i18n_wire::tr` (the
+//! subtitle/camera/3D idiom) — the title, the clip-count
+//! meta, the header actions, the empty state, the row's
+//! "Editing" marker and loop-mode words, the six row
+//! actions' help labels, the rename row (placeholder,
+//! Apply, Cancel), the loop-mode caption, hint and
+//! segmented words, the session section's buttons and
+//! hint, and the composed readouts themselves: the row's
+//! span · usage line, `span_text`, `usage_text` and all
+//! four `session_label` shapes resolve from `clips_*`
+//! keys (IA-U2-1), the readouts as `{slot}` templates
+//! substituted with `.replace()` at the composing site
+//! (the camera `follow_label` precedent). English is
+//! byte-identical; the pin is
+//! `clips_i18n_keys_exist_and_match_the_english_labels`.
+//! The keys land via IA-U2-1. Status sentences stay
+//! English by design — they are handler feedback on
+//! `core.status` ("No such clip.", "Clip changed while
+//! renaming — rename cancelled."), not labels. Clip and
+//! figure NAMES inside the readouts are user data carried
+//! through the `{name}` / `{names}` slots, never
+//! translated; the `", "` name join inside `usage_text`
+//! is data punctuation, kept literal.
 
 use std::cell::RefCell;
 
@@ -219,6 +244,7 @@ use stykanimate_rs::model::{ClipDef, ClipLoop, FigureInstance};
 
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
 use crate::rune_sec::icons;
 use crate::State;
@@ -323,12 +349,16 @@ pub fn clip_selection() -> Option<usize> {
 }
 
 /// Display label for a clip loop mode (the GPUI panel's
-/// wording: "Loop" / "Ping-pong" / "Once").
-pub fn loop_label(mode: ClipLoop) -> &'static str {
+/// wording: "Loop" / "Ping-pong" / "Once") — resolved
+/// through the `clips_loop*` keys (Wave U, IA-U2-1); the
+/// loop-mode segmented control's buttons share the keys.
+/// These are display words only: `ClipLoop` serialises
+/// as its enum variants, never as these strings.
+pub fn loop_label(core: &EditorCore, mode: ClipLoop) -> String {
     match mode {
-        ClipLoop::Loop => "Loop",
-        ClipLoop::PingPong => "Ping-pong",
-        ClipLoop::Once => "Once",
+        ClipLoop::Loop => i18n_wire::tr(core, "clips_loop"),
+        ClipLoop::PingPong => i18n_wire::tr(core, "clips_loop_pingpong"),
+        ClipLoop::Once => i18n_wire::tr(core, "clips_loop_once"),
     }
 }
 
@@ -726,27 +756,31 @@ pub fn is_editing(core: &EditorCore, index: usize) -> bool {
 pub fn session_label(core: &EditorCore) -> Option<String> {
     let session = core.clip_edit.as_ref()?;
     let Some(clip) = core.project.clips.get(session.clip) else {
-        return Some(format!(
-            "Editing clip {} · clip no longer exists",
-            session.clip + 1
-        ));
+        return Some(
+            i18n_wire::tr(core, "clips_session_gone")
+                .replace("{index}", &(session.clip + 1).to_string()),
+        );
     };
     if clip.name != session.name {
-        return Some(format!(
-            "Editing {} · clip changed — exit and re-enter",
-            session.name
-        ));
+        return Some(
+            i18n_wire::tr(core, "clips_session_stale")
+                .replace("{name}", &session.name),
+        );
     }
     if clip.frames.is_empty() {
-        return Some(format!("Editing {} · no frames", clip.name));
+        return Some(
+            i18n_wire::tr(core, "clips_session_no_frames")
+                .replace("{name}", &clip.name),
+        );
     }
     let frames = clip.frames.len();
     let frame = session.frame.min(frames.saturating_sub(1));
-    Some(format!(
-        "Editing {} · frame {} of {frames}",
-        clip.name,
-        frame + 1
-    ))
+    Some(
+        i18n_wire::tr(core, "clips_session_frame")
+            .replace("{name}", &clip.name)
+            .replace("{frame}", &(frame + 1).to_string())
+            .replace("{total}", &frames.to_string()),
+    )
 }
 
 /// Enter the editing session for the panel-selected clip
@@ -783,27 +817,33 @@ pub fn session_next(core: &mut EditorCore) {
 }
 
 /// The clip's frame span as shown in its list row: a clip
-/// always spans its own frames 1..=len.
-pub fn span_text(clip: &ClipDef) -> String {
+/// always spans its own frames 1..=len. Resolved through
+/// the `clips_span*` keys (Wave U, IA-U2-1), the many
+/// shape as the `{end}` / `{count}` template.
+pub fn span_text(core: &EditorCore, clip: &ClipDef) -> String {
     match clip.frames.len() {
-        0 => "no frames".to_string(),
-        1 => "frame 1 · 1 frame".to_string(),
-        n => format!("frames 1-{n} · {n} frames"),
+        0 => i18n_wire::tr(core, "clips_span_none"),
+        1 => i18n_wire::tr(core, "clips_span_one"),
+        n => i18n_wire::tr(core, "clips_span_many")
+            .replace("{end}", &n.to_string())
+            .replace("{count}", &n.to_string()),
     }
 }
 
 /// Which figures play clip `clip_idx` (the GPUI row's usage
-/// text).
-pub fn usage_text(figures: &[FigureInstance], clip_idx: usize) -> String {
+/// text). Resolved through the `clips_usage*` keys (Wave
+/// U, IA-U2-1); the names are user data carried through
+/// the `{names}` slot, joined with the literal `", "`.
+pub fn usage_text(core: &EditorCore, figures: &[FigureInstance], clip_idx: usize) -> String {
     let names: Vec<&str> = figures
         .iter()
         .filter(|f| f.clip == Some(clip_idx))
         .map(|f| f.name.as_str())
         .collect();
     if names.is_empty() {
-        "not used by any figure".to_string()
+        i18n_wire::tr(core, "clips_usage_none")
     } else {
-        format!("used by {}", names.join(", "))
+        i18n_wire::tr(core, "clips_usage_some").replace("{names}", &names.join(", "))
     }
 }
 
@@ -851,13 +891,13 @@ fn clip_row(s: &State, t: &Theme, index: usize, selected: bool) -> El {
         );
     if is_editing(core, index) {
         name_line = name_line.child(
-            text("Editing")
+            text(i18n_wire::tr(core, "clips_editing"))
                 .font(type_::LABEL)
                 .color(crate::rune_sec::app_theme::accent(t)),
         );
     }
     name_line = name_line.child(
-        text(loop_label(clip.loop_mode))
+        text(loop_label(core, clip.loop_mode))
             .font(type_::LABEL)
             .color(t.text_secondary),
     );
@@ -872,11 +912,14 @@ fn clip_row(s: &State, t: &Theme, index: usize, selected: bool) -> El {
                 .gap(4.0)
                 .child(name_line)
                 .child(
-                    text(format!(
-                        "{} · {}",
-                        span_text(clip),
-                        usage_text(&core.project.figures, index)
-                    ))
+                    text(
+                        i18n_wire::tr(core, "clips_row_detail")
+                            .replace("{span}", &span_text(core, clip))
+                            .replace(
+                                "{usage}",
+                                &usage_text(core, &core.project.figures, index),
+                            ),
+                    )
                     .font(type_::LABEL)
                     .color(t.text_secondary)
                     .wrap()
@@ -888,7 +931,7 @@ fn clip_row(s: &State, t: &Theme, index: usize, selected: bool) -> El {
                         .child(icon_only_btn(
                             &format!("clip-dup-{index}"),
                             "copy",
-                            "Duplicate",
+                            &i18n_wire::tr(core, "clips_duplicate"),
                             26.0,
                             false,
                             t,
@@ -901,7 +944,7 @@ fn clip_row(s: &State, t: &Theme, index: usize, selected: bool) -> El {
                         .child(icon_only_btn(
                             &format!("clip-rename-{index}"),
                             "pencil",
-                            "Rename",
+                            &i18n_wire::tr(core, "clips_rename"),
                             26.0,
                             false,
                             t,
@@ -913,7 +956,7 @@ fn clip_row(s: &State, t: &Theme, index: usize, selected: bool) -> El {
                         .child(icon_only_btn(
                             &format!("clip-insert-{index}"),
                             "plus",
-                            "Insert",
+                            &i18n_wire::tr(core, "clips_insert"),
                             26.0,
                             false,
                             t,
@@ -924,7 +967,7 @@ fn clip_row(s: &State, t: &Theme, index: usize, selected: bool) -> El {
                         .child(icon_only_btn(
                             &format!("clip-up-{index}"),
                             "chevron-up",
-                            "Move up",
+                            &i18n_wire::tr(core, "clips_move_up"),
                             26.0,
                             false,
                             t,
@@ -935,7 +978,7 @@ fn clip_row(s: &State, t: &Theme, index: usize, selected: bool) -> El {
                         .child(icon_only_btn(
                             &format!("clip-dn-{index}"),
                             "chevron-down",
-                            "Move down",
+                            &i18n_wire::tr(core, "clips_move_down"),
                             26.0,
                             false,
                             t,
@@ -946,7 +989,7 @@ fn clip_row(s: &State, t: &Theme, index: usize, selected: bool) -> El {
                         .child(icon_only_btn(
                             &format!("clip-del-{index}"),
                             "trash-can",
-                            "Delete",
+                            &i18n_wire::tr(core, "clips_delete"),
                             26.0,
                             false,
                             t,
@@ -984,14 +1027,17 @@ fn rename_row(s: &State, t: &Theme) -> El {
                 .single_line()
                 .grow(1.0)
                 .color(t.text)
-                .placeholder("Clip name", t.text_secondary)
+                .placeholder(
+                    &i18n_wire::tr(&s.core, "clips_rename_placeholder"),
+                    t.text_secondary,
+                )
                 .on_edit(|s: &mut State| &mut s.clips_rename.field)
                 .on_submit(|s: &mut State, _tx: &mut Tx| apply_rename(s)),
         )
         .child(icon_btn(
             "clip-rename-apply",
             "check",
-            "Apply",
+            &i18n_wire::tr(&s.core, "clips_apply"),
             false,
             t,
             |s: &mut State| apply_rename(s),
@@ -999,7 +1045,7 @@ fn rename_row(s: &State, t: &Theme) -> El {
         .child(icon_btn(
             "clip-rename-cancel",
             "xmark",
-            "Cancel",
+            &i18n_wire::tr(&s.core, "clips_cancel"),
             false,
             t,
             |s: &mut State| {
@@ -1026,7 +1072,7 @@ fn rename_row(s: &State, t: &Theme) -> El {
 fn loop_mode_row(s: &State, t: &Theme, selected: Option<usize>) -> El {
     let Some(index) = selected else {
         return row().key("clip-loop-mode").w_full().child(
-            text("Select a clip to set its loop mode.")
+            text(i18n_wire::tr(&s.core, "clips_loop_hint"))
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         );
@@ -1037,10 +1083,13 @@ fn loop_mode_row(s: &State, t: &Theme, selected: Option<usize>) -> El {
         .w_full()
         .gap(8.0)
         .center_y()
-        .child(design::section_label("Loop mode:", t))
+        .child(design::section_label(
+            &i18n_wire::tr(&s.core, "clips_loop_mode"),
+            t,
+        ))
         .child(btn(
             "clip-loop-loop",
-            "Loop",
+            &i18n_wire::tr(&s.core, "clips_loop"),
             mode == ClipLoop::Loop,
             t,
             |s: &mut State| {
@@ -1051,7 +1100,7 @@ fn loop_mode_row(s: &State, t: &Theme, selected: Option<usize>) -> El {
         ))
         .child(btn(
             "clip-loop-pingpong",
-            "Ping-pong",
+            &i18n_wire::tr(&s.core, "clips_loop_pingpong"),
             mode == ClipLoop::PingPong,
             t,
             |s: &mut State| {
@@ -1062,7 +1111,7 @@ fn loop_mode_row(s: &State, t: &Theme, selected: Option<usize>) -> El {
         ))
         .child(btn(
             "clip-loop-once",
-            "Once",
+            &i18n_wire::tr(&s.core, "clips_loop_once"),
             mode == ClipLoop::Once,
             t,
             |s: &mut State| {
@@ -1115,21 +1164,33 @@ fn clip_edit_section(s: &State, t: &Theme) -> El {
             // section docs. The frame controls stay
             // unmounted rather than inert, matching the
             // shell's no-dead-controls rule.
-            return section.child(btn("clip-edit-exit", "Exit", false, t, |s: &mut State| {
-                s.core.exit_clip()
-            }));
+            return section.child(btn(
+                "clip-edit-exit",
+                &i18n_wire::tr(&s.core, "clips_exit"),
+                false,
+                t,
+                |s: &mut State| s.core.exit_clip(),
+            ));
         }
         return section
             .child(
                 row()
                     .w_full()
                     .gap(8.0)
-                    .child(btn("clip-edit-prev", "Prev frame", false, t, |s: &mut State| {
-                        session_prev(&mut s.core)
-                    }))
-                    .child(btn("clip-edit-next", "Next frame", false, t, |s: &mut State| {
-                        session_next(&mut s.core)
-                    })),
+                    .child(btn(
+                        "clip-edit-prev",
+                        &i18n_wire::tr(&s.core, "clips_prev_frame"),
+                        false,
+                        t,
+                        |s: &mut State| session_prev(&mut s.core),
+                    ))
+                    .child(btn(
+                        "clip-edit-next",
+                        &i18n_wire::tr(&s.core, "clips_next_frame"),
+                        false,
+                        t,
+                        |s: &mut State| session_next(&mut s.core),
+                    )),
             )
             .child(
                 row()
@@ -1137,22 +1198,26 @@ fn clip_edit_section(s: &State, t: &Theme) -> El {
                     .gap(8.0)
                     .child(btn(
                         "clip-edit-add-frame",
-                        "Add frame",
+                        &i18n_wire::tr(&s.core, "clips_add_frame"),
                         false,
                         t,
                         |s: &mut State| s.core.clip_add_frame(),
                     ))
                     .child(btn(
                         "clip-edit-delete-frame",
-                        "Delete frame",
+                        &i18n_wire::tr(&s.core, "clips_delete_frame"),
                         false,
                         t,
                         |s: &mut State| s.core.clip_delete_frame(),
                     )),
             )
-            .child(btn("clip-edit-exit", "Exit", false, t, |s: &mut State| {
-                s.core.exit_clip()
-            }));
+            .child(btn(
+                "clip-edit-exit",
+                &i18n_wire::tr(&s.core, "clips_exit"),
+                false,
+                t,
+                |s: &mut State| s.core.exit_clip(),
+            ));
     }
     let section = col().key("clip-edit-section").w_full().gap(6.0);
     if core.project.clips.is_empty() {
@@ -1161,7 +1226,7 @@ fn clip_edit_section(s: &State, t: &Theme) -> El {
     match panel_state().clamped(core.project.clips.len()) {
         Some(_) => section.child(btn(
             "clip-edit-enter",
-            "Edit clip",
+            &i18n_wire::tr(&s.core, "clips_edit_clip"),
             false,
             t,
             |s: &mut State| {
@@ -1169,7 +1234,7 @@ fn clip_edit_section(s: &State, t: &Theme) -> El {
             },
         )),
         None => section.child(
-            text("Select a clip to edit its frames.")
+            text(i18n_wire::tr(&s.core, "clips_edit_hint"))
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         ),
@@ -1188,6 +1253,8 @@ pub fn clips_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let clips = &core.project.clips;
     let selected = panel_state().clamped(clips.len());
+    let count = i18n_wire::tr(core, "clips_count")
+        .replace("{count}", &clips.len().to_string());
     let mut panel = design::panel_col("clips-panel", t)
         .child(
             row()
@@ -1196,8 +1263,8 @@ pub fn clips_panel(s: &State, t: &Theme) -> El {
                 .center_y()
                 .child(design::panel_title(
                     Some("film"),
-                    "Movieclips",
-                    Some(&format!("{} clip(s)", clips.len())),
+                    &i18n_wire::tr(core, "clips_title"),
+                    Some(&count),
                     t,
                 )),
         )
@@ -1206,18 +1273,26 @@ pub fn clips_panel(s: &State, t: &Theme) -> El {
             row()
                 .w_full()
                 .gap(8.0)
-                .child(btn("make-clip", "Make clip", false, t, |s| {
-                    s.core.make_clip_from_figure()
-                }))
-                .child(btn("insert-clip", "Insert clip", false, t, |s| {
-                    s.core.insert_clip_figure()
-                })),
+                .child(btn(
+                    "make-clip",
+                    &i18n_wire::tr(core, "clips_make"),
+                    false,
+                    t,
+                    |s| s.core.make_clip_from_figure(),
+                ))
+                .child(btn(
+                    "insert-clip",
+                    &i18n_wire::tr(core, "clips_insert_clip"),
+                    false,
+                    t,
+                    |s| s.core.insert_clip_figure(),
+                )),
         );
     if clips.is_empty() {
         return panel
             .child(design::empty_state(
                 "film",
-                "No movieclips in this project. \"Make clip\" builds one from the selected figure.",
+                &i18n_wire::tr(core, "clips_empty"),
                 t,
             ))
             .child(clip_edit_section(s, t));
@@ -1249,9 +1324,10 @@ mod tests {
 
     #[test]
     fn loop_label_covers_all_modes() {
-        assert_eq!(loop_label(ClipLoop::Loop), "Loop");
-        assert_eq!(loop_label(ClipLoop::PingPong), "Ping-pong");
-        assert_eq!(loop_label(ClipLoop::Once), "Once");
+        let core = EditorCore::new();
+        assert_eq!(loop_label(&core, ClipLoop::Loop), "Loop");
+        assert_eq!(loop_label(&core, ClipLoop::PingPong), "Ping-pong");
+        assert_eq!(loop_label(&core, ClipLoop::Once), "Once");
     }
 
     #[test]
@@ -1270,22 +1346,29 @@ mod tests {
 
     #[test]
     fn span_text_zero_one_many() {
-        assert_eq!(span_text(&clip_with_frames(0)), "no frames");
-        assert_eq!(span_text(&clip_with_frames(1)), "frame 1 · 1 frame");
-        assert_eq!(span_text(&clip_with_frames(5)), "frames 1-5 · 5 frames");
+        let core = EditorCore::new();
+        assert_eq!(span_text(&core, &clip_with_frames(0)), "no frames");
+        assert_eq!(span_text(&core, &clip_with_frames(1)), "frame 1 · 1 frame");
+        assert_eq!(span_text(&core, &clip_with_frames(5)), "frames 1-5 · 5 frames");
     }
 
     #[test]
     fn usage_text_used_and_unused() {
         let mut core = EditorCore::new();
         // No figure plays clip 99 (or any clip) yet.
-        assert_eq!(usage_text(&core.project.figures, 99), "not used by any figure");
+        assert_eq!(
+            usage_text(&core, &core.project.figures, 99),
+            "not used by any figure"
+        );
         let fig_name = core.project.figures[core.selected_figure].name.clone();
         core.make_clip_from_figure();
-        let used = usage_text(&core.project.figures, 0);
+        let used = usage_text(&core, &core.project.figures, 0);
         assert!(used.starts_with("used by "), "unexpected usage: {used}");
         assert!(used.contains(&fig_name), "usage misses figure: {used}");
-        assert_eq!(usage_text(&core.project.figures, 99), "not used by any figure");
+        assert_eq!(
+            usage_text(&core, &core.project.figures, 99),
+            "not used by any figure"
+        );
     }
 
     #[test]
@@ -2293,5 +2376,80 @@ playback_speed: 1.0,
         let _ = clips_panel(&state, &t);
         state.core.exit_clip();
         let _ = clips_panel(&state, &t);
+    }
+
+    #[test]
+    fn clips_i18n_keys_exist_and_match_the_english_labels() {
+        // Wave U (U2): every label and composed readout
+        // the panel wires through `i18n_wire::tr` must
+        // resolve to exactly the English string the panel
+        // rendered before the wiring; template keys are
+        // asserted in stored form (slots intact). The
+        // keys land via IA-U2-1 (the integrator appends
+        // them to all 28 tables after the last Wave T
+        // block), so this pin passes only once that IA
+        // lands — until then `tr` falls back to the key
+        // itself and `key_in_table` is false (the Q7
+        // pattern: wiring and keys land together at
+        // integration). The composed readouts' substituted
+        // forms stay pinned by the pre-existing tests
+        // (`span_text_zero_one_many`,
+        // `usage_text_used_and_unused`, the session-label
+        // tests), which become IA-dependent the same way.
+        let core = EditorCore::new();
+        for (key, english) in [
+            ("clips_title", "Movieclips"),
+            ("clips_count", "{count} clip(s)"),
+            ("clips_make", "Make clip"),
+            ("clips_insert_clip", "Insert clip"),
+            (
+                "clips_empty",
+                "No movieclips in this project. \"Make clip\" builds one from the selected figure.",
+            ),
+            ("clips_editing", "Editing"),
+            ("clips_loop", "Loop"),
+            ("clips_loop_pingpong", "Ping-pong"),
+            ("clips_loop_once", "Once"),
+            ("clips_duplicate", "Duplicate"),
+            ("clips_rename", "Rename"),
+            ("clips_insert", "Insert"),
+            ("clips_move_up", "Move up"),
+            ("clips_move_down", "Move down"),
+            ("clips_delete", "Delete"),
+            ("clips_row_detail", "{span} · {usage}"),
+            ("clips_span_none", "no frames"),
+            ("clips_span_one", "frame 1 · 1 frame"),
+            ("clips_span_many", "frames 1-{end} · {count} frames"),
+            ("clips_usage_none", "not used by any figure"),
+            ("clips_usage_some", "used by {names}"),
+            ("clips_rename_placeholder", "Clip name"),
+            ("clips_apply", "Apply"),
+            ("clips_cancel", "Cancel"),
+            ("clips_loop_mode", "Loop mode:"),
+            ("clips_loop_hint", "Select a clip to set its loop mode."),
+            (
+                "clips_session_gone",
+                "Editing clip {index} · clip no longer exists",
+            ),
+            (
+                "clips_session_stale",
+                "Editing {name} · clip changed — exit and re-enter",
+            ),
+            ("clips_session_no_frames", "Editing {name} · no frames"),
+            (
+                "clips_session_frame",
+                "Editing {name} · frame {frame} of {total}",
+            ),
+            ("clips_prev_frame", "Prev frame"),
+            ("clips_next_frame", "Next frame"),
+            ("clips_add_frame", "Add frame"),
+            ("clips_delete_frame", "Delete frame"),
+            ("clips_exit", "Exit"),
+            ("clips_edit_clip", "Edit clip"),
+            ("clips_edit_hint", "Select a clip to edit its frames."),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
     }
 }

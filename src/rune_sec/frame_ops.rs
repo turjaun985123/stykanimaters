@@ -124,10 +124,22 @@
 //! through `i18n_wire::tr` under the `frame_*` keys
 //! (IA-T3-1) — the buttons, the group headings, the
 //! panel title and the "This frame" / "Insert" row
-//! labels, English byte-identical. Status sentences,
-//! the Sel/Loop and duration readouts, and pure
-//! notation (×0.5 / ×2, the − / + steppers) stay
-//! literal, as in the subtitle/camera/3D panels.
+//! labels, English byte-identical. Status sentences
+//! and pure notation (×0.5 / ×2, the − / + steppers)
+//! stay literal, as in the subtitle/camera/3D panels.
+//!
+//! Wave U (U6): the composed readouts the Wave T pass
+//! left behind now resolve through `{slot}` template
+//! keys (IA-U6-1), substituted with `.replace()` at
+//! the composing site (the camera `follow_label`
+//! precedent) — the Sel/Loop range readout
+//! (`frame_sel_*` / `frame_loop_*`), the duration
+//! multiplier (`frame_duration_value`) and the
+//! Insert-N count (`frame_insert_count`), English
+//! byte-identical. Status sentences and the remaining
+//! notation (the `—` no-frame marker, the two-decimal
+//! number format inside the duration slot) stay
+//! literal.
 
 use rune::tok::{type_, Theme};
 use rune::{row, text, El};
@@ -334,8 +346,14 @@ pub fn clamp_duration(d: f32) -> f32 {
 
 /// Format a duration multiplier for a readout, e.g. `1.00×`.
 /// The single format source for every duration label here.
-pub fn format_duration(d: f32) -> String {
-    format!("{d:.2}×")
+/// Wave U (U6): the readout resolves through the
+/// `frame_duration_value` template (`{value}×`) — the
+/// two-decimal number is the `{value}` slot, formatted
+/// here, and the `×` rides in the template so a locale
+/// can place it differently. English byte-identical
+/// once IA-U6-1 lands.
+pub fn format_duration(core: &EditorCore, d: f32) -> String {
+    i18n_wire::tr(core, "frame_duration_value").replace("{value}", &format!("{d:.2}"))
 }
 
 /// The current frame's hold-time multiplier, if there is a
@@ -358,7 +376,7 @@ pub fn can_duration_up(core: &EditorCore) -> bool {
 /// (`model::Frame::duration` is a hold-time multiplier).
 pub fn duration_label(core: &EditorCore) -> String {
     match duration_here(core) {
-        Some(d) => format_duration(d),
+        Some(d) => format_duration(core, d),
         None => "—".to_string(),
     }
 }
@@ -559,18 +577,29 @@ pub fn insert_frames_after_current(core: &mut EditorCore, count: usize) -> usize
 /// when neither exists (range ops then fall back per their own
 /// rules — see [`copy_range_args`] and [`reverse_args`]).
 pub fn range_label(core: &EditorCore, ops: &FrameOpsState) -> Option<String> {
+    // Wave U (U6): the readout resolves through the
+    // `frame_sel_*` / `frame_loop_*` template keys
+    // (IA-U6-1), slots replaced here at the composing
+    // site — the single-frame and range forms are
+    // separate keys, as their shapes differ (`Sel 3`
+    // vs `Sel 3–5`). English byte-identical once the
+    // IA lands.
     if let Some((lo, hi)) = selected_range(core, ops) {
         return Some(if lo == hi {
-            format!("Sel {}", lo + 1)
+            i18n_wire::tr(core, "frame_sel_one").replace("{frame}", &(lo + 1).to_string())
         } else {
-            format!("Sel {}–{}", lo + 1, hi + 1)
+            i18n_wire::tr(core, "frame_sel_range")
+                .replace("{from}", &(lo + 1).to_string())
+                .replace("{to}", &(hi + 1).to_string())
         });
     }
     if let Some((a, b)) = core.loop_range {
         return Some(if a == b {
-            format!("Loop {}", a + 1)
+            i18n_wire::tr(core, "frame_loop_one").replace("{frame}", &(a + 1).to_string())
         } else {
-            format!("Loop {}–{}", a + 1, b + 1)
+            i18n_wire::tr(core, "frame_loop_range")
+                .replace("{from}", &(a + 1).to_string())
+                .replace("{to}", &(b + 1).to_string())
         });
     }
     None
@@ -916,7 +945,8 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
             }
         })
         .child(design::stepper_value(
-            &format!("{} frames", clamp_insert_count(ops.insert_count)),
+            &i18n_wire::tr(core, "frame_insert_count")
+                .replace("{count}", &clamp_insert_count(ops.insert_count).to_string()),
             t,
         ))
         .child({
@@ -1121,13 +1151,19 @@ mod tests {
 
     #[test]
     fn format_duration_is_two_decimals_with_a_times_sign() {
-        assert_eq!(format_duration(1.0), "1.00×");
-        assert_eq!(format_duration(0.25), "0.25×");
-        assert_eq!(format_duration(2.5), "2.50×");
-        assert_eq!(format_duration(8.0), "8.00×");
-        // duration_label routes through the same format.
+        // Wave U (U6): format_duration resolves through
+        // the `frame_duration_value` template, so — like
+        // the i18n pin below — these asserts pass only
+        // once IA-U6-1's keys land at integration (until
+        // then `tr` falls back to the key itself, the Q7
+        // pattern).
         let core = EditorCore::new();
-        assert_eq!(duration_label(&core), format_duration(1.0));
+        assert_eq!(format_duration(&core, 1.0), "1.00×");
+        assert_eq!(format_duration(&core, 0.25), "0.25×");
+        assert_eq!(format_duration(&core, 2.5), "2.50×");
+        assert_eq!(format_duration(&core, 8.0), "8.00×");
+        // duration_label routes through the same format.
+        assert_eq!(duration_label(&core), format_duration(&core, 1.0));
     }
 
     #[test]
@@ -1632,5 +1668,41 @@ mod tests {
             assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
             assert_eq!(i18n_wire::tr(&core, key), english);
         }
+        // Wave U (U6, IA-U6-1): the composed readouts —
+        // the Sel/Loop range readout, the duration
+        // multiplier and the Insert-N count — resolve
+        // through `{slot}` template keys, pinned here in
+        // their stored form, slots intact (the camera
+        // `camera_following_figure` precedent). This
+        // section passes only once IA-U6-1 lands, like
+        // the label half above.
+        for (key, template) in [
+            ("frame_sel_one", "Sel {frame}"),
+            ("frame_sel_range", "Sel {from}–{to}"),
+            ("frame_loop_one", "Loop {frame}"),
+            ("frame_loop_range", "Loop {from}–{to}"),
+            ("frame_duration_value", "{value}×"),
+            ("frame_insert_count", "{count} frames"),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), template);
+        }
+        // Composed spot checks through the public
+        // helpers: the exact pre-wire sentences. (The
+        // Insert-N count composes inline in
+        // `frames_section` — the audio header-count
+        // idiom — so it is pinned by its stored
+        // template above.)
+        let mut core = EditorCore::new();
+        core.set_loop_range(1, 3);
+        assert_eq!(
+            range_label(&core, &FrameOpsState::default()),
+            Some("Loop 2–4".to_string())
+        );
+        assert_eq!(
+            range_label(&core, &ops_with_sel(0, 0)),
+            Some("Sel 1".to_string())
+        );
+        assert_eq!(duration_label(&core), "1.00×");
     }
 }

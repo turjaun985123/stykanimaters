@@ -73,6 +73,26 @@
 //! Reopen resolved it). Cap (5 of the writer's 10),
 //! order, dedup (the writer's job, shell.rs) and the
 //! empty state audited clean; no keys added or changed.
+//! Wave U (U3, menus i18n): every menu-bar trigger and
+//! dropdown label now resolves through `i18n_wire::tr`
+//! under a `menu_*` key (the subtitle/camera/3D idiom;
+//! keys via IA-U3-1, English byte-identical once they
+//! land). That includes Edit ▸ Mute/Unmute audio clip —
+//! Wave T's label pass (T2) excluded the menus' own
+//! mute labels because it did not own this file;
+//! [`mute_item_parts`] now builds its label with `tr`
+//! on the core IA-T2-2 already threaded into it, so its
+//! return carries a `String` label. Not wired, by
+//! design: the Open recent entries' labels are the
+//! projects' own display names (user data, not UI
+//! copy); the shortcut hints (`shortcut_hint`'s
+//! "Ctrl+S" …) are key-chord notation, locale-invariant
+//! like the stepper glyphs (the R6 precedent), and no
+//! code parses them; and `open_recent`'s "Recent
+//! project not found: …" is a handler status sentence,
+//! not a label — status sentences stay English in the
+//! label passes (the T2/T20 discipline), and this one
+//! is pinned verbatim by a test below.
 //! Declared from `main.rs` by the integrator; bin-crate
 //! code, not part of the engine library.
 //!
@@ -150,6 +170,7 @@ use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, Align, Color, El, Side, Transition};
 
 use crate::chrome_view::btn;
+use crate::rune_sec::i18n_wire;
 use crate::State;
 
 /// Menu indices in [`MenusState::open`] — the same numbering
@@ -159,13 +180,25 @@ pub const EDIT: usize = 1;
 pub const VIEW: usize = 2;
 pub const HELP: usize = 3;
 
-/// Trigger labels, in index order.
+/// Trigger labels (canonical English), in index order.
+/// The bar renders each through its [`MENU_LABEL_KEYS`]
+/// key; this const stays as the English source the
+/// catalogue values must match (pinned by
+/// `menu_tables_line_up` and the Wave U i18n pin below).
 pub const MENUS: [&str; 4] = ["File", "Edit", "View", "Help"];
 
 /// Trigger element keys, in index order (the Wave 15 menu
 /// ids). The dropdown for a menu anchors to the element
 /// carrying its trigger's key.
 pub const MENU_KEYS: [&str; 4] = ["menu-file", "menu-edit", "menu-view", "menu-help"];
+
+/// Trigger label keys, in index order — parallel to
+/// [`MENUS`] (the canonical English) and [`MENU_KEYS`]
+/// (the element keys): the bar renders
+/// `tr(core, MENU_LABEL_KEYS[i])` under element key
+/// `MENU_KEYS[i]`, and each key's English value is
+/// exactly `MENUS[i]` (Wave U, U3; keys via IA-U3-1).
+pub const MENU_LABEL_KEYS: [&str; 4] = ["menu_file", "menu_edit", "menu_view", "menu_help"];
 
 /// Menu-bar state. Owned by the integrator's `State` (field
 /// `menus`); this section's builders read it and its item
@@ -796,14 +829,20 @@ fn toggle_targeted_clip_muted(s: &mut State) {
 /// through the static [`menu_icon`] map: its glyph
 /// depends on state the map cannot see, so the EDIT
 /// branch hands the icon to [`item_icon`] directly —
-/// see [`menu_dropdown`].)
-fn mute_item_parts(core: &stykanimate_rs::editor::EditorCore, muted: bool) -> (&'static str, &'static str) {
+/// see [`menu_dropdown`].) Wave U (U3): the label
+/// resolves through `i18n_wire::tr` under
+/// `menu_mute_clip` / `menu_unmute_clip` (keys via
+/// IA-U3-1) on the core IA-T2-2 threaded in for the
+/// glyph — the same construction
+/// `audio_panel::mute_toggle_parts` uses for the
+/// panel's own "Mute" / "Unmute" — so the return
+/// carries the label as a `String`.
+fn mute_item_parts(core: &stykanimate_rs::editor::EditorCore, muted: bool) -> (String, &'static str) {
     let (icon, _) = crate::rune_sec::audio_panel::mute_toggle_parts(core, muted);
-    let label = if muted {
-        "Unmute audio clip"
-    } else {
-        "Mute audio clip"
-    };
+    let label = i18n_wire::tr(
+        core,
+        if muted { "menu_unmute_clip" } else { "menu_mute_clip" },
+    );
     (label, icon)
 }
 
@@ -880,7 +919,7 @@ pub fn menu_bar(s: &State, t: &Theme) -> El {
     for index in 0..MENUS.len() {
         bar = bar.child(btn(
             MENU_KEYS[index],
-            MENUS[index],
+            &i18n_wire::tr(&s.core, MENU_LABEL_KEYS[index]),
             s.menus.open == Some(index),
             t,
             move |s: &mut State| s.menus.toggle(index),
@@ -982,7 +1021,7 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
                     list = list.child(separator("menu-file-sep", t));
                 }
             }
-            list = list.child(item("export", "Export PNG", false, t, |s| {
+            list = list.child(item("export", &i18n_wire::tr(core, "menu_export_png"), false, t, |s| {
                 s.core.export_png()
             }));
             // No "Open Home" item: the Rune shell has no
@@ -1010,10 +1049,10 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
             // consequence of the dedup, and the snap test
             // now pins its absence.
             list = list
-                .child(item("copy-frame", "Copy frame", false, t, |s| {
+                .child(item("copy-frame", &i18n_wire::tr(core, "menu_copy_frame"), false, t, |s| {
                     s.core.copy_frame()
                 }))
-                .child(item("paste-frame", "Paste frame", false, t, |s| {
+                .child(item("paste-frame", &i18n_wire::tr(core, "menu_paste_frame"), false, t, |s| {
                     s.core.paste_frame()
                 }));
             // Selection deletes (Phase L): the Delete
@@ -1035,7 +1074,7 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
             if s.stroke_selected.is_some() {
                 list = list.child(item(
                     "edit-delete-stroke",
-                    "Delete stroke",
+                    &i18n_wire::tr(core, "menu_delete_stroke"),
                     false,
                     t,
                     delete_selected_stroke,
@@ -1044,7 +1083,7 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
             if s.particle_selected.is_some() {
                 list = list.child(item(
                     "edit-delete-particle",
-                    "Delete particle event",
+                    &i18n_wire::tr(core, "menu_delete_particle"),
                     false,
                     t,
                     delete_selected_particle,
@@ -1064,7 +1103,7 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
             if s.core.current + 1 < s.core.project.frames.len() {
                 list = list.child(item(
                     "edit-swap-next",
-                    "Swap frame with next",
+                    &i18n_wire::tr(core, "menu_swap_next"),
                     false,
                     t,
                     swap_frame_with_next,
@@ -1085,7 +1124,7 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
                 list = list.child(item_icon(
                     "edit-mute-clip",
                     icon,
-                    label,
+                    &label,
                     false,
                     shortcut_hint("edit-mute-clip"),
                     t,
@@ -1135,15 +1174,15 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
             // it — see `shortcut_hint`). Its gauge glyph
             // comes from `menu_icon`.
             list = list
-                .child(item("onion", "Onion skin", core.onion, t, |s| {
+                .child(item("onion", &i18n_wire::tr(core, "menu_onion_skin"), core.onion, t, |s| {
                     s.core.onion = !s.core.onion;
                 }))
-                .child(item("view-guides", "Stage guides", s.guides, t, |s| {
+                .child(item("view-guides", &i18n_wire::tr(core, "menu_stage_guides"), s.guides, t, |s| {
                     crate::rune_sec::settings_popover::toggle_guides(s);
                 }))
                 .child(item(
                     "view-guides-frustum",
-                    "Camera frame",
+                    &i18n_wire::tr(core, "menu_camera_frame"),
                     s.guides_frustum,
                     t,
                     |s| {
@@ -1152,27 +1191,27 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
                 ))
                 .child(item(
                     "view-guides-safe",
-                    "Safe frames",
+                    &i18n_wire::tr(core, "menu_safe_frames"),
                     s.guides_safe,
                     t,
                     |s| {
                         crate::rune_sec::settings_popover::toggle_guides_safe(s);
                     },
                 ))
-                .child(item("view-speed", "Playback speed", false, t, |s| {
+                .child(item("view-speed", &i18n_wire::tr(core, "menu_playback_speed"), false, t, |s| {
                     crate::rune_sec::playback_controls::cycle_playback_speed(s);
                 }))
                 .child(separator("menu-view-sep", t))
-                .child(item("view-fit", "Fit view", false, t, |s| {
+                .child(item("view-fit", &i18n_wire::tr(core, "menu_fit_view"), false, t, |s| {
                     s.core.frame_all_figures()
                 }))
-                .child(item("view-centre", "Centre on selection", false, t, |s| {
+                .child(item("view-centre", &i18n_wire::tr(core, "menu_centre_selection"), false, t, |s| {
                     s.core.centre_on_selection()
                 }))
                 .child(separator("menu-view-sep2", t))
                 .child(item(
                     "view-toggle-left",
-                    "Figures sidebar",
+                    &i18n_wire::tr(core, "menu_figures_sidebar"),
                     s.show_left,
                     t,
                     |s| {
@@ -1181,7 +1220,7 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
                 ))
                 .child(item(
                     "view-toggle-right",
-                    "Inspector sidebar",
+                    &i18n_wire::tr(core, "menu_inspector_sidebar"),
                     s.show_right,
                     t,
                     |s| {
@@ -1200,11 +1239,11 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
             // `item` wrapper closes this menu after opening
             // the palette, as for every other item.
             list = list
-                .child(item("help", "Shortcuts", s.menus.help_open, t, |s| {
+                .child(item("help", &i18n_wire::tr(core, "menu_shortcuts"), s.menus.help_open, t, |s| {
                     s.menus.help_open = !s.menus.help_open;
                 }))
                 .child(separator("menu-help-sep", t))
-                .child(item("menu-palette", "Command palette", false, t, |s| {
+                .child(item("menu-palette", &i18n_wire::tr(core, "menu_command_palette"), false, t, |s| {
                     crate::rune_sec::command_palette::open_palette(s);
                 }));
         }
@@ -1252,7 +1291,51 @@ mod tests {
             MENU_KEYS,
             ["menu-file", "menu-edit", "menu-view", "menu-help"]
         );
+        assert_eq!(
+            MENU_LABEL_KEYS,
+            ["menu_file", "menu_edit", "menu_view", "menu_help"]
+        );
         assert_eq!(MENUS.len(), MENU_KEYS.len());
+        assert_eq!(MENUS.len(), MENU_LABEL_KEYS.len());
+    }
+
+    #[test]
+    fn menus_i18n_keys_exist_and_match_the_english_labels() {
+        // Wave U (U3): every menu-bar and dropdown label
+        // resolves through i18n_wire::tr under a `menu_*`
+        // key. This pin passes only once IA-U3-1's keys
+        // land in src/i18n.rs at integration — until then
+        // tr falls back to the key itself (the Q7 pattern)
+        // and both asserts fail by design.
+        let core = stykanimate_rs::editor::EditorCore::new();
+        for (key, english) in [
+            ("menu_file", "File"),
+            ("menu_edit", "Edit"),
+            ("menu_view", "View"),
+            ("menu_help", "Help"),
+            ("menu_export_png", "Export PNG"),
+            ("menu_copy_frame", "Copy frame"),
+            ("menu_paste_frame", "Paste frame"),
+            ("menu_delete_stroke", "Delete stroke"),
+            ("menu_delete_particle", "Delete particle event"),
+            ("menu_swap_next", "Swap frame with next"),
+            ("menu_mute_clip", "Mute audio clip"),
+            ("menu_unmute_clip", "Unmute audio clip"),
+            ("menu_onion_skin", "Onion skin"),
+            ("menu_stage_guides", "Stage guides"),
+            ("menu_camera_frame", "Camera frame"),
+            ("menu_safe_frames", "Safe frames"),
+            ("menu_playback_speed", "Playback speed"),
+            ("menu_fit_view", "Fit view"),
+            ("menu_centre_selection", "Centre on selection"),
+            ("menu_figures_sidebar", "Figures sidebar"),
+            ("menu_inspector_sidebar", "Inspector sidebar"),
+            ("menu_shortcuts", "Shortcuts"),
+            ("menu_command_palette", "Command palette"),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
     }
 
     #[test]
@@ -1824,9 +1907,12 @@ mod tests {
             );
         }
         // The parts name the action, not the state —
-        // and reuse the Audio panel's glyph choice.
-        assert_eq!(mute_item_parts(&stykanimate_rs::editor::EditorCore::new(), false), ("Mute audio clip", "volume-xmark"));
-        assert_eq!(mute_item_parts(&stykanimate_rs::editor::EditorCore::new(), true), ("Unmute audio clip", "volume-high"));
+        // and reuse the Audio panel's glyph choice. The
+        // label resolves through `i18n_wire::tr` (Wave U,
+        // U3), so it matches the English below once
+        // IA-U3-1's keys land at integration (Q7 pattern).
+        assert_eq!(mute_item_parts(&stykanimate_rs::editor::EditorCore::new(), false), ("Mute audio clip".to_string(), "volume-xmark"));
+        assert_eq!(mute_item_parts(&stykanimate_rs::editor::EditorCore::new(), true), ("Unmute audio clip".to_string(), "volume-high"));
 
         let t = rune::tok::theme(true);
         let mut s = crate::init();
@@ -1891,7 +1977,7 @@ mod tests {
         // The targeted clip now names the way back.
         assert_eq!(
             mute_item_parts(&s.core, s.core.project.audio[1].muted),
-            ("Unmute audio clip", "volume-high")
+            ("Unmute audio clip".to_string(), "volume-high")
         );
 
         // A live selection retargets the item: clip 0

@@ -116,6 +116,17 @@
 //! and the Recent row keeps the bare labels (it is a
 //! shortcut row, not part of the grid).
 //!
+//! Wave U (U4) localises the 27 kind display names:
+//! [`kind_label`] now takes the core and resolves each
+//! known snake-case name through `i18n_wire::tr`
+//! (`fx_kind_*`, IA-U4-1), with English byte-identical
+//! once the keys land. The snake-case names themselves
+//! are unchanged — they remain the serialised/MCP
+//! vocabulary — and no display label is parsed back:
+//! the filter only substring-matches the localised
+//! label, the canonical English label, the snake-case
+//! name and the category name.
+//!
 //! Phase N restyles the panel onto the charter's card
 //! language: the root is the kit card
 //! (`design::panel_col`, key `fx-browser` unchanged)
@@ -191,6 +202,7 @@ use stykanimate_rs::vfx::ClipKind;
 
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::icon_btn;
 use crate::rune_sec::icons::icon_el;
 use crate::State;
@@ -262,15 +274,61 @@ pub fn kinds_in(category: &str) -> Vec<&'static FxKindEntry> {
     FX_KINDS.iter().filter(|e| e.category == category).collect()
 }
 
-/// Button label for a kind: its snake-case engine name,
-/// humanised ("shock_ring" → "Shock ring").
-pub fn kind_label(name: &str) -> String {
+/// The canonical English display label for a kind: its
+/// snake-case engine name, humanised ("shock_ring" →
+/// "Shock ring"). This remains the filter's English
+/// search alias and the fallback for a name outside the
+/// engine's 27-kind vocabulary; it is not the serialised
+/// name and is never parsed back into a kind.
+fn kind_label_english(name: &str) -> String {
     let spaced = name.replace('_', " ");
     let mut chars = spaced.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => spaced,
     }
+}
+
+/// Button label for a kind in the core's current
+/// language. Each known snake-case engine name resolves
+/// through the i18n table under its `fx_kind_*` key
+/// (Wave U, U4; IA-U4-1), so the English values are
+/// byte-identical to [`kind_label_english`]. A name
+/// outside the known vocabulary keeps the canonical
+/// humanised form rather than inventing a catalogue key
+/// for data this panel does not own.
+pub fn kind_label(core: &EditorCore, name: &str) -> String {
+    let key = match name {
+        "burst" => "fx_kind_burst",
+        "shock_ring" => "fx_kind_shock_ring",
+        "shard" => "fx_kind_shard",
+        "splash" => "fx_kind_splash",
+        "beam" => "fx_kind_beam",
+        "aura" => "fx_kind_aura",
+        "lightning" => "fx_kind_lightning",
+        "prism" => "fx_kind_prism",
+        "sparkle" => "fx_kind_sparkle",
+        "orbit" => "fx_kind_orbit",
+        "galaxy" => "fx_kind_galaxy",
+        "vortex" => "fx_kind_vortex",
+        "fireworks" => "fx_kind_fireworks",
+        "spiral" => "fx_kind_spiral",
+        "leaves" => "fx_kind_leaves",
+        "petals" => "fx_kind_petals",
+        "bubbles" => "fx_kind_bubbles",
+        "aurora" => "fx_kind_aurora",
+        "smoke" => "fx_kind_smoke",
+        "ember" => "fx_kind_ember",
+        "fountain" => "fx_kind_fountain",
+        "trail" => "fx_kind_trail",
+        "confetti" => "fx_kind_confetti",
+        "meteor" => "fx_kind_meteor",
+        "comet" => "fx_kind_comet",
+        "glitter" => "fx_kind_glitter",
+        "wave" => "fx_kind_wave",
+        _ => return kind_label_english(name),
+    };
+    i18n_wire::tr(core, key)
 }
 
 /// How many clips of `kind` the project already holds:
@@ -288,15 +346,15 @@ pub fn kind_usage(core: &EditorCore, kind: ClipKind) -> usize {
 }
 
 /// The grid kind button's label (Phase K): the kind's
-/// humanised label alone while the project holds none
-/// of it — byte-identical to the pre-Phase-K label —
-/// and "{label} · {n}" once it holds `n` clips of the
-/// kind ("Sparkle · 3"), so the browser itself shows
-/// which kinds are in use. Display only: filtering
-/// ([`kind_matches`]) matches the entry's base name /
-/// label / category and never this counted string.
+/// localised display label alone while the project
+/// holds none of it — byte-identical to the pre-Phase-K
+/// label in English — and "{label} · {n}" once it holds
+/// `n` clips of the kind ("Sparkle · 3"), so the browser
+/// itself shows which kinds are in use. Display only:
+/// filtering ([`kind_matches`]) matches the entry's base
+/// name / labels / category and never this counted string.
 pub fn kind_button_label(core: &EditorCore, entry: &FxKindEntry) -> String {
-    let label = kind_label(entry.name);
+    let label = kind_label(core, entry.name);
     match kind_usage(core, entry.kind) {
         0 => label,
         n => format!("{label} · {n}"),
@@ -393,18 +451,21 @@ pub fn category_matches(category: &str, query: &str) -> bool {
 
 /// True when `entry` matches the filter `query`:
 /// case-insensitive substring against the kind's
-/// snake-case name and its humanised label (so "ring"
-/// finds Shock ring either way) — or against the name
-/// of the category the kind belongs to, so a query
-/// naming a category matches every kind in it (Phase
-/// J; see [`category_matches`]). An empty (or
-/// whitespace-only) query matches everything — the
-/// `library_panel::name_matches` rule, mirrored.
-pub fn kind_matches(entry: &FxKindEntry, query: &str) -> bool {
+/// snake-case name, its localised display label and its
+/// canonical English label (so "ring" finds Shock ring
+/// either way) — or against the name of the category
+/// the kind belongs to, so a query naming a category
+/// matches every kind in it (Phase J; see
+/// [`category_matches`]). The labels are search text
+/// only: nothing parses a match back into a kind. An
+/// empty (or whitespace-only) query matches everything
+/// — the `library_panel::name_matches` rule, mirrored.
+pub fn kind_matches(core: &EditorCore, entry: &FxKindEntry, query: &str) -> bool {
     let q = query.trim().to_lowercase();
     q.is_empty()
         || entry.name.to_lowercase().contains(&q)
-        || kind_label(entry.name).to_lowercase().contains(&q)
+        || kind_label(core, entry.name).to_lowercase().contains(&q)
+        || kind_label_english(entry.name).to_lowercase().contains(&q)
         || category_matches(entry.category, query)
 }
 
@@ -422,6 +483,7 @@ pub fn kind_matches(entry: &FxKindEntry, query: &str) -> bool {
 /// exactly once, so category order and table order
 /// fully determine the result.
 pub fn visible_categories(
+    core: &EditorCore,
     query: &str,
 ) -> Vec<(&'static str, Vec<&'static FxKindEntry>)> {
     FX_CATEGORIES
@@ -429,7 +491,7 @@ pub fn visible_categories(
         .filter_map(|cat| {
             let kinds: Vec<&'static FxKindEntry> = kinds_in(cat)
                 .into_iter()
-                .filter(|e| kind_matches(e, query))
+                .filter(|e| kind_matches(core, e, query))
                 .collect();
             if kinds.is_empty() {
                 None
@@ -716,7 +778,7 @@ pub fn fx_browser(s: &State, t: &Theme) -> El {
             let kind = entry.kind;
             recent_row = recent_row.child(btn(
                 &format!("fx-recent-{}", entry.name),
-                &kind_label(entry.name),
+                &kind_label(core, entry.name),
                 false,
                 t,
                 move |s| {
@@ -730,7 +792,7 @@ pub fn fx_browser(s: &State, t: &Theme) -> El {
 
     // ---- Kinds, grouped by category, filtered by the
     // query (empty categories hide with their headings).
-    let visible = visible_categories(&query);
+    let visible = visible_categories(core, &query);
     if visible.is_empty() {
         // Kit empty state with the audit's glyph
         // (S13-3): the search that found nothing is a
@@ -962,10 +1024,67 @@ mod tests {
 
     #[test]
     fn kind_label_humanises_snake_names() {
-        assert_eq!(kind_label("burst"), "Burst");
-        assert_eq!(kind_label("shock_ring"), "Shock ring");
-        assert_eq!(kind_label("fireworks"), "Fireworks");
-        assert_eq!(kind_label(""), "");
+        // Wave U (U4): the known names resolve through
+        // the i18n table now, so their assertions pass
+        // only after IA-U4-1 lands (until then `tr` falls
+        // back to the key itself — the Q7 pattern). The
+        // empty and unknown-name assertions exercise the
+        // canonical humaniser and pass either way.
+        let core = EditorCore::new();
+        assert_eq!(kind_label(&core, "burst"), "Burst");
+        assert_eq!(kind_label(&core, "shock_ring"), "Shock ring");
+        assert_eq!(kind_label(&core, "fireworks"), "Fireworks");
+        assert_eq!(kind_label(&core, ""), "");
+        assert_eq!(kind_label(&core, "nova_burst"), "Nova burst");
+    }
+
+    #[test]
+    fn fx_kind_i18n_keys_exist_and_match_the_english_labels() {
+        // Wave U (U4): every FX kind display name wired
+        // through `i18n_wire::tr` must resolve to exactly
+        // the English string the browser rendered before
+        // the wiring. The keys land via IA-U4-1 (the
+        // integrator appends them to all 28 tables in
+        // Wave U roster order), so this pin passes only
+        // once that IA lands — until then `tr` falls back
+        // to the key itself and `key_in_table` is false
+        // (the Q7 pattern: wiring and keys land together
+        // at integration). The list is in IA insertion
+        // order, which is also the FX_KINDS table order.
+        let core = EditorCore::new();
+        for (name, key, english) in [
+            ("burst", "fx_kind_burst", "Burst"),
+            ("shock_ring", "fx_kind_shock_ring", "Shock ring"),
+            ("shard", "fx_kind_shard", "Shard"),
+            ("splash", "fx_kind_splash", "Splash"),
+            ("beam", "fx_kind_beam", "Beam"),
+            ("aura", "fx_kind_aura", "Aura"),
+            ("lightning", "fx_kind_lightning", "Lightning"),
+            ("prism", "fx_kind_prism", "Prism"),
+            ("sparkle", "fx_kind_sparkle", "Sparkle"),
+            ("orbit", "fx_kind_orbit", "Orbit"),
+            ("galaxy", "fx_kind_galaxy", "Galaxy"),
+            ("vortex", "fx_kind_vortex", "Vortex"),
+            ("fireworks", "fx_kind_fireworks", "Fireworks"),
+            ("spiral", "fx_kind_spiral", "Spiral"),
+            ("leaves", "fx_kind_leaves", "Leaves"),
+            ("petals", "fx_kind_petals", "Petals"),
+            ("bubbles", "fx_kind_bubbles", "Bubbles"),
+            ("aurora", "fx_kind_aurora", "Aurora"),
+            ("smoke", "fx_kind_smoke", "Smoke"),
+            ("ember", "fx_kind_ember", "Ember"),
+            ("fountain", "fx_kind_fountain", "Fountain"),
+            ("trail", "fx_kind_trail", "Trail"),
+            ("confetti", "fx_kind_confetti", "Confetti"),
+            ("meteor", "fx_kind_meteor", "Meteor"),
+            ("comet", "fx_kind_comet", "Comet"),
+            ("glitter", "fx_kind_glitter", "Glitter"),
+            ("wave", "fx_kind_wave", "Wave"),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+            assert_eq!(kind_label(&core, name), english);
+        }
     }
 
     // ---- Usage counts on the kind buttons (Phase K) ----
@@ -1021,7 +1140,7 @@ mod tests {
         // Phase K — byte-identical, no suffix.
         let core = EditorCore::new();
         for entry in FX_KINDS {
-            assert_eq!(kind_button_label(&core, &entry), kind_label(entry.name));
+            assert_eq!(kind_button_label(&core, &entry), kind_label(&core, entry.name));
         }
         assert_eq!(
             kind_button_label(&core, entry_of(ClipKind::Sparkle)),
@@ -1182,9 +1301,9 @@ mod tests {
         ]);
         assert_eq!(kind_usage(&core, ClipKind::Sparkle), 3);
         let sparkle = entry_of(ClipKind::Sparkle);
-        assert!(kind_matches(sparkle, "sparkle"));
-        assert!(kind_matches(sparkle, "Sparkle"));
-        let visible = visible_categories("sparkle");
+        assert!(kind_matches(&core, sparkle, "sparkle"));
+        assert!(kind_matches(&core, sparkle, "Sparkle"));
+        let visible = visible_categories(&core, "sparkle");
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].0, "Magic");
         assert_eq!(visible[0].1.len(), 1);
@@ -1192,8 +1311,8 @@ mod tests {
         // …while the count suffix itself is not a match
         // source: no name, label or category contains it,
         // so filtering by it finds nothing.
-        assert!(!kind_matches(sparkle, "· 3"));
-        assert!(visible_categories("· 3").is_empty());
+        assert!(!kind_matches(&core, sparkle, "· 3"));
+        assert!(visible_categories(&core, "· 3").is_empty());
     }
 
     // ---- Filter + recents (Phase F) ----
@@ -1204,22 +1323,24 @@ mod tests {
 
     #[test]
     fn kind_matches_is_case_insensitive_substring_on_name_and_label() {
+        let core = EditorCore::new();
         let shock = entry_of(ClipKind::ShockRing);
-        assert!(kind_matches(shock, "shock"));
-        assert!(kind_matches(shock, "SHOCK"));
-        assert!(kind_matches(shock, "Shock Ring"), "the humanised label matches too");
-        assert!(kind_matches(shock, "ring"));
-        assert!(kind_matches(shock, "  ring  "), "the query is trimmed");
-        assert!(!kind_matches(shock, "beam"));
+        assert!(kind_matches(&core, shock, "shock"));
+        assert!(kind_matches(&core, shock, "SHOCK"));
+        assert!(kind_matches(&core, shock, "Shock Ring"), "the humanised label matches too");
+        assert!(kind_matches(&core, shock, "ring"));
+        assert!(kind_matches(&core, shock, "  ring  "), "the query is trimmed");
+        assert!(!kind_matches(&core, shock, "beam"));
         // Empty and whitespace-only queries are "no filter".
-        assert!(kind_matches(shock, ""));
-        assert!(kind_matches(shock, "   "));
-        assert!(kind_matches(entry_of(ClipKind::Beam), ""));
+        assert!(kind_matches(&core, shock, ""));
+        assert!(kind_matches(&core, shock, "   "));
+        assert!(kind_matches(&core, entry_of(ClipKind::Beam), ""));
     }
 
     #[test]
     fn visible_categories_with_empty_query_is_the_full_grid() {
-        let visible = visible_categories("");
+        let core = EditorCore::new();
+        let visible = visible_categories(&core, "");
         let names: Vec<&str> = visible.iter().map(|(cat, _)| *cat).collect();
         assert_eq!(names, FX_CATEGORIES);
         let sizes: Vec<usize> = visible.iter().map(|(_, kinds)| kinds.len()).collect();
@@ -1228,8 +1349,9 @@ mod tests {
 
     #[test]
     fn visible_categories_drops_categories_with_no_matches() {
+        let core = EditorCore::new();
         // One match: only its category survives, with only it.
-        let visible = visible_categories("beam");
+        let visible = visible_categories(&core, "beam");
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].0, "Energy");
         assert_eq!(visible[0].1.len(), 1);
@@ -1240,7 +1362,7 @@ mod tests {
         // table order. ("or" is a substring of orbit,
         // vortex and fireworks — Magic; aurora — Nature;
         // meteor — Particles. Verified against the table.)
-        let visible = visible_categories("or");
+        let visible = visible_categories(&core, "or");
         let names: Vec<&str> = visible.iter().map(|(cat, _)| *cat).collect();
         assert_eq!(names, vec!["Magic", "Nature", "Particles"]);
         let magic: Vec<ClipKind> = visible[0].1.iter().map(|e| e.kind).collect();
@@ -1255,7 +1377,7 @@ mod tests {
 
         // Nothing matches: no categories at all (the
         // builder renders the "no match" line for this).
-        assert!(visible_categories("zzz-no-such-effect").is_empty());
+        assert!(visible_categories(&core, "zzz-no-such-effect").is_empty());
     }
 
     // ---- Category-name matching (Phase J) ----
@@ -1279,22 +1401,24 @@ mod tests {
 
     #[test]
     fn kind_matches_also_matches_through_the_kinds_category() {
+        let core = EditorCore::new();
         // A kind matches when the query names its
         // category, even though neither its snake-case
         // name nor its humanised label contains the
         // query ("prism" has no "energy" in it).
-        assert!(kind_matches(entry_of(ClipKind::Beam), "energy"));
-        assert!(kind_matches(entry_of(ClipKind::Prism), "ENER"));
+        assert!(kind_matches(&core, entry_of(ClipKind::Beam), "energy"));
+        assert!(kind_matches(&core, entry_of(ClipKind::Prism), "ENER"));
         // A kind from another category does not match.
-        assert!(!kind_matches(entry_of(ClipKind::Burst), "energy"));
-        assert!(!kind_matches(entry_of(ClipKind::Sparkle), "energy"));
+        assert!(!kind_matches(&core, entry_of(ClipKind::Burst), "energy"));
+        assert!(!kind_matches(&core, entry_of(ClipKind::Sparkle), "energy"));
     }
 
     #[test]
     fn visible_categories_for_a_category_query_is_that_category_at_full_size() {
+        let core = EditorCore::new();
         // "energy" names no kind; it names the category,
         // so the whole category shows, in table order.
-        let visible = visible_categories("energy");
+        let visible = visible_categories(&core, "energy");
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].0, "Energy");
         let kinds: Vec<ClipKind> = visible[0].1.iter().map(|e| e.kind).collect();
@@ -1312,7 +1436,7 @@ mod tests {
         // way: "nat" is Nature (and matches no kind name
         // anywhere in the table — verified against
         // FX_KINDS when this test was written).
-        let visible = visible_categories("nat");
+        let visible = visible_categories(&core, "nat");
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].0, "Nature");
         let kinds: Vec<ClipKind> = visible[0].1.iter().map(|e| e.kind).collect();
@@ -1329,12 +1453,13 @@ mod tests {
 
     #[test]
     fn visible_categories_unions_kind_and_category_matches_without_duplicates() {
+        let core = EditorCore::new();
         // "par" is a substring of the kind name "sparkle"
         // (Magic) and of the category name "Particles":
         // the result is the union — Sparkle under Magic,
         // then the whole Particles category — in category
         // order, each kind exactly once.
-        let visible = visible_categories("par");
+        let visible = visible_categories(&core, "par");
         let names: Vec<&str> = visible.iter().map(|(cat, _)| *cat).collect();
         assert_eq!(names, vec!["Magic", "Particles"]);
         let magic: Vec<ClipKind> = visible[0].1.iter().map(|e| e.kind).collect();

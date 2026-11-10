@@ -223,6 +223,27 @@
 //! vocabulary (`fx_edit::kind_name`), and its display
 //! form is `fx_browser::kind_label`'s, another
 //! module's surface.
+//!
+//! Wave U (U8): the composed readouts Wave T left
+//! behind now resolve through `i18n_wire::tr` as
+//! `{slot}` template keys (the camera `follow_label`
+//! precedent, `.replace()` at the composing site) —
+//! [`window_text`], [`clip_readout`],
+//! [`lane_count_text`], the lane rows' anchor text,
+//! and the inspector's title, window/anchor summary
+//! and seed/angle/length lines — English
+//! byte-identical, element keys untouched, pinned by
+//! the extended `fx_i18n_keys_exist_and_match_the_
+//! english_labels` (the stored template forms) with
+//! the readouts' own content tests as the composition
+//! pins. The keys land via IA-U8-1. Still English by
+//! design: the re-anchor / hide-show status sentences
+//! (class-C, machine-read), the row name
+//! (`{kind} #{n}` — notation around the serialised
+//! kind name, no English words), [`frame_label`]'s
+//! bare numbers, and the kind strings themselves,
+//! which enter the templates only as `{kind}` slot
+//! values (data, never translated here).
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, el, row, text, Color, Drag, El, LineCap, Phase, ScrollSpec, Shape, Tx};
@@ -284,13 +305,14 @@ pub fn seconds_to_frames(seconds: f32, fps: f32) -> f32 {
 /// 5–14` for the half-open window `[4, 14)`: the first
 /// covered frame is `start + 1` and the last is `end`
 /// (the same convention the GPUI panel's `f{start+1}`
-/// label used).
-pub fn window_text(start: f32, end: f32) -> String {
-    format!(
-        "frames {}–{}",
-        frame_label(start + 1.0),
-        frame_label(end)
-    )
+/// label used). Wave U (U8): composed from the
+/// `fx_window` template key (`frames {first}–{last}`,
+/// IA-U8-1), the numbers still rendered by
+/// [`frame_label`].
+pub fn window_text(core: &EditorCore, start: f32, end: f32) -> String {
+    i18n_wire::tr(core, "fx_window")
+        .replace("{first}", &frame_label(start + 1.0))
+        .replace("{last}", &frame_label(end))
 }
 
 /// One lane row's data, built from `fx_edit::list` plus the
@@ -350,8 +372,10 @@ pub fn clip_rows(core: &EditorCore, selected: Option<usize>) -> Vec<ClipRowData>
                 index: info.index,
                 kind: info.kind,
                 name: format!("{} #{}", info.kind, info.index + 1),
-                window: window_text(info.start, info.end),
-                anchor: format!("fig {} · node {}", info.figure + 1, info.node),
+                window: window_text(core, info.start, info.end),
+                anchor: i18n_wire::tr(core, "fx_row_anchor")
+                    .replace("{figure}", &(info.figure + 1).to_string())
+                    .replace("{node}", &info.node.to_string()),
                 start: info.start,
                 duration: info.duration,
                 color: entry.clip.color,
@@ -397,7 +421,7 @@ pub fn inspector_data(core: &EditorCore, selected: Option<usize>) -> Option<FxIn
         kind: info.kind,
         start: info.start,
         duration: info.duration,
-        window: window_text(info.start, info.end),
+        window: window_text(core, info.start, info.end),
         color: entry.clip.color,
         color2: entry.clip.color2,
         figure: entry.figure,
@@ -416,15 +440,20 @@ pub fn inspector_data(core: &EditorCore, selected: Option<usize>) -> Option<FxIn
 /// [`frame_label`], so whole frames render as
 /// integers and fractional ones keep their fraction
 /// — the phrasing the start/duration steppers use.
-pub fn clip_readout(entry: &FxClipEntry) -> String {
-    let mut line = format!(
-        "{} · starts frame {} · {} frames",
-        kind_label(fx_edit::kind_name(entry.clip.kind)),
-        frame_label(entry.clip.start + 1.0),
-        frame_label(entry.clip.duration)
-    );
+/// Wave U (U8): composed from the `fx_readout`
+/// template key (`{kind} · starts frame {first} ·
+/// {duration} frames`, IA-U8-1) with the hidden flag
+/// appended as the `fx_readout_hidden` key's text;
+/// the kind enters only as the `{kind}` slot value
+/// (the browser's display name — data, not a label
+/// translated here).
+pub fn clip_readout(core: &EditorCore, entry: &FxClipEntry) -> String {
+    let mut line = i18n_wire::tr(core, "fx_readout")
+        .replace("{kind}", kind_label(core, fx_edit::kind_name(entry.clip.kind)))
+        .replace("{first}", &frame_label(entry.clip.start + 1.0))
+        .replace("{duration}", &frame_label(entry.clip.duration));
     if entry.hidden {
-        line.push_str(" · hidden");
+        line.push_str(&i18n_wire::tr(core, "fx_readout_hidden"));
     }
     line
 }
@@ -438,12 +467,19 @@ pub fn clip_readout(entry: &FxClipEntry) -> String {
 /// "this much effect will play" even when every clip
 /// was hidden. The plain form is byte-identical to
 /// the pre-Wave-10 text, so nothing changes for a
-/// project with nothing hidden.
-pub fn lane_count_text(total: usize, hidden: usize) -> String {
+/// project with nothing hidden. Wave U (U8): each
+/// form is its own template key (`fx_lane_count`,
+/// `fx_lane_count_hidden`, IA-U8-1) rather than a
+/// shared stem plus a suffix, so a translation keeps
+/// both counts' word order and agreement in one
+/// string.
+pub fn lane_count_text(core: &EditorCore, total: usize, hidden: usize) -> String {
     if hidden == 0 {
-        format!("{total} clip(s)")
+        i18n_wire::tr(core, "fx_lane_count").replace("{total}", &total.to_string())
     } else {
-        format!("{total} clip(s) · {hidden} hidden")
+        i18n_wire::tr(core, "fx_lane_count_hidden")
+            .replace("{total}", &total.to_string())
+            .replace("{hidden}", &hidden.to_string())
     }
 }
 
@@ -1467,7 +1503,7 @@ pub fn fx_lane(s: &State, t: &Theme) -> El {
     }
     let total = s.core.project.fx_clips.len();
     let hidden = s.core.project.fx_clips.iter().filter(|e| e.hidden).count();
-    let count = lane_count_text(total, hidden);
+    let count = lane_count_text(&s.core, total, hidden);
     col()
         .key("fx-lane")
         .w_full()
@@ -1631,17 +1667,21 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
         .w_full()
         .gap(8.0)
         .child(
-            text(format!("{} · clip {}", data.kind, i + 1))
-                .font(type_::TITLE)
-                .color(t.text),
+            text(
+                i18n_wire::tr(&s.core, "fx_inspector_title")
+                    .replace("{kind}", data.kind)
+                    .replace("{index}", &(i + 1).to_string()),
+            )
+            .font(type_::TITLE)
+            .color(t.text),
         )
         .child(
-            text(format!(
-                "{} · anchor fig {} · node {}",
-                data.window,
-                data.figure + 1,
-                data.node
-            ))
+            text(
+                i18n_wire::tr(&s.core, "fx_inspector_summary")
+                    .replace("{window}", &data.window)
+                    .replace("{figure}", &(data.figure + 1).to_string())
+                    .replace("{node}", &data.node.to_string()),
+            )
             .font(type_::LABEL)
             .color(t.text_secondary),
         )
@@ -1650,7 +1690,7 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
         // frame, length, and its hidden flag — built
         // by clip_readout from the entry itself.
         .child(
-            text(clip_readout(&s.core.project.fx_clips[i]))
+            text(clip_readout(&s.core, &s.core.project.fx_clips[i]))
                 .key("fx-readout")
                 .font(type_::LABEL)
                 .color(t.text_secondary),
@@ -1675,7 +1715,7 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                     cycle_selected_kind(s, -1)
                 }))
                 .child(
-                    text(kind_label(data.kind))
+                    text(kind_label(&s.core, data.kind))
                         .font(type_::BODY)
                         .color(t.text),
                 )
@@ -1925,12 +1965,18 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                 ),
         );
     panel = panel.child(
-        text(format!(
-            "seed {} · angle {:.0}° · length {:.0}",
-            s.core.project.fx_clips[i].clip.seed,
-            s.core.project.fx_clips[i].clip.angle,
-            s.core.project.fx_clips[i].clip.length
-        ))
+        text(
+            i18n_wire::tr(&s.core, "fx_seed_line")
+                .replace("{seed}", &s.core.project.fx_clips[i].clip.seed.to_string())
+                .replace(
+                    "{angle}",
+                    &format!("{:.0}", s.core.project.fx_clips[i].clip.angle),
+                )
+                .replace(
+                    "{length}",
+                    &format!("{:.0}", s.core.project.fx_clips[i].clip.length),
+                ),
+        )
         .font(type_::LABEL)
         .color(t.text_secondary),
     );
@@ -2083,8 +2129,13 @@ mod tests {
     #[test]
     fn window_text_is_one_based_first_to_last_covered() {
         // [4, 14) covers frames 5..=14 in 1-based terms.
-        assert_eq!(window_text(4.0, 14.0), "frames 5–14");
-        assert_eq!(window_text(0.0, 16.0), "frames 1–16");
+        // Wave U (U8): the text comes from the `fx_window`
+        // template, so this doubles as the template's
+        // composition pin — it passes only once IA-U8-1
+        // lands (the Q7 pattern).
+        let core = EditorCore::new();
+        assert_eq!(window_text(&core, 4.0, 14.0), "frames 5–14");
+        assert_eq!(window_text(&core, 0.0, 16.0), "frames 1–16");
     }
 
     #[test]
@@ -2286,14 +2337,19 @@ mod tests {
 
     #[test]
     fn lane_count_text_names_the_hidden_share() {
+        // Wave U (U8): both forms come from template
+        // keys, so this doubles as their composition
+        // pin — it passes only once IA-U8-1 lands (the
+        // Q7 pattern).
+        let core = EditorCore::new();
         // Nothing hidden: the pre-Wave-10 text,
         // byte-identical.
-        assert_eq!(lane_count_text(0, 0), "0 clip(s)");
-        assert_eq!(lane_count_text(3, 0), "3 clip(s)");
+        assert_eq!(lane_count_text(&core, 0, 0), "0 clip(s)");
+        assert_eq!(lane_count_text(&core, 3, 0), "3 clip(s)");
         // Any hidden clips: the share is named — the
         // header must not read as fully live.
-        assert_eq!(lane_count_text(3, 1), "3 clip(s) · 1 hidden");
-        assert_eq!(lane_count_text(5, 5), "5 clip(s) · 5 hidden");
+        assert_eq!(lane_count_text(&core, 3, 1), "3 clip(s) · 1 hidden");
+        assert_eq!(lane_count_text(&core, 5, 5), "5 clip(s) · 5 hidden");
     }
 
     /// Conservative advance estimate for one character
@@ -3105,20 +3161,26 @@ mod tests {
 
     #[test]
     fn clip_readout_names_kind_first_frame_duration_and_hidden_flag() {
+        // Wave U (U8): the line is composed from the
+        // `fx_readout` / `fx_readout_hidden` templates,
+        // so this doubles as their composition pin — it
+        // passes only once IA-U8-1 lands (the Q7
+        // pattern).
+        let core = EditorCore::new();
         // Visible, whole frames: the kind's display
         // name (browser label over the snake name), the
         // 1-based first covered frame as an integer,
         // and the length in frames.
         let visible = entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D);
         assert_eq!(
-            clip_readout(&visible),
+            clip_readout(&core, &visible),
             "Burst · starts frame 5 · 10 frames"
         );
         // Hidden appends the flag — and only that.
         let mut hidden = entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D);
         hidden.hidden = true;
         assert_eq!(
-            clip_readout(&hidden),
+            clip_readout(&core, &hidden),
             "Burst · starts frame 5 · 10 frames · hidden"
         );
         // A fractional start (a split's second half)
@@ -3127,7 +3189,7 @@ mod tests {
         // buttons do.
         let fractional = entry(4.5, 9.5, ClipKind::ShockRing, 0x5DB2FF);
         assert_eq!(
-            clip_readout(&fractional),
+            clip_readout(&core, &fractional),
             "Shock ring · starts frame 5.5 · 9.5 frames"
         );
     }
@@ -3238,6 +3300,19 @@ mod tests {
         // to the key itself and `key_in_table` is false
         // (the Q7 pattern: wiring and keys land together
         // at integration).
+        //
+        // Wave U (U8) extension: the composed readouts'
+        // template keys, asserted in their STORED form
+        // (slot braces intact — the T1/T4 template-pin
+        // shape); their composed English output is
+        // pinned by the readouts' own content tests
+        // (`window_text_is_one_based_…`,
+        // `lane_count_text_names_the_hidden_share`,
+        // `clip_readout_names_kind_…`,
+        // `clip_rows_carry_kind_window_anchor_…`). The
+        // U8 keys land via IA-U8-1, appended after the
+        // IA-T5-1 `fx_*` block; same Q7 pattern — this
+        // pin passes only once that IA lands.
         let core = EditorCore::new();
         for (key, english) in [
             ("fx_title", "FX clips"),
@@ -3268,6 +3343,25 @@ mod tests {
             ("fx_gradient_end", "gradient end"),
             ("fx_anchor_to_joint", "Anchor to joint"),
             ("fx_anchor_hint", "uses the selected figure joint"),
+            // Wave U (U8) readout templates, stored form.
+            ("fx_window", "frames {first}–{last}"),
+            (
+                "fx_readout",
+                "{kind} · starts frame {first} · {duration} frames",
+            ),
+            ("fx_readout_hidden", " · hidden"),
+            ("fx_lane_count", "{total} clip(s)"),
+            ("fx_lane_count_hidden", "{total} clip(s) · {hidden} hidden"),
+            ("fx_row_anchor", "fig {figure} · node {node}"),
+            ("fx_inspector_title", "{kind} · clip {index}"),
+            (
+                "fx_inspector_summary",
+                "{window} · anchor fig {figure} · node {node}",
+            ),
+            (
+                "fx_seed_line",
+                "seed {seed} · angle {angle}° · length {length}",
+            ),
         ] {
             assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
             assert_eq!(i18n_wire::tr(&core, key), english);

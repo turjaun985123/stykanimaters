@@ -271,6 +271,29 @@
 //! effects caption sentence and every status line
 //! stay as they are. The pin is
 //! `audio_i18n_keys_exist_and_match_the_english_labels`.
+//!
+//! Wave U (U5) wires the composed readouts T2 left
+//! behind, as `{slot}` template keys substituted with
+//! `.replace()` at the composing site (the camera
+//! `follow_label` precedent): the summary, the target
+//! line, the readout and its duration segment, the row
+//! label skeleton, the gain suffix and stepper value,
+//! the duration frame suffix, the muted markers and
+//! the health words/wrappers resolve from 21 further
+//! `audio_*` keys (IA-U5-1), English byte-identical.
+//! The readout helpers take the core (the
+//! `mute_toggle_parts` precedent). Two things stay
+//! English by classification, not omission: the
+//! effects caption (`effects_settings_line`) is
+//! class-C sentence copy (T1's category), and
+//! `health_word` keeps its pure signature as the
+//! canonical-English vocabulary — its other consumer
+//! (`waveform_view::clip_health_caption`) has no core
+//! in scope; the panel's suffix/segment resolve the
+//! same words through the table, and the readout pin
+//! (`audio_readout_i18n_keys_exist_and_match_the_english`)
+//! asserts the two agree. Status sentences stay
+//! English throughout.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -355,9 +378,13 @@ pub fn gain_is_non_unity(gain: f32) -> bool {
 }
 
 /// `" · gain 1.50"` for a non-unity gain, `""` at unity.
-pub fn gain_suffix(gain: f32) -> String {
+///
+/// Wave U (U5): the wording resolves through the i18n
+/// table (`audio_gain_suffix`, a `{gain}` template —
+/// IA-U5-1), English byte-identical.
+pub fn gain_suffix(core: &EditorCore, gain: f32) -> String {
     if gain_is_non_unity(gain) {
-        format!(" · gain {gain:.2}")
+        i18n_wire::tr(core, "audio_gain_suffix").replace("{gain}", &format!("{gain:.2}"))
     } else {
         String::new()
     }
@@ -373,10 +400,12 @@ pub fn last_gain(clips: &[AudioClip]) -> Option<f32> {
 /// clip's current gain, `"Gain —"` when there are no clips
 /// (the stepper ops then report "no clips" via their own
 /// status text, like the other `_last` buttons).
-pub fn gain_readout(clips: &[AudioClip]) -> String {
+pub fn gain_readout(core: &EditorCore, clips: &[AudioClip]) -> String {
     match last_gain(clips) {
-        Some(gain) => format!("Gain {gain:.2}"),
-        None => "Gain —".to_string(),
+        Some(gain) => {
+            i18n_wire::tr(core, "audio_gain_value").replace("{gain}", &format!("{gain:.2}"))
+        }
+        None => i18n_wire::tr(core, "audio_gain_value_none"),
     }
 }
 
@@ -436,8 +465,17 @@ pub fn mute_toggle_parts(core: &EditorCore, muted: bool) -> (&'static str, Strin
 
 /// `" (muted)"` for a muted clip, `""` for an audible
 /// one — the row label's mute marker.
-pub fn muted_suffix(muted: bool) -> &'static str {
-    if muted { " (muted)" } else { "" }
+///
+/// Wave U (U5): the marker resolves through the i18n
+/// table (`audio_muted_suffix` — IA-U5-1), English
+/// byte-identical, so the helper returns a `String`
+/// now (the `mute_toggle_parts` shape).
+pub fn muted_suffix(core: &EditorCore, muted: bool) -> String {
+    if muted {
+        i18n_wire::tr(core, "audio_muted_suffix")
+    } else {
+        String::new()
+    }
 }
 
 /// The gain the toolbar stepper acts on now: the
@@ -450,10 +488,16 @@ pub fn target_gain(clips: &[AudioClip], selected: Option<usize>) -> Option<f32> 
 /// The gain stepper's readout for the current target:
 /// `"Gain 1.10"` for the target clip's gain, `"Gain —"`
 /// when there are no clips.
-pub fn target_gain_readout(clips: &[AudioClip], selected: Option<usize>) -> String {
+pub fn target_gain_readout(
+    core: &EditorCore,
+    clips: &[AudioClip],
+    selected: Option<usize>,
+) -> String {
     match target_gain(clips, selected) {
-        Some(gain) => format!("Gain {gain:.2}"),
-        None => "Gain —".to_string(),
+        Some(gain) => {
+            i18n_wire::tr(core, "audio_gain_value").replace("{gain}", &format!("{gain:.2}"))
+        }
+        None => i18n_wire::tr(core, "audio_gain_value_none"),
     }
 }
 
@@ -462,22 +506,32 @@ pub fn target_gain_readout(clips: &[AudioClip], selected: Option<usize>) -> Stri
 /// the toolbar, an explicit "last clip" wording when the
 /// fallback is in effect, and a no-clips wording when
 /// there is nothing to aim at.
-pub fn target_line(clips: &[AudioClip], selected: Option<usize>) -> String {
+/// Wave U (U5): all three wordings resolve through
+/// the i18n table (`audio_target_none` /
+/// `audio_target_selected` / `audio_target_last`, the
+/// latter two `{name}`/`{index}`/`{count}` templates —
+/// IA-U5-1), English byte-identical. The clip's name
+/// is substituted LAST (the camera `follow_label`
+/// order), so a file name containing a slot's text
+/// cannot be re-scanned by a later substitution.
+pub fn target_line(
+    core: &EditorCore,
+    clips: &[AudioClip],
+    selected: Option<usize>,
+) -> String {
     let count = clips.len();
     match effective_target(selected, count) {
-        None => "Target: none — no audio clips".to_string(),
-        Some(i) if selection_is_live(selected, count) => format!(
-            "Target: {} (clip {} of {})",
-            clip_display_name(&clips[i].path),
-            i + 1,
-            count
-        ),
-        Some(i) => format!(
-            "Target: last clip — {} (clip {} of {})",
-            clip_display_name(&clips[i].path),
-            i + 1,
-            count
-        ),
+        None => i18n_wire::tr(core, "audio_target_none"),
+        Some(i) if selection_is_live(selected, count) => {
+            i18n_wire::tr(core, "audio_target_selected")
+                .replace("{index}", &(i + 1).to_string())
+                .replace("{count}", &count.to_string())
+                .replace("{name}", &clip_display_name(&clips[i].path))
+        }
+        Some(i) => i18n_wire::tr(core, "audio_target_last")
+            .replace("{index}", &(i + 1).to_string())
+            .replace("{count}", &count.to_string())
+            .replace("{name}", &clip_display_name(&clips[i].path)),
     }
 }
 
@@ -539,25 +593,31 @@ pub fn clip_readout(
     let clips = &core.project.audio;
     let i = effective_target(selected, clips.len())?;
     let clip = &clips[i];
-    let mut line = format!(
-        "Clip {}: {} · starts frame {} · gain {:.2}",
-        i + 1,
-        clip_file_name(&clip.path),
-        clip.start_frame + 1,
-        clip.gain
-    );
+    // Wave U (U5): the base line and every segment
+    // resolve through the i18n table (`audio_readout_base`
+    // / `audio_readout_duration` templates,
+    // `audio_muted_segment`, the health keys — IA-U5-1),
+    // English byte-identical; the numeric slots are
+    // substituted before `{name}`, as in `target_line`.
+    let mut line = i18n_wire::tr(core, "audio_readout_base")
+        .replace("{index}", &(i + 1).to_string())
+        .replace("{frame}", &(clip.start_frame + 1).to_string())
+        .replace("{gain}", &format!("{:.2}", clip.gain))
+        .replace("{name}", clip_file_name(&clip.path));
     if let Some(d) = probe.and_then(|p| p.duration_secs) {
         // Wave 12 (E4): the frame span rides inside the
         // duration segment, converted at the project's
         // fps — read from the core on every build, so a
         // fps change re-reads on the next render.
-        line += &format!(" · {d:.1}s{}", duration_frames_suffix(d, core.project.fps));
+        line += &i18n_wire::tr(core, "audio_readout_duration")
+            .replace("{secs}", &format!("{d:.1}"))
+            .replace("{frames}", &duration_frames_suffix(core, d, core.project.fps));
     }
     if clip.muted {
-        line += " · muted";
+        line += &i18n_wire::tr(core, "audio_muted_segment");
     }
     if let Some(p) = probe {
-        line += &health_segment(p.health);
+        line += &health_segment(core, p.health);
     }
     Some(line)
 }
@@ -591,13 +651,19 @@ pub fn selection_after_delete(
 /// gain suffix when non-unity (the GPUI row format)
 /// and, since Phase M, the ` (muted)` marker when the
 /// clip is muted.
-pub fn clip_row_label(clip: &AudioClip) -> String {
+/// Wave U (U5): the skeleton resolves through the
+/// i18n table (`audio_row_label`, a `{name}`/`{frame}`
+/// template — IA-U5-1), English byte-identical; the
+/// conditional suffixes keep their own keys
+/// (`gain_suffix` / `muted_suffix`).
+pub fn clip_row_label(core: &EditorCore, clip: &AudioClip) -> String {
     format!(
-        "{} · f{}{}{}",
-        clip_display_name(&clip.path),
-        clip.start_frame + 1,
-        gain_suffix(clip.gain),
-        muted_suffix(clip.muted)
+        "{}{}{}",
+        i18n_wire::tr(core, "audio_row_label")
+            .replace("{frame}", &(clip.start_frame + 1).to_string())
+            .replace("{name}", &clip_display_name(&clip.path)),
+        gain_suffix(core, clip.gain),
+        muted_suffix(core, clip.muted)
     )
 }
 
@@ -634,10 +700,18 @@ pub fn secs_to_timeline_frames(secs: f32, fps: f32) -> usize {
 /// surfaces that print a duration (the rows' suffix
 /// and the readout), so the seconds and the frames
 /// they land on are never shown apart.
-pub fn duration_frames_suffix(duration_secs: f32, fps: f32) -> String {
+/// Wave U (U5): both wordings resolve through the
+/// i18n table (`audio_frames_one` / `audio_frames_many`,
+/// the latter a `{count}` template — IA-U5-1), English
+/// byte-identical.
+pub fn duration_frames_suffix(
+    core: &EditorCore,
+    duration_secs: f32,
+    fps: f32,
+) -> String {
     match secs_to_timeline_frames(duration_secs, fps) {
-        1 => " (1 frame)".to_string(),
-        n => format!(" ({n} frames)"),
+        1 => i18n_wire::tr(core, "audio_frames_one"),
+        n => i18n_wire::tr(core, "audio_frames_many").replace("{count}", &n.to_string()),
     }
 }
 
@@ -654,9 +728,23 @@ pub fn duration_frames_suffix(duration_secs: f32, fps: f32) -> String {
 /// D4). The frame span is computed from the UNROUNDED
 /// probed duration — the same input the engine's own
 /// conversions take — not from the 0.1 s display value.
-pub fn probe_duration_suffix(probe: &ClipProbe, fps: f32) -> String {
+/// Wave U (U5): the segment resolves through the i18n
+/// table (`audio_duration_segment`, a `{secs}`/`{frames}`
+/// template — IA-U5-1), English byte-identical. Note
+/// the readout's own duration segment
+/// (`audio_readout_duration`) is a separate key: it
+/// prints the seconds with NO space before the unit
+/// (`1.0s`), this one with (`1.0 s`) — a pre-existing
+/// difference between the two surfaces, preserved.
+pub fn probe_duration_suffix(
+    core: &EditorCore,
+    probe: &ClipProbe,
+    fps: f32,
+) -> String {
     match probe.duration_secs {
-        Some(d) => format!(" · {d:.1} s{}", duration_frames_suffix(d, fps)),
+        Some(d) => i18n_wire::tr(core, "audio_duration_segment")
+            .replace("{secs}", &format!("{d:.1}"))
+            .replace("{frames}", &duration_frames_suffix(core, d, fps)),
         None => String::new(),
     }
 }
@@ -664,12 +752,27 @@ pub fn probe_duration_suffix(probe: &ClipProbe, fps: f32) -> String {
 /// The summary line's wording. `total_secs` is `Some` when
 /// at least one clip's WAV read back; `None` degrades the
 /// line to the bare clip count (the GPUI panel's rule).
-pub fn format_summary(count: usize, total_secs: Option<f32>, gained: usize) -> String {
+/// Wave U (U5): both wordings resolve through the
+/// i18n table (`audio_summary_full`, a
+/// `{count}`/`{total}`/`{gained}` template, and
+/// `audio_summary_count` — IA-U5-1), English
+/// byte-identical — including the standing wart that
+/// the count wording never singularises ("1 clips"
+/// before, "1 clips" now; a locale's template may
+/// pluralise correctly for its own grammar).
+pub fn format_summary(
+    core: &EditorCore,
+    count: usize,
+    total_secs: Option<f32>,
+    gained: usize,
+) -> String {
     match total_secs {
-        Some(total) => format!(
-            "{count} clips · total {total:.1} s · {gained} with gain ≠ 1.0"
-        ),
-        None => format!("{count} clips"),
+        Some(total) => i18n_wire::tr(core, "audio_summary_full")
+            .replace("{count}", &count.to_string())
+            .replace("{total}", &format!("{total:.1}"))
+            .replace("{gained}", &gained.to_string()),
+        None => i18n_wire::tr(core, "audio_summary_count")
+            .replace("{count}", &count.to_string()),
     }
 }
 
@@ -685,7 +788,11 @@ pub fn format_summary(count: usize, total_secs: Option<f32>, gained: usize) -> S
 /// render (audit D4). `probes` is index-aligned with
 /// `clips`; a short `probes` slice simply sums what it
 /// has.
-pub fn summary_line(clips: &[AudioClip], probes: &[ClipProbe]) -> String {
+pub fn summary_line(
+    core: &EditorCore,
+    clips: &[AudioClip],
+    probes: &[ClipProbe],
+) -> String {
     let mut total_secs = 0.0f32;
     let mut any_readable = false;
     for probe in probes {
@@ -696,6 +803,7 @@ pub fn summary_line(clips: &[AudioClip], probes: &[ClipProbe]) -> String {
     }
     let gained = clips.iter().filter(|c| gain_is_non_unity(c.gain)).count();
     format_summary(
+        core,
         clips.len(),
         if any_readable { Some(total_secs) } else { None },
         gained,
@@ -774,12 +882,43 @@ pub fn health_word(health: ClipHealth) -> Option<&'static str> {
     }
 }
 
+/// Wave U (U5): the health word resolved through the
+/// i18n table (`audio_health_missing` /
+/// `audio_health_unsupported` / `audio_health_unreadable`
+/// — IA-U5-1) for the PANEL's suffix/segment below.
+/// `health_word` itself keeps its pure signature and
+/// stays the canonical-English vocabulary: its other
+/// consumer, `waveform_view::clip_health_caption`,
+/// composes its caption with no core in scope, so it
+/// cannot resolve through the table from there. The
+/// panel pin asserts the catalogue's English and
+/// `health_word` agree word for word, so the two
+/// vocabularies cannot drift apart silently.
+fn health_word_tr(core: &EditorCore, health: ClipHealth) -> Option<String> {
+    match health {
+        ClipHealth::Healthy => None,
+        ClipHealth::Missing => Some(i18n_wire::tr(core, "audio_health_missing")),
+        ClipHealth::Unsupported => {
+            Some(i18n_wire::tr(core, "audio_health_unsupported"))
+        }
+        ClipHealth::Unreadable => {
+            Some(i18n_wire::tr(core, "audio_health_unreadable"))
+        }
+    }
+}
+
 /// `" (missing file)"` for a non-healthy clip, `""` for a
 /// healthy one — the row label's health marker, in the
 /// parenthetical style of the ` (muted)` marker.
-pub fn health_suffix(health: ClipHealth) -> String {
-    match health_word(health) {
-        Some(word) => format!(" ({word})"),
+///
+/// Wave U (U5): word and wrapper resolve through the
+/// i18n table (`audio_health_suffix`, a `{word}`
+/// template — IA-U5-1), English byte-identical.
+pub fn health_suffix(core: &EditorCore, health: ClipHealth) -> String {
+    match health_word_tr(core, health) {
+        Some(word) => {
+            i18n_wire::tr(core, "audio_health_suffix").replace("{word}", &word)
+        }
         None => String::new(),
     }
 }
@@ -787,9 +926,15 @@ pub fn health_suffix(health: ClipHealth) -> String {
 /// `" · missing file"` for a non-healthy clip, `""` for
 /// a healthy one — the readout's health segment, in its
 /// ` · ` segment style.
-pub fn health_segment(health: ClipHealth) -> String {
-    match health_word(health) {
-        Some(word) => format!(" · {word}"),
+///
+/// Wave U (U5): word and wrapper resolve through the
+/// i18n table (`audio_health_segment`, a `{word}`
+/// template — IA-U5-1), English byte-identical.
+pub fn health_segment(core: &EditorCore, health: ClipHealth) -> String {
+    match health_word_tr(core, health) {
+        Some(word) => {
+            i18n_wire::tr(core, "audio_health_segment").replace("{word}", &word)
+        }
         None => String::new(),
     }
 }
@@ -1309,7 +1454,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             // numbers are unbounded (clip count, total
             // duration), so it wraps inside the card
             // instead of spilling past its edge.
-            text(summary_line(clips, &probes))
+            text(summary_line(core, clips, &probes))
                 .font(type_::LABEL)
                 .color(t.text_secondary)
                 .wrap()
@@ -1343,13 +1488,13 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                 .child(
                     text(format!(
                         "{}{}{}",
-                        clip_row_label(clip),
+                        clip_row_label(core, clip),
                         // Wave 12 (E4): fps from the core,
                         // so the row's frame span tracks
                         // the project's fps like the
                         // readout's does.
-                        probe_duration_suffix(probe, core.project.fps),
-                        health_suffix(probe.health)
+                        probe_duration_suffix(core, probe, core.project.fps),
+                        health_suffix(core, probe.health)
                     ))
                     .font(type_::BODY)
                     .color(t.text)
@@ -1460,7 +1605,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
         // Wave 9: the line embeds the target's
         // (unbounded) file name — kit prose treatment,
         // wraps inside the card instead of spilling.
-        text(target_line(clips, selected))
+        text(target_line(core, clips, selected))
             .font(type_::LABEL)
             .color(t.text_secondary)
             .wrap()
@@ -1570,7 +1715,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             // The − / + buttons keep their `btn` form and
             // labels; the readout carries the name.
             .child(design::stepper_value(
-                &target_gain_readout(clips, selected),
+                &target_gain_readout(core, clips, selected),
                 t,
             ))
             .child(btn("audio-gain-up", &i18n_wire::tr(core, "audio_gain_up"), false, t, |s| {
@@ -1754,27 +1899,34 @@ mod tests {
 
     #[test]
     fn target_line_names_the_pick_the_fallback_and_the_void() {
+        let core = EditorCore::new();
         let clips = vec![clip("a/theme.wav", 0, 1.0), clip("a/sting.wav", 9, 1.0)];
         // A live selection is named directly.
         assert_eq!(
-            target_line(&clips, Some(0)),
+            target_line(&core, &clips, Some(0)),
             "Target: theme.wav (clip 1 of 2)"
         );
         assert_eq!(
-            target_line(&clips, Some(1)),
+            target_line(&core, &clips, Some(1)),
             "Target: sting.wav (clip 2 of 2)"
         );
         // No selection — and a stale one — say "last clip".
         assert_eq!(
-            target_line(&clips, None),
+            target_line(&core, &clips, None),
             "Target: last clip — sting.wav (clip 2 of 2)"
         );
         assert_eq!(
-            target_line(&clips, Some(7)),
+            target_line(&core, &clips, Some(7)),
             "Target: last clip — sting.wav (clip 2 of 2)"
         );
-        assert_eq!(target_line(&[], None), "Target: none — no audio clips");
-        assert_eq!(target_line(&[], Some(0)), "Target: none — no audio clips");
+        assert_eq!(
+            target_line(&core, &[], None),
+            "Target: none — no audio clips"
+        );
+        assert_eq!(
+            target_line(&core, &[], Some(0)),
+            "Target: none — no audio clips"
+        );
     }
 
     #[test]
@@ -2041,6 +2193,84 @@ mod tests {
     }
 
     #[test]
+    fn audio_readout_i18n_keys_exist_and_match_the_english() {
+        // Wave U (U5): every composed readout the panel
+        // renders resolves from an `audio_*` key
+        // (IA-U5-1) whose English value is byte-identical
+        // to the pre-wire format string. Passes only
+        // after the integrator inserts the keys into
+        // `src/i18n.rs` — until then `tr` falls back to
+        // the key itself (the Q7 pattern) and
+        // `key_in_table` reports them missing; the
+        // readout content tests below fail the same way
+        // until the IA lands, so wiring + keys must land
+        // in one integration push. Templates are asserted
+        // in their raw stored form (the `audio_clip_count`
+        // precedent in the label pin above).
+        let core = EditorCore::new();
+        for (key, english) in [
+            ("audio_gain_suffix", " · gain {gain}"),
+            ("audio_gain_value", "Gain {gain}"),
+            ("audio_gain_value_none", "Gain —"),
+            ("audio_muted_suffix", " (muted)"),
+            ("audio_target_none", "Target: none — no audio clips"),
+            (
+                "audio_target_selected",
+                "Target: {name} (clip {index} of {count})",
+            ),
+            (
+                "audio_target_last",
+                "Target: last clip — {name} (clip {index} of {count})",
+            ),
+            (
+                "audio_readout_base",
+                "Clip {index}: {name} · starts frame {frame} · gain {gain}",
+            ),
+            ("audio_readout_duration", " · {secs}s{frames}"),
+            ("audio_muted_segment", " · muted"),
+            ("audio_row_label", "{name} · f{frame}"),
+            ("audio_frames_one", " (1 frame)"),
+            ("audio_frames_many", " ({count} frames)"),
+            ("audio_duration_segment", " · {secs} s{frames}"),
+            (
+                "audio_summary_full",
+                "{count} clips · total {total} s · {gained} with gain ≠ 1.0",
+            ),
+            ("audio_summary_count", "{count} clips"),
+            ("audio_health_missing", "missing file"),
+            ("audio_health_unsupported", "unsupported format"),
+            ("audio_health_unreadable", "unreadable file"),
+            ("audio_health_suffix", " ({word})"),
+            ("audio_health_segment", " · {word}"),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
+        // The catalogue's health words and the pure
+        // canonical vocabulary (`health_word`, kept for
+        // the core-less `waveform_view` caption) agree
+        // word for word, and the wrappers compose.
+        for (health, key) in [
+            (ClipHealth::Missing, "audio_health_missing"),
+            (ClipHealth::Unsupported, "audio_health_unsupported"),
+            (ClipHealth::Unreadable, "audio_health_unreadable"),
+        ] {
+            assert_eq!(
+                i18n_wire::tr(&core, key),
+                health_word(health).expect("a non-healthy word")
+            );
+        }
+        assert_eq!(
+            health_suffix(&core, ClipHealth::Missing),
+            " (missing file)"
+        );
+        assert_eq!(
+            health_segment(&core, ClipHealth::Missing),
+            " · missing file"
+        );
+    }
+
+    #[test]
     fn target_muted_reads_the_effective_target() {
         let clips = vec![clip("a.wav", 0, 1.0), muted_clip("b.wav", 3, 1.0)];
         // A live selection names its own clip's state.
@@ -2058,20 +2288,22 @@ mod tests {
 
     #[test]
     fn muted_suffix_marks_only_muted_clips() {
-        assert_eq!(muted_suffix(true), " (muted)");
-        assert_eq!(muted_suffix(false), "");
+        let core = EditorCore::new();
+        assert_eq!(muted_suffix(&core, true), " (muted)");
+        assert_eq!(muted_suffix(&core, false), "");
     }
 
     #[test]
     fn target_gain_readout_follows_the_target() {
+        let core = EditorCore::new();
         let clips = vec![clip("a.wav", 0, 2.0), clip("b.wav", 3, 0.5)];
         assert_eq!(target_gain(&clips, Some(0)), Some(2.0));
-        assert_eq!(target_gain_readout(&clips, Some(0)), "Gain 2.00");
+        assert_eq!(target_gain_readout(&core, &clips, Some(0)), "Gain 2.00");
         // Fallback (none / stale) reads the LAST clip,
         // exactly the old `gain_readout` values.
-        assert_eq!(target_gain_readout(&clips, None), "Gain 0.50");
-        assert_eq!(target_gain_readout(&clips, Some(9)), "Gain 0.50");
-        assert_eq!(target_gain_readout(&[], None), "Gain —");
+        assert_eq!(target_gain_readout(&core, &clips, None), "Gain 0.50");
+        assert_eq!(target_gain_readout(&core, &clips, Some(9)), "Gain 0.50");
+        assert_eq!(target_gain_readout(&core, &[], None), "Gain —");
         assert_eq!(target_gain(&[], Some(0)), None);
     }
 
@@ -2096,9 +2328,10 @@ mod tests {
         // Wave 4: the suffix is probe-fed. A missing file
         // probes no duration — the row shows name + start
         // (plus the health suffix, tested separately).
+        let core = EditorCore::new();
         let cache = RefCell::new(ProbeCache::new());
         let missing = probe_clip(&cache, &clip("no/such/file.wav", 0, 1.0));
-        assert_eq!(probe_duration_suffix(&missing, 12.0), "");
+        assert_eq!(probe_duration_suffix(&core, &missing, 12.0), "");
         // One second of silence at 44.1 kHz, written with
         // the engine's own WAV writer, probes 1.0 s.
         // Wave 12 (E4): at 12 fps the suffix carries the
@@ -2115,8 +2348,14 @@ mod tests {
         std::fs::write(&path, audio_edit::write_wav(&wav)).unwrap();
         let c = clip(&path.to_string_lossy(), 4, 1.0);
         let healthy = probe_clip(&cache, &c);
-        assert_eq!(probe_duration_suffix(&healthy, 12.0), " · 1.0 s (12 frames)");
-        assert_eq!(probe_duration_suffix(&healthy, 24.0), " · 1.0 s (24 frames)");
+        assert_eq!(
+            probe_duration_suffix(&core, &healthy, 12.0),
+            " · 1.0 s (12 frames)"
+        );
+        assert_eq!(
+            probe_duration_suffix(&core, &healthy, 24.0),
+            " · 1.0 s (24 frames)"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -2150,9 +2389,10 @@ mod tests {
 
     #[test]
     fn duration_frames_suffix_singularises_one_frame() {
-        assert_eq!(duration_frames_suffix(1.0, 12.0), " (12 frames)");
-        assert_eq!(duration_frames_suffix(0.05, 12.0), " (1 frame)");
-        assert_eq!(duration_frames_suffix(0.0, 12.0), " (0 frames)");
+        let core = EditorCore::new();
+        assert_eq!(duration_frames_suffix(&core, 1.0, 12.0), " (12 frames)");
+        assert_eq!(duration_frames_suffix(&core, 0.05, 12.0), " (1 frame)");
+        assert_eq!(duration_frames_suffix(&core, 0.0, 12.0), " (0 frames)");
     }
 
     #[test]
@@ -2195,25 +2435,32 @@ mod tests {
     fn health_words_name_each_failure_state() {
         // One vocabulary for both surfaces: the row's
         // parenthetical suffix and the readout's segment.
+        let core = EditorCore::new();
         assert_eq!(health_word(ClipHealth::Healthy), None);
-        assert_eq!(health_suffix(ClipHealth::Healthy), "");
-        assert_eq!(health_segment(ClipHealth::Healthy), "");
-        assert_eq!(health_suffix(ClipHealth::Missing), " (missing file)");
-        assert_eq!(health_segment(ClipHealth::Missing), " · missing file");
+        assert_eq!(health_suffix(&core, ClipHealth::Healthy), "");
+        assert_eq!(health_segment(&core, ClipHealth::Healthy), "");
         assert_eq!(
-            health_suffix(ClipHealth::Unsupported),
+            health_suffix(&core, ClipHealth::Missing),
+            " (missing file)"
+        );
+        assert_eq!(
+            health_segment(&core, ClipHealth::Missing),
+            " · missing file"
+        );
+        assert_eq!(
+            health_suffix(&core, ClipHealth::Unsupported),
             " (unsupported format)"
         );
         assert_eq!(
-            health_segment(ClipHealth::Unsupported),
+            health_segment(&core, ClipHealth::Unsupported),
             " · unsupported format"
         );
         assert_eq!(
-            health_suffix(ClipHealth::Unreadable),
+            health_suffix(&core, ClipHealth::Unreadable),
             " (unreadable file)"
         );
         assert_eq!(
-            health_segment(ClipHealth::Unreadable),
+            health_segment(&core, ClipHealth::Unreadable),
             " · unreadable file"
         );
     }
@@ -2281,7 +2528,7 @@ mod tests {
         let silent = probe_clip(&cache, &clip(&silent_path.to_string_lossy(), 0, 1.0));
         assert_eq!(silent.health, ClipHealth::Healthy);
         assert_eq!(silent.peak, Some(0.0));
-        assert_eq!(health_suffix(silent.health), "");
+        assert_eq!(health_suffix(&EditorCore::new(), silent.health), "");
         let _ = std::fs::remove_file(&good);
         let _ = std::fs::remove_file(&silent_path);
     }
@@ -2354,7 +2601,10 @@ mod tests {
         let missing = vec!["gone.wav".to_string()];
         let out = probes_with_shared_missing(&clips, probes, &missing);
         assert_eq!(out[0].health, ClipHealth::Missing);
-        assert_eq!(health_suffix(out[0].health), " (missing file)");
+        assert_eq!(
+            health_suffix(&EditorCore::new(), out[0].health),
+            " (missing file)"
+        );
     }
 
     #[test]
@@ -2367,7 +2617,7 @@ mod tests {
         let probes = vec![probe_with(ClipHealth::Missing)];
         let out = probes_with_shared_missing(&clips, probes, &[]);
         assert_eq!(out[0].health, ClipHealth::Healthy);
-        assert_eq!(health_suffix(out[0].health), "");
+        assert_eq!(health_suffix(&EditorCore::new(), out[0].health), "");
     }
 
     #[test]
@@ -2459,7 +2709,7 @@ mod tests {
             0,
             1.0,
         )];
-        let line = target_line(&clips, None);
+        let line = target_line(&EditorCore::new(), &clips, None);
         assert!(
             line.chars().count() > 52,
             "target line is {} chars: {line}",
@@ -2533,49 +2783,57 @@ mod tests {
 
     #[test]
     fn gain_suffix_only_for_non_unity_gain() {
-        assert_eq!(gain_suffix(1.0), "");
-        assert_eq!(gain_suffix(1.0005), "");
-        assert_eq!(gain_suffix(1.5), " · gain 1.50");
-        assert_eq!(gain_suffix(0.25), " · gain 0.25");
+        let core = EditorCore::new();
+        assert_eq!(gain_suffix(&core, 1.0), "");
+        assert_eq!(gain_suffix(&core, 1.0005), "");
+        assert_eq!(gain_suffix(&core, 1.5), " · gain 1.50");
+        assert_eq!(gain_suffix(&core, 0.25), " · gain 0.25");
     }
 
     #[test]
     fn row_label_shows_name_start_frame_and_gain() {
-        assert_eq!(clip_row_label(&clip("a/theme.wav", 0, 1.0)), "theme.wav · f1");
+        let core = EditorCore::new();
         assert_eq!(
-            clip_row_label(&clip("a/theme.wav", 4, 2.0)),
+            clip_row_label(&core, &clip("a/theme.wav", 0, 1.0)),
+            "theme.wav · f1"
+        );
+        assert_eq!(
+            clip_row_label(&core, &clip("a/theme.wav", 4, 2.0)),
             "theme.wav · f5 · gain 2.00"
         );
     }
 
     #[test]
     fn row_label_marks_a_muted_clip() {
+        let core = EditorCore::new();
         assert_eq!(
-            clip_row_label(&muted_clip("a/theme.wav", 0, 1.0)),
+            clip_row_label(&core, &muted_clip("a/theme.wav", 0, 1.0)),
             "theme.wav · f1 (muted)"
         );
         // The marker closes the label, after the gain
         // suffix when one is present.
         assert_eq!(
-            clip_row_label(&muted_clip("a/theme.wav", 4, 2.0)),
+            clip_row_label(&core, &muted_clip("a/theme.wav", 4, 2.0)),
             "theme.wav · f5 · gain 2.00 (muted)"
         );
     }
 
     #[test]
     fn summary_degrades_to_a_bare_count() {
-        assert_eq!(format_summary(0, None, 0), "0 clips");
-        assert_eq!(format_summary(2, None, 1), "2 clips");
+        let core = EditorCore::new();
+        assert_eq!(format_summary(&core, 0, None, 0), "0 clips");
+        assert_eq!(format_summary(&core, 2, None, 1), "2 clips");
     }
 
     #[test]
     fn summary_reports_total_and_gained_count() {
+        let core = EditorCore::new();
         assert_eq!(
-            format_summary(3, Some(12.34), 1),
+            format_summary(&core, 3, Some(12.34), 1),
             "3 clips · total 12.3 s · 1 with gain ≠ 1.0"
         );
         assert_eq!(
-            format_summary(1, Some(0.0), 0),
+            format_summary(&core, 1, Some(0.0), 0),
             "1 clips · total 0.0 s · 0 with gain ≠ 1.0"
         );
     }
@@ -2587,9 +2845,10 @@ mod tests {
             clip("no/such/file-b.wav", 9, 0.5),
         ];
         let cache = RefCell::new(ProbeCache::new());
+        let core = EditorCore::new();
         let probes: Vec<ClipProbe> = clips.iter().map(|c| probe_clip(&cache, c)).collect();
-        assert_eq!(summary_line(&clips, &probes), "2 clips");
-        assert_eq!(summary_line(&[], &[]), "0 clips");
+        assert_eq!(summary_line(&core, &clips, &probes), "2 clips");
+        assert_eq!(summary_line(&core, &[], &[]), "0 clips");
     }
 
     #[test]
@@ -2610,10 +2869,11 @@ mod tests {
             clip(&path.to_string_lossy(), 0, 1.0),
             clip("no/such/file.wav", 30, 2.0),
         ];
+        let core = EditorCore::new();
         let cache = RefCell::new(ProbeCache::new());
         let probes: Vec<ClipProbe> = clips.iter().map(|c| probe_clip(&cache, c)).collect();
         assert_eq!(
-            summary_line(&clips, &probes),
+            summary_line(&core, &clips, &probes),
             "2 clips · total 1.0 s · 1 with gain ≠ 1.0"
         );
         let _ = std::fs::remove_file(&path);
@@ -2621,12 +2881,13 @@ mod tests {
 
     #[test]
     fn gain_readout_shows_the_last_clips_gain() {
-        assert_eq!(gain_readout(&[]), "Gain —");
-        assert_eq!(gain_readout(&[clip("a.wav", 0, 1.0)]), "Gain 1.00");
+        let core = EditorCore::new();
+        assert_eq!(gain_readout(&core, &[]), "Gain —");
+        assert_eq!(gain_readout(&core, &[clip("a.wav", 0, 1.0)]), "Gain 1.00");
         // The readout follows the LAST clip (the stepper's
         // target), not the first.
         assert_eq!(
-            gain_readout(&[clip("a.wav", 0, 2.0), clip("b.wav", 3, 0.5)]),
+            gain_readout(&core, &[clip("a.wav", 0, 2.0), clip("b.wav", 3, 0.5)]),
             "Gain 0.50"
         );
         assert_eq!(last_gain(&[]), None);
@@ -2638,18 +2899,18 @@ mod tests {
         let mut core = EditorCore::new();
         core.project.audio.clear();
         core.project.audio.push(clip("fake/theme.wav", 0, 1.0));
-        assert_eq!(gain_readout(&core.project.audio), "Gain 1.00");
+        assert_eq!(gain_readout(&core, &core.project.audio), "Gain 1.00");
 
         // The exact step the Gain + button sends.
         core.audio_clip_gain_step(0.1);
         let gain = core.project.audio[0].gain;
         assert!((gain - 1.1).abs() < 1e-6, "unexpected gain {gain}");
-        assert_eq!(gain_readout(&core.project.audio), "Gain 1.10");
+        assert_eq!(gain_readout(&core, &core.project.audio), "Gain 1.10");
 
         // Two Gain - presses land at 0.90.
         core.audio_clip_gain_step(-0.1);
         core.audio_clip_gain_step(-0.1);
-        assert_eq!(gain_readout(&core.project.audio), "Gain 0.90");
+        assert_eq!(gain_readout(&core, &core.project.audio), "Gain 0.90");
     }
 
     #[test]
@@ -2664,7 +2925,7 @@ mod tests {
         assert_eq!(core.project.audio.len(), 1);
         assert_eq!(core.project.audio[0].path, "a/second.wav");
         // The readout now targets the surviving last clip.
-        assert_eq!(gain_readout(&core.project.audio), "Gain 0.50");
+        assert_eq!(gain_readout(&core, &core.project.audio), "Gain 0.50");
     }
 
     /// A shell `State` over the given core, field-for-field

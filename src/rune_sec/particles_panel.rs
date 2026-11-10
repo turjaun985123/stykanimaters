@@ -111,6 +111,29 @@
 //! count) are dynamic text, not labels, and stay
 //! English this wave, as do the handlers' status
 //! sentences.
+//!
+//! Wave U (U7) closes that readout remainder: the
+//! composed readouts now resolve through template
+//! keys substituted with `.replace()` at the composing
+//! site (the camera `follow_label` precedent;
+//! `particles_event_count` mirrors the audio panel's
+//! `{count} clip(s)` template): `row_label`
+//! (`particles_row_label`), `anchor_summary`
+//! (`particles_anchor_free` /
+//! `particles_anchor_summary_figure`), `anchor_detail`
+//! (the `particles_anchor_detail_*` keys), the detail
+//! title (`particles_detail_title` — its `{kind}` slot
+//! takes the serialised kind name as data, never
+//! translated), the fused summary and pad position
+//! lines (`particles_detail_summary` /
+//! `particles_position`) and the header's event count
+//! (`particles_event_count`). The pure helpers take
+//! `&EditorCore` as their first parameter, exactly
+//! like `follow_label`. The keys land via IA-U7-1, so
+//! the extended pin (and the helper tests asserting
+//! the composed strings) passes only once that IA
+//! lands — the Q7 pattern. Status sentences stay
+//! English (the board contract).
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, El};
@@ -178,31 +201,48 @@ pub const PARTICLE_PALETTE: [u32; 8] = [
 
 /// One list row's title: `Event {i+1} · frame {f+1}`
 /// (both numbers 1-based for display; the stored frame
-/// is 0-based).
-pub fn row_label(index: usize, event: &ParticleEvent) -> String {
-    format!("Event {} · frame {}", index + 1, event.frame + 1)
+/// is 0-based). Wave U (U7): the wording resolves
+/// through the `particles_row_label` template key
+/// (IA-U7-1), the slots substituted here — the camera
+/// `follow_label` idiom.
+pub fn row_label(core: &EditorCore, index: usize, event: &ParticleEvent) -> String {
+    i18n_wire::tr(core, "particles_row_label")
+        .replace("{index}", &(index + 1).to_string())
+        .replace("{frame}", &(event.frame + 1).to_string())
 }
 
 /// Short anchor summary for a list row: `free` for a
 /// stage-point event, `figure {n}` (1-based) for an
 /// anchored one. The node, when present, is detail-block
 /// information ([`anchor_detail`]), not row information.
-pub fn anchor_summary(event: &ParticleEvent) -> String {
+/// Wave U (U7): each shape resolves through its own key
+/// (`particles_anchor_free` /
+/// `particles_anchor_summary_figure`, IA-U7-1) — the
+/// conditional-key idiom `follow_label` uses.
+pub fn anchor_summary(core: &EditorCore, event: &ParticleEvent) -> String {
     match event.figure {
-        None => "free".to_string(),
-        Some(figure) => format!("figure {}", figure + 1),
+        None => i18n_wire::tr(core, "particles_anchor_free"),
+        Some(figure) => i18n_wire::tr(core, "particles_anchor_summary_figure")
+            .replace("{figure}", &(figure + 1).to_string()),
     }
 }
 
 /// Full anchor description for the detail block: a free
 /// event sits at its stage point; an anchored one names
-/// the figure and, when a node is set, the node.
-pub fn anchor_detail(event: &ParticleEvent) -> String {
+/// the figure and, when a node is set, the node. Wave U
+/// (U7): one key per shape (`particles_anchor_detail_*`,
+/// IA-U7-1); the figure slot is 1-based, the node slot
+/// is the stored 0-based index — the pre-wiring display
+/// values, unchanged.
+pub fn anchor_detail(core: &EditorCore, event: &ParticleEvent) -> String {
     match (event.figure, event.node) {
-        (None, _) => "free at stage point".to_string(),
-        (Some(figure), None) => format!("anchored to figure {}", figure + 1),
+        (None, _) => i18n_wire::tr(core, "particles_anchor_detail_free"),
+        (Some(figure), None) => i18n_wire::tr(core, "particles_anchor_detail_figure")
+            .replace("{figure}", &(figure + 1).to_string()),
         (Some(figure), Some(node)) => {
-            format!("anchored to figure {} · node {}", figure + 1, node)
+            i18n_wire::tr(core, "particles_anchor_detail_node")
+                .replace("{figure}", &(figure + 1).to_string())
+                .replace("{node}", &node.to_string())
         }
     }
 }
@@ -257,8 +297,8 @@ pub fn event_rows(core: &EditorCore, selected: Option<usize>) -> Vec<ParticleRow
         .enumerate()
         .map(|(index, event)| ParticleRowData {
             index,
-            label: row_label(index, event),
-            anchor: anchor_summary(event),
+            label: row_label(core, index, event),
+            anchor: anchor_summary(core, event),
             selected: selected == Some(index),
         })
         .collect()
@@ -303,7 +343,7 @@ pub fn detail_data(core: &EditorCore, selected: Option<usize>) -> Option<Particl
         color: event.color,
         frame: event.frame,
         seed: event.seed,
-        anchor: anchor_detail(event),
+        anchor: anchor_detail(core, event),
         figure: event.figure,
         x: event.x,
         y: event.y,
@@ -640,15 +680,31 @@ fn detail_block(s: &State, t: &Theme) -> El {
         .w_full()
         .gap(8.0)
         .child(
-            text(format!("Event {} · {}", i + 1, data.kind))
-                .font(type_::TITLE)
-                .color(t.text),
+            // Detail title (Wave U, U7): the
+            // `particles_detail_title` template; the
+            // `{kind}` slot takes the serialised kind
+            // name (`data.kind`) as data — the export/
+            // MCP vocabulary, never translated.
+            text(
+                i18n_wire::tr(&s.core, "particles_detail_title")
+                    .replace("{index}", &(i + 1).to_string())
+                    .replace("{kind}", data.kind),
+            )
+            .font(type_::TITLE)
+            .color(t.text),
         )
         .child(
-            text(format!(
-                "{} · at {:.0}, {:.0}",
-                data.anchor, data.x, data.y
-            ))
+            // Fused summary line (Wave U, U7): the
+            // `particles_detail_summary` template; the
+            // `{anchor}` slot takes `anchor_detail`'s
+            // own (already localised) composition, the
+            // coordinates keep the `{:.0}` display form.
+            text(
+                i18n_wire::tr(&s.core, "particles_detail_summary")
+                    .replace("{anchor}", &data.anchor)
+                    .replace("{x}", &format!("{:.0}", data.x))
+                    .replace("{y}", &format!("{:.0}", data.y)),
+            )
             .font(type_::LABEL)
             .color(t.text_secondary),
         )
@@ -840,10 +896,14 @@ fn detail_block(s: &State, t: &Theme) -> El {
         // same point fused with the anchor text; this is
         // the pad's own readout, updating as it nudges.)
         .child(
-            text(format!("At {:.0}, {:.0}", data.x, data.y))
-                .key("particles-pos")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
+            text(
+                i18n_wire::tr(&s.core, "particles_position")
+                    .replace("{x}", &format!("{:.0}", data.x))
+                    .replace("{y}", &format!("{:.0}", data.y)),
+            )
+            .key("particles-pos")
+            .font(type_::LABEL)
+            .color(t.text_secondary),
         )
 }
 
@@ -916,10 +976,16 @@ pub fn particles_panel(s: &State, t: &Theme) -> El {
                 .child(design::panel_title(
                     None,
                     &i18n_wire::tr(&s.core, "particles_title"),
-                    Some(&format!(
-                        "{} event(s)",
-                        s.core.project.particles.len()
-                    )),
+                    // Header count (Wave U, U7): the
+                    // `particles_event_count` template —
+                    // `{count} event(s)`, the audio
+                    // panel's `audio_clip_count` shape.
+                    Some(
+                        &i18n_wire::tr(&s.core, "particles_event_count").replace(
+                            "{count}",
+                            &s.core.project.particles.len().to_string(),
+                        ),
+                    ),
                     t,
                 )),
         )
@@ -1019,30 +1085,60 @@ mod tests {
 
     #[test]
     fn row_label_is_one_based_event_and_frame() {
-        assert_eq!(row_label(0, &event(0, None, None)), "Event 1 · frame 1");
-        assert_eq!(row_label(2, &event(4, None, None)), "Event 3 · frame 5");
-        assert_eq!(row_label(9, &event(29, None, None)), "Event 10 · frame 30");
+        // Wave U (U7): the helper composes through the
+        // `particles_row_label` template key, so — like
+        // the i18n pin below — this resolves only once
+        // IA-U7-1 lands (until then `tr` falls back to
+        // the key itself; the Q7 pattern).
+        let core = EditorCore::new();
+        assert_eq!(
+            row_label(&core, 0, &event(0, None, None)),
+            "Event 1 · frame 1"
+        );
+        assert_eq!(
+            row_label(&core, 2, &event(4, None, None)),
+            "Event 3 · frame 5"
+        );
+        assert_eq!(
+            row_label(&core, 9, &event(29, None, None)),
+            "Event 10 · frame 30"
+        );
     }
 
     #[test]
     fn anchor_summary_names_free_or_the_figure() {
-        assert_eq!(anchor_summary(&event(0, None, None)), "free");
+        // Wave U (U7): IA-U7-1-dependent, like the
+        // row_label test above.
+        let core = EditorCore::new();
+        assert_eq!(anchor_summary(&core, &event(0, None, None)), "free");
         // A stray node without a figure still reads free:
         // the anchor is the figure.
-        assert_eq!(anchor_summary(&event(0, None, Some(2))), "free");
-        assert_eq!(anchor_summary(&event(0, Some(0), None)), "figure 1");
-        assert_eq!(anchor_summary(&event(0, Some(1), Some(3))), "figure 2");
+        assert_eq!(anchor_summary(&core, &event(0, None, Some(2))), "free");
+        assert_eq!(
+            anchor_summary(&core, &event(0, Some(0), None)),
+            "figure 1"
+        );
+        assert_eq!(
+            anchor_summary(&core, &event(0, Some(1), Some(3))),
+            "figure 2"
+        );
     }
 
     #[test]
     fn anchor_detail_adds_the_node_when_present() {
-        assert_eq!(anchor_detail(&event(0, None, None)), "free at stage point");
+        // Wave U (U7): IA-U7-1-dependent, like the
+        // row_label test above.
+        let core = EditorCore::new();
         assert_eq!(
-            anchor_detail(&event(0, Some(0), None)),
+            anchor_detail(&core, &event(0, None, None)),
+            "free at stage point"
+        );
+        assert_eq!(
+            anchor_detail(&core, &event(0, Some(0), None)),
             "anchored to figure 1"
         );
         assert_eq!(
-            anchor_detail(&event(0, Some(1), Some(3))),
+            anchor_detail(&core, &event(0, Some(1), Some(3))),
             "anchored to figure 2 · node 3"
         );
     }
@@ -1069,6 +1165,9 @@ mod tests {
 
     #[test]
     fn event_rows_carry_label_anchor_and_selection() {
+        // The label/anchor strings compose through the
+        // Wave U (U7) template keys — IA-U7-1-dependent,
+        // like the helper tests above.
         let core = core_with(vec![
             event(0, None, None),
             event(4, Some(1), Some(2)),
@@ -1089,6 +1188,9 @@ mod tests {
 
     #[test]
     fn detail_data_needs_a_valid_selection() {
+        // The anchor string composes through the Wave U
+        // (U7) `anchor_detail` keys — IA-U7-1-dependent,
+        // like the helper tests above.
         let core = core_with(vec![event(4, Some(0), Some(3))]);
         assert!(detail_data(&core, None).is_none());
         assert!(detail_data(&core, Some(1)).is_none(), "out of range");
@@ -1625,6 +1727,14 @@ mod tests {
         // to the key itself and `key_in_table` is false
         // (the Q7 pattern: wiring and keys land together
         // at integration).
+        //
+        // Wave U (U7) extends the pin with the composed
+        // readouts' keys: the last ten pairs below land
+        // via IA-U7-1, so the pin as a whole passes only
+        // once that IA lands too. Template keys are
+        // asserted in their stored form, placeholders
+        // intact (the camera `camera_following_figure`
+        // precedent).
         let core = EditorCore::new();
         for (key, english) in [
             ("particles_title", "Particles"),
@@ -1649,6 +1759,38 @@ mod tests {
             ("particles_delete_event", "Delete event"),
             ("particles_to_playhead", "To playhead"),
             ("particles_anchor_joint", "Anchor to joint"),
+            // Wave U (U7) readout keys — IA-U7-1.
+            (
+                "particles_row_label",
+                "Event {index} · frame {frame}",
+            ),
+            ("particles_anchor_free", "free"),
+            (
+                "particles_anchor_summary_figure",
+                "figure {figure}",
+            ),
+            (
+                "particles_anchor_detail_free",
+                "free at stage point",
+            ),
+            (
+                "particles_anchor_detail_figure",
+                "anchored to figure {figure}",
+            ),
+            (
+                "particles_anchor_detail_node",
+                "anchored to figure {figure} · node {node}",
+            ),
+            (
+                "particles_detail_title",
+                "Event {index} · {kind}",
+            ),
+            (
+                "particles_detail_summary",
+                "{anchor} · at {x}, {y}",
+            ),
+            ("particles_position", "At {x}, {y}"),
+            ("particles_event_count", "{count} event(s)"),
         ] {
             assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
             assert_eq!(i18n_wire::tr(&core, key), english);
