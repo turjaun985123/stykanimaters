@@ -2181,7 +2181,7 @@ mod tests {
     fn svg_media_segment_image_carries_the_opacity_product() {
         let mut project = media_project();
         project.figures[0].def.nodes[2].media =
-            Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+            Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 });
         project.figures[0].opacity = 0.5;
         let dir = std::path::Path::new("/tmp/styk-svg-media-opacity-test");
         export_svg(&project, dir).unwrap();
@@ -2204,7 +2204,7 @@ mod tests {
         // over a single shared asset def — the unbent
         // single-use form is gone for this segment.
         let mut project = clip_media_project(
-            (Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }), None),
+            (Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }), None),
             (None, None),
         );
         project.frames[0].bends = vec![vec![0.0, 0.9, 0.0]];
@@ -2273,7 +2273,7 @@ mod tests {
         // funnel's item count for the same project — the
         // surfaces share the stream and cannot drift.
         let mut project = clip_media_project(
-            (Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }), None),
+            (Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }), None),
             (None, None),
         );
         project.frames[0].bends = vec![vec![0.0, 2.0, 0.0]];
@@ -2745,7 +2745,7 @@ mod tests {
         // first corner.
         let mut project = clip_media_project(
             (None, None),
-            (Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }), None),
+            (Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }), None),
         );
         project.strokes.push(crate::model::Stroke {
             frame: 0,
@@ -2803,7 +2803,7 @@ mod tests {
         // carrier.
         let mut project = clip_media_project(
             (None, None),
-            (Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }), None),
+            (Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }), None),
         );
         project.figures[0].opacity = 0.5;
         project.figures[0].def.nodes[1].style.opacity = 0.9;

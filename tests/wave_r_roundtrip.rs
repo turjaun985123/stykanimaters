@@ -176,7 +176,7 @@ fn alpha_fixture() -> Project {
         size: 10.0,
     });
     p.figures[0].def.nodes[5].style.opacity = 0.0;
-    p.figures[0].def.nodes[2].media = Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+    p.figures[0].def.nodes[2].media = Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 });
 
     let mut clip_def = FigureDef::humanoid();
     clip_def.nodes[4].media = Some(SegmentMedia::Text {
@@ -256,7 +256,7 @@ fn text_media_alpha_survives_save_load_exactly() {
     );
     assert_eq!(
         back.figures[0].def.nodes[2].media,
-        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
+        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }),
         "the image media sibling variant changed across the round trip"
     );
 }

@@ -445,7 +445,7 @@ fn clip_def_only_project(mcp: &mut Dispatch, dir: &Path) -> Vec<u8> {
     assert_eq!(project.clips.len(), 1, "exactly one clip was created");
     assert_eq!(
         clip_def_media(&project, 0, MEDIA_NODE),
-        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
+        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }),
         "the clip def carries the image on its chest node"
     );
     assert_eq!(
@@ -571,12 +571,12 @@ fn clip_def_media_follows_the_def_across_figures_and_frames() {
     assert_eq!(project.figures[1].clip, Some(0), "figure 1 loops clip 0");
     assert_eq!(
         clip_def_media(&project, 0, MEDIA_NODE),
-        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
+        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }),
         "the def still carries the media"
     );
     assert_eq!(
         figure_def_media(&project, 1, MEDIA_NODE),
-        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
+        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }),
         "the inserted instance was cloned from the def, media included"
     );
     assert_eq!(
@@ -657,7 +657,7 @@ fn clip_def_media_survives_save_load_and_renders_to_png() {
     assert_eq!(project.clips.len(), 1, "the clip survives the round-trip");
     assert_eq!(
         clip_def_media(&project, 0, MEDIA_NODE),
-        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
+        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }),
         "the def media survives save -> load"
     );
     assert_eq!(
@@ -806,7 +806,7 @@ fn clip_def_media_edit_is_exactly_one_undo_step() {
     let project = saved_project(&mut mcp, &dir, "after-edit.styk.json");
     assert_eq!(
         clip_def_media(&project, 0, MEDIA_NODE),
-        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
+        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }),
         "the def now carries the media"
     );
     assert_eq!(
@@ -850,7 +850,7 @@ fn clip_def_media_edit_is_exactly_one_undo_step() {
     let project = saved_project(&mut mcp, &dir, "after-redo.styk.json");
     assert_eq!(
         clip_def_media(&project, 0, MEDIA_NODE),
-        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
+        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }),
         "redo restored the def media"
     );
 
@@ -903,7 +903,7 @@ fn asset_remove_refuses_a_clip_def_only_reference() {
     assert_eq!(project.assets.len(), 1, "the refused removal kept the asset");
     assert_eq!(
         clip_def_media(&project, 0, MEDIA_NODE),
-        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
+        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }),
         "the refused removal kept the def media"
     );
 

@@ -2379,6 +2379,40 @@ mod tests {
     }
 
     #[test]
+    fn fop_pose_library_preserves_out_of_limit_angles_verbatim() {
+        // Wave Z (Z9, library state round-trip audit): the
+        // pose library stores a Pose {root, angles} only —
+        // no states (they live on FigureInstance) and no
+        // limits (they live on FigureDef) — and stored
+        // poses are NEVER rewritten by limits (Wave X, P-4:
+        // limits bind solving, not data). A pose authored
+        // PAST the humanoid presets (elbow max +160, knee
+        // min -160) must therefore round-trip through this
+        // library bit-exact, unclamped.
+        let dir = std::env::temp_dir().join(format!(
+            "stykanimate-fop-pose-limits-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let core = EditorCore::new();
+        let mut pose = core.project.frames[0].poses[0].clone();
+        pose.angles[4] = 170.0; // past the elbow preset max
+        pose.angles[8] = -175.0; // past the knee preset min
+        let path = fop_save_pose_library_in(&dir, &pose, "Over Limit")
+            .expect("save succeeds");
+        // The over-limit values are in the file itself.
+        let text = std::fs::read_to_string(&path).expect("entry readable");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&text).expect("entry is JSON");
+        assert_eq!(parsed["pose"]["angles"][4], json!(170.0));
+        assert_eq!(parsed["pose"]["angles"][8], json!(-175.0));
+        let loaded = fop_load_pose_library_in(&dir, "Over Limit").expect("load succeeds");
+        assert_eq!(loaded.angles, pose.angles, "angles round-trip unclamped");
+        assert_eq!(loaded.root, pose.root);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn fop_pose_entry_file_resolves_the_stored_name_not_the_slug() {
         // Wave W, W9 (mirror of the pose_tools pin): a
         // listed entry whose file stem is not its stored

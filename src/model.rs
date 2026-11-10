@@ -176,6 +176,14 @@ fn media_flip_is_default(flip: &bool) -> bool {
     !*flip
 }
 
+fn default_media_opacity() -> f32 {
+    1.0
+}
+
+fn media_opacity_is_default(opacity: &f32) -> bool {
+    *opacity == 1.0
+}
+
 /// Media attached to a segment: a sprite from the project's asset
 /// table, or a text label drawn along the segment.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -218,6 +226,21 @@ pub enum SegmentMedia {
         /// range — see `media::media_items`.)
         #[serde(default, skip_serializing_if = "media_flip_is_default")]
         flip: bool,
+        /// The image's own opacity (Wave Z, Z5): a fifth
+        /// payload field beside the transform, serde-defaulted
+        /// to 1.0 and skipped on write while it holds 1.0, so
+        /// pre-opacity files load fully opaque and projects
+        /// whose media are all opaque serialise byte-identically
+        /// to before. The one placement funnel multiplies it
+        /// into the item alpha (figure opacity × carrier style
+        /// opacity × this value, each clamped) — see
+        /// `media::media_items`. This is the home the layered
+        /// importer (P-9) stores a part's manifest opacity in.
+        #[serde(
+            default = "default_media_opacity",
+            skip_serializing_if = "media_opacity_is_default"
+        )]
+        opacity: f32,
     },
     Text { content: String, size: f32 },
 }
@@ -3135,15 +3158,15 @@ mod wave12_c4_serde_pins {
         // every saved file uses; the asset index must come back
         // exactly, including index 0 (the first asset).
         for media in [
-            SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false },
-            SegmentMedia::Image { asset: 7, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false },
+            SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 },
+            SegmentMedia::Image { asset: 7, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 },
             SegmentMedia::Text { content: "héllo \"world\"".to_string(), size: 14.5 },
         ] {
             let json = serde_json::to_string(&media).unwrap();
             let back: SegmentMedia = serde_json::from_str(&json).unwrap();
             assert_eq!(back, media, "round trip changed {media:?}");
         }
-        let json = serde_json::to_string(&SegmentMedia::Image { asset: 2, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }).unwrap();
+        let json = serde_json::to_string(&SegmentMedia::Image { asset: 2, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }).unwrap();
         assert_eq!(json, r#"{"Image":{"asset":2}}"#);
     }
 
@@ -3162,6 +3185,7 @@ mod wave12_c4_serde_pins {
                 scale: 1.0,
                 angle_offset: 0.0,
                 flip: false,
+                opacity: 1.0,
             }
         );
         // ...and writes back byte-identically (every transform
@@ -3175,6 +3199,7 @@ mod wave12_c4_serde_pins {
             scale: 2.0,
             angle_offset: 45.0,
             flip: true,
+            opacity: 1.0,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert_eq!(serde_json::from_str::<SegmentMedia>(&json).unwrap(), m);
@@ -3191,12 +3216,52 @@ mod wave12_c4_serde_pins {
                 scale: 2.0,
                 angle_offset: 0.0,
                 flip: false,
+                opacity: 1.0,
             }
         );
         assert_eq!(
             serde_json::to_string(&back).unwrap(),
             r#"{"Image":{"asset":1,"scale":2.0}}"#
         );
+    }
+
+    #[test]
+    fn wave_z_segment_media_opacity_serde_default_and_skip() {
+        // Wave Z (Z5): the payload's own opacity defaults
+        // to 1.0 — a pre-opacity file (transform fields
+        // only, or `asset` alone) loads fully opaque...
+        let back: SegmentMedia =
+            serde_json::from_str(r#"{"Image":{"asset":2,"scale":2.0}}"#).unwrap();
+        assert_eq!(
+            back,
+            SegmentMedia::Image {
+                asset: 2,
+                offset: [0.0, 0.0],
+                scale: 2.0,
+                angle_offset: 0.0,
+                flip: false,
+                opacity: 1.0,
+            }
+        );
+        // ...and an opaque payload writes back without the
+        // field, byte-identical to a pre-opacity file.
+        assert_eq!(
+            serde_json::to_string(&back).unwrap(),
+            r#"{"Image":{"asset":2,"scale":2.0}}"#
+        );
+        // A non-default opacity round-trips exactly and is
+        // the only extra field written.
+        let m = SegmentMedia::Image {
+            asset: 2,
+            offset: [0.0, 0.0],
+            scale: 1.0,
+            angle_offset: 0.0,
+            flip: false,
+            opacity: 0.5,
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(json, r#"{"Image":{"asset":2,"opacity":0.5}}"#);
+        assert_eq!(serde_json::from_str::<SegmentMedia>(&json).unwrap(), m);
     }
 
     #[test]
@@ -3224,7 +3289,7 @@ mod wave12_c4_serde_pins {
         };
         project.figures[0].def.nodes[1].style = styled;
         project.figures[0].def.nodes[1].media =
-            Some(SegmentMedia::Image { asset: 2, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+            Some(SegmentMedia::Image { asset: 2, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 });
         project.figures[0].def.nodes[2].media = Some(SegmentMedia::Text {
             content: "label".to_string(),
             size: 12.0,
@@ -3298,7 +3363,7 @@ mod wave12_c4_serde_pins {
         assert_eq!(back.figures[0].def.nodes[1].style, styled);
         assert_eq!(
             back.figures[0].def.nodes[1].media,
-            Some(SegmentMedia::Image { asset: 2, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false })
+            Some(SegmentMedia::Image { asset: 2, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 })
         );
         assert_eq!(
             back.assets[2].name, "third.png",

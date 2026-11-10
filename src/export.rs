@@ -7937,7 +7937,7 @@ mod media_integration_tests {
         }
         project.assets.push(crate::model::ImageAsset { name: "g.png".into(), png });
         project.figures[0].def.nodes[1].media =
-            Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+            Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 });
         let with = render_frame_at(&project, 0.0);
         assert_eq!((with.width(), with.height()), (960, 720));
         project.figures[0].def.nodes[1].media = None;
@@ -7973,7 +7973,7 @@ mod media_integration_tests {
         }
         project.assets.push(crate::model::ImageAsset { name: "g.png".into(), png });
         let mut clip_def = project.figures[0].def.clone();
-        clip_def.nodes[1].media = Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+        clip_def.nodes[1].media = Some(crate::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 });
         let pose0 = project.frames[0].poses[0].clone();
         project.clips = vec![crate::model::ClipDef {
             name: "clip".into(),

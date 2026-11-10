@@ -2107,6 +2107,17 @@ impl EditorCore {
     /// them through the returned figure defs, and frame poses
     /// carry no lengths, so only root and angle channels land in
     /// the frames. The status counts every channel either way.
+    ///
+    /// Wave Z (Z11): bend channels DO bake — frames carry a
+    /// bend home (`Frame::bends`), unlike lengths. Each baked
+    /// frame's evaluated bend row (the same
+    /// `apply_channels` result, seeded from `bends_at` with
+    /// the bend channels applied) is written into the frame
+    /// for every figure a bend channel targets, so clearing
+    /// the channels after a bake no longer drops the bend
+    /// motion the way it keeps the baked poses. Figures no
+    /// bend channel targets keep their stored bend tables
+    /// untouched — a pose-only bake never materialises them.
     pub fn bake_graph_channels(&mut self, from: usize, to: usize) {
         if self.project.channels.is_empty() {
             self.status = "No graph channels to bake.".into();
@@ -2119,15 +2130,45 @@ impl EditorCore {
         let lo = from;
         let hi = to.min(self.project.frames.len() - 1);
         let n_channels = self.project.channels.len();
-        let baked: Vec<Vec<crate::model::Pose>> = (lo..=hi)
+        // Figures a bend channel targets (Wave Z, Z11): only
+        // their bend rows are written by the bake.
+        let bend_figures: Vec<bool> = (0..self.project.figures.len())
+            .map(|fi| {
+                self.project
+                    .channels
+                    .iter()
+                    .any(|ch| {
+                        ch.figure == fi
+                            && matches!(ch.target, crate::graph::ChannelTarget::Bend(_))
+                    })
+            })
+            .collect();
+        let baked: Vec<(
+            Vec<crate::model::Pose>,
+            Vec<Vec<f32>>,
+        )> = (lo..=hi)
             .map(|f| {
-                crate::graph::apply_channels(&self.project, &self.project.channels, f as f32)
-                    .poses
+                let out = crate::graph::apply_channels(
+                    &self.project,
+                    &self.project.channels,
+                    f as f32,
+                );
+                (out.poses, out.bends)
             })
             .collect();
         self.snapshot();
-        for (poses, f) in baked.into_iter().zip(lo..=hi) {
+        for ((poses, bends), f) in baked.into_iter().zip(lo..=hi) {
             self.project.frames[f].poses = poses;
+            for (fi, row) in bends.into_iter().enumerate() {
+                if !bend_figures.get(fi).copied().unwrap_or(false) {
+                    continue;
+                }
+                let frame = &mut self.project.frames[f];
+                if frame.bends.len() <= fi {
+                    frame.bends.resize(fi + 1, Vec::new());
+                }
+                frame.bends[fi] = row;
+            }
         }
         self.status = format!(
             "Baked {n_channels} graph channel(s) into frames {}–{} ({} frame(s)).",
@@ -3087,7 +3128,7 @@ impl EditorCore {
                     .get_mut(self.selected_figure)
                     .and_then(|f| f.def.nodes.get_mut(node_idx))
                 {
-                    node.media = Some(crate::model::SegmentMedia::Image { asset, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+                    node.media = Some(crate::model::SegmentMedia::Image { asset, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 });
                     self.status = format!("Sprite attached (asset {}).", asset + 1);
                 }
             }
@@ -8259,6 +8300,137 @@ mod tests {
     }
 
     #[test]
+    fn library_file_text_preserves_joint_limits_verbatim() {
+        // Wave Z (Z9, library state round-trip audit):
+        // joint limits (Wave X, P-4) live ON NodeDef, so
+        // they are part of the FigureDef the figure library
+        // stores — they must ride the library file text
+        // exactly, past the extra top-level "name" field
+        // `library_file_text` adds. The def below carries
+        // every limit shape beside the humanoid presets:
+        // a wrap arc (min > max), a single bound, and a
+        // pinned joint (min == max).
+        let mut def = FigureDef::humanoid();
+        def.nodes[0].min_angle = Some(170.0);
+        def.nodes[0].max_angle = Some(-170.0);
+        def.nodes[1].min_angle = None;
+        def.nodes[1].max_angle = Some(-30.0);
+        def.nodes[2].min_angle = Some(45.0);
+        def.nodes[2].max_angle = Some(45.0);
+        let text = EditorCore::library_file_text(&def, "Limited")
+            .expect("serialise the library file");
+        // The limits are IN the file, not reconstructed
+        // from presets on load.
+        let value: serde_json::Value =
+            serde_json::from_str(&text).expect("the library file is JSON");
+        assert_eq!(value["nodes"][0]["min_angle"], serde_json::json!(170.0));
+        assert_eq!(value["nodes"][0]["max_angle"], serde_json::json!(-170.0));
+        assert_eq!(value["nodes"][1]["min_angle"], serde_json::Value::Null);
+        assert_eq!(value["nodes"][1]["max_angle"], serde_json::json!(-30.0));
+        assert_eq!(value["nodes"][4]["min_angle"], serde_json::json!(-10.0));
+        assert_eq!(value["nodes"][4]["max_angle"], serde_json::json!(160.0));
+        // And the file parses back into the identical def,
+        // node for node — the read `load_library` performs.
+        let back: FigureDef =
+            serde_json::from_str(&text).expect("the file parses as a bare FigureDef");
+        assert_eq!(back.nodes.len(), def.nodes.len());
+        for (want, got) in def.nodes.iter().zip(back.nodes.iter()) {
+            assert_eq!(
+                (want.min_angle, want.max_angle),
+                (got.min_angle, got.max_angle),
+                "limits of node '{}' round-trip verbatim",
+                want.name
+            );
+        }
+    }
+
+    #[test]
+    fn figure_library_round_trip_preserves_limits_and_starts_stateless() {
+        // Wave Z (Z9, library state round-trip audit), the
+        // V1 name pin's pattern (write into the real
+        // ./library under this figure's own slug, clean up
+        // after): the full save -> reload -> insert path.
+        // Joint limits ride it verbatim (they are def data);
+        // animation states (Wave X, P-1) do NOT — they live
+        // on FigureInstance, the library file stores the
+        // FigureDef only, and a state key's clip index names
+        // a PROJECT clip the library does not carry, so an
+        // inserted figure starts stateless by format. This
+        // pin holds both halves of that audit verdict
+        // consciously, so a future format change must move
+        // them deliberately, never silently.
+        let mut core = EditorCore::new();
+        core.project.figures[0].name = "Limited Styk".into();
+        core.project.figures[0].def.nodes[1].min_angle = Some(12.5);
+        core.project.figures[0].def.nodes[1].max_angle = Some(34.25);
+        // Assigned directly, not via the authoring op: the
+        // audit question is what the SAVE does with a state
+        // key that exists, not what authoring allows.
+        core.project.figures[0].states = vec![crate::model::StateKey {
+            frame: 2,
+            clip: 0,
+            offset: 1,
+            speed: 1.5,
+        }];
+        core.save_figure_to_library();
+        let dir = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("library");
+        let file = dir.join("limited-styk.json");
+        // Capture everything before asserting, so the
+        // cleanup below runs whatever the outcome.
+        let status = core.status.clone();
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        let value: serde_json::Value =
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+        let listed_limits = core
+            .library
+            .iter()
+            .find(|(n, _)| n == "Limited Styk")
+            .map(|(_, d)| {
+                (
+                    (d.nodes[1].min_angle, d.nodes[1].max_angle),
+                    (d.nodes[4].min_angle, d.nodes[4].max_angle),
+                )
+            });
+        let idx = core.library.iter().position(|(n, _)| n == "Limited Styk");
+        let mut inserted: Option<((Option<f32>, Option<f32>), bool)> = None;
+        if let Some(idx) = idx {
+            core.library_index = idx;
+            let before = core.project.figures.len();
+            core.insert_library_figure();
+            if let Some(fig) = core.project.figures.get(before) {
+                inserted = Some((
+                    (fig.def.nodes[1].min_angle, fig.def.nodes[1].max_angle),
+                    fig.states.is_empty(),
+                ));
+            }
+        }
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&dir);
+        assert_eq!(status, "Saved Limited Styk to the library.");
+        // Limits are in the file itself...
+        assert_eq!(value["nodes"][1]["min_angle"], serde_json::json!(12.5));
+        assert_eq!(value["nodes"][1]["max_angle"], serde_json::json!(34.25));
+        assert_eq!(value["nodes"][4]["min_angle"], serde_json::json!(-10.0));
+        // ...the reloaded entry carries them...
+        assert_eq!(
+            listed_limits,
+            Some(((Some(12.5), Some(34.25)), (Some(-10.0), Some(160.0)))),
+            "the reloaded library entry keeps the saved limits"
+        );
+        // ...and the inserted figure keeps them too, while
+        // starting with no state keys: the file holds no
+        // "states" field at all (the format boundary).
+        assert_eq!(value.get("states"), None, "no states ride the library file");
+        assert_eq!(
+            inserted,
+            Some(((Some(12.5), Some(34.25)), true)),
+            "insert keeps the limits and starts stateless"
+        );
+    }
+
+    #[test]
     fn builder_add_and_delete_segment_stays_consistent() {
         let mut core = EditorCore::new();
         core.selected_node = Some(2); // head: has no children after we add one
@@ -10121,6 +10293,64 @@ mod wave11_tests {
         assert_ne!(pre_root[0], 123.5, "the channel value must differ from the stored root");
         // Frames outside the range keep their stored poses.
         assert_ne!(core.project.frames[3].poses[0].root[0], 123.5);
+    }
+
+    #[test]
+    fn bake_graph_channels_writes_channel_bends() {
+        // Wave Z (Z11): bend channels bake into Frame::bends —
+        // frames carry a bend home, unlike lengths. A constant
+        // Bend(2) channel at 0.5 rad lands in every baked frame,
+        // and the bend survives clearing the channels (the bake
+        // promise root/angle already kept).
+        let mut core = EditorCore::new();
+        let frame3_bends_before = core.project.frames[3].bends.clone();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Bend(2),
+            keys: vec![Key::flat(0.0, 0.5)],
+        });
+        core.bake_graph_channels(0, 2);
+        assert!(core.status.contains("Baked"), "status: {}", core.status);
+        for f in 0..=2 {
+            let row = &core.project.frames[f].bends[0];
+            assert!(
+                (row[2] - 0.5).abs() < 1e-6,
+                "frame {f} bend baked, got {row:?}"
+            );
+            assert!(
+                row.iter().enumerate().all(|(i, b)| i == 2 || *b == 0.0),
+                "frame {f} unbend nodes stay straight: {row:?}"
+            );
+        }
+        // Frames outside the range keep their bend tables.
+        assert_eq!(core.project.frames[3].bends, frame3_bends_before);
+        // Clearing the channels changes nothing now: the baked
+        // bends read back through bends_at exactly.
+        core.project.channels.clear();
+        assert!((core.project.bends_at(1.0, 0)[2] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bake_without_bend_channels_leaves_bend_tables_alone() {
+        // Wave Z (Z11): a pose-only bake must not materialise
+        // bend tables — figures no bend channel targets keep
+        // their sparse stored shape byte-for-byte.
+        let mut core = EditorCore::new();
+        let before: Vec<Vec<Vec<f32>>> = core
+            .project
+            .frames
+            .iter()
+            .map(|f| f.bends.clone())
+            .collect();
+        core.project.channels.push(rootx_channel(123.5));
+        core.bake_graph_channels(0, 2);
+        assert!(core.status.contains("Baked"), "status: {}", core.status);
+        for (f, frame) in core.project.frames.iter().enumerate() {
+            assert_eq!(
+                frame.bends, before[f],
+                "frame {f} bend table untouched by a pose-only bake"
+            );
+        }
     }
 
     #[test]

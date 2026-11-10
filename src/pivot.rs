@@ -2948,7 +2948,7 @@ mod tests {
             png: test_png(4, 2),
         });
         project.figures[0].def.nodes[3].media =
-            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 });
         project.figures[0].def.nodes[5].media = Some(SegmentMedia::Text {
             content: "HI".into(),
             size: 25.0,

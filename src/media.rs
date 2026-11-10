@@ -107,7 +107,10 @@ pub enum MediaItem {
     /// with — where before this field existed the compositor
     /// ignored both and drew every image at full strength;
     /// free-standing sprite instances carry 1.0 (an instance
-    /// key has no opacity channel).
+    /// key has no opacity channel). Wave Z (Z5) adds the media
+    /// payload's own `opacity` as a third factor for segment
+    /// media (1.0 unless a layered import or an attach call
+    /// stored a lesser value).
     ///
     /// `src_rect` is the normalised source rectangle
     /// `[u0, v0, u1, v1]` this quad samples (Wave X, X4): the
@@ -229,11 +232,23 @@ pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
         let Some(pose) = poses.get(fi) else { continue };
         // Per-node bends at this frame (Wave X, X4): the same
         // `bends_at` fetch every segment-line surface makes.
-        // Bends have no graph channel (the stored bend is
-        // always the rendered bend), so this is correct with
-        // or without channels; an empty vec means no bend
-        // data — every node reads as straight.
-        let bends = project.bends_at(frame_f, fi);
+        // Wave Z (Z1): with channels present the bends come
+        // from the channelled evaluation's own rows — seeded
+        // from `bends_at` and overridden by any Bend channel
+        // (graph.rs), so a bend channel bends the media quads
+        // exactly as it bends the segment lines on stage,
+        // raster and SVG (Y2's routing on those surfaces,
+        // applied to this last funnel); the no-channels path
+        // is `bends_at` verbatim, as before, and with channels
+        // but no Bend channel the rows equal `bends_at`
+        // byte-for-byte, so only a project carrying a Bend
+        // channel renders differently — which is the point.
+        // An empty vec means no bend data — every node reads
+        // as straight.
+        let bends = match &channelled {
+            Some(r) => r.bends.get(fi).cloned().unwrap_or_default(),
+            None => project.bends_at(frame_f, fi),
+        };
         // Positions from the channelled def when channels
         // exist; the media payload and carrier stay on the
         // figure's own def nodes in the loop below.
@@ -287,7 +302,7 @@ pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
             let d = scale(ab, 1.0 / len);
             let mid = scale(add(a, b), 0.5);
             match media {
-                SegmentMedia::Image { asset, offset, scale: media_scale, angle_offset, flip } => {
+                SegmentMedia::Image { asset, offset, scale: media_scale, angle_offset, flip, opacity } => {
                     let Some(aspect) = png_aspect(project, *asset) else {
                         continue;
                     };
@@ -318,6 +333,13 @@ pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
                     };
                     let angle_offset = finite_or(*angle_offset, 0.0);
                     let flip = *flip;
+                    // Wave Z (Z5): the media's own opacity,
+                    // sanitised by the same rule (a non-finite
+                    // value reads as the 1.0 default, a finite
+                    // one clamps into [0, 1] where the alpha
+                    // product below consumes it) — never by
+                    // rewriting the stored project.
+                    let media_opacity = finite_or(*opacity, 1.0);
                     let n = [-d[1], d[0]];
                     let centre = add(add(mid, scale(d, offset[0])), scale(n, offset[1]));
                     let (sin, cos) = angle_offset.to_radians().sin_cos();
@@ -332,8 +354,14 @@ pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
                         add(add(centre, hl), hh),
                         add(sub(centre, hl), hh),
                     ];
+                    // Wave Z (Z5): the media's own opacity is
+                    // the third factor of the item alpha, after
+                    // figure opacity and carrier style opacity —
+                    // at its 1.0 default the product is exactly
+                    // the pre-Z5 value.
                     let alpha = fig.opacity.clamp(0.0, 1.0)
-                        * carrier.style.opacity.clamp(0.0, 1.0);
+                        * carrier.style.opacity.clamp(0.0, 1.0)
+                        * media_opacity.clamp(0.0, 1.0);
                     // Wave X (X4, GAP P-2): a bent segment's
                     // image follows the arc, exactly as the
                     // segment line does — the quad splits at
@@ -1034,7 +1062,7 @@ pub fn tool_asset_attach(core: &mut EditorCore, args: &Value) -> Result<Value, S
     // transform is set — attach replaces the media
     // wholesale, as it always has.
     let t = ast_opt_media_transform(args)?;
-    let (offset, scale, angle_offset, flip) = t.fields();
+    let (offset, scale, angle_offset, flip, opacity) = t.fields();
     core.snapshot();
     core.project.figures[fi].def.nodes[ni].media = Some(SegmentMedia::Image {
         asset,
@@ -1042,6 +1070,7 @@ pub fn tool_asset_attach(core: &mut EditorCore, args: &Value) -> Result<Value, S
         scale,
         angle_offset,
         flip,
+        opacity,
     });
     core.status = format!("Sprite attached (asset {}).", asset + 1);
     let mut reply = json!({
@@ -1138,6 +1167,10 @@ struct MediaTransformArgs {
     scale: Option<f32>,
     angle_offset: Option<f32>,
     flip: Option<bool>,
+    /// The payload's own opacity (Wave Z, Z5) — a
+    /// payload field beside the transform, parsed by
+    /// the same up-front discipline.
+    opacity: Option<f32>,
 }
 
 impl MediaTransformArgs {
@@ -1150,17 +1183,19 @@ impl MediaTransformArgs {
             || self.scale.is_some()
             || self.angle_offset.is_some()
             || self.flip.is_some()
+            || self.opacity.is_some()
     }
 
     /// The payload's `(offset, scale, angle_offset,
-    /// flip)` field set, identity components filled
-    /// in for the unnamed arguments.
-    fn fields(&self) -> ([f32; 2], f32, f32, bool) {
+    /// flip, opacity)` field set, identity components
+    /// filled in for the unnamed arguments.
+    fn fields(&self) -> ([f32; 2], f32, f32, bool, f32) {
         (
             self.offset.unwrap_or([0.0, 0.0]),
             self.scale.unwrap_or(1.0),
             self.angle_offset.unwrap_or(0.0),
             self.flip.unwrap_or(false),
+            self.opacity.unwrap_or(1.0),
         )
     }
 }
@@ -1191,11 +1226,24 @@ fn ast_opt_media_transform(args: &Value) -> Result<MediaTransformArgs, String> {
             return Err("argument 'scale' must be greater than zero".to_string());
         }
     }
+    // Wave Z (Z5): the payload opacity, range-checked
+    // by the sprite-key opacity rule (the funnel would
+    // clamp a stored value silently; at the door an
+    // out-of-range argument is an honest refusal).
+    let opacity = ast_opt_f32(args, "opacity")?;
+    if let Some(o) = opacity {
+        if !(0.0..=1.0).contains(&o) {
+            return Err(format!(
+                "argument 'opacity' must be between 0 and 1 (got {o})"
+            ));
+        }
+    }
     Ok(MediaTransformArgs {
         offset,
         scale,
         angle_offset: ast_opt_f32(args, "angle_offset")?,
         flip: ast_opt_bool(args, "flip")?,
+        opacity,
     })
 }
 
@@ -1578,9 +1626,10 @@ fn ast_check_clip_node(core: &EditorCore, ci: usize, ni: usize) -> Result<(), St
 /// A node's segment media as JSON, in `get_node`'s shape:
 /// null when the node carries none, otherwise
 /// {kind: "image", asset, offset, scale, angle_offset,
-/// flip} or {kind: "text", content, size}. The image
-/// arm carries the P-8 local transform in full (Wave Y,
-/// Y4) — stored values as they sit on the payload, the
+/// flip, opacity} or {kind: "text", content, size}. The
+/// image arm carries the P-8 local transform in full
+/// (Wave Y, Y4) plus the payload opacity (Wave Z, Z5)
+/// — stored values as they sit on the payload, the
 /// `key_json` precedent — so a read can never hide
 /// state the attach tools can write. Shared by
 /// `tool_clip_get_node_media` and the integrator's
@@ -1595,6 +1644,7 @@ pub fn segment_media_json(media: &Option<SegmentMedia>) -> Value {
             scale,
             angle_offset,
             flip,
+            opacity,
         }) => json!({
             "kind": "image",
             "asset": asset,
@@ -1602,6 +1652,7 @@ pub fn segment_media_json(media: &Option<SegmentMedia>) -> Value {
             "scale": scale,
             "angle_offset": angle_offset,
             "flip": flip,
+            "opacity": opacity,
         }),
         Some(SegmentMedia::Text { content, size }) => {
             json!({ "kind": "text", "content": content, "size": size })
@@ -1642,7 +1693,7 @@ pub fn tool_clip_asset_attach(core: &mut EditorCore, args: &Value) -> Result<Val
     // `tool_asset_attach` takes them — parsed before
     // the snapshot, so a refusal spends nothing.
     let t = ast_opt_media_transform(args)?;
-    let (offset, scale, angle_offset, flip) = t.fields();
+    let (offset, scale, angle_offset, flip, opacity) = t.fields();
     core.snapshot();
     core.project.clips[ci].def.nodes[ni].media = Some(SegmentMedia::Image {
         asset,
@@ -1650,6 +1701,7 @@ pub fn tool_clip_asset_attach(core: &mut EditorCore, args: &Value) -> Result<Val
         scale,
         angle_offset,
         flip,
+        opacity,
     });
     core.status = format!(
         "Sprite attached to clip {} (asset {}).",
@@ -2087,7 +2139,7 @@ mod tests {
                         "sprite",
                         Some(0),
                         100.0,
-                        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
+                        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }),
                     ),
                     node(
                         "label",
@@ -2317,6 +2369,230 @@ mod tests {
         }
     }
 
+    /// Wave Z (Z1): the funnel reads the channelled bend
+    /// rows, so a Bend channel ALONE — no Frame.bends
+    /// authored anywhere — bends the segment image through
+    /// the same arc the segment line takes (the svg.rs pin
+    /// `svg_bend_channel_routes_the_segment_without_frame_bends`
+    /// is the line-side twin). Before the routing the funnel
+    /// read `bends_at` only, and this project emitted ONE
+    /// straight item.
+    #[test]
+    fn bend_channel_alone_bends_segment_media_without_frame_bends() {
+        let mut project = demo_project();
+        project.channels = vec![Channel {
+            figure: 0,
+            target: ChannelTarget::Bend(1),
+            keys: vec![Key::flat(0.0, 0.9)],
+        }];
+        let items = media_items(&project, 0.0);
+        let images: Vec<&MediaItem> = items
+            .iter()
+            .filter(|i| matches!(i, MediaItem::Image { .. }))
+            .collect();
+        assert_eq!(
+            images.len(),
+            2,
+            "a bend channel splits the image like a frame bend"
+        );
+        let (c1, r1) = match images[0] {
+            MediaItem::Image {
+                corners, src_rect, ..
+            } => (*corners, *src_rect),
+            _ => unreachable!(),
+        };
+        let (c2, r2) = match images[1] {
+            MediaItem::Image {
+                corners, src_rect, ..
+            } => (*corners, *src_rect),
+            _ => unreachable!(),
+        };
+        assert_eq!(r1, [0.0, 0.0, 0.5, 1.0], "first half samples the left source half");
+        assert_eq!(r2, [0.5, 0.0, 1.0, 1.0], "second half samples the right source half");
+        // The shared edge is the channel bend's arc midpoint
+        // displaced by the quad's half-height — the same
+        // bend_mid the segment line splits at.
+        let arc_mid = crate::model::bend_mid([100.0, 100.0], [200.0, 100.0], 0.9);
+        assert!(
+            (arc_mid[1] - 100.0).abs() > 1.0,
+            "the fixture bend must displace the midpoint off the chord: {arc_mid:?}"
+        );
+        assert!(close(c1[1], [arc_mid[0], arc_mid[1] - 25.0]), "edge lo {:?}", c1[1]);
+        assert!(close(c1[2], [arc_mid[0], arc_mid[1] + 25.0]), "edge hi {:?}", c1[2]);
+        assert_eq!(c1[1], c2[0], "the halves share the split edge exactly");
+        assert_eq!(c1[2], c2[3], "the halves share the split edge exactly");
+        // The label node carries no bend channel: its text
+        // stays one item on the chord, as always.
+        let texts: Vec<&MediaItem> = items
+            .iter()
+            .filter(|i| matches!(i, MediaItem::Text { .. }))
+            .collect();
+        assert_eq!(texts.len(), 1, "text never splits");
+    }
+
+    /// Wave Z (Z1): a Bend channel OVERRIDES the frame bend
+    /// for media, exactly as graph.rs defines the rows — it
+    /// never adds to it. A channel keyed at 0.0 over a
+    /// 0.9 rad frame bend leaves the image on the straight
+    /// chord: one item, full source rect, the unbent quad's
+    /// own corners.
+    #[test]
+    fn bend_channel_overrides_frame_bend_for_segment_media() {
+        let mut project = demo_project();
+        project.frames[0].bends = vec![vec![0.0, 0.9, 0.0]];
+        project.channels = vec![Channel {
+            figure: 0,
+            target: ChannelTarget::Bend(1),
+            keys: vec![Key::flat(0.0, 0.0)],
+        }];
+        let items = media_items(&project, 0.0);
+        let images: Vec<&MediaItem> = items
+            .iter()
+            .filter(|i| matches!(i, MediaItem::Image { .. }))
+            .collect();
+        assert_eq!(
+            images.len(),
+            1,
+            "a zero bend channel straightens the media"
+        );
+        match images[0] {
+            MediaItem::Image {
+                corners, src_rect, ..
+            } => {
+                assert_eq!(*src_rect, [0.0, 0.0, 1.0, 1.0]);
+                assert!(close(corners[0], [100.0, 75.0]), "c0 {:?}", corners[0]);
+                assert!(close(corners[1], [200.0, 75.0]), "c1 {:?}", corners[1]);
+                assert!(close(corners[2], [200.0, 125.0]), "c2 {:?}", corners[2]);
+                assert!(close(corners[3], [100.0, 125.0]), "c3 {:?}", corners[3]);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Wave Z (Z1): the strip warp reads the channelled
+    /// bend too — a 2.0 rad Bend channel over a 0.9 rad
+    /// frame bend warps into the 4 strips the channel's
+    /// bend commands under Y9's count rule, not the frame
+    /// bend's 2, and the strips tile the source in quarters.
+    #[test]
+    fn bend_channel_value_drives_the_strip_warp_count() {
+        let mut project = demo_project();
+        project.frames[0].bends = vec![vec![0.0, 0.9, 0.0]];
+        project.channels = vec![Channel {
+            figure: 0,
+            target: ChannelTarget::Bend(1),
+            keys: vec![Key::flat(0.0, 2.0)],
+        }];
+        let items = media_items(&project, 0.0);
+        let images: Vec<&MediaItem> = items
+            .iter()
+            .filter(|i| matches!(i, MediaItem::Image { .. }))
+            .collect();
+        assert_eq!(
+            images.len(),
+            4,
+            "the channel's 2.0 rad bend warps into 4 strips"
+        );
+        for (i, item) in images.iter().enumerate() {
+            match item {
+                MediaItem::Image { src_rect, .. } => {
+                    assert_eq!(
+                        *src_rect,
+                        [i as f32 / 4.0, 0.0, (i + 1) as f32 / 4.0, 1.0],
+                        "strip {i} samples its own quarter of the source"
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+        // Adjacent strips share their edges exactly (Y9's
+        // spine rule, now on the channelled bend).
+        for pair in images.windows(2) {
+            let (a, b) = match (pair[0], pair[1]) {
+                (
+                    MediaItem::Image { corners: ca, .. },
+                    MediaItem::Image { corners: cb, .. },
+                ) => (*ca, *cb),
+                _ => unreachable!(),
+            };
+            assert_eq!(a[1], b[0], "strips share the lo edge exactly");
+            assert_eq!(a[2], b[3], "strips share the hi edge exactly");
+        }
+    }
+
+    /// Wave Z (Z1): routing through the channelled rows
+    /// changes nothing when no Bend channel exists. A
+    /// project whose only channel reproduces its own pose
+    /// (RootX keyed at the pose's root x) emits the very
+    /// items the raw `bends_at` path emits, frame bends
+    /// included — graph.rs pins the rows byte-equal; this
+    /// pins the funnel's stream equal.
+    #[test]
+    fn non_bend_channels_leave_media_stream_identical() {
+        let build = || {
+            let mut p = demo_project();
+            p.frames[0].bends = vec![vec![0.0, 0.9, 0.0]];
+            p
+        };
+        let raw = build();
+        let mut channelled = build();
+        channelled.channels = vec![Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: vec![Key::flat(0.0, 100.0)],
+        }];
+        let a = media_items(&raw, 0.0);
+        let b = media_items(&channelled, 0.0);
+        assert_eq!(a.len(), b.len(), "same item count");
+        // The comparison is not vacuous: the frame bend
+        // split the image in both streams.
+        let images_a = a
+            .iter()
+            .filter(|i| matches!(i, MediaItem::Image { .. }))
+            .count();
+        assert_eq!(images_a, 2, "the frame bend splits in the raw stream");
+        for (x, y) in a.iter().zip(b.iter()) {
+            match (x, y) {
+                (
+                    MediaItem::Image {
+                        corners: ca,
+                        src_rect: ra,
+                        alpha: aa,
+                        ..
+                    },
+                    MediaItem::Image {
+                        corners: cb,
+                        src_rect: rb,
+                        alpha: ab,
+                        ..
+                    },
+                ) => {
+                    assert_eq!(ra, rb, "src_rects identical");
+                    assert_eq!(aa, ab, "alphas identical");
+                    for (pa, pb) in ca.iter().zip(cb.iter()) {
+                        assert!(close(*pa, *pb), "corners identical: {pa:?} vs {pb:?}");
+                    }
+                }
+                (
+                    MediaItem::Text {
+                        pos: pa,
+                        angle_deg: aa,
+                        ..
+                    },
+                    MediaItem::Text {
+                        pos: pb,
+                        angle_deg: ab,
+                        ..
+                    },
+                ) => {
+                    assert!(close(*pa, *pb), "text positions identical");
+                    assert_eq!(aa, ab, "text angles identical");
+                }
+                _ => panic!("item kinds diverged: {x:?} vs {y:?}"),
+            }
+        }
+    }
+
     /// Wave X (X4): the compositor honours the split — each
     /// half-quad samples its own half of the source, and the
     /// painted region follows the arc off the old chord quad.
@@ -2381,6 +2657,7 @@ mod tests {
             scale,
             angle_offset,
             flip,
+            opacity: 1.0,
         });
         project
     }
@@ -2713,6 +2990,43 @@ mod tests {
         project.figures[0].opacity = 1.4;
         project.figures[0].def.nodes[1].style.opacity = 2.0;
         assert_eq!(alpha_of(&project), 1.0, "each factor clamps to 1");
+    }
+
+    #[test]
+    fn image_item_alpha_multiplies_the_media_own_opacity() {
+        // Wave Z (Z5): the payload's own opacity is the
+        // third factor of the segment-image item alpha —
+        // the home the layered importer stores a part's
+        // manifest opacity in. Sanitised at composition
+        // like the transform beside it: a non-finite value
+        // reads as the 1.0 default, a finite one clamps.
+        let alpha_of = |project: &Project| -> f32 {
+            media_items(project, 0.0)
+                .iter()
+                .find_map(|i| match i {
+                    MediaItem::Image { alpha, .. } => Some(*alpha),
+                    _ => None,
+                })
+                .expect("an image item")
+        };
+        let set_opacity = |project: &mut Project, opacity: f32| {
+            match &mut project.figures[0].def.nodes[1].media {
+                Some(SegmentMedia::Image { opacity: o, .. }) => *o = opacity,
+                other => panic!("demo node 1 media: {other:?}"),
+            }
+        };
+        let mut project = demo_project();
+        set_opacity(&mut project, 0.5);
+        assert_eq!(alpha_of(&project), 0.5, "media opacity alone");
+        project.figures[0].opacity = 0.5;
+        project.figures[0].def.nodes[1].style.opacity = 0.5;
+        assert_eq!(alpha_of(&project), 0.125, "figure × style × media");
+        set_opacity(&mut project, 1.7);
+        assert_eq!(alpha_of(&project), 0.25, "a stored 1.7 clamps to 1");
+        set_opacity(&mut project, f32::NAN);
+        assert_eq!(alpha_of(&project), 0.25, "a non-finite opacity reads as 1");
+        set_opacity(&mut project, 0.0);
+        assert_eq!(alpha_of(&project), 0.0, "opacity 0 hides the image");
     }
 
     #[test]
@@ -3107,7 +3421,7 @@ mod tests {
             def: FigureDef {
                 nodes: vec![
                     node("root", None, 0.0, None),
-                    node("img", Some(0), 50.0, Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false })),
+                    node("img", Some(0), 50.0, Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 })),
                 ],
             },
             frames: Vec::new(),
@@ -3135,7 +3449,7 @@ mod tests {
             png: png_bytes(2, 2, Rgba([4, 5, 6, 255])),
         });
         core.project.figures[0].def.nodes[1].media =
-            Some(SegmentMedia::Image { asset: 2, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+            Some(SegmentMedia::Image { asset: 2, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 });
         core.project.sprites.push(SpriteInstance {
             asset: 2,
             keys: vec![InstanceKey {
@@ -3161,7 +3475,7 @@ mod tests {
         // Both references followed their image down one index.
         assert_eq!(
             core.project.figures[0].def.nodes[1].media,
-            Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false })
+            Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 })
         );
         assert_eq!(core.project.sprites[0].asset, 1);
         assert_eq!(core.undo_depth(), undo_before + 1, "remove + remap = one undo step");
@@ -3190,7 +3504,7 @@ mod tests {
             def: FigureDef {
                 nodes: vec![
                     node("root", None, 0.0, None),
-                    node("img", Some(0), 50.0, Some(SegmentMedia::Image { asset: 2, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false })),
+                    node("img", Some(0), 50.0, Some(SegmentMedia::Image { asset: 2, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 })),
                 ],
             },
             frames: Vec::new(),
@@ -3214,7 +3528,7 @@ mod tests {
         assert_eq!(core.project.assets[1].name, "hero");
         assert_eq!(
             core.project.clips[0].def.nodes[1].media,
-            Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false })
+            Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 })
         );
         assert_eq!(core.undo_depth(), undo_before + 1, "remove + remap = one undo step");
     }
@@ -3232,7 +3546,7 @@ mod tests {
         assert_eq!(out["status"].as_str(), Some("Sprite attached (asset 1)."));
         assert_eq!(
             core.project.figures[0].def.nodes[2].media,
-            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false })
+            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 })
         );
         assert_eq!(core.undo_depth(), undo_before + 1);
         // A missing asset index is an error, not a snapshot.
@@ -3265,7 +3579,7 @@ mod tests {
         );
         assert_eq!(
             core.project.figures[0].def.nodes[2].media,
-            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false })
+            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 })
         );
         // Re-attaching the same asset WITH transform
         // args is the set path: the media is replaced
@@ -3284,7 +3598,7 @@ mod tests {
         assert_eq!(core.undo_depth(), undo_before + 2, "one step per attach");
         assert_eq!(
             core.project.figures[0].def.nodes[2].media,
-            Some(SegmentMedia::Image { asset: 0, offset: [4.0, -2.0], scale: 2.0, angle_offset: 30.0, flip: true })
+            Some(SegmentMedia::Image { asset: 0, offset: [4.0, -2.0], scale: 2.0, angle_offset: 30.0, flip: true, opacity: 1.0 })
         );
         assert_eq!(
             out["media"],
@@ -3292,6 +3606,7 @@ mod tests {
                 "kind": "image", "asset": 0,
                 "offset": [4.0, -2.0], "scale": 2.0,
                 "angle_offset": 30.0, "flip": true,
+                "opacity": 1.0,
             })
         );
         // A partial transform resets the unnamed
@@ -3305,10 +3620,40 @@ mod tests {
         .expect("partial transform attach succeeds");
         assert_eq!(
             core.project.figures[0].def.nodes[2].media,
-            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 0.5, angle_offset: 0.0, flip: false })
+            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 0.5, angle_offset: 0.0, flip: false, opacity: 1.0 })
         );
         assert_eq!(out["media"]["scale"], json!(0.5));
         assert_eq!(core.undo_depth(), undo_before + 3);
+    }
+
+    #[test]
+    fn asset_attach_opacity_arg_writes_the_payload_field() {
+        // Wave Z (Z5): `opacity` rides the same optional
+        // argument family as the transform — naming it
+        // alone writes the payload field (the rest of the
+        // payload resets, wholesale as always) and the
+        // reply's media read carries it; an out-of-range
+        // value refuses before the snapshot.
+        let mut core = asset_core();
+        let undo_before = core.undo_depth();
+        let out = tool_asset_attach(
+            &mut core,
+            &json!({ "figure": 0, "node": 2, "asset": 0, "opacity": 0.5 }),
+        )
+        .expect("opacity attach succeeds");
+        assert_eq!(core.undo_depth(), undo_before + 1, "one undo step");
+        assert_eq!(
+            core.project.figures[0].def.nodes[2].media,
+            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 0.5 })
+        );
+        assert_eq!(out["media"]["opacity"], json!(0.5));
+        let err = tool_asset_attach(
+            &mut core,
+            &json!({ "figure": 0, "node": 2, "asset": 0, "opacity": 1.5 }),
+        )
+        .expect_err("out-of-range opacity must be refused");
+        assert!(err.contains("between 0 and 1"), "err: {err}");
+        assert_eq!(core.undo_depth(), undo_before + 1, "the refusal spent nothing");
     }
 
     #[test]
@@ -3358,7 +3703,7 @@ mod tests {
         assert_eq!(core.undo_depth(), undo_before + 1, "one undo step");
         assert_eq!(
             core.project.clips[0].def.nodes[1].media,
-            Some(SegmentMedia::Image { asset: 0, offset: [1.5, 0.5], scale: 1.0, angle_offset: 0.0, flip: true })
+            Some(SegmentMedia::Image { asset: 0, offset: [1.5, 0.5], scale: 1.0, angle_offset: 0.0, flip: true, opacity: 1.0 })
         );
         assert_eq!(
             out["media"],
@@ -3366,6 +3711,7 @@ mod tests {
                 "kind": "image", "asset": 0,
                 "offset": [1.5, 0.5], "scale": 1.0,
                 "angle_offset": 0.0, "flip": true,
+                "opacity": 1.0,
             })
         );
         let read = tool_clip_get_node_media(&mut core, &json!({ "clip": 0, "node": 1 }))
@@ -3859,7 +4205,7 @@ mod tests {
         // figure opacity × CLIP node's style opacity (§6.2).
         let mut project = clip_project(
             (None, None),
-            (Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }), None),
+            (Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }), None),
         );
         project.figures[0].opacity = 0.5;
         project.clips[0].def.nodes[1].style.opacity = 0.5;
@@ -3897,8 +4243,8 @@ mod tests {
         // in the alpha product even though the payloads are
         // identical.
         let mut project = clip_project(
-            (Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }), None),
-            (Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }), None),
+            (Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }), None),
+            (Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }), None),
         );
         project.figures[0].def.nodes[1].style.opacity = 0.5;
         project.clips[0].def.nodes[1].style.opacity = 0.25;
@@ -3919,14 +4265,14 @@ mod tests {
         // image node and a text node.
         let mut project = clip_project(
             (
-                Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
+                Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }),
                 Some(SegmentMedia::Text {
                     content: "MINE".into(),
                     size: 25.0,
                 }),
             ),
             (
-                Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
+                Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }),
                 Some(SegmentMedia::Text {
                     content: "CLIP".into(),
                     size: 25.0,
@@ -4001,13 +4347,13 @@ mod tests {
         // and is skipped; the in-range fallback still lands.
         let mut project = clip_project(
             (None, None),
-            (Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }), None),
+            (Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }), None),
         );
         project.clips[0].def.nodes.push(node(
             "extra",
             Some(0),
             50.0,
-            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
+            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }),
         ));
         let items = media_items(&project, 0.0);
         assert_eq!(items.len(), 1, "the extra clip node contributes nothing");
@@ -4015,7 +4361,7 @@ mod tests {
         // have no fallback.
         let mut project = clip_project(
             (None, None),
-            (Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }), None),
+            (Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }), None),
         );
         project.clips[0].def.nodes.truncate(2);
         let items = media_items(&project, 0.0);
@@ -4036,7 +4382,7 @@ mod tests {
         // likewise leaves the enumeration untouched.
         let project = clip_project(
             (
-                Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
+                Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }),
                 Some(SegmentMedia::Text {
                     content: "HI".into(),
                     size: 25.0,
@@ -4055,7 +4401,7 @@ mod tests {
         // free-standing sprite and text instances.
         let mut project = clip_project(
             (None, None),
-            (Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }), None),
+            (Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }), None),
         );
         project.sprites.push(SpriteInstance {
             asset: 0,
@@ -4204,7 +4550,7 @@ mod tests {
         assert_eq!(out["asset"].as_u64(), Some(0));
         assert_eq!(
             core.project.clips[0].def.nodes[1].media,
-            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false })
+            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 })
         );
         assert_eq!(core.undo_depth(), undo_before + 1, "exactly one undo step");
         // Attaching again replaces (the asset_attach
@@ -4221,7 +4567,7 @@ mod tests {
         assert_eq!(out["asset"].as_u64(), Some(1));
         assert_eq!(
             core.project.clips[0].def.nodes[1].media,
-            Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false })
+            Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 })
         );
         assert_eq!(core.undo_depth(), undo_before + 2);
     }
@@ -4296,7 +4642,7 @@ mod tests {
     fn clip_clear_node_media_clears_either_kind_and_reports_an_empty_node() {
         let mut core = clip_media_core();
         core.project.clips[0].def.nodes[1].media =
-            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 });
         core.project.clips[0].def.nodes[2].media = Some(SegmentMedia::Text {
             content: "HEY".into(),
             size: 24.0,

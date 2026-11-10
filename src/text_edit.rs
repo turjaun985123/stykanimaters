@@ -1813,7 +1813,7 @@ mod tests {
     fn clear_segment_text_leaves_images_alone() {
         let mut core = EditorCore::new();
         core.project.figures[0].def.nodes[1].media =
-            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 });
         let out = tool_clear_segment_text(
             &mut core,
             &serde_json::json!({ "figure": 0, "node": 1 }),
@@ -1822,7 +1822,7 @@ mod tests {
         assert_eq!(out["changed"], false);
         assert!(matches!(
             core.project.figures[0].def.nodes[1].media,
-            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false })
+            Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 })
         ));
     }
 

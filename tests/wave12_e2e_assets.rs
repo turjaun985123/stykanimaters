@@ -453,7 +453,7 @@ fn legacy_attach_image_flow_via_import_folder() {
     assert_eq!(on_disk.assets[0].png, PNG_1X1.to_vec());
     assert_eq!(
         on_disk.figures[0].def.nodes[1].media,
-        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false })
+        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 })
     );
     assert_eq!(on_disk.figures[0].def.nodes[2].media, None);
 
@@ -772,7 +772,7 @@ fn asset_save_load_round_trip_keeps_bytes() {
     );
     assert_eq!(
         on_disk.figures[0].def.nodes[1].media,
-        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false })
+        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 })
     );
 
     // Replace the session with an empty project, prove the
@@ -812,7 +812,7 @@ fn asset_save_load_round_trip_keeps_bytes() {
     );
     assert_eq!(
         resaved.figures[0].def.nodes[1].media,
-        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false })
+        Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 })
     );
 
     let _ = fs::remove_dir_all(&dir);

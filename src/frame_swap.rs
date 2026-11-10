@@ -1252,7 +1252,7 @@ mod tests {
             ImageAsset { name: "b.png".into(), png: vec![4, 5, 6] },
         ];
         let mut def_with_media = FigureDef::humanoid();
-        def_with_media.nodes[3].media = Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+        def_with_media.nodes[3].media = Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 });
         def_with_media.nodes[4].media =
             Some(SegmentMedia::Text { content: "hi".into(), size: 12.0 });
         core.project.figures = vec![
@@ -1365,7 +1365,7 @@ mod tests {
         // and its text label are exactly as authored.
         assert_eq!(
             project.figures[0].def.nodes[3].media,
-            Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false }),
+            Some(SegmentMedia::Image { asset: 1, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }),
             "def-level image media untouched, asset index intact"
         );
         assert_eq!(

@@ -118,7 +118,7 @@ fn full_fixture() -> Project {
     });
     // Upper arm R: a circle node with an image on it.
     p.figures[0].def.nodes[5].shape = Shape::Circle;
-    p.figures[0].def.nodes[5].media = Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+    p.figures[0].def.nodes[5].media = Some(SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 });
 
     // -- A movieclip, and figure 1 referencing it. ---------
     let clip_def = FigureDef::humanoid();

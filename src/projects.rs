@@ -927,6 +927,81 @@ mod tests {
     }
 
     #[test]
+    fn load_round_trips_states_and_joint_limits_verbatim() {
+        // Wave Z (Z9, library state round-trip audit): the
+        // project library stores the WHOLE Project, so both
+        // Wave X fields in scope ride it — animation states
+        // (P-1, on FigureInstance) and joint limits (P-4, on
+        // NodeDef, in the figure's def AND in the second def
+        // copy every ClipDef embeds). The shallow pin above
+        // never looked at either; this one proves save ->
+        // load identity field by field, on the plain save
+        // and on the save-a-copy path (clone + rename +
+        // write).
+        let dir = temp_dir("states-limits");
+        let mut project = Project::new_demo();
+        project.name = "States And Limits".into();
+        project.figures[0].states = vec![
+            crate::model::StateKey { frame: 0, clip: 0, offset: 0, speed: 1.0 },
+            crate::model::StateKey { frame: 3, clip: 0, offset: 2, speed: 1.5 },
+        ];
+        project.figures[0].def.nodes[1].min_angle = Some(12.5);
+        project.figures[0].def.nodes[1].max_angle = Some(34.25);
+        project.figures[0].def.nodes[3].min_angle = Some(-45.5);
+        project.figures[0].def.nodes[3].max_angle = None;
+        let mut clip_def = project.figures[0].def.clone();
+        clip_def.nodes[2].min_angle = Some(170.0);
+        clip_def.nodes[2].max_angle = Some(-170.0);
+        project.clips.push(crate::model::ClipDef {
+            name: "Wave".into(),
+            def: clip_def,
+            frames: vec![project.figures[0].def.rest_pose([480.0, 470.0])],
+            loop_mode: crate::model::ClipLoop::Loop,
+        });
+        let path = save(&project, &dir).unwrap();
+        // Both fields are IN the file, not defaulted back
+        // on load.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["figures"][0]["states"][1]["offset"], json!(2));
+        assert_eq!(value["figures"][0]["states"][1]["speed"], json!(1.5));
+        assert_eq!(
+            value["figures"][0]["def"]["nodes"][1]["min_angle"],
+            json!(12.5)
+        );
+        assert_eq!(value["clips"][0]["def"]["nodes"][2]["max_angle"], json!(-170.0));
+        let back = load(&path).unwrap();
+        assert_eq!(back.figures[0].states, project.figures[0].states);
+        for (want, got) in project.figures[0]
+            .def
+            .nodes
+            .iter()
+            .zip(back.figures[0].def.nodes.iter())
+        {
+            assert_eq!(
+                (want.min_angle, want.max_angle),
+                (got.min_angle, got.max_angle),
+                "figure def limits of node '{}' round-trip verbatim",
+                want.name
+            );
+        }
+        assert_eq!(back.clips.len(), 1);
+        assert_eq!(back.clips[0].def.nodes[2].min_angle, Some(170.0));
+        assert_eq!(back.clips[0].def.nodes[2].max_angle, Some(-170.0));
+        // The save-a-copy path carries the same data.
+        let mut core = EditorCore::new();
+        core.project = project.clone();
+        let copy_path = save_copy_to(&core, "States Copy", &dir).unwrap();
+        let copy_back = load(&copy_path).unwrap();
+        assert_eq!(copy_back.name, "States Copy");
+        assert_eq!(copy_back.figures[0].states, project.figures[0].states);
+        assert_eq!(copy_back.figures[0].def.nodes[1].min_angle, Some(12.5));
+        assert_eq!(copy_back.figures[0].def.nodes[1].max_angle, Some(34.25));
+        assert_eq!(copy_back.clips[0].def.nodes[2].min_angle, Some(170.0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn thumbnail_writes_a_stage_sized_png() {
         let dir = temp_dir("thumb");
         let project = Project::new_demo();

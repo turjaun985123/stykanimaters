@@ -57,10 +57,14 @@ pub struct LayeredImportReport {
     /// match, an invisible part, or a node already dressed
     /// by an earlier part of the same import).
     pub sprites: Vec<String>,
-    /// Attached parts whose manifest opacity was < 1.0.
-    /// Segment media has no opacity home, so the value is
-    /// counted here instead of being silently absorbed.
-    pub attached_opacity_dropped: usize,
+    /// Attached parts whose manifest opacity was < 1.0
+    /// and is now STORED on the attached segment media
+    /// (Wave Z, Z5 — the payload's own `opacity` field;
+    /// this field was `attached_opacity_dropped` while
+    /// segment media had no opacity home, and the count
+    /// survives under its honest name: nothing is
+    /// dropped any more).
+    pub attached_opacity_stored: usize,
 }
 
 // ---------------------------------------------------------------------
@@ -391,10 +395,17 @@ fn apply_parts(
             Some(ni) => {
                 dressed[ni] = true;
                 if part.opacity < 1.0 {
-                    report.attached_opacity_dropped += 1;
+                    report.attached_opacity_stored += 1;
                 }
+                // Wave Z (Z5): the part's opacity is stored
+                // on the segment media itself (the payload's
+                // `opacity` field, which the media funnel
+                // multiplies into the item alpha) — at 1.0
+                // the stored value is the serde default and
+                // serialises away, exactly like an attach
+                // from any other surface.
                 core.project.figures[figure].def.nodes[ni].media =
-                    Some(SegmentMedia::Image { asset: asset_index, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false });
+                    Some(SegmentMedia::Image { asset: asset_index, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: part.opacity });
                 report.attached.push(part.name);
             }
             None => {
@@ -508,7 +519,7 @@ mod tests {
             "canvas": { "width": 960, "height": 720 },
             "parts": [
                 { "id": "head", "name": "Head", "image": "images/head.png",
-                  "x": 400, "y": 100, "width": 80, "height": 60 },
+                  "x": 400, "y": 100, "width": 80, "height": 60, "opacity": 0.5 },
                 { "id": "upper_arm_l", "name": "Upper Arm L", "image": "images/upper_arm_l.png",
                   "x": 300, "y": 200, "width": 40, "height": 90 },
                 { "id": "cape", "name": "Cape", "image": "images/cape.png",
@@ -537,6 +548,31 @@ mod tests {
             other => panic!("head node media: {other:?}"),
         };
         assert_eq!(core.project.assets[head_asset].name, "Head");
+        // Wave Z (Z5): the Head part's manifest opacity
+        // (0.5) is STORED on the attached segment media —
+        // the payload's own opacity field — and counted
+        // as stored, not dropped; the funnel then blends
+        // the head image at that alpha (figure and style
+        // opacities are 1 in the demo project).
+        assert_eq!(report.attached_opacity_stored, 1);
+        match &core.project.figures[0].def.nodes[2].media {
+            Some(SegmentMedia::Image { opacity, .. }) => {
+                assert_eq!(*opacity, 0.5, "manifest opacity stored on the media")
+            }
+            other => panic!("head node media: {other:?}"),
+        }
+        let head_alpha = crate::media::media_items(&core.project, 0.0)
+            .iter()
+            .find_map(|i| match i {
+                crate::media::MediaItem::Image { asset, alpha, .. }
+                    if *asset == head_asset =>
+                {
+                    Some(*alpha)
+                }
+                _ => None,
+            })
+            .expect("the head media emits an item");
+        assert_eq!(head_alpha, 0.5, "the funnel blends at the stored opacity");
         assert!(matches!(
             core.project.figures[0].def.nodes[3].media,
             Some(SegmentMedia::Image { .. })
