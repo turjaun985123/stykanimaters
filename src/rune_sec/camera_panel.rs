@@ -195,6 +195,15 @@
 //!   built-ins landed; `set_camera` wraps its angle,
 //!   documents zoom's unit and snapshots like the panel.
 //!
+//! * Wave R (i18n): the key-list rows' Delete label and the
+//!   key row's Clear label resolve through `i18n_wire::tr`
+//!   using the existing exact-value keys `camera_delete_key`
+//!   and `clear_key_no_undo`; their English table values are
+//!   the literals they replaced, so English rendering is
+//!   unchanged. The panel's other fixed labels have no
+//!   exact-value catalogue key yet and remain English
+//!   pending the R4 key additions filed by this wave.
+//!
 //! Engine facts this panel lives with (verified, not worked
 //! around silently): `camera_clear_key` does NOT snapshot, so
 //! clearing a key is not undoable; and `camera_zoom_by`'s
@@ -222,6 +231,7 @@ use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
 use crate::State;
 
@@ -356,7 +366,7 @@ impl CamKeyRow {
     /// (frame shown 1-based, as everywhere in the shell;
     /// the angle shown wrapped — see [`angle_deg`] — and a
     /// stranded key's label ends `" · past end"`).
-    pub fn label(&self) -> String {
+    pub fn label(&self, core: &EditorCore) -> String {
         let base = format!(
             "F{} · {}% · {:.0}°",
             self.frame + 1,
@@ -364,7 +374,7 @@ impl CamKeyRow {
             stykanimate_rs::model::norm_deg(self.angle)
         );
         if self.stale {
-            format!("{base} · past end")
+            format!("{base} · {}", i18n_wire::tr(core, "camera_key_past_end"))
         } else {
             base
         }
@@ -663,10 +673,12 @@ pub fn delete_camera_key_at(core: &mut EditorCore, frame: usize) -> bool {
 /// comes from the keys).
 pub fn follow_label(core: &EditorCore) -> String {
     match core.project.camera_follow {
-        None => "Following: off".into(),
+        None => i18n_wire::tr(core, "camera_following_off"),
         Some(fi) => match core.project.figures.get(fi) {
-            Some(f) => format!("Following: Figure {} — {}", fi + 1, f.name),
-            None => "Following: off (missing)".into(),
+            Some(f) => i18n_wire::tr(core, "camera_following_figure")
+                .replace("{index}", &(fi + 1).to_string())
+                .replace("{name}", &f.name),
+            None => i18n_wire::tr(core, "camera_following_off_missing"),
         },
     }
 }
@@ -999,17 +1011,18 @@ fn note_line(t: &Theme, label: &str) -> El {
 /// exactly how a first key can arrive.
 fn key_list(core: &EditorCore, t: &Theme) -> El {
     let rows = key_rows(core);
+    let delete_label = i18n_wire::tr(core, "camera_delete_key");
     let mut list = col().key("cam-key-list").gap(4.0);
-    list = list.child(design::section_label("Keys", t));
+    list = list.child(design::section_label(&i18n_wire::tr(core, "camera_keys"), t));
     list = list
         .child(
             row()
                 .gap(6.0)
                 .center_y()
-                .child(icon_only_btn("cam-prev-key", "chevron-left", "Previous key", 26.0, false, t, |s: &mut State| {
+                .child(icon_only_btn("cam-prev-key", "chevron-left", &i18n_wire::tr(core, "camera_previous_key"), 26.0, false, t, |s: &mut State| {
                     goto_prev_key(&mut s.core)
                 }))
-                .child(icon_only_btn("cam-next-key", "chevron-right", "Next key", 26.0, false, t, |s: &mut State| {
+                .child(icon_only_btn("cam-next-key", "chevron-right", &i18n_wire::tr(core, "camera_next_key"), 26.0, false, t, |s: &mut State| {
                     goto_next_key(&mut s.core)
                 })),
         )
@@ -1017,17 +1030,17 @@ fn key_list(core: &EditorCore, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
-                .child(icon_btn("cam-copy-key", "copy", "Copy key", false, t, |s: &mut State| {
+                .child(icon_btn("cam-copy-key", "copy", &i18n_wire::tr(core, "camera_copy_key"), false, t, |s: &mut State| {
                     copy_key_here(&mut s.core)
                 }))
-                .child(icon_btn("cam-paste-key", "clipboard", "Paste key", false, t, |s: &mut State| {
+                .child(icon_btn("cam-paste-key", "clipboard", &i18n_wire::tr(core, "camera_paste_key"), false, t, |s: &mut State| {
                     paste_key_here(&mut s.core)
                 })),
         );
     if rows.is_empty() {
         list = list.child(design::empty_state(
             "key",
-            "No camera keys yet — Set key pins the camera in effect at this frame.",
+            &i18n_wire::tr(core, "camera_no_keys_yet"),
             t,
         ));
     }
@@ -1043,7 +1056,7 @@ fn key_list(core: &EditorCore, t: &Theme) -> El {
             design::list_row(&format!("cam-key-row-{frame}"), r.is_current, t)
                 .child(btn(
                     &format!("cam-key-{frame}"),
-                    &r.label(),
+                    &r.label(core),
                     false,
                     t,
                     move |s: &mut State| {
@@ -1052,7 +1065,7 @@ fn key_list(core: &EditorCore, t: &Theme) -> El {
                 ))
                 .child(btn(
                     &format!("cam-key-clear-{frame}"),
-                    "Delete",
+                    &delete_label,
                     false,
                     t,
                     move |s: &mut State| {
@@ -1077,7 +1090,7 @@ fn follow_block(core: &EditorCore, t: &Theme) -> El {
     col()
         .key("cam-follow-block")
         .gap(4.0)
-        .child(design::section_label("Follow", t))
+        .child(design::section_label(&i18n_wire::tr(core, "camera_follow"), t))
         .child(
             el()
                 .key("cam-follow-label")
@@ -1089,7 +1102,7 @@ fn follow_block(core: &EditorCore, t: &Theme) -> El {
                 .center_y()
                 .child(btn(
                     "cam-follow",
-                    "Follow",
+                    &i18n_wire::tr(core, "camera_follow"),
                     follow_active(core),
                     t,
                     |s: &mut State| s.core.toggle_camera_follow(),
@@ -1097,7 +1110,7 @@ fn follow_block(core: &EditorCore, t: &Theme) -> El {
                 .child(icon_btn(
                     "cam-follow-selected",
                     "crosshairs",
-                    "Selected",
+                    &i18n_wire::tr(core, "camera_selected"),
                     false,
                     t,
                     |s: &mut State| follow_selected(&mut s.core),
@@ -1107,13 +1120,13 @@ fn follow_block(core: &EditorCore, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
-                .child(icon_only_btn("cam-follow-prev", "chevron-left", "Previous follow target", 26.0, false, t, |s: &mut State| {
+                .child(icon_only_btn("cam-follow-prev", "chevron-left", &i18n_wire::tr(core, "camera_previous_follow_target"), 26.0, false, t, |s: &mut State| {
                     follow_cycle(&mut s.core, -1)
                 }))
-                .child(icon_only_btn("cam-follow-next", "chevron-right", "Next follow target", 26.0, false, t, |s: &mut State| {
+                .child(icon_only_btn("cam-follow-next", "chevron-right", &i18n_wire::tr(core, "camera_next_follow_target"), 26.0, false, t, |s: &mut State| {
                     follow_cycle(&mut s.core, 1)
                 }))
-                .child(icon_btn("cam-follow-clear", "xmark", "Clear", false, t, |s: &mut State| {
+                .child(icon_btn("cam-follow-clear", "xmark", &i18n_wire::tr(core, "camera_clear"), false, t, |s: &mut State| {
                     follow_clear(&mut s.core)
                 })),
         )
@@ -1142,18 +1155,18 @@ pub fn panel(s: &State, t: &Theme) -> El {
                 .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(design::panel_title(Some("camera"), "Camera", None, t)),
+                .child(design::panel_title(Some("camera"), &i18n_wire::tr(core, "camera_title"), None, t)),
         )
         .child(design::divider(t))
-        .child(note_line(t, PANEL_NOTE))
+        .child(note_line(t, &i18n_wire::tr(core, "camera_panel_note")))
         .child(
             row()
                 .gap(6.0)
                 .center_y()
-                .child(btn("view-fit", "Fit", false, t, |s: &mut State| {
+                .child(btn("view-fit", &i18n_wire::tr(core, "camera_fit"), false, t, |s: &mut State| {
                     s.core.frame_all_figures()
                 }))
-                .child(btn("view-centre", "Centre", false, t, |s: &mut State| {
+                .child(btn("view-centre", &i18n_wire::tr(core, "camera_centre"), false, t, |s: &mut State| {
                     s.core.centre_on_selection()
                 }))
                 .child(btn("view-actual", "1:1", false, t, zoom_actual)),
@@ -1219,14 +1232,18 @@ pub fn panel(s: &State, t: &Theme) -> El {
                 // budget. Wave 4's longer "Clear key (no undo)"
                 // label wraps the same way.
                 .flex_wrap()
-                .child(btn("cam-set-key", "Set key", false, t, set_key_here))
-                .child(btn("cam-clear-key", "Clear key (no undo)", false, t, |s: &mut State| {
-                    s.core.camera_clear_key()
-                }))
-                .child(btn("cam-hold", "Hold camera", false, t, |s: &mut State| {
+                .child(btn("cam-set-key", &i18n_wire::tr(core, "camera_set_key"), false, t, set_key_here))
+                .child(btn(
+                    "cam-clear-key",
+                    &i18n_wire::tr(core, "clear_key_no_undo"),
+                    false,
+                    t,
+                    |s: &mut State| s.core.camera_clear_key(),
+                ))
+                .child(btn("cam-hold", &i18n_wire::tr(core, "camera_hold"), false, t, |s: &mut State| {
                     hold_camera(&mut s.core)
                 }))
-                .child(icon_btn("cam-delete-key", "trash-can", "Delete key", false, t, |s: &mut State| {
+                .child(icon_btn("cam-delete-key", "trash-can", &i18n_wire::tr(core, "camera_delete_key_button"), false, t, |s: &mut State| {
                     let frame = s.core.current;
                     delete_camera_key_at(&mut s.core, frame);
                 })),
@@ -1458,6 +1475,43 @@ mod tests {
     }
 
     #[test]
+    fn camera_i18n_keys_exist_and_match_the_english_labels() {
+        let core = EditorCore::new();
+        for (key, english) in [
+            ("camera_delete_key", "Delete"),
+            ("clear_key_no_undo", "Clear key (no undo)"),
+            // Wave R integrator pass: IA-R6-1's 22 keys,
+            // wired through the panel (title, note, framing
+            // row, key list, follow block, row labels).
+            ("camera_panel_note", "Framing, zoom and rotation here write camera keys at the current frame — the stage pill's Fit, Centre and zoom change only the view."),
+            ("camera_title", "Camera"),
+            ("camera_fit", "Fit"),
+            ("camera_centre", "Centre"),
+            ("camera_set_key", "Set key"),
+            ("camera_hold", "Hold camera"),
+            ("camera_delete_key_button", "Delete key"),
+            ("camera_keys", "Keys"),
+            ("camera_previous_key", "Previous key"),
+            ("camera_next_key", "Next key"),
+            ("camera_copy_key", "Copy key"),
+            ("camera_paste_key", "Paste key"),
+            ("camera_no_keys_yet", "No camera keys yet — Set key pins the camera in effect at this frame."),
+            ("camera_key_past_end", "past end"),
+            ("camera_follow", "Follow"),
+            ("camera_following_off", "Following: off"),
+            ("camera_following_off_missing", "Following: off (missing)"),
+            ("camera_following_figure", "Following: Figure {index} — {name}"),
+            ("camera_selected", "Selected"),
+            ("camera_previous_follow_target", "Previous follow target"),
+            ("camera_next_follow_target", "Next follow target"),
+            ("camera_clear", "Clear"),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
+    }
+
+    #[test]
     fn follow_active_matches_the_ops_own_condition() {
         let mut core = EditorCore::new();
         assert!(!follow_active(&core));
@@ -1611,7 +1665,7 @@ mod tests {
             rows[1],
             CamKeyRow { frame: 2, zoom_pct: 100, angle: 45.0, is_current: true, stale: false }
         );
-        assert_eq!(rows[1].label(), "F3 · 100% · 45°");
+        assert_eq!(rows[1].label(&core), "F3 · 100% · 45°");
         // The current marker follows the playhead.
         core.goto(0);
         let rows = key_rows(&core);
@@ -2096,7 +2150,7 @@ playback_speed: 1.0,
         // value stays as stored.
         let rows = key_rows(&core);
         assert_eq!(rows[0].angle, 725.0);
-        assert_eq!(rows[0].label(), "F1 · 100% · 5°");
+        assert_eq!(rows[0].label(&core), "F1 · 100% · 5°");
         // Negative unwrapped angles wrap the other way.
         pin_key(&mut core, 0, 0.0, 0.0, 1.0, -190.0);
         assert_eq!(angle_label(&core), "170°");
@@ -2139,9 +2193,9 @@ playback_speed: 1.0,
         let rows = key_rows(&core);
         assert_eq!(rows.len(), 2);
         assert!(!rows[0].stale);
-        assert_eq!(rows[0].label(), "F5 · 100% · 0°");
+        assert_eq!(rows[0].label(&core), "F5 · 100% · 0°");
         assert!(rows[1].stale);
-        assert_eq!(rows[1].label(), "F8 · 100% · 15° · past end");
+        assert_eq!(rows[1].label(&core), "F8 · 100% · 15° · past end");
     }
 
     #[test]

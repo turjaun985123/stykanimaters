@@ -35,8 +35,8 @@
 //!   per-node fallback (`media::media_items`, Wave 14 C1;
 //!   `docs/wave13/CLIP_MEDIA.md` §6.1), mirrored here
 //!   because this pass re-derives segment text instead of
-//!   consuming the funnel (whose text items carry no
-//!   alpha — see "Opacity" below). The carrier node
+//!   consuming the funnel (whose text items carry the
+//!   same alpha — see "Opacity" below). The carrier node
 //!   supplies the media, the colour and the style
 //!   opacity; placement stays on the instance's segment.
 //!
@@ -65,16 +65,23 @@
 //! applied exactly once — here, in [`label_boxes_alpha`];
 //! the stage painter applies a prim's alpha verbatim
 //! (stage_view.rs:1196) and nothing else multiplies it.
-//! This is a DELIBERATE divergence from the rasterizer,
-//! which stamps text fully opaque (`composite_text` builds
-//! `Rgba([…, 255])`, media.rs:326) — the stage fades a
-//! segment's label with its segment, per the Wave 12
-//! stage-fidelity directive. Figure opacity is NOT
+//! Wave R (R8) closed the last P17 remainder by carrying
+//! this same value on the funnel's text items:
+//! `MediaItem::Text` holds an `alpha` field, set in
+//! `media_items` from the CARRIER node's style opacity
+//! and clamped identically, and every consumer applies
+//! it — the SVG writer emits it as an `opacity`
+//! attribute (its media pass's rule: present only below
+//! 1.0) and the raster compositor blends its glyph
+//! stamps by it. The value on every surface is this
+//! section's rule; `segment_text_alpha_agrees_with_the_media_stream`
+//! pins the agreement. Figure opacity is NOT
 //! multiplied in: export multiplies it into SEGMENT alpha
 //! only, never into text, and the stage's figure fade is a
 //! colour blend, not an alpha. Free-standing texts have no
-//! node style (model.rs:675-680) and keep alpha 1.0. The
-//! backing plates are unaffected — they stay at
+//! node style (model.rs:675-680) and keep alpha 1.0 —
+//! their stream items carry 1.0 too. The backing plates
+//! are unaffected — they stay at
 //! [`BACKING_ALPHA`] whatever the glyph alpha.
 //! - **Free-standing texts** (`Project.texts`, media.rs:180-
 //!   200): the instance key is sampled with
@@ -167,10 +174,10 @@
 //! reproduces these helpers constant-for-constant (its
 //! helper swap is IA-P27-1), so stage and SVG cannot
 //! drift apart in where a line sits; the raster burn-in
-//! still sizes its stamps proportionally (6% of stage
-//! height) until IA-P26-1 lands the same helpers there —
-//! the stacking order already agrees on all three
-//! surfaces. [`subtitle_bands`] is the factored,
+//! sizes and places its stamps by the same helpers
+//! (IA-P26-1 landed the placement in Wave Q; Wave R, R1
+//! retired the last proportional sizing) — the stacking
+//! order agrees on all three surfaces. [`subtitle_bands`] is the factored,
 //! unit-pinned composition of those helpers for this
 //! stage.
 //!
@@ -202,8 +209,8 @@
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{InstanceKey, SegmentMedia, V2};
 use stykanimate_rs::subtitles::{
-    live_subtitle_cues, subtitle_font_size, subtitle_line_center_y, subtitle_line_height,
-    subtitle_stack_line_offset, SubtitleCue, SubtitlePosition, SubtitleStyle,
+    live_subtitle_cues, subtitle_display_lines, subtitle_font_size, subtitle_line_center_y,
+    subtitle_line_height, subtitle_stack_line_offset, SubtitleCue, SubtitlePosition, SubtitleStyle,
 };
 
 /// One primitive of stage text geometry, in stage coordinates.
@@ -556,7 +563,9 @@ pub struct SubtitleBand {
 /// `subtitle_stack_line_offset`, `subtitle_line_center_y`
 /// — scale sanitisation included), so the stage's bands
 /// are the SVG exporter's bands by construction (the
-/// raster burn-in joins them via IA-P26-1); the only
+/// raster burn-in joined them via IA-P26-1 in Wave Q,
+/// and Wave R, R1 retired its last proportional sizing);
+/// the only
 /// stage-local maths is the band WIDTH, which the bitmap
 /// font fixes: a line's run is `4n − 1` cells at
 /// `font_size / 5` per cell ([`label_boxes`]' layout),
@@ -577,7 +586,7 @@ pub fn subtitle_bands(
     let mut bands = Vec::new();
     let mut lines_before = 0usize;
     for cue in cues {
-        let lines: Vec<&str> = cue.text.lines().collect();
+        let lines: Vec<String> = subtitle_display_lines(cue);
         for (i, line) in lines.iter().enumerate() {
             let position: SubtitlePosition = style.position;
             let from_edge = subtitle_stack_line_offset(lines_before, lines.len(), i, position);
@@ -1277,6 +1286,112 @@ mod tests {
         assert!(alphas_for(&prims, seg_color).iter().all(|a| *a == 0.0));
     }
 
+    #[test]
+    fn segment_text_alpha_agrees_with_the_media_stream() {
+        // Wave R (R8 — the settlement pin P21 §4 asked for
+        // and P17 deferred until the item could carry the
+        // value): this pass re-derives segment text while
+        // the exporters consume `media_items`; the two must
+        // carry the same placement AND the same alpha. The
+        // item alpha is the carrier node's style opacity —
+        // this surface's rule — and both sides follow the
+        // channelled evaluation.
+        let (mut core, ni, a, b) = core_with_segment_text("H", 25.0);
+        core.project.figures[0].def.nodes[ni].style.opacity = 0.5;
+        let item = |p: &stykanimate_rs::model::Project| {
+            stykanimate_rs::media::media_items(p, 0.0)
+                .into_iter()
+                .find_map(|i| match i {
+                    stykanimate_rs::media::MediaItem::Text {
+                        pos,
+                        angle_deg,
+                        content,
+                        alpha,
+                        ..
+                    } if content == "H" => Some((pos, angle_deg, alpha)),
+                    _ => None,
+                })
+                .expect("a text item for the fixture label")
+        };
+        let seg_color = core.project.figures[0].def.nodes[ni]
+            .color
+            .unwrap_or(core.project.figures[0].color);
+        // Glyph alphas for the label: glyphs are the second
+        // prim of each (plate, glyph) pair.
+        let glyph_alphas = |prims: &[TextPrim]| -> Vec<f32> {
+            prims
+                .chunks_exact(2)
+                .map(|pair| &pair[1])
+                .filter(|p| matches!(p, TextPrim::GlyphBox { color: c, .. } if *c == seg_color))
+                .map(|p| {
+                    let TextPrim::GlyphBox { alpha, .. } = p;
+                    *alpha
+                })
+                .collect()
+        };
+        let (pos, angle, alpha) = item(&core.project);
+        assert_eq!(alpha, 0.5, "the stream item must carry the style opacity");
+        let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+        assert!(
+            (pos[0] - mid[0]).abs() < 0.01 && (pos[1] - mid[1]).abs() < 0.01,
+            "item pos {pos:?} vs the stage's chord midpoint {mid:?}"
+        );
+        let chord_angle = (b[1] - a[1]).atan2(b[0] - a[0]).to_degrees();
+        assert!(
+            (angle - chord_angle).abs() < 0.01,
+            "item angle {angle} vs chord angle {chord_angle}"
+        );
+        // Every glyph prim of the label sits at that same
+        // alpha — exactly, not approximately: both sides
+        // clamp the same stored f32.
+        let prims = text_geometry(&core);
+        let alphas = glyph_alphas(&prims);
+        assert!(!alphas.is_empty());
+        assert!(
+            alphas.iter().all(|pa| *pa == alpha),
+            "stage prim alphas {alphas:?} vs stream alpha {alpha}"
+        );
+        // Under a RootX channel both sides move together:
+        // the item stays on the channelled segment this
+        // pass evaluates (`positions_f`), displaced by
+        // exactly the channel's root shift, alpha unchanged.
+        let root_x = core.project.frames[0].poses[0].root[0];
+        core.project.channels = vec![stykanimate_rs::graph::Channel {
+            figure: 0,
+            target: stykanimate_rs::graph::ChannelTarget::RootX,
+            keys: vec![stykanimate_rs::graph::Key::flat(0.0, root_x + 137.0)],
+        }];
+        let (cpos, _, calpha) = item(&core.project);
+        assert_eq!(calpha, 0.5, "the channel must not touch the alpha");
+        assert!(
+            (cpos[0] - pos[0] - 137.0).abs() < 0.01,
+            "channelled item pos {cpos:?} vs unchannelled {pos:?} + the 137 root shift"
+        );
+        let pts = core.positions_f(0.0, 0);
+        let (pa, pb) = match core.project.figures[0].def.nodes[ni].parent {
+            Some(p) => (pts[p], pts[ni]),
+            None => (
+                pts[ni],
+                [
+                    pts[ni][0] + core.project.figures[0].def.nodes[ni].length,
+                    pts[ni][1],
+                ],
+            ),
+        };
+        let cmid = [(pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0];
+        assert!(
+            (cpos[0] - cmid[0]).abs() < 0.01 && (cpos[1] - cmid[1]).abs() < 0.01,
+            "channelled item pos {cpos:?} vs the stage's channelled midpoint {cmid:?}"
+        );
+        let prims = text_geometry(&core);
+        let alphas = glyph_alphas(&prims);
+        assert!(!alphas.is_empty());
+        assert!(
+            alphas.iter().all(|pa| *pa == calpha),
+            "channelled stage prim alphas {alphas:?} vs stream alpha {calpha}"
+        );
+    }
+
     /// The `media_items` sprite quad for a 100×50 image
     /// centred at (150, 100), unrotated (the corner values
     /// media.rs's own tests pin): corners[0] is the local
@@ -1416,7 +1531,7 @@ mod tests {
     }
 
     fn cue(text: &str) -> SubtitleCue {
-        SubtitleCue { start_frame: 0, end_frame: 100, text: text.into() }
+        SubtitleCue { start_frame: 0, end_frame: 100, text: text.into(), speaker: None }
     }
 
     #[test]
@@ -1550,6 +1665,7 @@ mod tests {
             start_frame: start,
             end_frame: end,
             text: text.into(),
+            speaker: None,
         });
         core
     }
@@ -1623,6 +1739,7 @@ mod tests {
             start_frame: 0,
             end_frame: 10,
             text: "B".into(),
+            speaker: None,
         });
         let prims = subtitle_geometry(&core);
         // "A" and "B" are 10 lit pixels each: 10 * 2 * 2.

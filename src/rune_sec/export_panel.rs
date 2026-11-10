@@ -200,6 +200,30 @@
 //! failure reason wraps instead of spilling. Lines
 //! that provably fit (the 42-char subtitle, the
 //! bounded output line) are unchanged.
+//!
+//! Wave R (R5) wires the panel's labels to the i18n
+//! catalogue through `i18n_wire::tr` — the shell's one
+//! established idiom — wherever a catalogue key's
+//! English value is byte-identical to the label the
+//! panel already showed: the title (`ws_export`), the
+//! range toggle's caption (`frames`, with its colon
+//! composed on), and the SVG / spritesheet / WebM
+//! buttons (`export_svg`, `spritesheet`, `export_webm`).
+//! English rendering is therefore unchanged (pinned in
+//! the tests); other languages now localise those five
+//! labels. Every other label stays hardcoded English
+//! for now: some have no catalogue key at all (JPEG,
+//! APNG, the section headings, the bundle buttons) and
+//! some sit next to a key whose value is a different
+//! string (`export_png` is "Export PNG", the button is
+//! "PNG") — wiring those would change the English
+//! label, so they are recorded as gaps in the Wave R
+//! findings (r5.md) for R4 / the integrator instead.
+//! The guidance notes and the composed prose lines
+//! (loop note, effective / output lines, recaps,
+//! history rows) are sentence-length copy with no
+//! catalogue keys; they stay English, the Q14 blurb
+//! precedent. No key, handler or layout changed.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -211,6 +235,7 @@ use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::icon_btn;
 use crate::rune_sec::icons::{icon_el, icon_el_rgb};
 use crate::rune_sec::toasts::{classify_status, Severity};
@@ -1392,11 +1417,16 @@ fn plain_row(
 /// label — Phase H; same key, same label, same handler)
 /// is one of the `export_*_action` functions above, which
 /// choose between the range exporter and the full op at
-/// press time.
+/// press time. The label is a borrowed `&str`, not
+/// `&'static str`, so a call site can pass the
+/// `i18n_wire::tr` translation of a catalogue key (Wave R,
+/// R5) — the button builder copies it into the element
+/// inside this call, like the chrome_view call sites that
+/// pass `&i18n_wire::tr(...)` straight to `icon_btn`.
 fn range_row(
     key: &'static str,
     icon: &str,
-    label: &'static str,
+    label: &str,
     note: &'static str,
     t: &Theme,
     action: fn(&mut State),
@@ -1469,7 +1499,12 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             .w_full()
             .gap(8.0)
             .center_y()
-            .child(design::panel_title(None, "Export", None, t)),
+            .child(design::panel_title(
+                None,
+                &i18n_wire::tr(core, "ws_export"),
+                None,
+                t,
+            )),
     );
     panel = panel.child(design::divider(t));
     panel = panel.child(
@@ -1490,7 +1525,11 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         .key("xc-range-toggle")
         .gap(8.0)
         .center_y()
-        .child(text("Frames:").font(type_::LABEL).color(t.text))
+        .child(
+            text(format!("{}:", i18n_wire::tr(core, "frames")))
+                .font(type_::LABEL)
+                .color(t.text),
+        )
         .child(btn("xc-range-all", "All frames", !use_range, t, |s| {
             s.export_use_range = false;
         }))
@@ -1550,7 +1589,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         .child(range_row(
             "xc-svg",
             "image",
-            "SVG",
+            &i18n_wire::tr(core, "export_svg"),
             "One SVG per frame in ./export/svg/",
             t,
             export_svg_action,
@@ -1558,7 +1597,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         .child(range_row(
             "xc-sheet",
             "table-cells-large",
-            "Spritesheet",
+            &i18n_wire::tr(core, "spritesheet"),
             "Frames on one sheet — ./export/spritesheet.png",
             t,
             export_sheet_action,
@@ -1620,7 +1659,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         .child(range_row(
             "xc-webm",
             "video",
-            "WebM",
+            &i18n_wire::tr(core, "export_webm"),
             "WebM video (VP9) — ./export/animation.webm (video-only — WebM never includes audio)",
             t,
             export_webm_action,
@@ -1819,6 +1858,77 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- i18n wire (Wave R, R5) ----
+
+    #[test]
+    fn wired_labels_exist_in_the_catalogue_and_match_english_byte_identically() {
+        // Every label `export_panel` now sources from the
+        // catalogue must (a) exist in the table — a missing
+        // key renders the key text itself — and (b) resolve
+        // in English to exactly the string the panel showed
+        // before the wire, so English rendering is
+        // byte-identical by construction.
+        let core = EditorCore::new();
+        assert_eq!(core.lang, stykanimate_rs::i18n::Lang::En, "default core is English");
+        for (key, literal) in [
+            ("ws_export", "Export"),
+            ("frames", "Frames"),
+            ("export_svg", "SVG"),
+            ("spritesheet", "Spritesheet"),
+            ("export_webm", "WebM"),
+        ] {
+            assert!(
+                crate::rune_sec::i18n_wire::key_in_table(key),
+                "{key} must exist in the i18n table"
+            );
+            assert_eq!(
+                crate::rune_sec::i18n_wire::tr(&core, key),
+                literal,
+                "{key} must render byte-identically in English"
+            );
+        }
+        // The toggle caption composes its colon onto the
+        // translated word; in English that composition is
+        // the pre-wire literal.
+        assert_eq!(
+            format!("{}:", crate::rune_sec::i18n_wire::tr(&core, "frames")),
+            "Frames:"
+        );
+    }
+
+    #[test]
+    fn wired_labels_follow_the_core_language() {
+        // The wire is live, not a fallback coincidence: in
+        // Bengali the translated keys resolve from the real
+        // BN table (values read from src/i18n.rs), while
+        // the format-name keys the BN table carries in
+        // English stay English.
+        let mut core = EditorCore::new();
+        core.lang = stykanimate_rs::i18n::Lang::Bn;
+        assert_eq!(crate::rune_sec::i18n_wire::tr(&core, "ws_export"), "এক্সপোর্ট");
+        assert_eq!(crate::rune_sec::i18n_wire::tr(&core, "frames"), "ফ্রেমসমূহ");
+        assert_eq!(crate::rune_sec::i18n_wire::tr(&core, "spritesheet"), "স্প্রাইটশিট");
+        assert_eq!(crate::rune_sec::i18n_wire::tr(&core, "export_svg"), "SVG");
+        assert_eq!(crate::rune_sec::i18n_wire::tr(&core, "export_webm"), "WebM");
+    }
+
+    #[test]
+    fn export_panel_constructs_under_both_themes_and_languages() {
+        // Construction is the assertable level (element
+        // internals are opaque — the frame_ops precedent):
+        // the wired panel builds with an English core and
+        // with a Bengali core, under both themes, with the
+        // range branches taken as well as not.
+        let mut s = crate::init();
+        let _ = export_panel(&s, &rune::tok::theme(true));
+        let _ = export_panel(&s, &rune::tok::theme(false));
+        s.core.lang = stykanimate_rs::i18n::Lang::Bn;
+        let _ = export_panel(&s, &rune::tok::theme(true));
+        s.core.loop_range = Some((0, 0));
+        s.export_use_range = true;
+        let _ = export_panel(&s, &rune::tok::theme(false));
+    }
 
     #[test]
     fn range_support_matches_the_export_rs_range_functions() {

@@ -244,9 +244,16 @@
 //! direct `project.subtitle_style` write — the field
 //! the core's style op stores through — so the pair
 //! differs in exactly the one field the census
-//! discriminates on. The cue is stage-canvas paint,
-//! so both scenes are `--snap` facts, not tree facts
-//! (facts 32–33).
+//! discriminates on. The cue's stage rendering is
+//! canvas paint, so the pair's pixel proof is the
+//! `--snap` census; but a planted cue also mounts
+//! the subtitle lane in the timeline card (the lane
+//! exists only when a project has cues), so the pair
+//! are tree facts too — facts 32–33 record both
+//! halves. (Wave R, R16: the facts as first written
+//! claimed inventory identity with `default`, the
+//! stage half only; the lane's wiring landed in
+//! Wave Q, and the facts are corrected there.)
 
 use crate::State;
 
@@ -1289,7 +1296,9 @@ fn scene_sprites_populated(s: &mut State) {
 /// census compares it against the `default` scene's
 /// stage crop — the same state minus the cue — and
 /// gates on the measured delta, never on a guessed
-/// pixel floor.
+/// pixel floor. The planted cue also mounts the
+/// subtitle lane in this scene's timeline (the tree
+/// half of fact 32).
 fn scene_subtitles_populated(s: &mut State) {
     plant_subtitle_cue(s);
 }
@@ -1331,6 +1340,7 @@ fn plant_subtitle_cue(s: &mut State) {
         start_frame: 0,
         end_frame: frames,
         text: "We walk home before dark.".to_string(),
+        speaker: None,
     }];
     s.core.goto(2);
 }
@@ -1626,22 +1636,40 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
 ///    canvas drawings, so their positions and
 ///    rotations are a `--snap` fact.
 /// 32. Under `--scene subtitles-populated` (Wave P):
-///    the element inventory is IDENTICAL to the
-///    default tree's (facts 1–6, key for key) — the
-///    planted cue is stage-canvas paint, never
-///    structure (fact 19's shape), and the scene
-///    switches nothing. The cue's rendering is a
-///    `--snap` fact: the headless subtitle census
-///    (P33) compares this scene's stage crop against
-///    the default scene's, band by band, and gates on
-///    the measured delta.
+///    the element inventory is the default tree's
+///    PLUS the subtitle lane, and nothing else: an
+///    element keyed `subtitle-lane` (the lane root,
+///    inside the timeline card) holding one block
+///    keyed `subtitle-cue-0` — the planted cue's
+///    block, under the lane's `subtitle-cue-{i}` key
+///    scheme. The lane mounts whenever a project has
+///    cues and the timeline is expanded (its mount
+///    gate is `!collapsed` only, in every workspace),
+///    and its header and sub-rows are unkeyed, so the
+///    two keyed additions are the whole tree delta.
+///    The stage's cue paint itself is never
+///    structure: the cue's rendering is a `--snap`
+///    fact — the headless subtitle census (P33)
+///    compares this scene's stage crop against the
+///    default scene's, band by band, and gates on
+///    the measured delta. (Wave R, R16: as first
+///    written this fact claimed inventory identity
+///    with `default` — true of the stage paint, but
+///    the lane's wiring landed in Wave Q and the
+///    overflow scan has treated this tree as the
+///    lane's carrier ever since; the fact now
+///    records the whole tree, which is also the
+///    inventory R3's lane drag must preserve.)
 /// 33. Under `--scene subtitles-top` (Wave P): the
-///    same inventory identity as fact 32 — the scene
-///    differs from `subtitles-populated` only in the
-///    subtitle style's position field, so any key
-///    drift between the two trees means a view
-///    branched on the style. The top-band rendering
-///    is the same census's second `--snap` fact.
+///    inventory is identical to
+///    `subtitles-populated`'s (fact 32's inventory,
+///    lane included) — the scene differs only in
+///    the subtitle style's position field, and
+///    neither the lane nor the stage's tree
+///    branches on that field, so any key drift
+///    between the two trees means a view branched
+///    on the style. The top-band rendering is the
+///    same census's second `--snap` fact.
 pub fn layout_assertions() -> Vec<&'static str> {
     vec![
         "exactly one element keyed \"stage\"",
@@ -1675,8 +1703,8 @@ pub fn layout_assertions() -> Vec<&'static str> {
         "under --scene strokes-populated: elements keyed \"stroke-measure\", \"stroke-width-row\" and \"stroke-opacity-row\" exist and elements keyed \"stroke-del-0\" through \"stroke-del-3\" exist (the selected-stroke rows and the four strokes' list rows — see fact 29)",
         "under --scene library-populated: elements keyed \"library-row-0\" and \"library-row-1\" exist and elements keyed \"library-thumb-0\" and \"library-thumb-1\" exist (the two seeded library entries and their thumbnail canvases — see fact 30)",
         "under --scene sprites-populated: an element keyed \"sprite-panel\" exists and elements keyed \"sprite-row-0\" and \"sprite-row-1\" exist (the Sprites panel and its two placed-instance rows — see fact 31)",
-        "under --scene subtitles-populated: the element inventory is identical to the default tree's (the planted cue is stage-canvas paint, a --snap fact — see fact 32)",
-        "under --scene subtitles-top: the element inventory is identical to the subtitles-populated tree's (only the subtitle style's position field differs — see fact 33)",
+        "under --scene subtitles-populated: the element inventory is the default tree's plus the subtitle lane — an element keyed \"subtitle-lane\" exists and an element keyed \"subtitle-cue-0\" exists (the planted cue's lane block; the stage cue paint itself is a --snap fact — see fact 32)",
+        "under --scene subtitles-top: the element inventory is identical to the subtitles-populated tree's, lane included (only the subtitle style's position field differs — see fact 33)",
     ]
 }
 

@@ -3937,16 +3937,23 @@ mod tests {
     }
 
     #[test]
-    fn clean_save_refresh_offers_a_content_identical_snapshot() {
-        // Wave P (P42) — the spurious offer, pinned as the
-        // tree's current truth (reported for the user's
-        // decision, NOT fixed here): the GUI save path
+    fn clean_save_refresh_no_longer_offers_a_content_identical_snapshot() {
+        // Wave P (P42) found the spurious offer and pinned
+        // it as the then-current truth: the GUI save path
         // (`save_named_pressed`, project_tools.rs) writes
         // the named save and THEN refreshes the recovery
         // snapshot with the same project, so the snapshot
         // is strictly newer than the save while holding
         // byte-identical content — and the mtime-only
-        // offer condition offers it at the next startup.
+        // offer condition offered it at the next startup.
+        // Wave R (R22) lands the content-comparison gate
+        // the user approved ("Build both", 2026-11-10):
+        // the same fixture now yields NO offer, because
+        // `recovery_is_newer_than_last_project` compares
+        // content once the mtime verdict fires (see
+        // shell.rs `project_documents_match`). This pin
+        // replaces P42's — the fixture is unchanged, only
+        // the expected verdict flipped.
         let dir = temp_dir("spurious-offer");
         let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
         let t1 = t0 + std::time::Duration::from_secs(60);
@@ -3969,13 +3976,14 @@ mod tests {
             "the two files are byte-identical"
         );
         assert!(
-            shell::recovery_is_newer_than_last_project_in(&dir),
-            "identical content still reads as newer work"
+            !shell::recovery_is_newer_than_last_project_in(&dir),
+            "identical content is the clean-save refresh, not newer work"
         );
-        assert_eq!(startup_recovery_in(&dir), StartupRecovery::Offer);
-        // The user's way out, now that Discard exists:
-        // discarding the snapshot ends the spurious offer.
+        assert_eq!(startup_recovery_in(&dir), StartupRecovery::None);
+        // Discard is unaffected by the gate: it still
+        // retires the snapshot file itself.
         assert!(discard_recovery_in(&dir));
+        assert!(!snapshot.exists(), "discard removed the snapshot file");
         assert_eq!(startup_recovery_in(&dir), StartupRecovery::None);
         let _ = std::fs::remove_dir_all(&dir);
     }

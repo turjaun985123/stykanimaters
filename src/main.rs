@@ -806,6 +806,7 @@ fn text_focused(s: &State) -> bool {
         || s.audio_panel.name.focused
         || s.subtitle_panel.path.focused
         || (s.subtitle_panel.text_target.is_some() && s.subtitle_panel.text.focused)
+        || (s.subtitle_panel.text_target.is_some() && s.subtitle_panel.speaker.focused)
         || s.home_panel.search.focused
         || s.library_panel.search.focused
         || s.text_tool.field.focused

@@ -87,10 +87,16 @@
 //!
 //! ## Labels and limits, stated
 //!
-//! * The section's labels are plain strings, not i18n
-//!   keys — no `subtitles` key exists in the 28 locale
-//!   tables (the lane's stated deviation, P32 IA-5;
-//!   registering one is a separate wave action).
+//! * The section's labels resolve through the i18n
+//!   tables (Wave R, R4 — the P32 IA-5 registration,
+//!   landed): `subtitles` + the `subtitle_*` keys in
+//!   `src/i18n.rs`, rendered via `i18n_wire::tr`, with
+//!   genuine translations in the eight translated
+//!   tables and English placeholders in the other 19
+//!   (the tables' convention). The handlers' status
+//!   sentences stay English: they are messages in the
+//!   ops' voice, not labels, and the shell localises
+//!   no status sentence.
 //! * The cue text field is the kit's one field
 //!   construction, which is single-line: a multi-line
 //!   cue's line breaks ride in the buffer verbatim and
@@ -111,6 +117,7 @@
 //! `subtitle-section` (root), `subtitle-row-{i}` (cue
 //! rows), `subtitle-add`, `subtitle-detail` (detail
 //! root), `subtitle-edit-open`, `subtitle-text-field`,
+//! `subtitle-speaker-field` (Wave R, IA-R21-5),
 //! `subtitle-edit-apply`, `subtitle-edit-cancel`,
 //! `subtitle-start-dn` / `subtitle-start-up`,
 //! `subtitle-end-dn` / `subtitle-end-up`,
@@ -137,14 +144,18 @@ use stykanimate_rs::subtitles::{
 
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::icon_only_btn;
 use crate::rune_sec::subtitle_lane::{press_cue, selection_is_live};
 use crate::State;
 
-/// The text a freshly added cue carries. It is a real
-/// cue the moment it lands (the core refuses empty
-/// text), and adding one opens the text editor on it
-/// (see [`add_cue`]), so the placeholder is one
+/// The text a freshly added cue carries, in English.
+/// [`add_cue`] resolves the `subtitle_new` i18n key,
+/// whose English value is this string; the constant
+/// stays as the reference the pins assert against. It
+/// is a real cue the moment it lands (the core refuses
+/// empty text), and adding one opens the text editor
+/// on it (see [`add_cue`]), so the placeholder is one
 /// keystroke away from being replaced.
 pub const DEFAULT_CUE_TEXT: &str = "New subtitle";
 
@@ -191,6 +202,19 @@ pub struct SubtitlePanelState {
     /// (the clips rename panel's `opened_name`
     /// discipline).
     pub text_opened: String,
+    /// The cue-speaker edit buffer (Wave R, R21 via
+    /// IA-R21-5), loaded from the target cue by
+    /// [`begin_edit`] — the cue's speaker name, or empty
+    /// for an uncredited cue. Applying passes the buffer
+    /// through the op's normalisation, so an emptied
+    /// buffer clears the speaker.
+    pub speaker: TextEdit,
+    /// The speaker text the target cue carried when the
+    /// session opened — the identity pair to
+    /// `text_opened` for the speaker buffer: apply's
+    /// no-change test compares BOTH buffers against
+    /// their opened values.
+    pub speaker_opened: String,
 }
 
 impl SubtitlePanelState {
@@ -200,6 +224,8 @@ impl SubtitlePanelState {
             text: TextEdit::new(""),
             text_target: None,
             text_opened: String::new(),
+            speaker: TextEdit::new(""),
+            speaker_opened: String::new(),
         }
     }
 }
@@ -221,23 +247,30 @@ impl Default for SubtitlePanelState {
 /// row is one truncated line, and the detail block
 /// below carries the text whole.
 pub fn cue_row_label(cue: &SubtitleCue) -> String {
-    format!(
-        "{}–{} · {}",
-        cue.start_frame + 1,
-        cue.end_frame,
-        cue.text.replace('\n', " ")
-    )
+    // A credited cue's row carries its speaker as the
+    // `Name: ` prefix — the same composition the
+    // renderers draw (subtitles::subtitle_display_lines),
+    // panel-local per IA-R21-5.
+    let text = match &cue.speaker {
+        Some(name) => format!("{name}: {}", cue.text.replace('\n', " ")),
+        None => cue.text.replace('\n', " "),
+    };
+    format!("{}–{} · {}", cue.start_frame + 1, cue.end_frame, text)
 }
 
 /// The detail block's range line: the same window as
 /// [`cue_row_label`], with the cue's length spelled
-/// out.
-pub fn cue_range_line(cue: &SubtitleCue) -> String {
+/// out. The two words resolve through the i18n tables
+/// (`frames` + `subtitle_frames_unit`); the numbers
+/// and the window punctuation are locale-invariant.
+pub fn cue_range_line(core: &EditorCore, cue: &SubtitleCue) -> String {
     format!(
-        "Frames {}–{} · {} frame(s)",
+        "{} {}–{} · {} {}",
+        i18n_wire::tr(core, "frames"),
         cue.start_frame + 1,
         cue.end_frame,
-        cue.end_frame - cue.start_frame
+        cue.end_frame - cue.start_frame,
+        i18n_wire::tr(core, "subtitle_frames_unit")
     )
 }
 
@@ -299,12 +332,13 @@ pub fn stepped_end(cue: &SubtitleCue, dir: i32) -> Option<usize> {
     }
 }
 
-/// A position's display name (the style stepper's
-/// readout).
-pub fn position_name(position: SubtitlePosition) -> &'static str {
+/// A position's display label (the style stepper's
+/// readout), resolved through the i18n tables
+/// (`subtitle_bottom` / `subtitle_top`).
+pub fn position_label(core: &EditorCore, position: SubtitlePosition) -> String {
     match position {
-        SubtitlePosition::Bottom => "Bottom",
-        SubtitlePosition::Top => "Top",
+        SubtitlePosition::Bottom => i18n_wire::tr(core, "subtitle_bottom"),
+        SubtitlePosition::Top => i18n_wire::tr(core, "subtitle_top"),
     }
 }
 
@@ -391,15 +425,16 @@ pub fn select_cue(s: &mut State, i: usize) {
 }
 
 /// Add a cue at the playhead (see
-/// [`default_cue_window`]) carrying
-/// [`DEFAULT_CUE_TEXT`], select it at the index the op
-/// returns, and open the text editor on it so the
-/// placeholder is immediately replaceable. One undo
-/// step (the op's). A refusal is the op's own status;
-/// nothing else moves.
+/// [`default_cue_window`]) carrying the `subtitle_new`
+/// label ([`DEFAULT_CUE_TEXT`] in English), select it
+/// at the index the op returns, and open the text
+/// editor on it so the placeholder is immediately
+/// replaceable. One undo step (the op's). A refusal
+/// is the op's own status; nothing else moves.
 pub fn add_cue(s: &mut State) {
     let (start, end) = default_cue_window(&s.core);
-    if let Some(i) = s.core.subtitle_add(start, end, DEFAULT_CUE_TEXT) {
+    let text = i18n_wire::tr(&s.core, "subtitle_new");
+    if let Some(i) = s.core.subtitle_add(start, end, &text, None) {
         s.subtitle_selected = Some(i);
         begin_edit(s);
     }
@@ -419,6 +454,8 @@ pub fn begin_edit(s: &mut State) {
     s.subtitle_panel.text = TextEdit::new(cue.text.clone());
     s.subtitle_panel.text_target = Some(i);
     s.subtitle_panel.text_opened = cue.text;
+    s.subtitle_panel.speaker = TextEdit::new(cue.speaker.clone().unwrap_or_default());
+    s.subtitle_panel.speaker_opened = cue.speaker.unwrap_or_default();
 }
 
 /// Stand the text session down: forget the target and
@@ -431,6 +468,8 @@ pub fn close_edit(s: &mut State) {
     s.subtitle_panel.text_target = None;
     s.subtitle_panel.text_opened = String::new();
     s.subtitle_panel.text = TextEdit::new("");
+    s.subtitle_panel.speaker_opened = String::new();
+    s.subtitle_panel.speaker = TextEdit::new("");
 }
 
 /// Apply the text session: write the buffer back over
@@ -442,8 +481,9 @@ pub fn close_edit(s: &mut State) {
 /// * the session no longer names its cue
 ///   ([`edit_is_live`] fails — the world moved): close
 ///   the session, change nothing, and say so;
-/// * the buffer is unchanged: close the session and
-///   say so, spending no undo step;
+/// * both buffers are unchanged (text AND speaker —
+///   IA-R21-5's compare-both rule): close the session
+///   and say so, spending no undo step;
 /// * the op refuses (empty text): the op's status
 ///   stands and the session stays OPEN, so the text
 ///   can be fixed in place.
@@ -459,7 +499,8 @@ pub fn apply_edit(s: &mut State) {
     }
     let i = s.subtitle_panel.text_target.unwrap_or_default();
     let text = s.subtitle_panel.text.text.clone();
-    if text == s.subtitle_panel.text_opened {
+    let speaker = s.subtitle_panel.speaker.text.clone();
+    if text == s.subtitle_panel.text_opened && speaker == s.subtitle_panel.speaker_opened {
         close_edit(s);
         s.core.status = format!("Subtitle {} text unchanged.", i + 1);
         return;
@@ -467,7 +508,9 @@ pub fn apply_edit(s: &mut State) {
     let Some((_, cue)) = selected_cue(&s.core, s.subtitle_selected) else {
         return;
     };
-    if let Some(new_i) = s.core.subtitle_update(i, cue.start_frame, cue.end_frame, &text) {
+    if let Some(new_i) =
+        s.core.subtitle_update(i, cue.start_frame, cue.end_frame, &text, Some(speaker.as_str()))
+    {
         s.subtitle_selected = Some(new_i);
         close_edit(s);
     }
@@ -484,7 +527,7 @@ pub fn step_start(s: &mut State, dir: i32) {
     };
     match stepped_start(&cue, dir) {
         Some(start) => {
-            if let Some(new_i) = s.core.subtitle_update(i, start, cue.end_frame, &cue.text) {
+            if let Some(new_i) = s.core.subtitle_update(i, start, cue.end_frame, &cue.text, cue.speaker.as_deref()) {
                 s.subtitle_selected = Some(new_i);
             }
         }
@@ -507,7 +550,7 @@ pub fn step_end(s: &mut State, dir: i32) {
     };
     match stepped_end(&cue, dir) {
         Some(end) => {
-            if let Some(new_i) = s.core.subtitle_update(i, cue.start_frame, end, &cue.text) {
+            if let Some(new_i) = s.core.subtitle_update(i, cue.start_frame, end, &cue.text, cue.speaker.as_deref()) {
                 s.subtitle_selected = Some(new_i);
             }
         }
@@ -539,7 +582,7 @@ pub fn start_at_playhead(s: &mut State) {
         );
         return;
     }
-    if let Some(new_i) = s.core.subtitle_update(i, at, cue.end_frame, &cue.text) {
+    if let Some(new_i) = s.core.subtitle_update(i, at, cue.end_frame, &cue.text, cue.speaker.as_deref()) {
         s.subtitle_selected = Some(new_i);
     }
 }
@@ -565,7 +608,7 @@ pub fn end_at_playhead(s: &mut State) {
         );
         return;
     }
-    if let Some(new_i) = s.core.subtitle_update(i, cue.start_frame, at + 1, &cue.text) {
+    if let Some(new_i) = s.core.subtitle_update(i, cue.start_frame, at + 1, &cue.text, cue.speaker.as_deref()) {
         s.subtitle_selected = Some(new_i);
     }
 }
@@ -792,11 +835,11 @@ pub fn subtitle_section(s: &State, t: &Theme) -> El {
         .key("subtitle-section")
         .w_full()
         .gap(8.0)
-        .child(design::section_label("Subtitles", t));
+        .child(design::section_label(&i18n_wire::tr(core, "subtitles"), t));
     if cues.is_empty() {
         section = section.child(design::empty_state(
             "star",
-            "No subtitles in this project.",
+            &i18n_wire::tr(core, "subtitle_none"),
             t,
         ));
     } else {
@@ -820,7 +863,13 @@ pub fn subtitle_section(s: &State, t: &Theme) -> El {
         row()
             .gap(6.0)
             .center_y()
-            .child(btn("subtitle-add", "Add cue", false, t, |s| add_cue(s))),
+            .child(btn(
+                "subtitle-add",
+                &i18n_wire::tr(core, "subtitle_add"),
+                false,
+                t,
+                |s| add_cue(s),
+            )),
     );
     if !cues.is_empty() {
         section = section.child(detail_block(s, t));
@@ -843,7 +892,7 @@ fn detail_block(s: &State, t: &Theme) -> El {
             .w_full()
             .child(design::empty_state(
                 "star",
-                "Select a subtitle cue to edit it.",
+                &i18n_wire::tr(&s.core, "subtitle_select"),
                 t,
             ));
     };
@@ -852,20 +901,43 @@ fn detail_block(s: &State, t: &Theme) -> El {
         .w_full()
         .gap(8.0)
         .child(
-            text(format!("Cue {}", i + 1))
+            text(format!(
+                "{} {}",
+                i18n_wire::tr(&s.core, "subtitle_cue"),
+                i + 1
+            ))
                 .font(type_::TITLE)
                 .color(t.text),
         )
         .child(
-            text(cue_range_line(&cue))
+            text(cue_range_line(&s.core, &cue))
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         );
     if edit_is_live(s) {
-        // The open text session: the kit field (Enter
-        // applies, like every committing field in the
-        // shell) over the Apply/Cancel row.
+        // The open text session: the speaker field over
+        // the cue-text field (Enter applies in either,
+        // like every committing field in the shell) over
+        // the Apply/Cancel row.
         block = block
+            .child(design::section_label(
+                &i18n_wire::tr(&s.core, "subtitle_speaker"),
+                t,
+            ))
+            .child(
+                design::text_field(
+                    &s.subtitle_panel.speaker,
+                    type_::BODY,
+                    s.subtitle_panel.speaker.focused,
+                    t,
+                )
+                .key("subtitle-speaker-field")
+                .single_line()
+                .w_full()
+                .color(t.text)
+                .on_edit(|s: &mut State| &mut s.subtitle_panel.speaker)
+                .on_submit(|s: &mut State, _tx: &mut rune::Tx| apply_edit(s)),
+            )
             .child(
                 design::text_field(
                     &s.subtitle_panel.text,
@@ -884,12 +956,20 @@ fn detail_block(s: &State, t: &Theme) -> El {
                 row()
                     .gap(6.0)
                     .center_y()
-                    .child(btn("subtitle-edit-apply", "Apply text", false, t, |s| {
-                        apply_edit(s)
-                    }))
-                    .child(btn("subtitle-edit-cancel", "Cancel", false, t, |s| {
-                        close_edit(s)
-                    })),
+                    .child(btn(
+                        "subtitle-edit-apply",
+                        &i18n_wire::tr(&s.core, "subtitle_apply"),
+                        false,
+                        t,
+                        |s| apply_edit(s),
+                    ))
+                    .child(btn(
+                        "subtitle-edit-cancel",
+                        &i18n_wire::tr(&s.core, "subtitle_cancel"),
+                        false,
+                        t,
+                        |s| close_edit(s),
+                    )),
             );
     } else {
         // The cue's text whole (it wraps — a cue is
@@ -907,9 +987,13 @@ fn detail_block(s: &State, t: &Theme) -> El {
                 row()
                     .gap(6.0)
                     .center_y()
-                    .child(btn("subtitle-edit-open", "Edit text", false, t, |s| {
-                        begin_edit(s)
-                    })),
+                    .child(btn(
+                        "subtitle-edit-open",
+                        &i18n_wire::tr(&s.core, "subtitle_edit"),
+                        false,
+                        t,
+                        |s| begin_edit(s),
+                    )),
             );
     }
     block = block
@@ -919,7 +1003,10 @@ fn detail_block(s: &State, t: &Theme) -> El {
             row()
                 .gap(8.0)
                 .center_y()
-                .child(design::section_label("Start", t).grow(1.0))
+                .child(
+                    design::section_label(&i18n_wire::tr(&s.core, "subtitle_start"), t)
+                        .grow(1.0),
+                )
                 .child(btn("subtitle-start-dn", "−", false, t, |s| step_start(s, -1)))
                 .child(design::stepper_value(&format!("{}", cue.start_frame + 1), t))
                 .child(btn("subtitle-start-up", "+", false, t, |s| step_start(s, 1))),
@@ -931,7 +1018,10 @@ fn detail_block(s: &State, t: &Theme) -> El {
             row()
                 .gap(8.0)
                 .center_y()
-                .child(design::section_label("End", t).grow(1.0))
+                .child(
+                    design::section_label(&i18n_wire::tr(&s.core, "subtitle_end"), t)
+                        .grow(1.0),
+                )
                 .child(btn("subtitle-end-dn", "−", false, t, |s| step_end(s, -1)))
                 .child(design::stepper_value(&format!("{}", cue.end_frame), t))
                 .child(btn("subtitle-end-up", "+", false, t, |s| step_end(s, 1))),
@@ -943,12 +1033,20 @@ fn detail_block(s: &State, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
-                .child(btn("subtitle-start-at", "Start @ playhead", false, t, |s| {
-                    start_at_playhead(s)
-                }))
-                .child(btn("subtitle-end-at", "End @ playhead", false, t, |s| {
-                    end_at_playhead(s)
-                })),
+                .child(btn(
+                    "subtitle-start-at",
+                    &i18n_wire::tr(&s.core, "subtitle_start_at"),
+                    false,
+                    t,
+                    |s| start_at_playhead(s),
+                ))
+                .child(btn(
+                    "subtitle-end-at",
+                    &i18n_wire::tr(&s.core, "subtitle_end_at"),
+                    false,
+                    t,
+                    |s| end_at_playhead(s),
+                )),
         )
         .child(
             row()
@@ -957,7 +1055,7 @@ fn detail_block(s: &State, t: &Theme) -> El {
                 .child(icon_only_btn(
                     "subtitle-delete",
                     "trash-can",
-                    "Delete cue",
+                    &i18n_wire::tr(&s.core, "subtitle_delete"),
                     26.0,
                     false,
                     t,
@@ -999,26 +1097,35 @@ fn style_block(s: &State, t: &Theme) -> El {
         .key("subtitle-style")
         .w_full()
         .gap(8.0)
-        .child(design::section_label("Style", t))
+        .child(design::section_label(
+            &i18n_wire::tr(&s.core, "subtitle_style"),
+            t,
+        ))
         .child(
             row()
                 .gap(8.0)
                 .center_y()
-                .child(design::section_label("Position", t).grow(1.0))
+                .child(
+                    design::section_label(&i18n_wire::tr(&s.core, "subtitle_position"), t)
+                        .grow(1.0),
+                )
                 .child(icon_only_btn(
                     "subtitle-position-prev",
                     "chevron-left",
-                    "Previous position",
+                    &i18n_wire::tr(&s.core, "subtitle_position_prev"),
                     26.0,
                     false,
                     t,
                     |s| cycle_position(s),
                 ))
-                .child(design::stepper_value(position_name(style.position), t))
+                .child(design::stepper_value(
+                    &position_label(&s.core, style.position),
+                    t,
+                ))
                 .child(icon_only_btn(
                     "subtitle-position-next",
                     "chevron-right",
-                    "Next position",
+                    &i18n_wire::tr(&s.core, "subtitle_position_next"),
                     26.0,
                     false,
                     t,
@@ -1029,7 +1136,10 @@ fn style_block(s: &State, t: &Theme) -> El {
             row()
                 .gap(8.0)
                 .center_y()
-                .child(design::section_label("Font scale", t).grow(1.0))
+                .child(
+                    design::section_label(&i18n_wire::tr(&s.core, "subtitle_font_scale"), t)
+                        .grow(1.0),
+                )
                 .child(btn("subtitle-scale-dn", "−", false, t, |s| step_scale(s, -1)))
                 .child(design::stepper_value(&scale_readout(style), t))
                 .child(btn("subtitle-scale-up", "+", false, t, |s| step_scale(s, 1))),
@@ -1038,20 +1148,28 @@ fn style_block(s: &State, t: &Theme) -> El {
             row()
                 .gap(8.0)
                 .center_y()
-                .child(design::section_label("Text", t))
+                .child(design::section_label(
+                    &i18n_wire::tr(&s.core, "subtitle_text"),
+                    t,
+                ))
                 .child(text_colors),
         )
         .child(
             row()
                 .gap(8.0)
                 .center_y()
-                .child(design::section_label("Box", t))
+                .child(design::section_label(
+                    &i18n_wire::tr(&s.core, "subtitle_box"),
+                    t,
+                ))
                 .child(box_colors),
         )
         .child(
             text(format!(
-                "Text {} · Box {}",
+                "{} {} · {} {}",
+                i18n_wire::tr(&s.core, "subtitle_text"),
                 hex_label(style.text_color),
+                i18n_wire::tr(&s.core, "subtitle_box"),
                 hex_label(style.box_color)
             ))
             .font(type_::LABEL)
@@ -1072,7 +1190,10 @@ fn file_block(s: &State, t: &Theme) -> El {
         .key("subtitle-file")
         .w_full()
         .gap(8.0)
-        .child(design::section_label("File", t))
+        .child(design::section_label(
+            &i18n_wire::tr(&s.core, "subtitle_file"),
+            t,
+        ))
         .child(
             design::text_field(
                 &s.subtitle_panel.path,
@@ -1085,7 +1206,7 @@ fn file_block(s: &State, t: &Theme) -> El {
             .w_full()
             .color(t.text)
             .placeholder(
-                "Subtitle file path — e.g. subtitles.srt",
+                &i18n_wire::tr(&s.core, "subtitle_path_hint"),
                 t.text_secondary,
             )
             .on_edit(|s: &mut State| &mut s.subtitle_panel.path),
@@ -1094,23 +1215,39 @@ fn file_block(s: &State, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
-                .child(btn("subtitle-export-srt", "Export SRT", false, t, |s| {
-                    export_file(s, SubtitleFileFormat::Srt)
-                }))
-                .child(btn("subtitle-export-vtt", "Export VTT", false, t, |s| {
-                    export_file(s, SubtitleFileFormat::Vtt)
-                })),
+                .child(btn(
+                    "subtitle-export-srt",
+                    &i18n_wire::tr(&s.core, "subtitle_export_srt"),
+                    false,
+                    t,
+                    |s| export_file(s, SubtitleFileFormat::Srt),
+                ))
+                .child(btn(
+                    "subtitle-export-vtt",
+                    &i18n_wire::tr(&s.core, "subtitle_export_vtt"),
+                    false,
+                    t,
+                    |s| export_file(s, SubtitleFileFormat::Vtt),
+                )),
         )
         .child(
             row()
                 .gap(6.0)
                 .center_y()
-                .child(btn("subtitle-import-srt", "Import SRT", false, t, |s| {
-                    import_file(s, SubtitleFileFormat::Srt)
-                }))
-                .child(btn("subtitle-import-vtt", "Import VTT", false, t, |s| {
-                    import_file(s, SubtitleFileFormat::Vtt)
-                })),
+                .child(btn(
+                    "subtitle-import-srt",
+                    &i18n_wire::tr(&s.core, "subtitle_import_srt"),
+                    false,
+                    t,
+                    |s| import_file(s, SubtitleFileFormat::Srt),
+                ))
+                .child(btn(
+                    "subtitle-import-vtt",
+                    &i18n_wire::tr(&s.core, "subtitle_import_vtt"),
+                    false,
+                    t,
+                    |s| import_file(s, SubtitleFileFormat::Vtt),
+                )),
         )
 }
 
@@ -1124,6 +1261,7 @@ mod tests {
             start_frame: start,
             end_frame: end,
             text: text.to_string(),
+            speaker: None,
         }
     }
 
@@ -1175,8 +1313,15 @@ mod tests {
             "5–6 · one two",
             "line breaks flatten for the one-line row"
         );
-        assert_eq!(cue_range_line(&cue(0, 24, "x")), "Frames 1–24 · 24 frame(s)");
-        assert_eq!(cue_range_line(&cue(3, 4, "x")), "Frames 4–4 · 1 frame(s)");
+        let s = cue_state(Vec::new());
+        assert_eq!(
+            cue_range_line(&s.core, &cue(0, 24, "x")),
+            "Frames 1–24 · 24 frame(s)"
+        );
+        assert_eq!(
+            cue_range_line(&s.core, &cue(3, 4, "x")),
+            "Frames 4–4 · 1 frame(s)"
+        );
         assert_eq!(hex_label(0xFFFFFF), "#FFFFFF");
         assert_eq!(hex_label(0x000000), "#000000");
         assert_eq!(hex_label(0xFFD94D), "#FFD94D");
@@ -1235,9 +1380,80 @@ mod tests {
     }
 
     #[test]
+    fn subtitle_i18n_keys_exist_and_match_the_english_labels() {
+        // Every key the panel renders through tr()
+        // exists in the catalogue, and a default
+        // (English) core resolves it to the exact
+        // literal it replaced — English rendering is
+        // byte-identical to the pre-i18n panel.
+        const LABELS: [(&str, &str); 31] = [
+            ("subtitles", "Subtitles"),
+            ("subtitle_none", "No subtitles in this project."),
+            ("subtitle_add", "Add cue"),
+            ("subtitle_select", "Select a subtitle cue to edit it."),
+            ("subtitle_cue", "Cue"),
+            ("frames", "Frames"),
+            ("subtitle_frames_unit", "frame(s)"),
+            ("subtitle_new", "New subtitle"),
+            ("subtitle_edit", "Edit text"),
+            ("subtitle_apply", "Apply text"),
+            ("subtitle_cancel", "Cancel"),
+            ("subtitle_start", "Start"),
+            ("subtitle_end", "End"),
+            ("subtitle_start_at", "Start @ playhead"),
+            ("subtitle_end_at", "End @ playhead"),
+            ("subtitle_delete", "Delete cue"),
+            ("subtitle_style", "Style"),
+            ("subtitle_position", "Position"),
+            ("subtitle_position_prev", "Previous position"),
+            ("subtitle_position_next", "Next position"),
+            ("subtitle_bottom", "Bottom"),
+            ("subtitle_top", "Top"),
+            ("subtitle_font_scale", "Font scale"),
+            ("subtitle_text", "Text"),
+            ("subtitle_box", "Box"),
+            ("subtitle_file", "File"),
+            (
+                "subtitle_path_hint",
+                "Subtitle file path — e.g. subtitles.srt",
+            ),
+            ("subtitle_export_srt", "Export SRT"),
+            ("subtitle_export_vtt", "Export VTT"),
+            ("subtitle_import_srt", "Import SRT"),
+            ("subtitle_import_vtt", "Import VTT"),
+        ];
+        let s = cue_state(Vec::new());
+        for (key, english) in LABELS {
+            assert!(
+                i18n_wire::key_in_table(key),
+                "{key} missing from the catalogue"
+            );
+            assert_eq!(i18n_wire::tr(&s.core, key), english, "{key} in English");
+        }
+        assert_eq!(DEFAULT_CUE_TEXT, i18n_wire::tr(&s.core, "subtitle_new"));
+        // The translated tables genuinely translate:
+        // the section title and the position readout
+        // follow the core's language.
+        let mut s = cue_state(Vec::new());
+        s.core.lang = stykanimate_rs::i18n::Lang::Bn;
+        assert_eq!(i18n_wire::tr(&s.core, "subtitles"), "সাবটাইটেল");
+        assert_eq!(
+            cue_range_line(&s.core, &cue(0, 24, "x")),
+            "ফ্রেমসমূহ 1–24 · 24 ফ্রেম"
+        );
+        s.core.lang = stykanimate_rs::i18n::Lang::De;
+        assert_eq!(position_label(&s.core, SubtitlePosition::Bottom), "Unten");
+        assert_eq!(position_label(&s.core, SubtitlePosition::Top), "Oben");
+    }
+
+    #[test]
     fn position_cycles_between_the_two() {
-        assert_eq!(position_name(SubtitlePosition::Bottom), "Bottom");
-        assert_eq!(position_name(SubtitlePosition::Top), "Top");
+        let s = cue_state(Vec::new());
+        assert_eq!(
+            position_label(&s.core, SubtitlePosition::Bottom),
+            "Bottom"
+        );
+        assert_eq!(position_label(&s.core, SubtitlePosition::Top), "Top");
         assert_eq!(flipped_position(SubtitlePosition::Bottom), SubtitlePosition::Top);
         assert_eq!(flipped_position(SubtitlePosition::Top), SubtitlePosition::Bottom);
     }
