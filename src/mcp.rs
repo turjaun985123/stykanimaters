@@ -156,7 +156,8 @@ pub fn all_tools() -> Vec<Tool> {
 // Progress transport (Wave W, W3)
 // ---------------------------------------------------------------------
 
-/// Which export phase a [`ProgressReport`] counts. The two
+/// What a [`ProgressReport`] counts: one export phase —
+/// or, for one tool, a whole bundle's combined count. The two
 /// phases have separate core contracts (Wave U, U11 for
 /// encode; Wave V, V12 for render) and are never merged into
 /// one number: a `tools/call` reports the phase its format
@@ -171,6 +172,15 @@ pub enum ProgressPhase {
     /// Frames rendered and written, from
     /// [`crate::export::RenderProgressEvent`].
     Render,
+    /// A whole bundle's combined count, from
+    /// [`crate::export::BundleProgressEvent`]: frames
+    /// completed across all of a bundle's members
+    /// against the bundle total allocated before the
+    /// first member ran. Not a phase — the two phases
+    /// above are still never merged with each other;
+    /// a bundle count is a separate core contract,
+    /// reported only by the `export_bundle` handler.
+    Bundle,
 }
 
 /// One progress observation in transport-neutral form: a
@@ -213,6 +223,20 @@ impl ProgressReport {
         ProgressReport {
             phase: ProgressPhase::Render,
             progress: event.rendered_frames,
+            total: event.total_frames,
+            finished: event.finished,
+        }
+    }
+
+    /// Translate a bundle core event (Wave X, X11:
+    /// `progress` = `completed_frames`, `total` =
+    /// `total_frames` — the bundle contract's own
+    /// mapping; see
+    /// [`crate::export::BundleProgressEvent`]).
+    pub fn bundle(event: crate::export::BundleProgressEvent) -> Self {
+        ProgressReport {
+            phase: ProgressPhase::Bundle,
+            progress: event.completed_frames,
             total: event.total_frames,
             finished: event.finished,
         }

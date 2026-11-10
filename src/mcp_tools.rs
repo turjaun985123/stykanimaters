@@ -289,6 +289,7 @@ fn tool_new_project(core: &mut EditorCore, args: &Value) -> Result<Value, String
             def,
             hidden: false,
             clip: None,
+            states: Vec::new(),
             locked: false,
             opacity: 1.0,
         }],
@@ -2737,12 +2738,18 @@ fn tool_clip_list(core: &mut EditorCore, _args: &Value) -> Result<Value, String>
                     crate::model::ClipLoop::PingPong => "ping-pong",
                     crate::model::ClipLoop::Once => "once",
                 },
+                // Wave X (P-1): a figure also uses the clip
+                // when one of its state keys names it — the
+                // base-link-only filter would report a
+                // state-keyed clip as unused.
                 "used_by": core
                     .project
                     .figures
                     .iter()
                     .enumerate()
-                    .filter(|(_, f)| f.clip == Some(i))
+                    .filter(|(_, f)| {
+                        f.clip == Some(i) || f.states.iter().any(|k| k.clip == i)
+                    })
                     .map(|(fi, _)| fi)
                     .collect::<Vec<_>>(),
             })
@@ -2750,6 +2757,213 @@ fn tool_clip_list(core: &mut EditorCore, _args: &Value) -> Result<Value, String>
         .collect();
     let count = clips.len();
     Ok(json!({ "clips": clips, "count": count }))
+}
+
+// ---------------------------------------------------------------------
+// Figure state tools (Wave X, P-1 / GAP #13): animation-state
+// keys on figures — one figure switching clips (idle -> walk
+// -> attack) across its timeline. The state tools accept a
+// clip by index ("clip") or by name ("clip_name"), GAP #13's
+// name-accepting surface. Writes route through the core's
+// state/linking ops (X2: set_state_key / remove_state_key /
+// assign_clip_to_figure / unlink_figure), so panel and MCP
+// author through one path and every mutating tool is
+// exactly one undo step.
+// ---------------------------------------------------------------------
+
+/// Resolve the clip argument shared by the state tools:
+/// `clip_name` (exact match; the first clip with the name
+/// wins — `clip_list` shows every index) takes precedence,
+/// else the `clip` index, range-checked in the
+/// `check_figure` voice.
+fn resolve_clip_arg(core: &EditorCore, args: &Value) -> Result<usize, String> {
+    if let Some(name) = opt_str(args, "clip_name")? {
+        return core
+            .project
+            .clips
+            .iter()
+            .position(|c| c.name == name)
+            .ok_or_else(|| format!("no clip named '{name}'"));
+    }
+    let ci = req_usize(args, "clip")?;
+    if ci >= core.project.clips.len() {
+        return Err(format!(
+            "clip index {ci} out of range (project has {} clip(s))",
+            core.project.clips.len()
+        ));
+    }
+    Ok(ci)
+}
+
+fn state_key_json(core: &EditorCore, key: &crate::model::StateKey) -> Value {
+    json!({
+        "frame": key.frame,
+        "clip": key.clip,
+        "clip_name": core.project.clips.get(key.clip).map(|c| c.name.clone()),
+        "offset": key.offset,
+        "speed": key.speed,
+    })
+}
+
+fn tool_figure_list_states(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = req_usize(args, "figure")?;
+    check_figure(core, fi)?;
+    let fig = &core.project.figures[fi];
+    let mut keys = fig.states.clone();
+    keys.sort_by_key(|k| k.frame);
+    let states: Vec<Value> = keys.iter().map(|k| state_key_json(core, k)).collect();
+    Ok(json!({
+        "figure": fi,
+        "name": fig.name,
+        "base_clip": fig.clip,
+        "base_clip_name": fig
+            .clip
+            .and_then(|ci| core.project.clips.get(ci))
+            .map(|c| c.name.clone()),
+        "states": states,
+        "count": fig.states.len(),
+    }))
+}
+
+fn tool_figure_set_state(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = req_usize(args, "figure")?;
+    check_figure(core, fi)?;
+    let frame = req_usize(args, "frame")?;
+    check_frame(core, frame)?;
+    let ci = resolve_clip_arg(core, args)?;
+    let offset = match args.get("offset") {
+        None => 0,
+        Some(v) => as_usize(v, "offset")?,
+    };
+    let speed = opt_f32(args, "speed")?.unwrap_or(1.0);
+    let key = crate::model::StateKey {
+        frame,
+        clip: ci,
+        offset,
+        speed,
+    };
+    if !core.set_state_key(fi, key) {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "figure": fi,
+        "frame": frame,
+        "clip": ci,
+        "clip_name": core.project.clips[ci].name,
+        "offset": offset,
+        "speed": speed,
+        "states": core.project.figures[fi].states.len(),
+        "status": core.status,
+    }))
+}
+
+fn tool_figure_clear_state(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = req_usize(args, "figure")?;
+    check_figure(core, fi)?;
+    let frame = req_usize(args, "frame")?;
+    // No check_frame here: a key can outlive its frame when
+    // the timeline shrinks, and clearing it must stay
+    // possible — the op refuses when no key sits there.
+    if !core.remove_state_key(fi, frame) {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "figure": fi,
+        "frame": frame,
+        "states": core.project.figures[fi].states.len(),
+        "status": core.status,
+    }))
+}
+
+fn tool_figure_assign_clip(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = req_usize(args, "figure")?;
+    check_figure(core, fi)?;
+    let ci = resolve_clip_arg(core, args)?;
+    let name = core.project.clips[ci].name.clone();
+    // The op treats re-assigning the linked clip as a no-op
+    // (false, no status churn) — report it as the success it
+    // is rather than as an error carrying a stale status.
+    if core.project.figures[fi].clip == Some(ci) {
+        return Ok(json!({
+            "ok": true,
+            "figure": fi,
+            "clip": ci,
+            "clip_name": name,
+            "already_linked": true,
+        }));
+    }
+    if !core.assign_clip_to_figure(fi, ci) {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "figure": fi,
+        "clip": ci,
+        "clip_name": name,
+        "status": core.status,
+    }))
+}
+
+fn tool_figure_unlink_clip(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = req_usize(args, "figure")?;
+    check_figure(core, fi)?;
+    // Same no-op shape as assign: unlinking an unlinked
+    // figure is a success with nothing to do (the op returns
+    // false without touching the status).
+    if core.project.figures[fi].clip.is_none() {
+        return Ok(json!({
+            "ok": true,
+            "figure": fi,
+            "already_unlinked": true,
+            "states_kept": core.project.figures[fi].states.len(),
+        }));
+    }
+    if !core.unlink_figure(fi) {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "figure": fi,
+        "status": core.status,
+    }))
+}
+
+fn tool_clip_compatible(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = req_usize(args, "figure")?;
+    check_figure(core, fi)?;
+    let ci = resolve_clip_arg(core, args)?;
+    Ok(json!({
+        "compatible": core.clip_compatible(fi, ci),
+        "figure": fi,
+        "clip": ci,
+        "clip_name": core.project.clips[ci].name,
+        "figure_nodes": core.project.figures[fi].def.nodes.len(),
+        "clip_nodes": core.project.clips[ci].def.nodes.len(),
+    }))
+}
+
+fn tool_clip_create_range(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = req_usize(args, "figure")?;
+    check_figure(core, fi)?;
+    let start = req_usize(args, "start")?;
+    let end = req_usize(args, "end")?;
+    let Some(ci) = core.create_clip_from_figure_range(fi, start, end) else {
+        return Err(core.status.clone());
+    };
+    let clip = &core.project.clips[ci];
+    Ok(json!({
+        "ok": true,
+        "clip": ci,
+        "name": clip.name,
+        "frames": clip.frames.len(),
+        "figure": fi,
+        "start": start,
+        "end": end,
+        "loops_on_figure": core.project.figures[fi].clip == Some(ci),
+        "status": core.status,
+    }))
 }
 
 // ---------------------------------------------------------------------
@@ -4282,6 +4496,91 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             handler: tool_set_clip_loop,
         },
         Tool {
+            name: "figure_list_states",
+            description: "List a figure's animation states: its base clip link and its state keys (frame, clip index + name, offset, speed) in timeline order. Read-only.",
+            schema: obj_schema(
+                json!({ "figure": { "type": "integer" } }),
+                &["figure"],
+            ),
+            handler: tool_figure_list_states,
+        },
+        Tool {
+            name: "figure_set_state",
+            description: "Author (or replace) a figure's animation-state key at 'frame': from that frame the figure plays the given clip, starting 'offset' frames in (default 0) at 'speed' times the timeline rate (default 1.0). The clip is given by index ('clip') or by name ('clip_name'). The clip must fit the figure's rig (see clip_compatible); a key already at the frame is replaced wholesale, so an omitted offset/speed resets to the defaults. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "figure": { "type": "integer" },
+                    "frame": { "type": "integer" },
+                    "clip": { "type": "integer" },
+                    "clip_name": { "type": "string", "description": "Clip name instead of the 'clip' index" },
+                    "offset": { "type": "integer", "description": "Frames into the clip where playback starts (default 0)" },
+                    "speed": { "type": "number", "description": "Playback rate multiplier (default 1.0)" }
+                }),
+                &["figure", "frame"],
+            ),
+            handler: tool_figure_set_state,
+        },
+        Tool {
+            name: "figure_clear_state",
+            description: "Remove a figure's animation-state key at 'frame'. Refuses when the figure has no key there. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "figure": { "type": "integer" },
+                    "frame": { "type": "integer" }
+                }),
+                &["figure", "frame"],
+            ),
+            handler: tool_figure_clear_state,
+        },
+        Tool {
+            name: "figure_assign_clip",
+            description: "Link an existing movieclip to a figure as its base clip (the clip that plays before the first state key, and whenever the figure has no keys), given by index ('clip') or by name ('clip_name'). Refused when the clip's rig does not fit the figure (see clip_compatible). Assigning the clip already linked is a no-op. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "figure": { "type": "integer" },
+                    "clip": { "type": "integer" },
+                    "clip_name": { "type": "string", "description": "Clip name instead of the 'clip' index" }
+                }),
+                &["figure"],
+            ),
+            handler: tool_figure_assign_clip,
+        },
+        Tool {
+            name: "figure_unlink_clip",
+            description: "Unlink a figure's base movieclip: the figure falls back to its timeline poses. State keys are NOT cleared - they still apply. Unlinking an unlinked figure is a no-op. One undo step.",
+            schema: obj_schema(
+                json!({ "figure": { "type": "integer" } }),
+                &["figure"],
+            ),
+            handler: tool_figure_unlink_clip,
+        },
+        Tool {
+            name: "clip_compatible",
+            description: "Check whether a movieclip (by 'clip' index or 'clip_name') can play on a figure: the clip's rig must match the figure's node count and every clip frame must fit that rig. Read-only.",
+            schema: obj_schema(
+                json!({
+                    "figure": { "type": "integer" },
+                    "clip": { "type": "integer" },
+                    "clip_name": { "type": "string", "description": "Clip name instead of the 'clip' index" }
+                }),
+                &["figure"],
+            ),
+            handler: tool_clip_compatible,
+        },
+        Tool {
+            name: "clip_create_range",
+            description: "Create a movieclip from a figure's poses over the half-open frame range [start, end) and link the figure to it (the ranged sibling of clip_create). Returns the clip index and frame count. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "figure": { "type": "integer" },
+                    "start": { "type": "integer" },
+                    "end": { "type": "integer" }
+                }),
+                &["figure", "start", "end"],
+            ),
+            handler: tool_clip_create_range,
+        },
+        Tool {
             name: "set_bend",
             description: "Set one segment's bend (radians, clamped to +/-0.7) for a figure on a frame. Positive/negative bend arcs the segment to opposite sides; 0 is straight. Frame.bends rows/cols are extended with zeros as needed. Node 0 (the origin) has no segment to bend and is refused. The reply reports the stored bend in radians and degrees. One undo step.",
             schema: obj_schema(
@@ -5741,7 +6040,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "sprite_list",
-            description: "Every sprite instance in the project: index, asset index and asset name, key count, and every transform key (frame, x, y, scale, rotation in degrees). Read-only.",
+            description: "Every sprite instance in the project: index, asset index and asset name, key count, and every transform key (frame, x, y, scale, rotation in degrees, opacity, flip_x, flip_y, scale_y, pivot_x, pivot_y). Read-only.",
             schema: obj_schema(json!({}), &[]),
             handler: crate::media::tool_sprite_list,
         },
@@ -5765,7 +6064,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "sprite_set_key",
-            description: "Write sprite 'sprite''s transform key at 'frame' (0-based, a whole frame number; clamped to the project's last frame): insert a new key or replace the one there. 'x', 'y', 'rotation' (degrees) and 'scale' are each optional — an omitted field takes the value the sprite samples at that frame (or x 0, y 0, rotation 0, scale 1 for a sprite with no keys). 'scale' must be greater than 0. One undo step.",
+            description: "Write sprite 'sprite''s transform key at 'frame' (0-based, a whole frame number; clamped to the project's last frame): insert a new key or replace the one there. 'x', 'y', 'rotation' (degrees), 'scale', 'opacity' (0 to 1), 'flip_x', 'flip_y', 'scale_y' and 'pivot_x'/'pivot_y' (the anchor point, image-relative, 0.5 = centre) are each optional — an omitted field takes the value the sprite samples at that frame (or x 0, y 0, rotation 0, scale 1, opacity 1, no flips, scale_y following scale, centre pivot for a sprite with no keys). 'scale' and 'scale_y' must be greater than 0. One undo step.",
             schema: obj_schema(
                 json!({
                     "sprite": { "type": "integer" },
@@ -5773,7 +6072,13 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                     "x": { "type": "number" },
                     "y": { "type": "number" },
                     "scale": { "type": "number" },
-                    "rotation": { "type": "number" }
+                    "rotation": { "type": "number" },
+                    "opacity": { "type": "number" },
+                    "flip_x": { "type": "boolean" },
+                    "flip_y": { "type": "boolean" },
+                    "scale_y": { "type": "number" },
+                    "pivot_x": { "type": "number" },
+                    "pivot_y": { "type": "number" }
                 }),
                 &["sprite", "frame"],
             ),
@@ -5815,6 +6120,30 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["sprite", "frame"],
             ),
             handler: crate::mcp_sprite_tools::tool_sprite_delete_key_at,
+        },
+        Tool {
+            name: "sprite_set_asset",
+            description: "Re-point sprite 'sprite' at image asset 'asset', keeping every transform key verbatim — the fix for a wrong image, which otherwise means removing the instance and re-keying everything. Naming the asset the sprite already uses changes nothing and spends no undo step. One undo step on a real change.",
+            schema: obj_schema(
+                json!({
+                    "sprite": { "type": "integer" },
+                    "asset": { "type": "integer" }
+                }),
+                &["sprite", "asset"],
+            ),
+            handler: crate::mcp_sprite_tools::tool_sprite_set_asset,
+        },
+        Tool {
+            name: "sprite_reorder",
+            description: "Move sprite 'sprite' to 0-based position 'to' in the sprite table — draw order IS table order (later sprites paint over earlier ones), so this is the z-order write. The instances between shift by one, keeping their relative order; the moved sprite keeps its asset and keys verbatim. Naming the position the sprite already holds changes nothing and spends no undo step. One undo step on a real move.",
+            schema: obj_schema(
+                json!({
+                    "sprite": { "type": "integer" },
+                    "to": { "type": "integer" }
+                }),
+                &["sprite", "to"],
+            ),
+            handler: crate::mcp_sprite_tools::tool_sprite_reorder,
         },
         // ---------------------------------------------------------
         // Wave 14 — parity fill (Squad A + clip media + transport):
@@ -8565,5 +8894,172 @@ mod tests {
         // The project survived all of it untouched.
         assert_eq!(core.project.figures.len(), 1);
         assert_eq!(core.project.frames.len(), 1);
+    }
+
+    #[test]
+    fn wave_x_state_tools_key_assign_and_unlink() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        // Two clips from figure 0; both start life named
+        // "Styk clip", so rename the second before using
+        // name-accepting calls (first match would win).
+        call(&mut core, &tools, "clip_create", json!({ "figure": 0 })).unwrap();
+        call(&mut core, &tools, "clip_create", json!({ "figure": 0 })).unwrap();
+        assert_eq!(core.project.clips.len(), 2);
+        assert_eq!(core.project.figures[0].clip, Some(1));
+        call(
+            &mut core,
+            &tools,
+            "clip_rename",
+            json!({ "index": 1, "name": "Wave" }),
+        )
+        .unwrap();
+
+        // Compatibility reads by index and by name.
+        let r = call(&mut core, &tools, "clip_compatible", json!({ "figure": 0, "clip": 0 }))
+            .unwrap();
+        assert_eq!(r["compatible"], true);
+        let r = call(
+            &mut core,
+            &tools,
+            "clip_compatible",
+            json!({ "figure": 0, "clip_name": "Wave" }),
+        )
+        .unwrap();
+        assert_eq!(r["clip"], 1);
+        assert_eq!(r["clip_name"], "Wave");
+        // A name that matches nothing is an error naming it.
+        let e = call(
+            &mut core,
+            &tools,
+            "clip_compatible",
+            json!({ "figure": 0, "clip_name": "Nope" }),
+        )
+        .unwrap_err();
+        assert_eq!(e, "no clip named 'Nope'");
+
+        // Assign by name; re-assigning is the reported no-op.
+        let r = call(
+            &mut core,
+            &tools,
+            "figure_assign_clip",
+            json!({ "figure": 0, "clip_name": "Styk clip" }),
+        )
+        .unwrap();
+        assert_eq!(r["clip"], 0);
+        assert_eq!(core.project.figures[0].clip, Some(0));
+        let r = call(
+            &mut core,
+            &tools,
+            "figure_assign_clip",
+            json!({ "figure": 0, "clip": 0 }),
+        )
+        .unwrap();
+        assert_eq!(r["already_linked"], true);
+
+        // Key a state at frame 2 by name, with offset + speed:
+        // exactly one undo step, key stored verbatim.
+        let depth = core.undo_depth();
+        let r = call(
+            &mut core,
+            &tools,
+            "figure_set_state",
+            json!({
+                "figure": 0,
+                "frame": 2,
+                "clip_name": "Wave",
+                "offset": 1,
+                "speed": 2.0
+            }),
+        )
+        .unwrap();
+        assert_eq!(core.undo_depth(), depth + 1, "one undo step per state write");
+        assert_eq!(r["clip"], 1);
+        assert_eq!(r["offset"], 1);
+        let key = core.project.figures[0].states[0];
+        assert_eq!((key.frame, key.clip, key.offset, key.speed), (2, 1, 1, 2.0));
+
+        // The list read resolves names for base + keys, and
+        // clip_list now counts the state-keyed usage.
+        let r = call(&mut core, &tools, "figure_list_states", json!({ "figure": 0 })).unwrap();
+        assert_eq!(r["base_clip"], 0);
+        assert_eq!(r["base_clip_name"], "Styk clip");
+        assert_eq!(r["count"], 1);
+        assert_eq!(r["states"][0]["clip_name"], "Wave");
+        let r = call(&mut core, &tools, "clip_list", json!({})).unwrap();
+        assert_eq!(r["clips"][1]["used_by"], json!([0]), "state usage counts");
+
+        // Replacing the key resets omitted offset/speed.
+        call(
+            &mut core,
+            &tools,
+            "figure_set_state",
+            json!({ "figure": 0, "frame": 2, "clip": 1 }),
+        )
+        .unwrap();
+        let key = core.project.figures[0].states[0];
+        assert_eq!((key.offset, key.speed), (0, 1.0));
+        assert_eq!(core.project.figures[0].states.len(), 1);
+
+        // Undo restores the pre-replace key (one step back).
+        core.undo();
+        let key = core.project.figures[0].states[0];
+        assert_eq!((key.offset, key.speed), (1, 2.0));
+
+        // Clear: one step; a second clear refuses in the op's
+        // voice; a state key past the timeline end is refused
+        // by check_frame at authoring time.
+        call(
+            &mut core,
+            &tools,
+            "figure_clear_state",
+            json!({ "figure": 0, "frame": 2 }),
+        )
+        .unwrap();
+        assert!(core.project.figures[0].states.is_empty());
+        let e = call(
+            &mut core,
+            &tools,
+            "figure_clear_state",
+            json!({ "figure": 0, "frame": 2 }),
+        )
+        .unwrap_err();
+        assert!(e.contains("has no state key at frame 3"), "op voice: {e}");
+        assert!(call(
+            &mut core,
+            &tools,
+            "figure_set_state",
+            json!({ "figure": 0, "frame": 99, "clip": 0 }),
+        )
+        .is_err());
+
+        // Unlink drops the base link; the second unlink is
+        // the reported no-op.
+        let r = call(&mut core, &tools, "figure_unlink_clip", json!({ "figure": 0 })).unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(core.project.figures[0].clip, None);
+        let r = call(&mut core, &tools, "figure_unlink_clip", json!({ "figure": 0 })).unwrap();
+        assert_eq!(r["already_unlinked"], true);
+
+        // Ranged clip creation: [1, 3) bakes two frames and
+        // links the figure.
+        let r = call(
+            &mut core,
+            &tools,
+            "clip_create_range",
+            json!({ "figure": 0, "start": 1, "end": 3 }),
+        )
+        .unwrap();
+        assert_eq!(r["frames"], 2);
+        assert_eq!(r["loops_on_figure"], true);
+        assert_eq!(core.project.clips.len(), 3);
+        // An empty range refuses through the op's status.
+        assert!(call(
+            &mut core,
+            &tools,
+            "clip_create_range",
+            json!({ "figure": 0, "start": 2, "end": 2 }),
+        )
+        .is_err());
     }
 }

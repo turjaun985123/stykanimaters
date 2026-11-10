@@ -77,6 +77,12 @@
 //! verbatim; the module declaration in `lib.rs` is
 //! likewise an integrator action (see the P38
 //! findings).
+//!
+//! Wave X (X5) adds the SpriteLoop GAP P-3 pair beside
+//! P38's — `sprite_set_asset` and `sprite_reorder`,
+//! thin verified shells over the `sprite_ops` core ops
+//! of the same names (see the section banner above
+//! their handlers).
 
 use crate::editor::EditorCore;
 use crate::model::InstanceKey;
@@ -123,6 +129,18 @@ fn spt_check_sprite(core: &EditorCore, index: usize) -> Result<(), String> {
     if index >= n {
         return Err(format!(
             "sprite index {index} out of range (project has {n} sprite instance(s))"
+        ));
+    }
+    Ok(())
+}
+
+/// Check an asset index against the table (the
+/// `ast_check_asset` message shape, media.rs).
+fn spt_check_asset(core: &EditorCore, index: usize) -> Result<(), String> {
+    let n = core.project.assets.len();
+    if index >= n {
+        return Err(format!(
+            "asset index {index} out of range (project has {n} asset(s))"
         ));
     }
     Ok(())
@@ -341,6 +359,133 @@ pub fn tool_sprite_delete_key_at(core: &mut EditorCore, args: &Value) -> Result<
     }))
 }
 
+// --------------------------------------------------------------------
+// Wave X (X5) — SpriteLoop GAP P-3's two instance-level
+// writes: re-pointing an instance at another asset, and
+// z-reorder. Both drive the `sprite_ops` core ops
+// (`set_sprite_asset` / `reorder_sprite`), which own the
+// mutation, the status line and exactly one snapshot per
+// real change; the handlers validate arguments up front,
+// then verify the op's effect from the resulting project
+// state — the media.rs sprite handlers' discipline, in
+// this module because the registry splice rides the same
+// TOOL ENTRY SPEC route as P38's pair above.
+// --------------------------------------------------------------------
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 13 sprite block immediately after the
+// sprite_delete_key_at entry.
+//   Tool {
+//       name: "sprite_set_asset",
+//       description: "Re-point sprite 'sprite' at image asset 'asset', keeping every transform key verbatim — the fix for a wrong image, which otherwise means removing the instance and re-keying everything. Naming the asset the sprite already uses changes nothing and spends no undo step. One undo step on a real change.",
+//       schema: obj_schema(
+//           json!({
+//               "sprite": { "type": "integer" },
+//               "asset": { "type": "integer" }
+//           }),
+//           &["sprite", "asset"],
+//       ),
+//       handler: crate::mcp_sprite_tools::tool_sprite_set_asset,
+//   }
+// MCP.md row (insert after the `sprite_delete_key_at` row):
+//   | `sprite_set_asset` | Re-point sprite 'sprite' at image asset 'asset', keeping every transform key verbatim — the fix for a wrong image, which otherwise means removing the instance and re-keying everything. Naming the asset the sprite already uses changes nothing and spends no undo step. One undo step on a real change. (Wave X, X5) | `sprite`, `asset` | — |
+/// MCP handler for `sprite_set_asset`: re-point sprite
+/// `sprite` at asset `asset` via the `set_sprite_asset`
+/// core op. The op's validated no-op (the asset already
+/// in use) reports `changed: false` and spends no undo
+/// step; a real change is exactly one. The result is
+/// verified from the resulting state — the instance's
+/// asset is the one named and its key list is
+/// byte-for-byte the one captured before the call —
+/// before success is reported.
+pub fn tool_sprite_set_asset(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let sprite = spt_req_usize(args, "sprite")?;
+    spt_check_sprite(core, sprite)?;
+    let asset = spt_req_usize(args, "asset")?;
+    spt_check_asset(core, asset)?;
+    let keys_before: Vec<Value> = core.project.sprites[sprite]
+        .keys
+        .iter()
+        .map(spt_key_json)
+        .collect();
+    let changed = core.project.sprites[sprite].asset != asset;
+    core.set_sprite_asset(sprite, asset);
+    let inst = &core.project.sprites[sprite];
+    let keys_after: Vec<Value> = inst.keys.iter().map(spt_key_json).collect();
+    if inst.asset == asset && keys_after == keys_before {
+        Ok(json!({
+            "ok": true,
+            "sprite": sprite,
+            "asset": asset,
+            "changed": changed,
+            "key_count": inst.keys.len(),
+            "status": core.status,
+        }))
+    } else {
+        Err(core.status.clone())
+    }
+}
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 13 sprite block immediately after the
+// sprite_set_asset entry.
+//   Tool {
+//       name: "sprite_reorder",
+//       description: "Move sprite 'sprite' to 0-based position 'to' in the sprite table — draw order IS table order (later sprites paint over earlier ones), so this is the z-order write. The instances between shift by one, keeping their relative order; the moved sprite keeps its asset and keys verbatim. Naming the position the sprite already holds changes nothing and spends no undo step. One undo step on a real move.",
+//       schema: obj_schema(
+//           json!({
+//               "sprite": { "type": "integer" },
+//               "to": { "type": "integer" }
+//           }),
+//           &["sprite", "to"],
+//       ),
+//       handler: crate::mcp_sprite_tools::tool_sprite_reorder,
+//   }
+// MCP.md row (insert after the `sprite_set_asset` row):
+//   | `sprite_reorder` | Move sprite 'sprite' to 0-based position 'to' in the sprite table — draw order IS table order (later sprites paint over earlier ones), so this is the z-order write. The instances between shift by one, keeping their relative order; the moved sprite keeps its asset and keys verbatim. Naming the position the sprite already holds changes nothing and spends no undo step. One undo step on a real move. (Wave X, X5) | `sprite`, `to` | — |
+/// MCP handler for `sprite_reorder`: move sprite
+/// `sprite` to position `to` via the `reorder_sprite`
+/// core op. A `to` outside the table is refused up
+/// front (the handler family's index wording) before
+/// any change; the op's validated no-op (the position
+/// already held) reports `changed: false` and spends
+/// no undo step. The result is verified from the
+/// resulting table — the instance at `to` is the one
+/// captured before the call (asset + keys verbatim)
+/// and the table length is unchanged — before success
+/// is reported.
+pub fn tool_sprite_reorder(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let sprite = spt_req_usize(args, "sprite")?;
+    spt_check_sprite(core, sprite)?;
+    let to = spt_req_usize(args, "to")?;
+    let n = core.project.sprites.len();
+    if to >= n {
+        return Err(format!(
+            "position index {to} out of range (project has {n} sprite instance(s))"
+        ));
+    }
+    let before = core.project.sprites[sprite].clone();
+    let keys_before: Vec<Value> = before.keys.iter().map(spt_key_json).collect();
+    core.reorder_sprite(sprite, to);
+    let landed = &core.project.sprites[to];
+    let keys_after: Vec<Value> = landed.keys.iter().map(spt_key_json).collect();
+    if core.project.sprites.len() == n
+        && landed.asset == before.asset
+        && keys_after == keys_before
+    {
+        Ok(json!({
+            "ok": true,
+            "sprite": sprite,
+            "from": sprite,
+            "to": to,
+            "changed": sprite != to,
+            "status": core.status,
+        }))
+    } else {
+        Err(core.status.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,6 +516,12 @@ mod tests {
             y,
             scale,
             angle,
+            opacity: 1.0,
+            flip_x: false,
+            flip_y: false,
+            scale_y: 0.0,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
         }
     }
 
@@ -607,6 +758,109 @@ mod tests {
         assert!(tool_sprite_delete_key_at(&mut core, &json!({ "sprite": 0, "frame": 0 })).is_err());
         // Missing argument.
         assert!(tool_sprite_delete_key_at(&mut core, &json!({ "sprite": 0 })).is_err());
+        assert_eq!(project_json(&core), before, "refusals change nothing");
+        assert_eq!(core.undo_depth(), 0, "refusals spend no undo step");
+    }
+
+    // ---- Wave X (X5): set_asset + reorder ----
+
+    #[test]
+    fn set_asset_repoints_and_keeps_the_keys_verbatim() {
+        let mut core = core_with_sprites(vec![sprite(
+            0,
+            vec![
+                key(0.0, 100.0, 100.0, 1.0, 0.0),
+                key(4.0, 300.0, 200.0, 3.0, 90.0),
+            ],
+        )]);
+        let out = tool_sprite_set_asset(&mut core, &json!({ "sprite": 0, "asset": 2 }))
+            .expect("the re-point succeeds");
+        assert_eq!(out["changed"], json!(true));
+        assert_eq!(out["key_count"], json!(2));
+        assert_eq!(out["status"], json!("Sprite 1 now uses asset 3."));
+        assert_eq!(core.project.sprites[0].asset, 2);
+        assert_eq!(frames_of(&core, 0), vec![0.0, 4.0], "no key moved");
+        assert_eq!(core.undo_depth(), 1, "exactly one undo step");
+        core.undo();
+        assert_eq!(core.project.sprites[0].asset, 0, "one undo restores the asset");
+    }
+
+    #[test]
+    fn set_asset_same_asset_is_a_no_op() {
+        let mut core = core_with_sprites(vec![sprite(1, vec![key(0.0, 5.0, 5.0, 1.0, 0.0)])]);
+        let before = project_json(&core);
+        let out = tool_sprite_set_asset(&mut core, &json!({ "sprite": 0, "asset": 1 }))
+            .expect("naming the current asset is a validated no-op");
+        assert_eq!(out["changed"], json!(false));
+        assert_eq!(out["status"], json!("Sprite 1 already uses asset 2."));
+        assert_eq!(project_json(&core), before, "nothing was written");
+        assert_eq!(core.undo_depth(), 0, "a no-op spends no undo step");
+    }
+
+    #[test]
+    fn set_asset_refusals_spend_no_undo_step() {
+        let mut core = core_with_sprites(vec![sprite(0, vec![key(0.0, 5.0, 5.0, 1.0, 0.0)])]);
+        let before = project_json(&core);
+        // No such sprite / no such asset (the MCP house
+        // index checks, media.rs shapes).
+        let err = tool_sprite_set_asset(&mut core, &json!({ "sprite": 1, "asset": 0 }))
+            .expect_err("no sprite 1");
+        assert_eq!(err, "sprite index 1 out of range (project has 1 sprite instance(s))");
+        let err = tool_sprite_set_asset(&mut core, &json!({ "sprite": 0, "asset": 3 }))
+            .expect_err("the fixture holds three assets");
+        assert_eq!(err, "asset index 3 out of range (project has 3 asset(s))");
+        // Missing argument.
+        assert!(tool_sprite_set_asset(&mut core, &json!({ "sprite": 0 })).is_err());
+        assert_eq!(project_json(&core), before, "refusals change nothing");
+        assert_eq!(core.undo_depth(), 0, "refusals spend no undo step");
+    }
+
+    #[test]
+    fn reorder_moves_the_instance_to_the_named_position() {
+        let mut core = core_with_sprites(vec![
+            sprite(0, vec![key(0.0, 10.0, 0.0, 1.0, 0.0)]),
+            sprite(1, vec![key(0.0, 20.0, 0.0, 1.0, 0.0)]),
+            sprite(2, vec![key(0.0, 30.0, 0.0, 1.0, 0.0)]),
+        ]);
+        let out = tool_sprite_reorder(&mut core, &json!({ "sprite": 0, "to": 2 }))
+            .expect("the move succeeds");
+        assert_eq!(out["changed"], json!(true));
+        assert_eq!(out["status"], json!("Sprite moved from position 1 to position 3."));
+        let assets: Vec<usize> = core.project.sprites.iter().map(|s| s.asset).collect();
+        assert_eq!(assets, vec![1, 2, 0], "the rest keep their relative order");
+        assert_eq!(core.undo_depth(), 1, "exactly one undo step");
+        core.undo();
+        let assets: Vec<usize> = core.project.sprites.iter().map(|s| s.asset).collect();
+        assert_eq!(assets, vec![0, 1, 2], "one undo restores the order");
+    }
+
+    #[test]
+    fn reorder_onto_its_own_position_is_a_no_op() {
+        let mut core = core_with_sprites(vec![
+            sprite(0, vec![key(0.0, 10.0, 0.0, 1.0, 0.0)]),
+            sprite(1, vec![key(0.0, 20.0, 0.0, 1.0, 0.0)]),
+        ]);
+        let before = project_json(&core);
+        let out = tool_sprite_reorder(&mut core, &json!({ "sprite": 1, "to": 1 }))
+            .expect("naming the held position is a validated no-op");
+        assert_eq!(out["changed"], json!(false));
+        assert_eq!(out["status"], json!("Sprite 2 is already at position 2."));
+        assert_eq!(project_json(&core), before, "nothing was written");
+        assert_eq!(core.undo_depth(), 0, "a no-op spends no undo step");
+    }
+
+    #[test]
+    fn reorder_refusals_spend_no_undo_step() {
+        let mut core = core_with_sprites(vec![
+            sprite(0, vec![key(0.0, 10.0, 0.0, 1.0, 0.0)]),
+            sprite(1, vec![key(0.0, 20.0, 0.0, 1.0, 0.0)]),
+        ]);
+        let before = project_json(&core);
+        assert!(tool_sprite_reorder(&mut core, &json!({ "sprite": 2, "to": 0 })).is_err());
+        let err = tool_sprite_reorder(&mut core, &json!({ "sprite": 0, "to": 2 }))
+            .expect_err("position 2 is past the two-instance table");
+        assert_eq!(err, "position index 2 out of range (project has 2 sprite instance(s))");
+        assert!(tool_sprite_reorder(&mut core, &json!({ "sprite": 0 })).is_err());
         assert_eq!(project_json(&core), before, "refusals change nothing");
         assert_eq!(core.undo_depth(), 0, "refusals spend no undo step");
     }
