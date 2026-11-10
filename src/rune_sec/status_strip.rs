@@ -936,6 +936,7 @@ use rune::{el, row, text, Color, El};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::rune_sec::app_theme;
+use crate::rune_sec::i18n_wire;
 use crate::State;
 
 /// Timecode of a frame at a project frame rate, formatted
@@ -1075,11 +1076,25 @@ pub fn project_parts(core: &EditorCore) -> (String, String) {
 /// and disappearing would shift every later segment in
 /// the strip sideways each time.
 pub fn undo_text(core: &EditorCore) -> String {
+    // Wave P (P48): the two label words resolve through
+    // the i18n table (keys `undo` / `redo`, genuinely
+    // translated in all 28 languages) in the core's
+    // current language — the shell's `i18n_wire::tr`
+    // idiom. The English values are the exact literals
+    // this segment carried before the wiring, so the
+    // default-language text is byte-identical; the
+    // depth numbers are data and stay untranslated.
     let redo = core.redo_depth();
     if redo > 0 {
-        format!("Undo {} · Redo {}", core.undo_depth(), redo)
+        format!(
+            "{} {} · {} {}",
+            i18n_wire::tr(core, "undo"),
+            core.undo_depth(),
+            i18n_wire::tr(core, "redo"),
+            redo
+        )
     } else {
-        format!("Undo {}", core.undo_depth())
+        format!("{} {}", i18n_wire::tr(core, "undo"), core.undo_depth())
     }
 }
 
@@ -1098,7 +1113,18 @@ pub fn fps_text(fps: f32) -> String {
 /// (1-based, the convention chrome's line and the timeline
 /// chips both use).
 pub fn frame_text(core: &EditorCore) -> String {
-    format!("Frame {}/{}", core.current + 1, core.frame_count())
+    // Wave P (P48): the label word resolves through the
+    // i18n table (key `frame`, genuinely translated in
+    // all 28 languages) in the core's current language;
+    // the English value is the literal this segment
+    // carried before the wiring, so the default text is
+    // byte-identical. The positions are data.
+    format!(
+        "{} {}/{}",
+        i18n_wire::tr(core, "frame"),
+        core.current + 1,
+        core.frame_count()
+    )
 }
 
 /// Zoom segment: `Zoom {pct}%` for the EFFECTIVE zoom —
@@ -1141,7 +1167,18 @@ pub fn frame_text(core: &EditorCore) -> String {
 pub fn zoom_text(core: &EditorCore) -> String {
     let pct =
         (core.camera_here().2 * crate::stage_view::view_nav().zoom * 100.0).round() as i64;
-    format!("Zoom {pct}%")
+    // Wave P (P48): the label word resolves through the
+    // i18n table (key `zoom`, genuinely translated in
+    // all 28 languages) in the core's current language;
+    // the English value is the literal this segment
+    // carried before the wiring, so at the default
+    // language the label — and the width arithmetic in
+    // this fn's docs, which is stated against it — is
+    // unchanged. The segment is built by
+    // `segment_yielding` from the live label's estimated
+    // width (see the Wave 10 note above), so a longer
+    // translated word funds its own box the same way.
+    format!("{} {pct}%", i18n_wire::tr(core, "zoom"))
 }
 
 /// Selection summary. With a node selected:
@@ -1872,6 +1909,50 @@ mod tests {
         let txt = frame_text(&core);
         assert!(txt.starts_with("Frame 1/"), "unexpected: {txt}");
         assert!(txt.ends_with(&core.frame_count().to_string()));
+    }
+
+    /// Wave P (P48): the strip's three fully-keyed
+    /// readout segments — frame ([`frame_text`]), zoom
+    /// ([`zoom_text`]) and undo/redo ([`undo_text`]) —
+    /// render their label words from the i18n table in
+    /// the core's current language. Switching
+    /// `core.lang` (the settings popover's
+    /// `set_language` write) changes the rendered
+    /// strings; the English default stays byte-identical
+    /// to the literals the segments carried before the
+    /// wiring. (Zoom percentages read the shell's global
+    /// view nav, so the identity view is reset first —
+    /// the `zoom_text_agrees_with_the_overlay_readout`
+    /// idiom.)
+    #[test]
+    fn strip_readout_labels_follow_the_core_language() {
+        use stykanimate_rs::i18n::Lang;
+        crate::stage_view::reset_view_nav();
+        let mut core = EditorCore::new();
+        let count = core.frame_count();
+        // English default: the historical literals.
+        assert_eq!(frame_text(&core), format!("Frame 1/{count}"));
+        assert_eq!(zoom_text(&core), "Zoom 100%");
+        assert_eq!(undo_text(&core), "Undo 0");
+        // Bengali: every label word moves (the keys'
+        // Bengali values are genuine translations, not
+        // placeholders), the numbers do not.
+        core.lang = Lang::Bn;
+        assert_eq!(frame_text(&core), format!("ফ্রেম 1/{count}"));
+        assert_eq!(zoom_text(&core), "জুম 100%");
+        assert_eq!(undo_text(&core), "আনডু 0");
+        // One snapshot-counted edit, then an undo: the
+        // redo half of the segment localises too.
+        core.snapshot();
+        core.undo();
+        assert_eq!(undo_text(&core), "আনডু 0 · রিডু 1");
+        // Chinese (Simplified): a second genuine table,
+        // so the pin cannot pass on a one-language fluke.
+        core.lang = Lang::ZhHans;
+        assert_eq!(frame_text(&core), format!("帧 1/{count}"));
+        assert_eq!(zoom_text(&core), "缩放 100%");
+        assert_eq!(undo_text(&core), "撤销 0 · 重做 1");
+        crate::stage_view::reset_view_nav();
     }
 
     #[test]

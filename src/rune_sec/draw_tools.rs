@@ -194,7 +194,7 @@ use rune::{row, text, El};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::paint::ShapeKind;
 
-use crate::chrome_view::{btn, btn_inert};
+use crate::chrome_view::btn;
 use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::{chip_btn, icon_btn};
 use crate::State;
@@ -744,11 +744,14 @@ fn stamp_step_btn(
     t: &Theme,
     f: impl Fn(&mut State) + 'static,
 ) -> El {
-    if noop {
-        btn_inert(key, label, t)
+    // Wave P: delegates to the kit's `design::step_btn`
+    // (the inert-at-clamp split above is its Noop form).
+    let form = if noop {
+        design::StepForm::Noop
     } else {
-        btn(key, label, false, t, f)
-    }
+        design::StepForm::Live
+    };
+    design::step_btn(key, label, form, t, f)
 }
 
 /// The Draw toolbar panel (Phase N: the kit card shell —

@@ -106,6 +106,19 @@
 //! icon buttons' Phase I inert/live pairs are already
 //! family and are untouched, as is the main row's
 //! `flex_wrap` (the Phase M pressability fix).
+//!
+//! Wave P (P49, toolbar density): the main row's single
+//! wrapping row of ~17 controls — the wall of small
+//! buttons the user's screenshot verdict named — is
+//! regrouped into labelled wrapping groups (Arrange /
+//! Path / Clipboard / Dur) on the kit idiom the audio
+//! operations toolbar's Wave 4 regroup established.
+//! Arrangement only: every key, label, glyph, handler
+//! and gating predicate is verbatim; the group rows
+//! carry additive container keys only. The "This frame"
+//! and "Insert" rows already read as single-purpose
+//! labelled groups in the charter stepper order and are
+//! unchanged.
 
 use rune::tok::{type_, Theme};
 use rune::{row, text, El};
@@ -553,32 +566,53 @@ pub fn range_label(core: &EditorCore, ops: &FrameOpsState) -> Option<String> {
     None
 }
 
-/// The "Frames" toolbar section: the main row in GPUI
-/// tool-group order — Inbetween / Shift / Reverse / Swap /
-/// Smooth path, the clipboards, then the duration
-/// steppers with their readout (the row wraps inside the
-/// side column — see the `flex_wrap` note in the builder) — over a second row, "This
-/// frame", carrying the current frame's duration multiplier
-/// with ×0.5 / ×2 / Reset 1.0 controls (Phase F), and a third
-/// row, "Insert", carrying the Insert-N count stepper and the
-/// batch insert button (Phase G).
+/// The "Frames" toolbar section: the controls in GPUI
+/// tool-group order, seated in labelled wrapping groups
+/// (Wave P, P49 — the kit grouping idiom the audio
+/// operations toolbar's Wave 4 regroup established):
+/// "Arrange" (Inbetween / Shift / Reverse / Swap),
+/// "Path" (Smooth path), "Clipboard" (the frame and
+/// range clipboards plus Delete range, with the Sel/Loop
+/// readout seated under the group) and "Dur" (the
+/// duration steppers with their readout) — then the
+/// "This frame" row, carrying the current frame's
+/// duration multiplier with ×0.5 / ×2 / Reset 1.0
+/// controls (Phase F), and the "Insert" row, carrying
+/// the Insert-N count stepper and the batch insert
+/// button (Phase G). Every control's key, label, glyph
+/// and handler is verbatim from the pre-regroup single
+/// wrapping row; only the row containers changed (the
+/// group rows carry the additive container keys
+/// `frames-arrange` / `frames-path` / `frames-clipboard`
+/// / `frames-dur`).
 pub fn frames_section(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let ops = &s.frame_ops;
     let n = core.frame_count();
 
-    let mut section = row()
+    // Wave P (P49): the pre-regroup main row carried ~17
+    // controls in GPUI tool-group order in ONE wrapping
+    // row — far wider than the side column it lives in,
+    // so it wrapped into an undifferentiated wall of
+    // small buttons (the density the user's screenshot
+    // verdict named). The controls now sit in labelled
+    // wrapping groups, the kit idiom the audio toolbar's
+    // Wave 4 regroup established: a `design::section_label`
+    // heading a keyed `flex_wrap` row of only that group's
+    // controls (the panel assembly below seats the labels
+    // and rows). Wrapping itself stays — it keeps every
+    // button inside the column (and pressable);
+    // unwrapped, a row's tail overflowed past the panel
+    // edge and its buttons could not be pressed at all
+    // (Phase M's swap test proved this against the
+    // clipped row). Group rows take the grouped-row gap
+    // (6.0, as in the audio and keyframe groups); the
+    // panel's own gap separates label/row pairs.
+    let arrange = row()
+        .key("frames-arrange")
         .w_full()
-        .gap(8.0)
+        .gap(6.0)
         .center_y()
-        // The main row carries ~17 controls in GPUI
-        // tool-group order — far wider than the side
-        // column it now lives in. Wrapping keeps every
-        // button inside the column (and pressable);
-        // unwrapped, the tail of the row overflowed
-        // past the panel edge and its buttons could
-        // not be pressed at all (Phase M's swap test
-        // proved this against the clipped row).
         .flex_wrap()
         .child({
             // Muted-live dispatch (Phase N): fbtn kept the
@@ -686,7 +720,14 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
                 "Swap with next",
                 t,
             )
-        })
+        });
+
+    let path = row()
+        .key("frames-path")
+        .w_full()
+        .gap(6.0)
+        .center_y()
+        .flex_wrap()
         .child({
             let press = |s: &mut State| {
                 let fi = s.core.selected_figure;
@@ -697,7 +738,14 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
             } else {
                 btn_muted_live("smooth-path", "Smooth path", false, t, press)
             }
-        })
+        });
+
+    let clipboard = row()
+        .key("frames-clipboard")
+        .w_full()
+        .gap(6.0)
+        .center_y()
+        .flex_wrap()
         .child(if copy_frame_enabled(core) {
             crate::rune_sec::icon_btn::icon_btn("copy-frame", "copy", "Copy frame", false, t, |s| {
                 if s.core.frame_count() > 0 {
@@ -753,8 +801,20 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
             )
         } else {
             crate::rune_sec::icon_btn::icon_btn_inert("range-del", "trash-can", "Delete range", t)
-        })
-        .child(design::section_label("Dur", t))
+        });
+
+    // The duration steppers keep their charter order
+    // (−, value, +) in their own group row; the "Dur"
+    // label that rode inline in the old wrapping row
+    // heads this group from above instead (its text is
+    // verbatim — see the panel assembly below), the
+    // parallel structure every other kit group uses.
+    let dur = row()
+        .key("frames-dur")
+        .w_full()
+        .gap(6.0)
+        .center_y()
+        .flex_wrap()
         .child({
             let press = |s: &mut State| {
                 s.core.adjust_frame_duration(DUR_DOWN_FACTOR);
@@ -776,10 +836,6 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
                 btn_muted_live("dur-up", "Dur +", false, t, press)
             }
         });
-
-    if let Some(label) = range_label(core, ops) {
-        section = section.child(text(label).font(type_::LABEL).color(t.text_secondary));
-    }
 
     // "This frame" row: the current frame's duration as an
     // absolute control (the main row's steppers only multiply
@@ -879,7 +935,7 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
             crate::rune_sec::icon_btn::icon_btn_inert("fop-ins-n", "plus", "Insert frames", t)
         });
 
-    design::panel_col("frames", t)
+    let mut panel = design::panel_col("frames", t)
         .child(
             row()
                 .w_full()
@@ -888,7 +944,23 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
                 .child(design::panel_title(None, "Frames", None, t)),
         )
         .child(design::divider(t))
-        .child(section)
+        .child(design::section_label("Arrange", t))
+        .child(arrange)
+        .child(design::section_label("Path", t))
+        .child(path)
+        .child(design::section_label("Clipboard", t))
+        .child(clipboard);
+    // The Sel/Loop readout names the range the Clipboard
+    // group's range ops act on, so it seats directly
+    // under that group (it rode at the tail of the old
+    // wrapping row, after the duration steppers — the
+    // readout's text and styling are unchanged).
+    if let Some(label) = range_label(core, ops) {
+        panel = panel.child(text(label).font(type_::LABEL).color(t.text_secondary));
+    }
+    panel
+        .child(design::section_label("Dur", t))
+        .child(dur)
         .child(this_frame)
         .child(insert_row)
 }
@@ -1486,5 +1558,29 @@ mod tests {
         assert_eq!(durations, [2.0, 3.0, 1.0], "the second swap exchanges indices 1 and 2");
         assert_eq!(core.current, 1, "still on frame 1 after both swaps");
         assert_eq!(core.frame_count(), 3, "swapping adds and removes nothing");
+    }
+
+    /// Wave Q (Q15, completing P49): the regrouped Frames
+    /// section constructs — the four labelled groups
+    /// (Arrange / Path / Clipboard / Dur), the "This
+    /// frame" and "Insert" rows, and the panel assembly —
+    /// on the demo project under both themes, with and
+    /// without the Sel/Loop readout that now seats under
+    /// the Clipboard group. Construction is the assertable
+    /// level (element internals are opaque — the
+    /// chrome_view / audio_panel precedent); the regroup's
+    /// key census (zero loss, four additive container
+    /// keys) is recorded in the Q15 findings.
+    #[test]
+    fn frames_section_constructs_regrouped_under_both_themes() {
+        let mut s = crate::init();
+        assert!(s.core.frame_count() > 0, "the demo project has frames");
+        let _ = frames_section(&s, &rune::tok::theme(true));
+        let _ = frames_section(&s, &rune::tok::theme(false));
+        // With a loop range the readout exists, so the
+        // panel assembly takes its extra child.
+        s.core.loop_range = Some((0, 0));
+        assert!(range_label(&s.core, &s.frame_ops).is_some());
+        let _ = frames_section(&s, &rune::tok::theme(true));
     }
 }

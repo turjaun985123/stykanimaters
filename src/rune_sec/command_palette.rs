@@ -260,7 +260,7 @@
 use std::cell::RefCell;
 
 use rune::tok::{self, type_, Theme};
-use rune::{col, el, row, text, text_input, Color, El, Key, KeyEvent, TextEdit, Transition, Tx};
+use rune::{col, el, row, text, Color, El, Key, KeyEvent, TextEdit, Transition, Tx};
 use stykanimate_rs::audio_ops;
 use stykanimate_rs::graph_keys;
 use stykanimate_rs::model::CapKind;
@@ -1951,7 +1951,7 @@ pub fn palette_view(s: &State, t: &Theme) -> El {
     let (results, recent_rows) = display_commands(&s.palette.query.text, &s.palette.recent);
     let selected = clamped_selected(s.palette.selected, results.len());
 
-    let field = text_input(&s.palette.query, type_::BODY.lh(26.0))
+    let field = design::text_field(&s.palette.query, type_::BODY.lh(26.0), s.palette.query.focused, t)
         .key("palette-query")
         .single_line()
         .grow(1.0)
@@ -2024,6 +2024,12 @@ pub fn palette_view(s: &State, t: &Theme) -> El {
                 .gap(8.0)
                 .fill(if on { accent.alpha(0.85) } else { Color::TRANSPARENT })
                 .hover(if on { accent.alpha(0.85) } else { t.control_track })
+                // Wave P (P4): the press state the btn family
+                // derives — full accent on the selected row,
+                // `control_off` (one step past the hover) off
+                // it. The row carried fill + hover only, so a
+                // press gave no visual answer.
+                .press(if on { accent } else { t.control_off })
                 .on_press(move |s: &mut State| run_command(s, ci))
                 .child(
                     text(cmd.title)
@@ -3332,5 +3338,26 @@ mod tests {
         close_palette(&mut s);
         open_palette(&mut s);
         assert_eq!(s.palette.recent, vec!["play"]);
+    }
+
+    /// Wave P (P4): the result rows construct with their
+    /// press state in place — the unfiltered list (row 0
+    /// is the selected `on` branch, the rest the off
+    /// branch) and a filtered list, under both themes.
+    /// Element internals are opaque to a bin-crate unit
+    /// test, so construction is the assertable level; the
+    /// presented-tree proof is the headless `palette-open`
+    /// scene's job.
+    #[test]
+    fn palette_view_rows_construct_in_both_selection_branches() {
+        for dark in [true, false] {
+            let t = tok::theme(dark);
+            let mut s = crate::init();
+            open_palette(&mut s);
+            let _ = palette_view(&s, &t);
+            s.palette.query.text = "export".to_string();
+            s.palette.selected = 0;
+            let _ = palette_view(&s, &t);
+        }
     }
 }

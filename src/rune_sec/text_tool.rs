@@ -288,7 +288,7 @@
 //! step, and the worn swatch is already accent-marked).
 
 use rune::tok::{type_, Theme};
-use rune::{col, el, row, text, text_input, El, TextEdit as FieldEdit, Tx};
+use rune::{col, el, row, text, El, TextEdit as FieldEdit, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{InstanceKey, SegmentMedia, TextInstance};
 use stykanimate_rs::text_edit::{TextEdit as SegTextEdit, DEFAULT_TEXT_SIZE};
@@ -1125,13 +1125,18 @@ fn step_btn(
     t: &Theme,
     f: impl Fn(&mut State) + 'static,
 ) -> El {
-    if !live {
-        edit_btn(key, label, false, t, f)
+    // Wave P: delegates to the kit's `design::step_btn`
+    // — the three forms above are its StepForm split
+    // (not-live is MutedLive: `edit_btn` IS the
+    // muted-live wrapper, handler kept for the refusal).
+    let form = if !live {
+        design::StepForm::MutedLive
     } else if noop {
-        btn_inert(key, label, t)
+        design::StepForm::Noop
     } else {
-        btn(key, label, false, t, f)
-    }
+        design::StepForm::Live
+    };
+    design::step_btn(key, label, form, t, f)
 }
 
 /// One z-order button (Wave 10 D6): the live [`btn`]
@@ -1463,7 +1468,7 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
         )
         .child(design::divider(t))
         .child(
-            text_input(&s.text_tool.field, type_::BODY.lh(26.0))
+            design::text_field(&s.text_tool.field, type_::BODY.lh(26.0), s.text_tool.field.focused, t)
                 .key("text-input")
                 .single_line()
                 .w_full()

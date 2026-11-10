@@ -1344,9 +1344,16 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                 .color(t.text_secondary),
         )
         .child(
+            // Phase O (p05, O-5): the actions row joins
+            // the panel's wrap discipline — the p05
+            // measurement put the unwrapped row at
+            // 327.5 pt against the 316 pt column budget.
+            // Keys verbatim; wrap only engages past the
+            // column width.
             row()
                 .key(ACTIONS_ROW_KEY)
                 .gap(6.0)
+                .flex_wrap()
                 .child(btn("key-angle", "Key angle here", false, t, |s| {
                     s.core.key_graph_angle()
                 }))
@@ -1364,9 +1371,13 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                 })),
         )
         .child(
+            // Phase O (p05, O-5): wrap, as on the rows
+            // above — the clipboard row measured
+            // 318.8 pt against the 316 pt budget.
             row()
                 .key("keyframe-clipboard")
                 .gap(6.0)
+                .flex_wrap()
                 .child(if selected_angle_channel_index(core).is_some() {
                     btn("key-copy", "Copy keys", false, t, |s| copy_keys_here(s))
                 } else {
@@ -2592,6 +2603,7 @@ mod tests {
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            subtitle_panel: crate::rune_sec::subtitle_panel::SubtitlePanelState::new(),
             menus: crate::rune_sec::menus::MenusState::default(),
             palette: crate::rune_sec::command_palette::PaletteState::new(),
             settings: crate::rune_sec::settings_popover::SettingsState::default(),
@@ -2600,6 +2612,7 @@ mod tests {
             name_edit: rune::TextEdit::new(""),
             export_use_range: false,
             fx_selected: None,
+            subtitle_selected: None,
             pose_clipboard: None,
             last_status: String::new(),
             toast_now: 0.0,

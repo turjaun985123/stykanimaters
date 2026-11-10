@@ -215,7 +215,7 @@ use stykanimate_rs::vfx::ClipKind;
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
 use crate::rune_sec::fx_browser::kind_label;
-use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
+use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn, icon_only_btn_inert};
 use crate::rune_sec::icons::{icon_el, icon_width};
 use crate::stage_view::hex_color;
 use crate::State;
@@ -818,6 +818,35 @@ fn nudge_clip_start(core: &mut EditorCore, i: usize, delta: i32) -> bool {
 }
 
 /// Nudge the selected clip's start by `delta` frames.
+/// Whether a start step in `delta`'s direction can
+/// move a clip starting at `start` in a project of
+/// `frames` frames — the exact mirror of
+/// [`nudge_clip_start`]'s guards (Wave Q): negative
+/// steps refuse at `start <= 0`; positive steps
+/// refuse when the clip already starts in the last
+/// frame (`start >= frames - 1`, where the clamped
+/// step would be 0). The StepForm source for every
+/// start-stepping control in this panel (the start
+/// stepper, Earlier/Later, the nudge row), so the
+/// buttons and the guard cannot disagree: at a bound
+/// the step is a silent no-op today — no status, no
+/// snapshot — and the button renders inert instead.
+fn start_step_live(start: f32, frames: usize, delta: i32) -> bool {
+    if delta < 0 {
+        start > 0.0
+    } else {
+        start < frames as f32 - 1.0
+    }
+}
+
+/// Whether shrinking a clip of `duration` frames can
+/// change it — the mirror of [`nudge_duration`]'s
+/// floor guard (`duration <= 0.1` refuses silently).
+/// Growing is unbounded, always live.
+fn duration_shrink_live(duration: f32) -> bool {
+    duration > 0.1
+}
+
 fn nudge_start(s: &mut State, delta: i32) {
     let Some(i) = valid_selection(s.fx_selected, s.core.project.fx_clips.len()) else {
         return;
@@ -1339,6 +1368,14 @@ pub fn fx_lane(s: &State, t: &Theme) -> El {
                 } else {
                     t.control_off
                 })
+                // Wave P (P4): the kit row press overlay —
+                // the same `t.press` token `design::row_base`
+                // paints on `list_row` / `row_shell`. This
+                // two-line row keeps its local fill/hover
+                // (its anatomy predates the kit row's
+                // metrics) but carried no press state at
+                // all, so a press answered nothing.
+                .press(t.press)
                 .on_press(move |s: &mut State| {
                     s.fx_selected = Some(i);
                 })
@@ -1448,13 +1485,22 @@ pub fn fx_lane(s: &State, t: &Theme) -> El {
 /// with its two buttons instead of letting a wrap
 /// separate them.
 pub fn nudge_row(s: &State, t: &Theme) -> El {
-    if valid_selection(s.fx_selected, s.core.project.fx_clips.len()).is_none() {
+    let Some(sel) = valid_selection(s.fx_selected, s.core.project.fx_clips.len()) else {
         return row().key("fx-nudge").w_full().child(
             text("Select an FX clip to edit it.")
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         );
-    }
+    };
+    // Wave Q: the selected clip's bounds, for the
+    // StepForm mirrors (`start_step_live` /
+    // `duration_shrink_live`) — every button in this
+    // row drives the same guarded nudge paths as the
+    // inspector's steppers, so it takes the same
+    // inert-at-the-bound forms.
+    let start = s.core.project.fx_clips[sel].clip.start;
+    let duration = s.core.project.fx_clips[sel].clip.duration;
+    let frames = s.core.frame_count();
     col()
         .key("fx-nudge")
         .w_full()
@@ -1468,18 +1514,42 @@ pub fn nudge_row(s: &State, t: &Theme) -> El {
                         .font(type_::LABEL)
                         .color(t.text_secondary),
                 )
-                .child(btn("fx-nudge-l10", "-10", false, t, |s| {
-                    nudge_start(s, -10)
-                }))
-                .child(icon_only_btn("fx-nudge-l", "chevron-left", "Nudge earlier", 26.0, false, t, |s| {
-                    nudge_start(s, -1)
-                }))
-                .child(icon_only_btn("fx-nudge-r", "chevron-right", "Nudge later", 26.0, false, t, |s| {
-                    nudge_start(s, 1)
-                }))
-                .child(btn("fx-nudge-r10", "+10", false, t, |s| {
-                    nudge_start(s, 10)
-                })),
+                .child(design::step_btn(
+                    "fx-nudge-l10",
+                    "-10",
+                    if start_step_live(start, frames, -10) {
+                        design::StepForm::Live
+                    } else {
+                        design::StepForm::Noop
+                    },
+                    t,
+                    |s| nudge_start(s, -10),
+                ))
+                .child(if start_step_live(start, frames, -1) {
+                    icon_only_btn("fx-nudge-l", "chevron-left", "Nudge earlier", 26.0, false, t, |s| {
+                        nudge_start(s, -1)
+                    })
+                } else {
+                    icon_only_btn_inert("fx-nudge-l", "chevron-left", "Nudge earlier", 26.0, t)
+                })
+                .child(if start_step_live(start, frames, 1) {
+                    icon_only_btn("fx-nudge-r", "chevron-right", "Nudge later", 26.0, false, t, |s| {
+                        nudge_start(s, 1)
+                    })
+                } else {
+                    icon_only_btn_inert("fx-nudge-r", "chevron-right", "Nudge later", 26.0, t)
+                })
+                .child(design::step_btn(
+                    "fx-nudge-r10",
+                    "+10",
+                    if start_step_live(start, frames, 10) {
+                        design::StepForm::Live
+                    } else {
+                        design::StepForm::Noop
+                    },
+                    t,
+                    |s| nudge_start(s, 10),
+                )),
         )
         .child(
             row()
@@ -1490,12 +1560,24 @@ pub fn nudge_row(s: &State, t: &Theme) -> El {
                         .font(type_::LABEL)
                         .color(t.text_secondary),
                 )
-                .child(btn("fx-dur-dn", "-0.1s", false, t, |s| {
-                    nudge_duration_seconds(s, -0.1)
-                }))
-                .child(btn("fx-dur-up", "+0.1s", false, t, |s| {
-                    nudge_duration_seconds(s, 0.1)
-                })),
+                .child(design::step_btn(
+                    "fx-dur-dn",
+                    "-0.1s",
+                    if duration_shrink_live(duration) {
+                        design::StepForm::Live
+                    } else {
+                        design::StepForm::Noop
+                    },
+                    t,
+                    |s| nudge_duration_seconds(s, -0.1),
+                ))
+                .child(design::step_btn(
+                    "fx-dur-up",
+                    "+0.1s",
+                    design::StepForm::Live,
+                    t,
+                    |s| nudge_duration_seconds(s, 0.1),
+                )),
         )
 }
 
@@ -1591,17 +1673,36 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                         .font(type_::LABEL)
                         .color(t.text_secondary),
                 )
-                .child(btn(&format!("fx-start-dec-{i}"), "-", false, t, |s| {
-                    nudge_start(s, -1)
-                }))
+                .child(design::step_btn(
+                    &format!("fx-start-dec-{i}"),
+                    "-",
+                    // Wave Q: inert where
+                    // `nudge_clip_start`'s guards refuse
+                    // (see `start_step_live`).
+                    if start_step_live(data.start, s.core.frame_count(), -1) {
+                        design::StepForm::Live
+                    } else {
+                        design::StepForm::Noop
+                    },
+                    t,
+                    |s| nudge_start(s, -1),
+                ))
                 .child(
                     text(frame_label(data.start + 1.0))
                         .font(type_::BODY)
                         .color(t.text),
                 )
-                .child(btn(&format!("fx-start-inc-{i}"), "+", false, t, |s| {
-                    nudge_start(s, 1)
-                })),
+                .child(design::step_btn(
+                    &format!("fx-start-inc-{i}"),
+                    "+",
+                    if start_step_live(data.start, s.core.frame_count(), 1) {
+                        design::StepForm::Live
+                    } else {
+                        design::StepForm::Noop
+                    },
+                    t,
+                    |s| nudge_start(s, 1),
+                )),
         )
         // Duration stepper: -/+ resize by one frame
         // (EditorCore::fx_resize_clip).
@@ -1614,17 +1715,33 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                         .font(type_::LABEL)
                         .color(t.text_secondary),
                 )
-                .child(btn(&format!("fx-dur-dec-{i}"), "-", false, t, |s| {
-                    nudge_duration(s, -1.0)
-                }))
+                .child(design::step_btn(
+                    &format!("fx-dur-dec-{i}"),
+                    "-",
+                    // Wave Q: inert at `nudge_duration`'s
+                    // 0.1 floor (see
+                    // `duration_shrink_live`); growing is
+                    // unbounded, always Live.
+                    if duration_shrink_live(data.duration) {
+                        design::StepForm::Live
+                    } else {
+                        design::StepForm::Noop
+                    },
+                    t,
+                    |s| nudge_duration(s, -1.0),
+                ))
                 .child(
                     text(frame_label(data.duration))
                         .font(type_::BODY)
                         .color(t.text),
                 )
-                .child(btn(&format!("fx-dur-inc-{i}"), "+", false, t, |s| {
-                    nudge_duration(s, 1.0)
-                })),
+                .child(design::step_btn(
+                    &format!("fx-dur-inc-{i}"),
+                    "+",
+                    design::StepForm::Live,
+                    t,
+                    |s| nudge_duration(s, 1.0),
+                )),
         )
         // Earlier / later: the GPUI panel's per-row nudge
         // buttons, same ops as the start stepper.
@@ -1632,12 +1749,31 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
             row()
                 .gap(8.0)
                 .center_y()
-                .child(btn(&format!("fx-earlier-{i}"), "Earlier", false, t, |s| {
-                    nudge_start(s, -1)
-                }))
-                .child(btn(&format!("fx-later-{i}"), "Later", false, t, |s| {
-                    nudge_start(s, 1)
-                }))
+                .child(design::step_btn(
+                    &format!("fx-earlier-{i}"),
+                    "Earlier",
+                    // Wave Q: the same start guards as
+                    // the stepper above — these are the
+                    // same op in a labelled form.
+                    if start_step_live(data.start, s.core.frame_count(), -1) {
+                        design::StepForm::Live
+                    } else {
+                        design::StepForm::Noop
+                    },
+                    t,
+                    |s| nudge_start(s, -1),
+                ))
+                .child(design::step_btn(
+                    &format!("fx-later-{i}"),
+                    "Later",
+                    if start_step_live(data.start, s.core.frame_count(), 1) {
+                        design::StepForm::Live
+                    } else {
+                        design::StepForm::Noop
+                    },
+                    t,
+                    |s| nudge_start(s, 1),
+                ))
                 .child(el().grow(1.0))
                 .child(icon_only_btn(&format!("fx-dup-{i}"), "copy", "Duplicate clip", 26.0, false, t, |s| {
                     duplicate_selected(s)
@@ -1836,6 +1972,80 @@ mod tests {
             });
         }
         core
+    }
+
+    /// Wave P (P4): the lane rows construct with their
+    /// press overlay in place, in both selection branches
+    /// (one clip selected, one not), under both themes.
+    /// Element internals are opaque to a bin-crate unit
+    /// test, so construction is the assertable level; the
+    /// presented-tree proof is the headless `fx-selected`
+    /// scene's job.
+    #[test]
+    fn fx_lane_rows_construct_in_both_selection_branches() {
+        for dark in [true, false] {
+            let t = rune::tok::theme(dark);
+            let mut s = crate::init();
+            s.core = core_with(vec![
+                entry(0.0, 10.0, ClipKind::Burst, 0xFFAA00),
+                entry(12.0, 8.0, ClipKind::Burst, 0x00AAFF),
+            ]);
+            s.fx_selected = Some(0);
+            let _ = fx_lane(&s, &t);
+            s.fx_selected = None;
+            let _ = fx_lane(&s, &t);
+        }
+    }
+
+    #[test]
+    fn start_step_live_mirrors_the_nudge_guards() {
+        // Wave Q: the StepForm source for every
+        // start-stepping control must agree with
+        // `nudge_clip_start`'s guards exactly.
+        // Frame 0: negative refused, positive live.
+        assert!(!start_step_live(0.0, 30, -1));
+        assert!(!start_step_live(0.0, 30, -10));
+        assert!(start_step_live(0.0, 30, 1));
+        // A fractional start above 0 still moves.
+        assert!(start_step_live(0.5, 30, -1));
+        // Last frame of 30: positive refused (the
+        // clamped step would be 0), negative live.
+        assert!(!start_step_live(29.0, 30, 1));
+        assert!(!start_step_live(29.0, 30, 10));
+        assert!(start_step_live(29.0, 30, -1));
+        // One short of the last frame still moves.
+        assert!(start_step_live(28.5, 30, 1));
+        // Duration floor: at/under 0.1 the shrink is
+        // refused; above it, live.
+        assert!(!duration_shrink_live(0.1));
+        assert!(!duration_shrink_live(0.05));
+        assert!(duration_shrink_live(0.2));
+    }
+
+    #[test]
+    fn fx_stepper_surfaces_construct_at_the_bounds() {
+        // Wave Q: the inspector and the nudge row
+        // build in their inert branches (clip at
+        // frame 0 with duration at the floor; clip in
+        // the last frame) under both themes.
+        for dark in [true, false] {
+            let t = rune::tok::theme(dark);
+            let mut s = crate::init();
+            s.core = core_with_frames(
+                vec![entry(0.0, 0.1, ClipKind::Burst, 0xFFAA00)],
+                30,
+            );
+            s.fx_selected = Some(0);
+            let _ = fx_inspector(&s, &t);
+            let _ = nudge_row(&s, &t);
+            s.core = core_with_frames(
+                vec![entry(29.0, 10.0, ClipKind::Burst, 0xFFAA00)],
+                30,
+            );
+            s.fx_selected = Some(0);
+            let _ = fx_inspector(&s, &t);
+            let _ = nudge_row(&s, &t);
+        }
     }
 
     #[test]
@@ -2520,6 +2730,7 @@ mod tests {
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            subtitle_panel: crate::rune_sec::subtitle_panel::SubtitlePanelState::new(),
             menus: crate::rune_sec::menus::MenusState::default(),
             palette: crate::rune_sec::command_palette::PaletteState::new(),
             settings: crate::rune_sec::settings_popover::SettingsState::default(),
@@ -2528,6 +2739,7 @@ mod tests {
             name_edit: rune::TextEdit::new(""),
             export_use_range: false,
             fx_selected,
+            subtitle_selected: None,
             pose_clipboard: None,
             workspace: crate::rune_sec::workspaces::Workspace::Animate,
             guides: false,

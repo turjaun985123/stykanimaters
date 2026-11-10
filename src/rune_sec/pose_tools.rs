@@ -337,7 +337,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use rune::tok::{type_, Theme};
-use rune::{col, el, row, text, text_input, El, TextEdit, Tx};
+use rune::{col, el, row, text, El, TextEdit, Tx};
 use serde::{Deserialize, Serialize};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::Pose;
@@ -1292,7 +1292,7 @@ fn rename_editor_row(s: &State, t: &Theme) -> El {
         .gap(4.0)
         .center_y()
         .child(
-            text_input(&s.pose_rename.field, type_::BODY.lh(26.0))
+            design::text_field(&s.pose_rename.field, type_::BODY.lh(26.0), s.pose_rename.field.focused, t)
                 .key("pose-rename")
                 .single_line()
                 .grow(1.0)
@@ -1474,7 +1474,7 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
                     .center_y()
                     .child(icon_el("magnifying-glass", 13.0, t.text_secondary))
                     .child(
-                        text_input(&s.pose_library.filter, type_::BODY.lh(26.0))
+                        design::text_field(&s.pose_library.filter, type_::BODY.lh(26.0), s.pose_library.filter.focused, t)
                             .key("pose-lib-filter")
                             .single_line()
                             .grow(1.0)

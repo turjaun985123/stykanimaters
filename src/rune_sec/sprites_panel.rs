@@ -545,13 +545,18 @@ fn step_btn(
     t: &Theme,
     f: impl Fn(&mut State) + 'static,
 ) -> El {
-    if !live {
-        edit_btn(key, label, false, t, f)
+    // Wave P: delegates to the kit's `design::step_btn`
+    // — the three forms above are its StepForm split
+    // (not-live is MutedLive: `edit_btn` IS the
+    // muted-live wrapper, handler kept for the refusal).
+    let form = if !live {
+        design::StepForm::MutedLive
     } else if noop {
-        btn_inert(key, label, t)
+        design::StepForm::Noop
     } else {
-        btn(key, label, false, t, f)
-    }
+        design::StepForm::Live
+    };
+    design::step_btn(key, label, form, t, f)
 }
 
 /// One stepper row: the field's label, its − button,

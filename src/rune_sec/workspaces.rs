@@ -101,9 +101,11 @@
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
+use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::shell::{load_layout, save_layout, LayoutPrefs};
 
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::icon_btn;
 use crate::State;
 
@@ -225,6 +227,40 @@ impl Workspace {
             Workspace::Export => "ws-export",
             Workspace::Home => "ws-home",
         }
+    }
+
+    /// The i18n catalogue key for this workspace's chip
+    /// label (the `ws_*` block of `src/i18n.rs`). Kept
+    /// distinct from [`Workspace::key`]: that one is the
+    /// element key (`ws-animate`, hyphen form); this one
+    /// is the translation key (`ws_animate`, underscore
+    /// form). `Build3D` maps to `ws_3d` — its chip reads
+    /// "3D"; the merged-away Build workspace's `ws_build`
+    /// key has no chip of its own anymore.
+    pub fn i18n_key(self) -> &'static str {
+        match self {
+            Workspace::Animate => "ws_animate",
+            Workspace::Draw => "ws_draw",
+            Workspace::Graph => "ws_graph",
+            Workspace::Effects => "ws_effects",
+            Workspace::Audio => "ws_audio",
+            Workspace::Build3D => "ws_3d",
+            Workspace::Export => "ws_export",
+            Workspace::Home => "ws_home",
+        }
+    }
+
+    /// The chip label in the shell's current language:
+    /// [`Workspace::label`] resolved through the i18n
+    /// table (`i18n_wire::tr` over `core.lang`). This is
+    /// the text [`workspace_row`] renders. `label()`
+    /// itself stays the canonical English string — it is
+    /// also the persisted name ([`Workspace::name`]), and
+    /// persistence must never vary with the UI language.
+    /// In English the two agree for every workspace
+    /// (pinned by the tests below).
+    pub fn display_label(self, core: &EditorCore) -> String {
+        i18n_wire::tr(core, self.i18n_key())
     }
 
     /// One sentence saying what this workspace is for —
@@ -581,6 +617,16 @@ pub fn blurb_line(ws: Workspace) -> &'static str {
 /// suffix in the same label is the least noisy rendering
 /// available.
 ///
+/// Wave Q (i18n wiring): the name part of each chip now
+/// resolves through the i18n table via
+/// [`Workspace::display_label`], so the row follows the
+/// shell's current language; `label()` itself is
+/// unchanged (it is the persisted name, and persistence
+/// must never vary with the UI language). The
+/// `· Alt+N` suffix and the blurb line under the chips
+/// stay as they were — the catalogue carries no blurb
+/// keys.
+///
 /// Under the chips, a single muted line (key `ws-blurb`)
 /// shows the ACTIVE workspace's [`Workspace::blurb`] —
 /// that method's consumer. The root element keeps the
@@ -609,7 +655,7 @@ pub fn workspace_row(s: &State, t: &Theme) -> El {
         .gap(design::PANEL_GAP)
         .center_y();
     for (i, ws) in Workspace::all().into_iter().enumerate() {
-        let chip_label = format!("{} · Alt+{}", ws.label(), i + 1);
+        let chip_label = format!("{} · Alt+{}", ws.display_label(&s.core), i + 1);
         chips = chips.child(icon_btn(
             ws.key(),
             "border-all",
@@ -738,6 +784,52 @@ mod tests {
         assert_eq!(Workspace::Build3D.label(), "3D");
         assert_eq!(Workspace::Build3D.name(), "3D");
         assert_eq!(Workspace::Build3D.key(), "ws-3d");
+    }
+
+    #[test]
+    fn workspace_i18n_keys_exist_in_the_table() {
+        // Every chip's translation key must resolve in the
+        // catalogue — a missing key would render the key
+        // text itself in the row.
+        for ws in Workspace::all() {
+            assert!(
+                i18n_wire::key_in_table(ws.i18n_key()),
+                "{} ({}) not in the i18n table",
+                ws.i18n_key(),
+                ws.label()
+            );
+        }
+    }
+
+    #[test]
+    fn english_display_labels_match_the_persisted_labels() {
+        // English is the shell's default language, and the
+        // persisted name is the English label — the rendered
+        // chip text must not change for English users.
+        let core = EditorCore::new();
+        for ws in Workspace::all() {
+            assert_eq!(ws.display_label(&core), ws.label(), "{ws:?}");
+        }
+    }
+
+    #[test]
+    fn display_labels_follow_the_core_language() {
+        use stykanimate_rs::i18n::Lang;
+        let mut core = EditorCore::new();
+        core.lang = Lang::Bn;
+        assert_eq!(Workspace::Animate.display_label(&core), "অ্যানিমেট");
+        assert_eq!(Workspace::Export.display_label(&core), "এক্সপোর্ট");
+        assert_eq!(Workspace::Home.display_label(&core), "হোম");
+        // `ws_3d` reads "3D" in every table.
+        assert_eq!(Workspace::Build3D.display_label(&core), "3D");
+        core.lang = Lang::De;
+        assert_eq!(Workspace::Animate.display_label(&core), "Animieren");
+        assert_eq!(Workspace::Home.display_label(&core), "Startseite");
+        core.lang = Lang::ZhHans;
+        assert_eq!(Workspace::Audio.display_label(&core), "音频");
+        // The persisted name never follows the language.
+        assert_eq!(Workspace::Home.name(), "Home");
+        assert_eq!(Workspace::Animate.name(), "Animate");
     }
 
     #[test]

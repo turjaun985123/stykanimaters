@@ -722,13 +722,32 @@ fn channel_row_impl(
                 .grow(1.0),
         )
         .child(swatch)
-        .child(btn(&format!("style-{stem}-dn"), "−", false, t, move |s| {
-            step(&mut s.core, channel, -1)
-        }))
+        .child(design::step_btn(
+            &format!("style-{stem}-dn"),
+            "−",
+            // Wave P: a channel at 0 / 255 can only
+            // no-op in that direction — inert (the
+            // step fns clamp to the u8 range).
+            if value == 0 {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            t,
+            move |s| step(&mut s.core, channel, -1),
+        ))
         .child(design::stepper_value(&value.to_string(), t))
-        .child(btn(&format!("style-{stem}-up"), "+", false, t, move |s| {
-            step(&mut s.core, channel, 1)
-        }))
+        .child(design::step_btn(
+            &format!("style-{stem}-up"),
+            "+",
+            if value == 255 {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            t,
+            move |s| step(&mut s.core, channel, 1),
+        ))
 }
 
 /// One RGB channel stepper row over the node's own
@@ -1061,13 +1080,32 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
                     .color(t.text_secondary)
                     .grow(1.0),
             )
-            .child(btn("style-opacity-dn", "−", false, t, |s| {
-                step_opacity(&mut s.core, -1)
-            }))
+            .child(design::step_btn(
+                "style-opacity-dn",
+                "−",
+                // Wave P: inert where the pure
+                // `opacity_stepped` mirror says the
+                // step lands on the stored value.
+                if opacity_stepped(style.opacity, -1) == style.opacity {
+                    design::StepForm::Noop
+                } else {
+                    design::StepForm::Live
+                },
+                t,
+                |s| step_opacity(&mut s.core, -1),
+            ))
             .child(design::stepper_value(&opacity_text(style.opacity), t))
-            .child(btn("style-opacity-up", "+", false, t, |s| {
-                step_opacity(&mut s.core, 1)
-            })),
+            .child(design::step_btn(
+                "style-opacity-up",
+                "+",
+                if opacity_stepped(style.opacity, 1) == style.opacity {
+                    design::StepForm::Noop
+                } else {
+                    design::StepForm::Live
+                },
+                t,
+                |s| step_opacity(&mut s.core, 1),
+            )),
     );
 
     // Copy / Paste: the panel-local style clipboard (see

@@ -185,7 +185,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use rune::tok::{type_, Theme};
-use rune::{row, text_input, El, TextEdit};
+use rune::{row, El, TextEdit};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::vfx::ClipKind;
 
@@ -696,7 +696,7 @@ pub fn fx_browser(s: &State, t: &Theme) -> El {
             .center_y()
             .child(icon_el("magnifying-glass", 12.0, t.text_secondary))
             .child(
-                text_input(&s.fx_browser.query, type_::BODY.lh(26.0))
+                design::text_field(&s.fx_browser.query, type_::BODY.lh(26.0), s.fx_browser.query.focused, t)
                     .key("fx-filter")
                     .single_line()
                     .grow(1.0)

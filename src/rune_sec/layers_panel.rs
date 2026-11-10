@@ -646,10 +646,18 @@ fn layer_row(r: &LayerRow, t: &Theme) -> El {
             )
             .child(name_btn)
             .child(el().grow(1.0))
-            .child(btn(
+            .child(design::step_btn(
                 &format!("layer-op-dec-{fi}"),
                 "-",
-                false,
+                // Wave Q: inert at the readout's own
+                // bounds, the StepForm split Wave P gave
+                // the inspector's opacity pair (the op
+                // clamps to 0..=1).
+                if r.opacity_pct == 0 {
+                    design::StepForm::Noop
+                } else {
+                    design::StepForm::Live
+                },
                 t,
                 move |s: &mut State| s.core.step_figure_opacity(fi, -OPACITY_STEP),
             ))
@@ -658,10 +666,14 @@ fn layer_row(r: &LayerRow, t: &Theme) -> El {
                     .font(type_::LABEL)
                     .color(t.text),
             )
-            .child(btn(
+            .child(design::step_btn(
                 &format!("layer-op-inc-{fi}"),
                 "+",
-                false,
+                if r.opacity_pct == 100 {
+                    design::StepForm::Noop
+                } else {
+                    design::StepForm::Live
+                },
                 t,
                 move |s: &mut State| s.core.step_figure_opacity(fi, OPACITY_STEP),
             )),
@@ -1251,6 +1263,22 @@ mod tests {
         assert_eq!(rs.len(), core.project.figures.len());
         for r in &rs {
             let _ = layer_row(r, &t);
+        }
+    }
+
+    #[test]
+    fn layer_rows_construct_at_the_opacity_bounds() {
+        // Wave Q: the opacity pair builds in its
+        // inert branches (0% dec, 100% inc) and at a
+        // live mid value, under both themes.
+        for dark in [true, false] {
+            let t = tok::theme(dark);
+            for opacity in [0.0, 0.5, 1.0] {
+                let mut core = EditorCore::new();
+                core.project.figures[0].opacity = opacity;
+                let rs = rows(&core);
+                let _ = layer_row(&rs[0], &t);
+            }
         }
     }
 

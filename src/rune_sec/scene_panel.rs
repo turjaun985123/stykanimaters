@@ -812,11 +812,17 @@ pub fn step_background_channel(core: &mut EditorCore, channel: usize, dir: i32) 
 
 /// One stepper row: label, − button, value, + button (the
 /// GPUI weather panel's row shape). Keys carry the GPUI ids.
+/// Wave P: the buttons take their [`design::StepForm`] from
+/// the caller — computed from the same values the row
+/// renders, against the backing op's clamp — so a step
+/// that can only no-op renders inert instead of live.
 fn stepper_row(
     label: &str,
     value: String,
     dn_key: &'static str,
     up_key: &'static str,
+    dn_form: design::StepForm,
+    up_form: design::StepForm,
     t: &Theme,
     dn: impl Fn(&mut State) + 'static,
     up: impl Fn(&mut State) + 'static,
@@ -825,9 +831,9 @@ fn stepper_row(
         .gap(6.0)
         .center_y()
         .child(design::section_label(label, t).grow(1.0))
-        .child(btn(dn_key, "−", false, t, dn))
+        .child(design::step_btn(dn_key, "−", dn_form, t, dn))
         .child(design::stepper_value(&value, t))
-        .child(btn(up_key, "+", false, t, up))
+        .child(design::step_btn(up_key, "+", up_form, t, up))
 }
 
 /// One background RGB channel stepper row (Phase G): channel
@@ -843,13 +849,31 @@ fn bg_channel_row(channel: usize, label: &str, value: u8, t: &Theme) -> El {
         .gap(8.0)
         .center_y()
         .child(design::section_label(label, t).grow(1.0))
-        .child(btn(&format!("scene-bg-{lower}-dn"), "−", false, t, move |s| {
-            step_background_channel(&mut s.core, channel, -1)
-        }))
+        .child(design::step_btn(
+            &format!("scene-bg-{lower}-dn"),
+            "−",
+            // Wave P: a channel at 0 / 255 can only
+            // no-op in that direction — inert.
+            if value == 0 {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            t,
+            move |s| step_background_channel(&mut s.core, channel, -1),
+        ))
         .child(design::stepper_value(&value.to_string(), t))
-        .child(btn(&format!("scene-bg-{lower}-up"), "+", false, t, move |s| {
-            step_background_channel(&mut s.core, channel, 1)
-        }))
+        .child(design::step_btn(
+            &format!("scene-bg-{lower}-up"),
+            "+",
+            if value == 255 {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            t,
+            move |s| step_background_channel(&mut s.core, channel, 1),
+        ))
 }
 
 /// The frame-rate stepper row (Phase K): the
@@ -863,13 +887,33 @@ fn fps_row(core: &EditorCore, t: &Theme) -> El {
         .gap(8.0)
         .center_y()
         .child(design::section_label("Frame rate", t).grow(1.0))
-        .child(btn("scene-fps-dn", "−", false, t, |s| {
-            step_fps(&mut s.core, -1)
-        }))
+        .child(design::step_btn(
+            "scene-fps-dn",
+            "−",
+            // Wave P: inert where `fps_after`'s clamp
+            // (1..=60) makes the step a no-op — the
+            // pure helper is the op's own mirror, so
+            // the button and the op cannot disagree.
+            if fps_after(core, -1) == core.project.fps {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            t,
+            |s| step_fps(&mut s.core, -1),
+        ))
         .child(design::stepper_value(&fps_label(core.project.fps), t))
-        .child(btn("scene-fps-up", "+", false, t, |s| {
-            step_fps(&mut s.core, 1)
-        }))
+        .child(design::step_btn(
+            "scene-fps-up",
+            "+",
+            if fps_after(core, 1) == core.project.fps {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            t,
+            |s| step_fps(&mut s.core, 1),
+        ))
 }
 
 /// One fine stage-axis stepper row (Phase K): the
@@ -890,13 +934,33 @@ fn stage_axis_row(axis: usize, label: &str, value: f32, t: &Theme) -> El {
         .gap(8.0)
         .center_y()
         .child(design::section_label(label, t).grow(1.0))
-        .child(btn(dn_key, "−", false, t, move |s| {
-            step_stage_axis(&mut s.core, axis, -1)
-        }))
+        .child(design::step_btn(
+            dn_key,
+            "−",
+            // Wave P: inert at `stage_axis_after`'s
+            // clamp edges (64..=4096, mirrored here
+            // from the rendered value, the fps_after
+            // discipline).
+            if (value - STAGE_AXIS_STEP).clamp(64.0, 4096.0) == value {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            t,
+            move |s| step_stage_axis(&mut s.core, axis, -1),
+        ))
         .child(design::stepper_value(&format!("{}", value as i32), t))
-        .child(btn(up_key, "+", false, t, move |s| {
-            step_stage_axis(&mut s.core, axis, 1)
-        }))
+        .child(design::step_btn(
+            up_key,
+            "+",
+            if (value + STAGE_AXIS_STEP).clamp(64.0, 4096.0) == value {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            t,
+            move |s| step_stage_axis(&mut s.core, axis, 1),
+        ))
 }
 
 /// Slider track width and knob diameter (the settings
@@ -1034,6 +1098,16 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
                     .radius(8.0)
                     .fill(if is_current { accent } else { t.bg })
                     .center()
+                    // Wave P (P4): the kit swatch's state
+                    // overlays (`design::swatch` paints the
+                    // same `t.hover` / `t.press` pair). This
+                    // two-tone ring construction stays local
+                    // — the kit swatch is a single 24 pt fill
+                    // with a border, not a 26 pt ring around
+                    // a 22 pt core — but it carried NO hover
+                    // or press state, so a press was silent.
+                    .hover(t.hover)
+                    .press(t.press)
                     .on_press(move |s: &mut State| set_background(&mut s.core, rgb))
                     .child(
                         el()
@@ -1145,6 +1219,21 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
             },
             "wx-amt-dn",
             "wx-amt-up",
+            // Wave P forms: weather off — the step op's
+            // refusal ("Weather is off — pick a kind
+            // first.") is the feedback, so muted-live;
+            // at the 0..=200 clamps the step can only
+            // no-op, so inert.
+            match weather {
+                None => design::StepForm::MutedLive,
+                Some(w) if w.amount <= 0.0 => design::StepForm::Noop,
+                Some(_) => design::StepForm::Live,
+            },
+            match weather {
+                None => design::StepForm::MutedLive,
+                Some(w) if w.amount >= 200.0 => design::StepForm::Noop,
+                Some(_) => design::StepForm::Live,
+            },
             t,
             |s: &mut State| step_weather_amount(&mut s.core, -20.0),
             |s: &mut State| step_weather_amount(&mut s.core, 20.0),
@@ -1165,6 +1254,19 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
             },
             "wx-wind-dn",
             "wx-wind-up",
+            // Wave P forms, as the Amount row: off is
+            // muted-live (the op refuses aloud); the
+            // -200..=200 clamps are inert.
+            match weather {
+                None => design::StepForm::MutedLive,
+                Some(w) if w.wind <= -200.0 => design::StepForm::Noop,
+                Some(_) => design::StepForm::Live,
+            },
+            match weather {
+                None => design::StepForm::MutedLive,
+                Some(w) if w.wind >= 200.0 => design::StepForm::Noop,
+                Some(_) => design::StepForm::Live,
+            },
             t,
             |s: &mut State| step_weather_wind(&mut s.core, -0.5),
             |s: &mut State| step_weather_wind(&mut s.core, 0.5),
@@ -1197,6 +1299,18 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
             format!("{}", core.project.stage[0] as i32),
             "stage-w-dn",
             "stage-w-up",
+            // Wave P forms: `adjust_stage`'s clamp is
+            // 200..=4000 per axis — inert at the edge.
+            if core.project.stage[0] <= 200.0 {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            if core.project.stage[0] >= 4000.0 {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
             t,
             |s: &mut State| adjust_stage(&mut s.core, -40.0, 0.0),
             |s: &mut State| adjust_stage(&mut s.core, 40.0, 0.0),
@@ -1206,6 +1320,16 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
             format!("{}", core.project.stage[1] as i32),
             "stage-h-dn",
             "stage-h-up",
+            if core.project.stage[1] <= 200.0 {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            if core.project.stage[1] >= 4000.0 {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
             t,
             |s: &mut State| adjust_stage(&mut s.core, 0.0, -40.0),
             |s: &mut State| adjust_stage(&mut s.core, 0.0, 40.0),
@@ -1265,6 +1389,24 @@ mod tests {
         let mut core = EditorCore::new();
         core.project.weather = Some(Weather { kind, amount, wind });
         core
+    }
+
+    /// Wave P (P4): the panel — background swatch grid
+    /// included — constructs with the swatches' hover /
+    /// press overlays in place. Both branches of the
+    /// swatch's current/not-current fill occur (the demo
+    /// background matches at most one swatch), under both
+    /// themes. Element internals are opaque to a bin-crate
+    /// unit test, so construction is the assertable level;
+    /// the presented-tree proof is the headless `default`
+    /// scene's job.
+    #[test]
+    fn scene_panel_constructs_with_swatch_states() {
+        for dark in [true, false] {
+            let t = rune::tok::theme(dark);
+            let s = crate::init();
+            let _ = scene_panel(&s, &t);
+        }
     }
 
     #[test]

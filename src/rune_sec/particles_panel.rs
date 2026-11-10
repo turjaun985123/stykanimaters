@@ -34,6 +34,11 @@
 //!   index, kind)` (Phase I)
 //! * colour swatches — `EditorCore::particle_set_color(
 //!   index, color)` (Phase I)
+//! * seed stepper — `EditorCore::particle_set_seed(
+//!   index, seed)` (Wave P; the op and its MCP tool
+//!   existed since Wave 14, but the panel neither showed
+//!   nor edited the seed — the last event field with no
+//!   panel control)
 //! * anchor — `EditorCore::particle_set_anchor(index,
 //!   figure, node)` with `Option` figure/node, mirroring
 //!   the model's `ParticleEvent { figure: Option<usize>,
@@ -251,6 +256,9 @@ pub struct ParticleDetailData {
     pub color: u32,
     /// 0-based start frame (display adds 1).
     pub frame: usize,
+    /// The event's random seed, for the seed stepper's
+    /// readout (Wave P).
+    pub seed: u32,
     /// Full anchor description ([`anchor_detail`]).
     pub anchor: String,
     /// Anchored figure, if any (0-based).
@@ -272,6 +280,7 @@ pub fn detail_data(core: &EditorCore, selected: Option<usize>) -> Option<Particl
         kind_value: event.kind,
         color: event.color,
         frame: event.frame,
+        seed: event.seed,
         anchor: anchor_detail(event),
         figure: event.figure,
         x: event.x,
@@ -285,6 +294,16 @@ pub fn detail_data(core: &EditorCore, selected: Option<usize>) -> Option<Particl
 /// imported ones can).
 pub fn stepped_frame(frame: usize, delta: i32) -> usize {
     (frame as i64 + delta as i64).max(0) as usize
+}
+
+/// Seed after a ±1 stepper press, wrapping at both
+/// ends of the `u32` range (Wave P): a seed has no
+/// meaningful order — every value draws a different
+/// particle pattern — so the stepper cycles the full
+/// range rather than clamping and dead-ending at 0
+/// the way [`stepped_frame`] must.
+pub fn stepped_seed(seed: u32, delta: i32) -> u32 {
+    seed.wrapping_add(delta as u32)
 }
 
 /// Selection after event `deleted` was removed, with
@@ -379,6 +398,23 @@ fn step_frame(s: &mut State, delta: i32) {
     if next != frame {
         s.core.particle_set_frame(i, next);
     }
+}
+
+/// Step the selected event's random seed by `delta`
+/// through [`stepped_seed`] via
+/// `EditorCore::particle_set_seed` (Wave P) — the
+/// panel's first control over the seed, which before
+/// this only the op and the MCP tool could write.
+/// Stepping always lands on a different seed (the
+/// step wraps the full `u32` range), so every press
+/// is a real edit and takes the op's snapshot — the
+/// same discipline as [`cycle_selected_kind`].
+fn step_seed(s: &mut State, delta: i32) {
+    let Some(i) = selected_event(&s.core, s.particle_selected) else {
+        return;
+    };
+    let next = stepped_seed(s.core.project.particles[i].seed, delta);
+    s.core.particle_set_seed(i, next);
 }
 
 /// Move the selected event to the playhead frame
@@ -507,21 +543,34 @@ fn nudge_selected(s: &mut State, dx: f32, dy: f32) {
 
 /// The detail block for the selected event: kind and
 /// anchor summary, a kind stepper and colour swatches
-/// (Phase I), a frame stepper, the anchor buttons
+/// (Phase I), a frame stepper, a seed stepper (Wave P),
+/// the anchor buttons
 /// (anchor to the selected figure / clear anchor),
 /// duplicate and delete, a final action row (to
 /// playhead, plus anchor to joint while a joint is
 /// selected — Phase K), and a position nudge pad with
 /// its readout (Phase L). With events present but no
-/// valid selection it renders a guidance line instead
+/// valid selection it renders the kit
+/// `design::empty_state` guidance (Wave P) instead
 /// of dead buttons.
 fn detail_block(s: &State, t: &Theme) -> El {
     let Some(data) = detail_data(&s.core, s.particle_selected) else {
-        return col().key("particles-detail").w_full().child(
-            text("Select a particle event to edit it.")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        // Kit empty state (Wave P), in place of the
+        // bare guidance line: the `star` glyph is the
+        // one the events list's own empty state above
+        // carries, the copy is unchanged (it names the
+        // filling action — select an event in the
+        // list), and the block's root key is the same
+        // `particles-detail` the populated block
+        // returns, so the key census is untouched.
+        return col()
+            .key("particles-detail")
+            .w_full()
+            .child(design::empty_state(
+                "star",
+                "Select a particle event to edit it.",
+                t,
+            ));
     };
     let i = data.index;
     // Colour swatches: the kit's one swatch construction
@@ -626,12 +675,52 @@ fn detail_block(s: &State, t: &Theme) -> El {
                 .gap(8.0)
                 .center_y()
                 .child(design::section_label("Frame", t).grow(1.0))
-                .child(btn("particles-frame-dn", "−", false, t, |s| {
-                    step_frame(s, -1)
-                }))
+                .child(design::step_btn(
+                    "particles-frame-dn",
+                    "−",
+                    // Wave Q: `stepped_frame` clamps at 0
+                    // and `step_frame` silently refuses
+                    // there — inert at frame 0, the
+                    // StepForm split. Up has no clamp
+                    // (the helper steps past the timeline
+                    // end by design), so it stays Live;
+                    // the seed pair below wraps the full
+                    // u32 range and is Live both ways.
+                    if data.frame == 0 {
+                        design::StepForm::Noop
+                    } else {
+                        design::StepForm::Live
+                    },
+                    t,
+                    |s| step_frame(s, -1),
+                ))
                 .child(design::stepper_value(&format!("{}", data.frame + 1), t))
-                .child(btn("particles-frame-up", "+", false, t, |s| {
-                    step_frame(s, 1)
+                .child(design::step_btn(
+                    "particles-frame-up",
+                    "+",
+                    design::StepForm::Live,
+                    t,
+                    |s| step_frame(s, 1),
+                )),
+        )
+        // Seed stepper: -/+ step the event's random
+        // seed through the full u32 range (EditorCore::
+        // particle_set_seed) — the same construction as
+        // the frame stepper above. The same kind with a
+        // new seed draws a new particle pattern. Before
+        // Wave P the seed was the one event field this
+        // panel neither showed nor edited.
+        .child(
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(design::section_label("Seed", t).grow(1.0))
+                .child(btn("particles-seed-dn", "−", false, t, |s| {
+                    step_seed(s, -1)
+                }))
+                .child(design::stepper_value(&format!("{}", data.seed), t))
+                .child(btn("particles-seed-up", "+", false, t, |s| {
+                    step_seed(s, 1)
                 })),
         )
         // Anchor: attach to the core's selected figure,
@@ -854,6 +943,7 @@ mod tests {
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            subtitle_panel: crate::rune_sec::subtitle_panel::SubtitlePanelState::new(),
             menus: crate::rune_sec::menus::MenusState::default(),
             palette: crate::rune_sec::command_palette::PaletteState::new(),
             settings: crate::rune_sec::settings_popover::SettingsState::default(),
@@ -862,6 +952,7 @@ mod tests {
             name_edit: rune::TextEdit::new(""),
             export_use_range: false,
             fx_selected: None,
+            subtitle_selected: None,
             pose_clipboard: None,
             last_status: String::new(),
             toast_now: 0.0,
@@ -983,6 +1074,35 @@ mod tests {
         assert_eq!(stepped_frame(0, -1), 0);
         assert_eq!(stepped_frame(0, 1), 1);
         assert_eq!(stepped_frame(41, 1), 42);
+    }
+
+    #[test]
+    fn detail_block_constructs_with_the_frame_stepper_in_both_branches() {
+        // Wave Q: at frame 0 the frame stepper's dn
+        // button takes its inert branch (the clamp
+        // above); at a later frame both buttons are
+        // live. The detail block builds either way,
+        // under both themes.
+        for dark in [true, false] {
+            let t = rune::tok::theme(dark);
+            let mut state = demo_state();
+            state.core.project.particles = vec![event(0, None, None)];
+            state.particle_selected = Some(0);
+            let _ = detail_block(&state, &t);
+            state.core.project.particles = vec![event(5, None, None)];
+            let _ = detail_block(&state, &t);
+        }
+    }
+
+    #[test]
+    fn stepped_seed_steps_and_wraps_the_full_range() {
+        assert_eq!(stepped_seed(7, 1), 8);
+        assert_eq!(stepped_seed(7, -1), 6);
+        assert_eq!(stepped_seed(0, 1), 1);
+        // No clamping: the range wraps at both ends, so
+        // the stepper never dead-ends.
+        assert_eq!(stepped_seed(u32::MAX, 1), 0);
+        assert_eq!(stepped_seed(0, -1), u32::MAX);
     }
 
     #[test]
@@ -1197,6 +1317,45 @@ mod tests {
         let data = detail_data(&core, Some(0)).expect("valid selection");
         assert_eq!(data.kind_value, ParticleKind::Sparkle);
         assert_eq!(data.color, 0xFFC65D);
+    }
+
+    #[test]
+    fn detail_data_carries_the_seed() {
+        // The fixture event's seed is 7 (see `event`).
+        let core = core_with(vec![event(4, Some(0), Some(3))]);
+        let data = detail_data(&core, Some(0)).expect("valid selection");
+        assert_eq!(data.seed, 7);
+    }
+
+    #[test]
+    fn step_seed_steps_only_the_selected_event() {
+        let mut state = demo_state();
+        state.core.project.particles = vec![event(0, None, None), event(2, None, None)];
+        state.core.project.particles[1].seed = 42;
+        state.particle_selected = Some(0);
+        let depth = state.core.undo_depth();
+        step_seed(&mut state, 1);
+        assert_eq!(state.core.project.particles[0].seed, 8);
+        assert_eq!(
+            state.core.project.particles[1].seed, 42,
+            "the other event keeps its seed"
+        );
+        assert_eq!(state.core.undo_depth(), depth + 1, "exactly one snapshot");
+        // Stepping down wraps at the bottom of the range.
+        state.core.project.particles[0].seed = 0;
+        step_seed(&mut state, -1);
+        assert_eq!(state.core.project.particles[0].seed, u32::MAX);
+        // No selection: nothing changes, no panic, no
+        // snapshot.
+        state.particle_selected = None;
+        let depth = state.core.undo_depth();
+        step_seed(&mut state, 1);
+        assert_eq!(state.core.project.particles[0].seed, u32::MAX);
+        assert_eq!(state.core.undo_depth(), depth);
+        // The panel builds with the seed row present.
+        state.particle_selected = Some(0);
+        let t = rune::tok::theme(true);
+        let _ = particles_panel(&state, &t);
     }
 
     #[test]

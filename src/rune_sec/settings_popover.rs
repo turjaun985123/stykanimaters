@@ -813,20 +813,45 @@ fn stage_axis_row(s: &State, t: &Theme, axis: usize, heading: &str) -> El {
     } else {
         (0.0, STAGE_STEP)
     };
+    let stage_v = s.core.project.stage[axis];
     row()
         .gap(8.0)
         .center_y()
         .child(design::section_label(heading, t))
-        .child(btn(down_key, "-", false, t, move |s: &mut State| {
-            apply_stage_step(&mut s.core, -dw, -dh);
-        }))
+        .child(design::step_btn(
+            down_key,
+            "-",
+            // Wave P: inert where the step clamps to
+            // the stored size ([`STAGE_MIN`]..=
+            // [`STAGE_MAX`], the apply_stage_step
+            // mirror).
+            if (stage_v - STAGE_STEP).clamp(STAGE_MIN, STAGE_MAX) == stage_v {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            t,
+            move |s: &mut State| {
+                apply_stage_step(&mut s.core, -dw, -dh);
+            },
+        ))
         .child(design::stepper_value(
             &format!("{}", s.core.project.stage[axis] as i32),
             t,
         ))
-        .child(btn(up_key, "+", false, t, move |s: &mut State| {
-            apply_stage_step(&mut s.core, dw, dh);
-        }))
+        .child(design::step_btn(
+            up_key,
+            "+",
+            if (stage_v + STAGE_STEP).clamp(STAGE_MIN, STAGE_MAX) == stage_v {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            t,
+            move |s: &mut State| {
+                apply_stage_step(&mut s.core, dw, dh);
+            },
+        ))
 }
 
 /// The Playback block's speed row: one chip per
@@ -1359,6 +1384,7 @@ mod tests {
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            subtitle_panel: crate::rune_sec::subtitle_panel::SubtitlePanelState::new(),
             menus: crate::rune_sec::menus::MenusState::default(),
             palette: crate::rune_sec::command_palette::PaletteState::new(),
             settings: SettingsState::default(),
@@ -1367,6 +1393,7 @@ mod tests {
             name_edit: rune::TextEdit::new(""),
             export_use_range: false,
             fx_selected: None,
+            subtitle_selected: None,
             pose_clipboard: None,
             guides: false,
             last_status: String::new(),
@@ -1423,6 +1450,7 @@ playback_speed: 1.0,
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            subtitle_panel: crate::rune_sec::subtitle_panel::SubtitlePanelState::new(),
             menus: crate::rune_sec::menus::MenusState::default(),
             palette: crate::rune_sec::command_palette::PaletteState::new(),
             settings: SettingsState::default(),
@@ -1431,6 +1459,7 @@ playback_speed: 1.0,
             name_edit: rune::TextEdit::new(""),
             export_use_range: false,
             fx_selected: None,
+            subtitle_selected: None,
             pose_clipboard: None,
             guides: false,
             last_status: String::new(),

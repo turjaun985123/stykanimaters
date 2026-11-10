@@ -239,13 +239,33 @@
 //! `audio-clip-{i}`, and both lines already carry the
 //! Wave 9 wrap/truncate treatment, so the longer text
 //! cannot spill the card.
+//!
+//! Wave Q (Q20, P14 follow-up): the rows' missing-file
+//! warning no longer re-derives existence per clip.
+//! The probe still stats/decodes each file for
+//! duration, peak and the unsupported/unreadable
+//! states, but the `Missing` verdict the rows print
+//! (suffix + warning glyph) and the readout's health
+//! segment repeats is reconciled against the shared
+//! classification `audio::missing_audio_clips` — the
+//! one query project-open (P14), playback and export
+//! (P15) all name — by `probes_with_shared_missing`.
+//! The visible difference is exactly P14's settled
+//! exclusion: a MUTED clip whose file is gone keeps
+//! its ` (muted)` marker and carries no missing-file
+//! warning, because a muted clip's absence is no loss
+//! anywhere else in the app either. The query runs on
+//! the panel's own clip slice at render time rather
+//! than reading the core's cached report, so a path
+//! typed or repointed in this panel is classified on
+//! the same render that shows it.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::SystemTime;
 
 use rune::tok::{type_, Theme};
-use rune::{row, text, text_input, El, TextEdit, Tx};
+use rune::{row, text, El, TextEdit, Tx};
 use stykanimate_rs::audio_edit;
 use stykanimate_rs::audio_ops;
 use stykanimate_rs::editor::EditorCore;
@@ -836,6 +856,75 @@ pub fn probe_clip(cache: &RefCell<ProbeCache>, clip: &AudioClip) -> ClipProbe {
     probe
 }
 
+/// Wave Q (Q20 — P14 follow-up): reconcile the probes'
+/// `Missing` verdicts with the shared missing-audio
+/// classification. `missing` is
+/// `audio::missing_audio_clips(clips)` for the same
+/// clip list: the stored paths of the clips that would
+/// sound but cannot (unmuted + file gone), one entry
+/// per clip in clip order — the set project-open,
+/// playback planning and the export outcome all name.
+///
+/// `probe_clip` derives existence privately (its
+/// stat), which disagrees with the shared query in
+/// exactly one case: a MUTED clip whose file is gone
+/// probes `Missing` but is not in the shared set.
+/// P14 settled that a muted clip's absence is no loss
+/// (the exclusion is load-bearing for open/playback/
+/// export), so the panel names the same set instead
+/// of re-deriving its own. Per clip:
+///
+/// - named by the query → the probe's health is
+///   `Missing` (its own stat already says so on any
+///   consistent filesystem; the query is the
+///   authority if the two stats raced a file change);
+/// - NOT named but the probe says `Missing` → the
+///   muted case above: the warning state clears (the
+///   health becomes `Healthy` — no warning word, no
+///   glyph; duration/peak stay `None`, and the row
+///   keeps its ` (muted)` marker);
+/// - every other health (Healthy / Unsupported /
+///   Unreadable — states of files that EXIST, which
+///   the query does not classify) passes through
+///   untouched.
+///
+/// Occurrence matching: the query emits one entry per
+/// qualifying clip, so a path shared by two clips is
+/// consumed in clip order by the unmuted ones only —
+/// a muted twin never consumes its unmuted twin's
+/// entry. `probes` is index-aligned with `clips`
+/// (the panel's own discipline); a short `probes`
+/// vec reconciles only what it has.
+pub fn probes_with_shared_missing(
+    clips: &[AudioClip],
+    mut probes: Vec<ClipProbe>,
+    missing: &[String],
+) -> Vec<ClipProbe> {
+    let mut unnamed: HashMap<&str, usize> = HashMap::new();
+    for path in missing {
+        *unnamed.entry(path.as_str()).or_insert(0) += 1;
+    }
+    for (i, clip) in clips.iter().enumerate() {
+        let Some(probe) = probes.get_mut(i) else {
+            break;
+        };
+        let named = !clip.muted
+            && match unnamed.get_mut(clip.path.as_str()) {
+                Some(count) if *count > 0 => {
+                    *count -= 1;
+                    true
+                }
+                _ => false,
+            };
+        if named {
+            probe.health = ClipHealth::Missing;
+        } else if probe.health == ClipHealth::Missing {
+            probe.health = ClipHealth::Healthy;
+        }
+    }
+    probes
+}
+
 /// The fixed settings the one-click effects apply,
 /// stated before the fact (audit D3): fade length, echo
 /// delay/feedback, lowpass cutoff, pitch shift and
@@ -1181,6 +1270,17 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             .iter()
             .map(|clip| probe_clip(&s.audio_panel.probe_cache, clip))
             .collect();
+        // Wave Q (Q20): the Missing verdicts the summary,
+        // rows and readout print come from the shared
+        // classification, not the probes' private stat —
+        // the panel names the same missing set as open,
+        // playback and export (see
+        // `probes_with_shared_missing`).
+        let probes = probes_with_shared_missing(
+            clips,
+            probes,
+            &stykanimate_rs::audio::missing_audio_clips(clips),
+        );
         panel = panel.child(
             // Wave 9: kit prose treatment — the line's
             // numbers are unbounded (clip count, total
@@ -1507,7 +1607,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             .center_y()
             .gap(6.0)
             .child(
-                text_input(&s.audio_panel.name, type_::BODY)
+                design::text_field(&s.audio_panel.name, type_::BODY, s.audio_panel.name.focused, t)
                     .key("audio-name")
                     .single_line()
                     .grow(1.0)
@@ -1521,6 +1621,18 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             )
             .child(icon_btn("add-audio", "music", "Add clip", false, t, |s| add_clip(s))),
     );
+
+    // Wave Q (Q7, the P31 slice): the Subtitles section
+    // closes the Audio workspace's panel — the cue list,
+    // the selected cue's editor, the subtitle style and
+    // the SRT/WebVTT file exchange. This workspace is
+    // its home because the timeline's subtitle lane is
+    // gated to show here (P32 IA-3: `!collapsed` only),
+    // so the lane's selection and this panel's editor
+    // sit on the same screen. The section is its own
+    // module (`rune_sec::subtitle_panel`); this call is
+    // the whole mount.
+    panel = panel.child(crate::rune_sec::subtitle_panel::subtitle_section(s, t));
 
     panel
 }
@@ -2116,6 +2228,103 @@ mod tests {
         assert_eq!(probe_clip(&cache, &c).health, ClipHealth::Missing);
     }
 
+    /// Wave Q (Q20): a health-only probe for the
+    /// shared-missing reconciliation pins — nothing
+    /// decoded, the way every non-healthy probe looks.
+    fn probe_with(health: ClipHealth) -> ClipProbe {
+        ClipProbe {
+            health,
+            duration_secs: None,
+            peak: None,
+        }
+    }
+
+    #[test]
+    fn shared_missing_names_the_unmuted_missing_clip() {
+        // The query names the clip: its row keeps the
+        // Missing warning, word for word.
+        let clips = vec![clip("gone.wav", 0, 1.0)];
+        let probes = vec![probe_with(ClipHealth::Missing)];
+        let missing = vec!["gone.wav".to_string()];
+        let out = probes_with_shared_missing(&clips, probes, &missing);
+        assert_eq!(out[0].health, ClipHealth::Missing);
+        assert_eq!(health_suffix(out[0].health), " (missing file)");
+    }
+
+    #[test]
+    fn shared_missing_clears_the_warning_for_a_muted_missing_clip() {
+        // P14's settled exclusion: the shared query does
+        // not name a muted clip (its absence is no loss),
+        // so its row carries no missing-file warning even
+        // though the probe's private stat found no file.
+        let clips = vec![muted_clip("gone.wav", 0, 1.0)];
+        let probes = vec![probe_with(ClipHealth::Missing)];
+        let out = probes_with_shared_missing(&clips, probes, &[]);
+        assert_eq!(out[0].health, ClipHealth::Healthy);
+        assert_eq!(health_suffix(out[0].health), "");
+    }
+
+    #[test]
+    fn shared_missing_leaves_existing_file_states_untouched() {
+        // The query classifies existence only: probes of
+        // files that exist — unsupported, unreadable,
+        // healthy with its decoded values — pass through
+        // exactly as probed.
+        let clips = vec![
+            clip("song.mp3", 0, 1.0),
+            clip("bad.wav", 3, 1.0),
+            clip("ok.wav", 5, 1.0),
+        ];
+        let probes = vec![
+            probe_with(ClipHealth::Unsupported),
+            probe_with(ClipHealth::Unreadable),
+            ClipProbe {
+                health: ClipHealth::Healthy,
+                duration_secs: Some(2.0),
+                peak: Some(0.5),
+            },
+        ];
+        let out = probes_with_shared_missing(&clips, probes.clone(), &[]);
+        assert_eq!(out, probes);
+    }
+
+    #[test]
+    fn shared_missing_twin_paths_consume_one_entry() {
+        // The same missing path on a muted and an
+        // unmuted clip: the query names it once, for the
+        // unmuted clip — the muted twin (first in the
+        // list) must not consume the entry, and keeps no
+        // warning; the unmuted twin keeps it.
+        let clips = vec![muted_clip("gone.wav", 0, 1.0), clip("gone.wav", 4, 1.0)];
+        let probes = vec![
+            probe_with(ClipHealth::Missing),
+            probe_with(ClipHealth::Missing),
+        ];
+        let missing = vec!["gone.wav".to_string()];
+        let out = probes_with_shared_missing(&clips, probes, &missing);
+        assert_eq!(out[0].health, ClipHealth::Healthy);
+        assert_eq!(out[1].health, ClipHealth::Missing);
+    }
+
+    #[test]
+    fn shared_missing_query_drives_the_rows_end_to_end() {
+        // Through the real query over real (absent)
+        // paths: an unmuted missing clip is named, a
+        // muted one is not — so the set the rows warn
+        // about equals the open/playback/export set.
+        let clips = vec![
+            clip("no/such/a.wav", 0, 1.0),
+            muted_clip("no/such/b.wav", 2, 1.0),
+        ];
+        let cache = RefCell::new(ProbeCache::new());
+        let probes: Vec<ClipProbe> = clips.iter().map(|c| probe_clip(&cache, c)).collect();
+        let missing = stykanimate_rs::audio::missing_audio_clips(&clips);
+        assert_eq!(missing, vec!["no/such/a.wav".to_string()]);
+        let out = probes_with_shared_missing(&clips, probes, &missing);
+        assert_eq!(out[0].health, ClipHealth::Missing);
+        assert_eq!(out[1].health, ClipHealth::Healthy);
+    }
+
     #[test]
     fn panel_prose_lines_cannot_fit_one_card_line() {
         // Wave 9 premise, pinned: the panel's content
@@ -2367,6 +2576,7 @@ mod tests {
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: AudioPanelState::new(),
+            subtitle_panel: crate::rune_sec::subtitle_panel::SubtitlePanelState::new(),
             menus: crate::rune_sec::menus::MenusState::default(),
             palette: crate::rune_sec::command_palette::PaletteState::new(),
             settings: crate::rune_sec::settings_popover::SettingsState::default(),
@@ -2375,6 +2585,7 @@ mod tests {
             name_edit: rune::TextEdit::new(""),
             export_use_range: false,
             fx_selected: None,
+            subtitle_selected: None,
             pose_clipboard: None,
             last_status: String::new(),
             toast_now: 0.0,

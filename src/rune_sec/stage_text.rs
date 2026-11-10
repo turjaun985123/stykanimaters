@@ -149,9 +149,62 @@
 //! draws the actual image and no name; the label exists
 //! only so stage placeholders stay identifiable, the same
 //! honesty rule as the segment-media placeholder outlines.
+//!
+//! ## Subtitles (Wave P, P28)
+//!
+//! [`subtitle_geometry`] renders the frame's live subtitle
+//! cues (`Project::subtitles` under the half-open liveness
+//! rule, in stored order) through this module's own glyph
+//! machinery — the stage is the WYSIWYG promise for the
+//! exports, so the placement comes from the shared
+//! layout source in `subtitles.rs` (Wave P, P23):
+//! `subtitle_font_size`, `subtitle_line_height`,
+//! `subtitle_stack_line_offset` and
+//! `subtitle_line_center_y` decide the font size, the line
+//! step, each line's distance from the anchored edge and
+//! its centre height, and `live_subtitle_cues` decides
+//! which cues show. The SVG writer's inline arithmetic
+//! reproduces these helpers constant-for-constant (its
+//! helper swap is IA-P27-1), so stage and SVG cannot
+//! drift apart in where a line sits; the raster burn-in
+//! still sizes its stamps proportionally (6% of stage
+//! height) until IA-P26-1 lands the same helpers there —
+//! the stacking order already agrees on all three
+//! surfaces. [`subtitle_bands`] is the factored,
+//! unit-pinned composition of those helpers for this
+//! stage.
+//!
+//! The glyphs themselves are [`label_boxes`] output at the
+//! shared font size in the style's text colour, anchored
+//! at the band centre — so they inherit `composite_text`'s
+//! half-cell vertical quirk exactly as every other
+//! stage/raster text pair in this module does (the glyph
+//! block sits half a cell low in its band; the rasterizer
+//! stamps it the same way from the same anchor). The
+//! backing follows the style's settled cross-surface
+//! semantics (`subtitles.rs`'s style note: NO surface draws
+//! a filled backing box — `box_color` is the backing /
+//! outline colour): each glyph box is preceded by a plate
+//! in the style's box colour — this module's own backing
+//! device ([`with_backing`]'s scaled plate), recoloured
+//! from the fixed black to the project's box colour and
+//! fully opaque, the bitmap analogue of SVG's stroke halo
+//! and the raster's offset stamps. Both colours are fully
+//! opaque — the style carries no alpha channel.
+//!
+//! Nothing clips the stack to the stage: a stack taller
+//! than the stage paints past the opposite edge, the same
+//! unsettled overflow the other surfaces have (the raster
+//! clips only because a bitmap ends). A frame with no live
+//! cue yields no prims at all, so cue-free projects draw
+//! exactly as before.
 
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{InstanceKey, SegmentMedia, V2};
+use stykanimate_rs::subtitles::{
+    live_subtitle_cues, subtitle_font_size, subtitle_line_center_y, subtitle_line_height,
+    subtitle_stack_line_offset, SubtitleCue, SubtitlePosition, SubtitleStyle,
+};
 
 /// One primitive of stage text geometry, in stage coordinates.
 #[derive(Clone, Debug, PartialEq)]
@@ -450,6 +503,168 @@ pub fn text_geometry(core: &EditorCore) -> Vec<TextPrim> {
             size,
             text.color,
         )));
+    }
+    out
+}
+
+/// One laid-out subtitle line: the band it occupies and
+/// everything the painter needs to draw the line's glyphs,
+/// in stage coordinates. Produced by [`subtitle_bands`]
+/// (the factored composition of `subtitles.rs`'s shared
+/// layout helpers — see the module docs), consumed by
+/// [`subtitle_geometry`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubtitleBand {
+    /// The line's text (one line of a cue's text).
+    pub text: String,
+    /// Centre of the line's band: the stage's horizontal
+    /// centre, and `subtitle_line_center_y`'s per-anchor
+    /// centre height. The glyph anchor [`label_boxes`] is
+    /// called with.
+    pub center: V2,
+    /// The band rect the line occupies, ordered like a
+    /// glyph box's corners (starting at the (−x, −y)
+    /// corner, walking the +x edge first): one line height
+    /// tall, centred on `center`, and as wide as the line's
+    /// bitmap run plus half a font size of padding per
+    /// side. This is the line's layout extent — the region
+    /// a pixel proof probes — NOT a drawn fill: no surface
+    /// fills the backing box (see the module docs); the
+    /// drawn backing is the per-glyph plate stream
+    /// [`subtitle_geometry`] emits inside this extent.
+    pub corners: [V2; 4],
+    /// Glyph height for the line: `subtitle_font_size` of
+    /// the style (base × sanitised scale).
+    pub font_size: f32,
+    /// The band height: `subtitle_line_height` of the
+    /// style (base × sanitised scale).
+    pub line_height: f32,
+    /// The style's text colour (the glyphs' fill).
+    pub text_color: u32,
+    /// The style's box colour (the backing plates' fill).
+    pub box_color: u32,
+}
+
+/// The shared subtitle layout, composed for the stage:
+/// every line of every cue in `cues` (already filtered to
+/// the frame's live cues, in stored order) laid out on a
+/// `stage`-sized picture under `style`, in cue order,
+/// lines in text order. Pure maths — this is the
+/// unit-pinned half of the stage subtitle draw. Every
+/// placement value comes from `subtitles.rs`'s helpers
+/// (`subtitle_font_size`, `subtitle_line_height`,
+/// `subtitle_stack_line_offset`, `subtitle_line_center_y`
+/// — scale sanitisation included), so the stage's bands
+/// are the SVG exporter's bands by construction (the
+/// raster burn-in joins them via IA-P26-1); the only
+/// stage-local maths is the band WIDTH, which the bitmap
+/// font fixes: a line's run is `4n − 1` cells at
+/// `font_size / 5` per cell ([`label_boxes`]' layout),
+/// plus half a font size of padding per side.
+///
+/// A cue whose text has no lines (empty text) contributes
+/// nothing and does not advance the stack — `"".lines()`
+/// is empty, the same split the SVG writer makes.
+pub fn subtitle_bands(
+    stage: [f32; 2],
+    style: &SubtitleStyle,
+    cues: &[&SubtitleCue],
+) -> Vec<SubtitleBand> {
+    let font_size = subtitle_font_size(*style);
+    let line_height = subtitle_line_height(*style);
+    let cx = stage[0] / 2.0;
+    let cell = font_size / GLYPH_ROWS as f32;
+    let mut bands = Vec::new();
+    let mut lines_before = 0usize;
+    for cue in cues {
+        let lines: Vec<&str> = cue.text.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            let position: SubtitlePosition = style.position;
+            let from_edge = subtitle_stack_line_offset(lines_before, lines.len(), i, position);
+            let y = subtitle_line_center_y(*style, stage[1], from_edge);
+            let n = line.chars().count() as f32;
+            let run = if n > 0.0 {
+                (n * CHAR_ADVANCE - 1.0) * cell
+            } else {
+                0.0
+            };
+            let half_w = (run + font_size) / 2.0;
+            let half_h = line_height / 2.0;
+            bands.push(SubtitleBand {
+                text: (*line).to_string(),
+                center: [cx, y],
+                corners: [
+                    [cx - half_w, y - half_h],
+                    [cx + half_w, y - half_h],
+                    [cx + half_w, y + half_h],
+                    [cx - half_w, y + half_h],
+                ],
+                font_size,
+                line_height,
+                text_color: style.text_color,
+                box_color: style.box_color,
+            });
+        }
+        lines_before += lines.len();
+    }
+    bands
+}
+
+/// Interleave subtitle backing plates into one line's
+/// glyph boxes: every glyph box is preceded by its plate —
+/// the same box scaled by [`BACKING_SCALE`] about its own
+/// centre, in the style's `box_color`, fully opaque.
+/// [`with_backing`] is the same device for labels, with
+/// the shell's fixed translucent black; the subtitle
+/// backing is project data (the cross-surface backing /
+/// outline colour — see the module docs), so the colour
+/// and opacity are the style's, verbatim.
+fn with_subtitle_backing(boxes: Vec<TextPrim>, box_color: u32) -> Vec<TextPrim> {
+    let mut out = Vec::with_capacity(boxes.len() * 2);
+    for prim in boxes {
+        let TextPrim::GlyphBox { corners, .. } = &prim;
+        out.push(TextPrim::GlyphBox {
+            corners: scaled_about_centre(*corners, BACKING_SCALE),
+            color: box_color,
+            alpha: 1.0,
+        });
+        out.push(prim);
+    }
+    out
+}
+
+/// Every subtitle prim visible at the core's display frame,
+/// in stage coordinates: for each live cue's every line, in
+/// stored order, the line's glyph boxes (the shared
+/// [`label_boxes`] layout at the shared font size, in the
+/// style's text colour, fully opaque), each preceded by
+/// its backing plate in the style's box colour (see
+/// [`with_subtitle_backing`]). The stage painter fills
+/// them in stream order, so every plate lands under its own
+/// glyph and the lines stack exactly as [`subtitle_bands`]
+/// laid them out.
+///
+/// Liveness is `live_subtitle_cues` over the frame the
+/// display frame falls in (`display_frame` floored, the
+/// core's own conversion in `advance_play`) — the
+/// contract's half-open rule. A project with no cues, a
+/// frame with no live cue, and a degenerate stage (a
+/// non-positive dimension — there is no picture to pin
+/// furniture to) all yield an empty vec, so those frames
+/// draw exactly as they did before subtitles.
+pub fn subtitle_geometry(core: &EditorCore) -> Vec<TextPrim> {
+    let project = &core.project;
+    if project.subtitles.is_empty() || project.stage[0] <= 0.0 || project.stage[1] <= 0.0 {
+        return Vec::new();
+    }
+    let frame = core.display_frame().floor() as usize;
+    let live = live_subtitle_cues(project, frame);
+    let mut out = Vec::new();
+    for band in subtitle_bands(project.stage, &project.subtitle_style, &live) {
+        out.extend(with_subtitle_backing(
+            label_boxes(band.center, 0.0, &band.text, band.font_size, band.text_color),
+            band.box_color,
+        ));
     }
     out
 }
@@ -1187,5 +1402,258 @@ mod tests {
         // Zero-height quad: the height cap is 0.
         let no_height = [[100.0, 75.0], [200.0, 75.0], [200.0, 75.0], [100.0, 75.0]];
         assert!(sprite_label_boxes(no_height, "AB", 0).is_empty());
+    }
+
+    // ---- Wave P, P28: subtitle bands --------------------------------
+
+    fn subtitle_style(position: SubtitlePosition, font_scale: f32) -> SubtitleStyle {
+        SubtitleStyle {
+            position,
+            font_scale,
+            text_color: 0xFFEE00,
+            box_color: 0x112233,
+        }
+    }
+
+    fn cue(text: &str) -> SubtitleCue {
+        SubtitleCue { start_frame: 0, end_frame: 100, text: text.into() }
+    }
+
+    #[test]
+    fn subtitle_band_bottom_anchor_on_a_known_stage() {
+        // 640x360 stage, default-scale bottom style, one
+        // single-line cue: the band's centre is the stage's
+        // horizontal centre, one edge margin (16) plus half
+        // a line height (12) above the bottom edge.
+        let style = subtitle_style(SubtitlePosition::Bottom, 1.0);
+        let c = cue("HELLO");
+        let bands = subtitle_bands([640.0, 360.0], &style, &[&c]);
+        assert_eq!(bands.len(), 1);
+        let b = &bands[0];
+        assert_eq!(b.text, "HELLO");
+        assert_eq!(b.center, [320.0, 332.0]);
+        assert_eq!(b.font_size, 20.0);
+        assert_eq!(b.line_height, 24.0);
+        assert_eq!((b.text_color, b.box_color), (0xFFEE00, 0x112233));
+        // Band: one line height tall around the centre; the
+        // run is (4*5 - 1) cells * 4 = 76 wide, plus half a
+        // font size (10) of padding per side = 96.
+        assert_eq!(
+            b.corners,
+            [[272.0, 320.0], [368.0, 320.0], [368.0, 344.0], [272.0, 344.0]]
+        );
+    }
+
+    #[test]
+    fn subtitle_band_top_anchor_on_a_known_stage() {
+        // Same stage and cue at the top anchor: the centre
+        // is one edge margin plus half a line height BELOW
+        // the top edge; x layout is unchanged.
+        let style = subtitle_style(SubtitlePosition::Top, 1.0);
+        let c = cue("HELLO");
+        let bands = subtitle_bands([640.0, 360.0], &style, &[&c]);
+        assert_eq!(bands.len(), 1);
+        assert_eq!(bands[0].center, [320.0, 28.0]);
+        assert_eq!(
+            bands[0].corners,
+            [[272.0, 16.0], [368.0, 16.0], [368.0, 40.0], [272.0, 40.0]]
+        );
+    }
+
+    #[test]
+    fn subtitle_bands_stack_away_from_the_anchor_in_stored_order() {
+        // Two single-line cues: the FIRST cue sits closest
+        // to the anchored edge at both anchors — at the
+        // bottom it is the LOWER band, at the top the UPPER.
+        let (a, b) = (cue("A"), cue("B"));
+        let bottom = subtitle_bands(
+            [640.0, 360.0],
+            &subtitle_style(SubtitlePosition::Bottom, 1.0),
+            &[&a, &b],
+        );
+        assert_eq!(bottom.len(), 2);
+        assert_eq!((bottom[0].text.as_str(), bottom[0].center[1]), ("A", 332.0));
+        assert_eq!((bottom[1].text.as_str(), bottom[1].center[1]), ("B", 308.0));
+        let top = subtitle_bands(
+            [640.0, 360.0],
+            &subtitle_style(SubtitlePosition::Top, 1.0),
+            &[&a, &b],
+        );
+        assert_eq!((top[0].text.as_str(), top[0].center[1]), ("A", 28.0));
+        assert_eq!((top[1].text.as_str(), top[1].center[1]), ("B", 52.0));
+    }
+
+    #[test]
+    fn subtitle_multiline_cue_hugs_the_anchor_with_its_last_line_at_bottom() {
+        // One two-line cue: at the bottom anchor the cue's
+        // LAST line is offset 0 (it lands where a single-line
+        // cue would), the first line stacks above it; at the
+        // top the lines count away in their own order.
+        let c = cue("X\nY");
+        let bottom = subtitle_bands(
+            [640.0, 360.0],
+            &subtitle_style(SubtitlePosition::Bottom, 1.0),
+            &[&c],
+        );
+        assert_eq!(bottom.len(), 2);
+        assert_eq!((bottom[0].text.as_str(), bottom[0].center[1]), ("X", 308.0));
+        assert_eq!((bottom[1].text.as_str(), bottom[1].center[1]), ("Y", 332.0));
+        let top = subtitle_bands(
+            [640.0, 360.0],
+            &subtitle_style(SubtitlePosition::Top, 1.0),
+            &[&c],
+        );
+        assert_eq!((top[0].text.as_str(), top[0].center[1]), ("X", 28.0));
+        assert_eq!((top[1].text.as_str(), top[1].center[1]), ("Y", 52.0));
+        // A trailing newline adds no line ("X\n".lines() is
+        // one line), and an empty-text cue adds no band and
+        // does not advance the stack.
+        let (t, e) = (cue("X\n"), cue(""));
+        let bands = subtitle_bands(
+            [640.0, 360.0],
+            &subtitle_style(SubtitlePosition::Bottom, 1.0),
+            &[&t, &e],
+        );
+        assert_eq!(bands.len(), 1);
+        assert_eq!(bands[0].center[1], 332.0);
+        assert!(subtitle_bands([640.0, 360.0], &subtitle_style(SubtitlePosition::Bottom, 1.0), &[]).is_empty());
+    }
+
+    #[test]
+    fn subtitle_font_scale_scales_and_sanitises() {
+        let c = cue("A");
+        // Scale 2: font 40, line height 48, bottom centre
+        // one margin (16) plus half a line height (24) up.
+        let bands = subtitle_bands(
+            [640.0, 360.0],
+            &subtitle_style(SubtitlePosition::Bottom, 2.0),
+            &[&c],
+        );
+        assert_eq!((bands[0].font_size, bands[0].line_height), (40.0, 48.0));
+        assert_eq!(bands[0].center[1], 320.0);
+        // Out-of-range scales clamp into [0.5, 3.0]; a
+        // non-finite scale falls back to 1.0 — the SVG
+        // writer's sanitisation, mirrored.
+        let hi = subtitle_bands([640.0, 360.0], &subtitle_style(SubtitlePosition::Bottom, 10.0), &[&c]);
+        assert_eq!(hi[0].font_size, 60.0);
+        let lo = subtitle_bands([640.0, 360.0], &subtitle_style(SubtitlePosition::Bottom, 0.1), &[&c]);
+        assert_eq!((lo[0].font_size, lo[0].line_height), (10.0, 12.0));
+        let nan = subtitle_bands([640.0, 360.0], &subtitle_style(SubtitlePosition::Bottom, f32::NAN), &[&c]);
+        assert_eq!((nan[0].font_size, nan[0].line_height), (20.0, 24.0));
+    }
+
+    fn core_with_cue(text: &str, start: usize, end: usize) -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.stage = [640.0, 360.0];
+        core.project.subtitle_style = subtitle_style(SubtitlePosition::Bottom, 1.0);
+        core.project.subtitles.push(SubtitleCue {
+            start_frame: start,
+            end_frame: end,
+            text: text.into(),
+        });
+        core
+    }
+
+    #[test]
+    fn subtitle_geometry_is_empty_without_a_live_cue() {
+        // The demo project carries no cues: the stage draws
+        // exactly as before.
+        assert!(subtitle_geometry(&EditorCore::new()).is_empty());
+        // A cue outside the display frame (frame 0) is not
+        // live — including one that starts exactly at the
+        // half-open end of another's range.
+        assert!(subtitle_geometry(&core_with_cue("HI", 5, 9)).is_empty());
+        let mut core = core_with_cue("HI", 0, 0);
+        assert!(subtitle_geometry(&core).is_empty(), "an empty range is never live");
+        core.project.subtitles[0].end_frame = 1;
+        assert!(!subtitle_geometry(&core).is_empty(), "frame 0 is inside [0, 1)");
+    }
+
+    /// The glyph boxes of a `subtitle_geometry` output:
+    /// the odd prims of each (plate, glyph) pair. (The
+    /// older `glyphs` helper's alpha filter cannot be
+    /// reused here — subtitle plates are fully opaque too,
+    /// in the style's box colour.)
+    fn subtitle_glyphs(prims: &[TextPrim]) -> Vec<TextPrim> {
+        prims.iter().skip(1).step_by(2).cloned().collect()
+    }
+
+    #[test]
+    fn subtitle_geometry_paints_backing_then_glyphs_in_the_style_colours() {
+        // "HI" at the default scale: H = 11 lit pixels,
+        // I = 9 — 20 glyph boxes, each preceded by its
+        // backing plate.
+        let core = core_with_cue("HI", 0, 10);
+        let prims = subtitle_geometry(&core);
+        assert_eq!(prims.len(), 40);
+        for pair in prims.chunks_exact(2) {
+            let TextPrim::GlyphBox { color: pc, alpha: pa, .. } = &pair[0];
+            let TextPrim::GlyphBox { color: gc, alpha: ga, .. } = &pair[1];
+            assert_eq!((*pc, *pa), (0x112233, 1.0), "plate first, box colour, opaque");
+            assert_eq!((*gc, *ga), (0xFFEE00, 1.0), "glyph second, text colour, opaque");
+            // The plate is the glyph's own box grown about
+            // its centre (the shared backing device).
+            let (bc, gc2) = (box_centre(&pair[0]), box_centre(&pair[1]));
+            assert!(
+                (bc[0] - gc2[0]).abs() < 1e-4 && (bc[1] - gc2[1]).abs() < 1e-4,
+                "plate centre {bc:?} vs glyph centre {gc2:?}"
+            );
+        }
+        // Glyph placement is label_boxes at the band centre,
+        // half-cell quirk included: "HI" spans 7 cells (28
+        // units) wide centred on x=320, and its block centre
+        // sits half a cell (2 units) below the band centre.
+        let (lo, hi) = bbox(&subtitle_glyphs(&prims));
+        assert!((lo[0] - 306.0).abs() < 1e-4 && (hi[0] - 334.0).abs() < 1e-4, "x span {lo:?}..{hi:?}");
+        let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+        assert!(
+            (centre[0] - 320.0).abs() < 1e-4 && (centre[1] - 334.0).abs() < 1e-4,
+            "glyph centre {centre:?} (band centre 332 + half a cell)"
+        );
+    }
+
+    #[test]
+    fn subtitle_geometry_stacks_cues_in_stored_order() {
+        // Two live single-line cues at the bottom anchor:
+        // the stream is (plate, glyph) pairs per cue in
+        // stored order, and the first cue's glyphs sit BELOW
+        // the second's (closest to the anchored edge).
+        let mut core = core_with_cue("A", 0, 10);
+        core.project.subtitles.push(SubtitleCue {
+            start_frame: 0,
+            end_frame: 10,
+            text: "B".into(),
+        });
+        let prims = subtitle_geometry(&core);
+        // "A" and "B" are 10 lit pixels each: 10 * 2 * 2.
+        assert_eq!(prims.len(), 40);
+        let (lo, hi) = bbox(&subtitle_glyphs(&prims[..20]));
+        let first_centre_y = (lo[1] + hi[1]) / 2.0;
+        let (lo, hi) = bbox(&subtitle_glyphs(&prims[20..]));
+        let second_centre_y = (lo[1] + hi[1]) / 2.0;
+        // Band centres 332 / 308, each plus the half-cell
+        // quirk (2 units at this scale).
+        assert!((first_centre_y - 334.0).abs() < 1e-4, "first cue centre {first_centre_y}");
+        assert!((second_centre_y - 310.0).abs() < 1e-4, "second cue centre {second_centre_y}");
+        // Each cue's stream opens with a box-colour plate.
+        assert!(matches!(&prims[0], TextPrim::GlyphBox { color, .. } if *color == 0x112233));
+        assert!(matches!(&prims[20], TextPrim::GlyphBox { color, .. } if *color == 0x112233));
+    }
+
+    #[test]
+    fn subtitle_geometry_top_anchor_puts_the_band_at_the_top() {
+        let mut core = core_with_cue("HI", 0, 10);
+        core.project.subtitle_style = subtitle_style(SubtitlePosition::Top, 1.0);
+        let prims = subtitle_geometry(&core);
+        assert_eq!(prims.len(), 40);
+        // The glyph block centre is the top band's centre
+        // (28) plus the half-cell quirk (2), and the whole
+        // stream — plates included — sits in the band's
+        // neighbourhood at the top of the 360-tall stage.
+        let (lo, hi) = bbox(&subtitle_glyphs(&prims));
+        let centre_y = (lo[1] + hi[1]) / 2.0;
+        assert!((centre_y - 30.0).abs() < 1e-4, "glyph centre y {centre_y}");
+        let (lo, hi) = bbox(&prims);
+        assert!(lo[1] >= 16.0 - 3.0 && hi[1] <= 40.0 + 3.0, "stream y span {lo:?}..{hi:?}");
     }
 }

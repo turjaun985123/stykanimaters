@@ -225,6 +225,28 @@
 //!   the Sprites panel reads the project tables through
 //!   its normal paths once the integrator mounts it
 //!   there.
+//!
+//! The Wave P scenes give the subtitle stage draw
+//! (Squad 3) its pixel-proof states:
+//! `subtitles-populated` plants ONE cue spanning the
+//! whole timeline by direct `project.subtitles` write
+//! — the `graph-duplicates` exception, because the
+//! scene needs a cue with chosen frames and text, and
+//! the planted value is ordinary project data the
+//! stage, panel and exporters then read through their
+//! normal paths — parks the playhead mid-timeline
+//! through `EditorCore::goto` (the `frame-3` op), and
+//! leaves the subtitle style at the project default
+//! (bottom anchor), so its `--snap --crop stage` is
+//! the bottom-band input of the headless subtitle
+//! census (P33). `subtitles-top` plants the same cue
+//! and flips only the style's position to Top by
+//! direct `project.subtitle_style` write — the field
+//! the core's style op stores through — so the pair
+//! differs in exactly the one field the census
+//! discriminates on. The cue is stage-canvas paint,
+//! so both scenes are `--snap` facts, not tree facts
+//! (facts 32–33).
 
 use crate::State;
 
@@ -1251,6 +1273,68 @@ fn scene_sprites_populated(s: &mut State) {
     s.sprites_panel.selected = Some(0);
 }
 
+/// `"subtitles-populated"` — the demo project with ONE
+/// subtitle cue live across the whole timeline and the
+/// playhead parked mid-timeline (frame 2 of the demo's
+/// 5), under the project's DEFAULT subtitle style
+/// (bottom anchor, scale 1.0, white on black — the
+/// contract's plain default look). The cue is planted
+/// by `plant_subtitle_cue` (direct `project.subtitles`
+/// write — see the module header for the exception),
+/// spanning frame 0..frame count as the project stands
+/// when the scene runs, so it is live at the parked
+/// frame by construction. This scene's
+/// `--snap --crop stage` is the headless subtitle
+/// census's bottom-band input (Wave P, P33): the
+/// census compares it against the `default` scene's
+/// stage crop — the same state minus the cue — and
+/// gates on the measured delta, never on a guessed
+/// pixel floor.
+fn scene_subtitles_populated(s: &mut State) {
+    plant_subtitle_cue(s);
+}
+
+/// `"subtitles-top"` — the same planted cue as
+/// `subtitles-populated`, with the subtitle style's
+/// position flipped to Top by direct
+/// `project.subtitle_style` write — the field the
+/// core's style op stores through — so the pair of
+/// scenes differs in exactly the one field the
+/// headless subtitle census discriminates on: this
+/// scene's stage crop must move the painted band from
+/// the stage's bottom edge to its top edge (Wave P,
+/// P33).
+fn scene_subtitles_top(s: &mut State) {
+    plant_subtitle_cue(s);
+    s.core.project.subtitle_style.position =
+        stykanimate_rs::subtitles::SubtitlePosition::Top;
+}
+
+/// The one cue both subtitle scenes plant: a single
+/// line of text spanning the project's whole timeline
+/// as it stands when the scene runs, with the playhead
+/// parked on frame 2 through `EditorCore::goto` (the
+/// timeline chips' op, which guards the park). The
+/// cue spans every frame, so it is live at whatever
+/// frame the park lands on — frame 2 on the demo, the
+/// guarded no-op's frame 0 on a shorter project — and
+/// on an empty project the scene plants nothing at
+/// all: total, like every scene in this table. Shared
+/// by both scenes so they cannot drift apart in
+/// anything but the style field the census varies.
+fn plant_subtitle_cue(s: &mut State) {
+    let frames = s.core.project.frames.len();
+    if frames == 0 {
+        return;
+    }
+    s.core.project.subtitles = vec![stykanimate_rs::subtitles::SubtitleCue {
+        start_frame: 0,
+        end_frame: frames,
+        text: "We walk home before dark.".to_string(),
+    }];
+    s.core.goto(2);
+}
+
 /// The scene table for `AppSpec::scenes`, in `--list-scenes`
 /// display order. Element type is Rune's own, verbatim:
 /// `(&'static str, fn(&mut State))` (tooling.rs:25).
@@ -1285,6 +1369,8 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
         ("library-populated", scene_library_populated),
         ("sprites-populated", scene_sprites_populated),
         ("settings-open-error", scene_settings_open_error),
+        ("subtitles-populated", scene_subtitles_populated),
+        ("subtitles-top", scene_subtitles_top),
     ]
 }
 
@@ -1539,6 +1625,23 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
 ///    placeholder outlines for the instances are
 ///    canvas drawings, so their positions and
 ///    rotations are a `--snap` fact.
+/// 32. Under `--scene subtitles-populated` (Wave P):
+///    the element inventory is IDENTICAL to the
+///    default tree's (facts 1–6, key for key) — the
+///    planted cue is stage-canvas paint, never
+///    structure (fact 19's shape), and the scene
+///    switches nothing. The cue's rendering is a
+///    `--snap` fact: the headless subtitle census
+///    (P33) compares this scene's stage crop against
+///    the default scene's, band by band, and gates on
+///    the measured delta.
+/// 33. Under `--scene subtitles-top` (Wave P): the
+///    same inventory identity as fact 32 — the scene
+///    differs from `subtitles-populated` only in the
+///    subtitle style's position field, so any key
+///    drift between the two trees means a view
+///    branched on the style. The top-band rendering
+///    is the same census's second `--snap` fact.
 pub fn layout_assertions() -> Vec<&'static str> {
     vec![
         "exactly one element keyed \"stage\"",
@@ -1572,6 +1675,8 @@ pub fn layout_assertions() -> Vec<&'static str> {
         "under --scene strokes-populated: elements keyed \"stroke-measure\", \"stroke-width-row\" and \"stroke-opacity-row\" exist and elements keyed \"stroke-del-0\" through \"stroke-del-3\" exist (the selected-stroke rows and the four strokes' list rows — see fact 29)",
         "under --scene library-populated: elements keyed \"library-row-0\" and \"library-row-1\" exist and elements keyed \"library-thumb-0\" and \"library-thumb-1\" exist (the two seeded library entries and their thumbnail canvases — see fact 30)",
         "under --scene sprites-populated: an element keyed \"sprite-panel\" exists and elements keyed \"sprite-row-0\" and \"sprite-row-1\" exist (the Sprites panel and its two placed-instance rows — see fact 31)",
+        "under --scene subtitles-populated: the element inventory is identical to the default tree's (the planted cue is stage-canvas paint, a --snap fact — see fact 32)",
+        "under --scene subtitles-top: the element inventory is identical to the subtitles-populated tree's (only the subtitle style's position field differs — see fact 33)",
     ]
 }
 
@@ -1584,13 +1689,14 @@ mod tests {
         scene_graph_duplicates, scene_graph_open, scene_home, scene_home_populated,
         scene_library_populated, scene_loop_range, scene_menu_open, scene_palette_open,
         scene_settings_open, scene_settings_open_light, scene_sprites_populated,
-        scene_strokes_populated, scene_three_d, scene_three_d_stage, scenes,
+        scene_strokes_populated, scene_subtitles_populated, scene_subtitles_top,
+        scene_three_d, scene_three_d_stage, scenes,
     };
     use crate::init;
     use crate::rune_sec::workspaces::Workspace;
 
     /// The scene table is the headless contract:
-    /// twenty-eight scenes, each name unique (a duplicate
+    /// thirty-one scenes, each name unique (a duplicate
     /// would shadow the later entry in `with_scene`'s
     /// lookup), with the Phase J scenes in their display
     /// positions, the two Phase K scenes appended after
@@ -1604,13 +1710,16 @@ mod tests {
     /// those, the Wave 10 dopesheet-keys scene appended
     /// after those, the two Wave 12 populated-state
     /// scenes (home-populated, strokes-populated)
-    /// appended after those, and the two Wave 13
+    /// appended after those, the two Wave 13
     /// populated-state scenes (library-populated,
-    /// sprites-populated) last.
+    /// sprites-populated) appended after those, the
+    /// Wave 14 settings-open-error scene appended after
+    /// those, and the two Wave P subtitle scenes
+    /// (subtitles-populated, subtitles-top) last.
     #[test]
-    fn scene_table_has_twentynine_uniquely_named_scenes() {
+    fn scene_table_has_thirtyone_uniquely_named_scenes() {
         let table = scenes();
-        assert_eq!(table.len(), 29, "twenty-nine scenes are registered");
+        assert_eq!(table.len(), 31, "thirty-one scenes are registered");
         let mut names: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
         let total = names.len();
         names.sort_unstable();
@@ -1640,6 +1749,9 @@ mod tests {
         assert_eq!(table[25].0, "strokes-populated");
         assert_eq!(table[26].0, "library-populated");
         assert_eq!(table[27].0, "sprites-populated");
+        assert_eq!(table[28].0, "settings-open-error");
+        assert_eq!(table[29].0, "subtitles-populated");
+        assert_eq!(table[30].0, "subtitles-top");
     }
 
     /// The export scene reaches the Export workspace through
@@ -2326,6 +2438,81 @@ mod tests {
             placed,
             vec![0, 1],
             "frame 0 places exactly the two sprite images, in order"
+        );
+    }
+
+    /// The subtitles-populated scene (Wave P) plants
+    /// exactly one cue spanning the whole timeline,
+    /// parks the playhead mid-timeline inside the cue,
+    /// and leaves the subtitle style at the project
+    /// default — whose position is Bottom, so the
+    /// scene's stage crop is the headless subtitle
+    /// census's bottom-band input (P33). This is the
+    /// state behind layout fact 32.
+    #[test]
+    fn subtitles_populated_scene_plants_one_live_cue_under_the_default_style() {
+        let mut s = init();
+        scene_subtitles_populated(&mut s);
+        let project = &s.core.project;
+        assert_eq!(project.subtitles.len(), 1, "exactly one cue is planted");
+        let cue = &project.subtitles[0];
+        assert_eq!(cue.start_frame, 0, "the cue starts at the first frame");
+        assert_eq!(
+            cue.end_frame,
+            project.frames.len(),
+            "the cue spans the whole timeline"
+        );
+        assert_eq!(cue.text, "We walk home before dark.");
+        assert_eq!(s.core.current, 2, "the playhead is parked mid-timeline");
+        assert!(
+            cue.start_frame <= s.core.current && s.core.current < cue.end_frame,
+            "the cue is live at the parked frame"
+        );
+        assert_eq!(
+            project.subtitle_style.position,
+            stykanimate_rs::subtitles::SubtitlePosition::Bottom,
+            "the default style anchors at the bottom"
+        );
+    }
+
+    /// The subtitles-top scene (Wave P) plants the SAME
+    /// cue as subtitles-populated and flips only the
+    /// subtitle style's position to Top — the pair
+    /// differs in exactly the one field the headless
+    /// subtitle census discriminates on (P33). This is
+    /// the state behind layout fact 33.
+    #[test]
+    fn subtitles_top_scene_flips_only_the_style_position() {
+        let mut a = init();
+        scene_subtitles_populated(&mut a);
+        let mut b = init();
+        scene_subtitles_top(&mut b);
+        assert_eq!(
+            b.core.project.subtitles, a.core.project.subtitles,
+            "the planted cue is identical"
+        );
+        assert_eq!(b.core.current, a.core.current, "the park is identical");
+        assert_eq!(
+            b.core.project.subtitle_style.position,
+            stykanimate_rs::subtitles::SubtitlePosition::Top,
+            "the top scene anchors at the top"
+        );
+        // Every other style field keeps the default the
+        // bottom scene renders under.
+        assert_eq!(
+            b.core.project.subtitle_style.font_scale,
+            a.core.project.subtitle_style.font_scale,
+            "the font scale is untouched"
+        );
+        assert_eq!(
+            b.core.project.subtitle_style.text_color,
+            a.core.project.subtitle_style.text_color,
+            "the text colour is untouched"
+        );
+        assert_eq!(
+            b.core.project.subtitle_style.box_color,
+            a.core.project.subtitle_style.box_color,
+            "the box colour is untouched"
         );
     }
 }

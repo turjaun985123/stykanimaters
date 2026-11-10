@@ -190,12 +190,12 @@
 //! kit `empty_state`, which wraps.
 
 use rune::tok::{type_, Theme};
-use rune::{canvas, col, el, row, text, text_input, Color, El, LineCap, ScrollSpec, Shape, TextEdit};
+use rune::{canvas, col, el, row, text, Color, El, LineCap, ScrollSpec, Shape, TextEdit};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{self, V2};
 
 use crate::rune_sec::design;
-use crate::rune_sec::icon_btn::{chip_btn, icon_btn, icon_only_btn};
+use crate::rune_sec::icon_btn::{chip_btn, chip_btn_inert, icon_btn, icon_only_btn};
 use crate::rune_sec::icons::icon_el;
 use crate::stage_view::{hex_color, ngon};
 use crate::State;
@@ -937,22 +937,37 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                             t,
                             move |s: &mut State| delete_row(&mut s.core, fi),
                         ))
-                        .child(chip_btn(
-                            &format!("fig-op-dn-{fi}"),
-                            None,
-                            "−",
-                            false,
-                            t,
-                            move |s: &mut State| s.core.step_figure_opacity(fi, -0.1),
-                        ))
-                        .child(chip_btn(
-                            &format!("fig-op-up-{fi}"),
-                            None,
-                            "+",
-                            false,
-                            t,
-                            move |s: &mut State| s.core.step_figure_opacity(fi, 0.1),
-                        )),
+                        // Wave Q: the opacity chips take the
+                        // chip family's inert form at the
+                        // readout's own bounds — the same
+                        // StepForm split Wave P gave the
+                        // inspector's opacity pair (the op
+                        // clamps to 0..=1, so at 0% / 100%
+                        // the step can only no-op).
+                        .child(if r.opacity_pct == 0 {
+                            chip_btn_inert(&format!("fig-op-dn-{fi}"), None, "−", t)
+                        } else {
+                            chip_btn(
+                                &format!("fig-op-dn-{fi}"),
+                                None,
+                                "−",
+                                false,
+                                t,
+                                move |s: &mut State| s.core.step_figure_opacity(fi, -0.1),
+                            )
+                        })
+                        .child(if r.opacity_pct == 100 {
+                            chip_btn_inert(&format!("fig-op-up-{fi}"), None, "+", t)
+                        } else {
+                            chip_btn(
+                                &format!("fig-op-up-{fi}"),
+                                None,
+                                "+",
+                                false,
+                                t,
+                                move |s: &mut State| s.core.step_figure_opacity(fi, 0.1),
+                            )
+                        }),
                 ),
         )
 }
@@ -1049,7 +1064,7 @@ pub fn figures_panel(s: &State, t: &Theme) -> El {
             .center_y()
             .child(icon_el("magnifying-glass", 13.0, t.text_secondary))
             .child(
-                text_input(&s.figures_panel.filter, type_::BODY.lh(26.0))
+                design::text_field(&s.figures_panel.filter, type_::BODY.lh(26.0), s.figures_panel.filter.focused, t)
                     .key("figures-filter")
                     .single_line()
                     .grow(1.0)
@@ -1226,6 +1241,30 @@ mod tests {
             assert_eq!(r.locked, fig.locked);
             assert_eq!(r.selected, r.index == core.selected_figure);
             assert_eq!(r.solo, core.solo == Some(r.index));
+        }
+    }
+
+    #[test]
+    fn figure_rows_construct_at_the_opacity_bounds() {
+        // Wave Q: the opacity chips build in their
+        // inert branches (0% dn, 100% up) and in a
+        // live mid row, under both themes.
+        let core = EditorCore::new();
+        for dark in [true, false] {
+            let t = rune::tok::theme(dark);
+            for pct in [0, 50, 100] {
+                let r = FigureRow {
+                    index: 0,
+                    name: "A".to_string(),
+                    color: 0xFF0000,
+                    hidden: false,
+                    locked: false,
+                    solo: false,
+                    selected: true,
+                    opacity_pct: pct,
+                };
+                let _ = figure_row(&r, &core, &t);
+            }
         }
     }
 

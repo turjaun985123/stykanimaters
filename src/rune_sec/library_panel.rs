@@ -338,7 +338,7 @@
 use std::path::PathBuf;
 
 use rune::tok::{type_, Theme};
-use rune::{canvas, col, row, text, text_input, Color, El, LineCap, ScrollSpec, Shape, TextEdit, Tx};
+use rune::{canvas, col, row, text, Color, El, LineCap, ScrollSpec, Shape, TextEdit, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{self, FigureDef};
 
@@ -1186,7 +1186,7 @@ fn rename_editor_row(s: &State, t: &Theme) -> El {
         .gap(8.0)
         .center_y()
         .child(
-            text_input(&s.library_panel.rename, type_::BODY.lh(26.0))
+            design::text_field(&s.library_panel.rename, type_::BODY.lh(26.0), s.library_panel.rename.focused, t)
                 .key("library-rename")
                 .single_line()
                 .grow(1.0)
@@ -1424,7 +1424,7 @@ pub fn library_panel(s: &State, t: &Theme) -> El {
                 .center_y()
                 .child(icon_el("magnifying-glass", 13.0, t.text_secondary))
                 .child(
-                    text_input(&s.library_panel.search, type_::BODY.lh(26.0))
+                    design::text_field(&s.library_panel.search, type_::BODY.lh(26.0), s.library_panel.search.focused, t)
                         .key("library-search")
                         .single_line()
                         .grow(1.0)

@@ -989,6 +989,8 @@ fn marker_row(core: &EditorCore, t: &Theme) -> Option<El> {
                     .grow(1.0)
                     .h(MARKER_H)
                     .center()
+                    .hover(t.hover)
+                    .press(t.press)
                     .on_press(move |s: &mut State| goto_marker(s, i))
                     .child(
                         text("◆")
@@ -1009,6 +1011,8 @@ fn marker_row(core: &EditorCore, t: &Theme) -> Option<El> {
                     .grow(1.0)
                     .h(MARKER_H)
                     .center()
+                    .hover(t.hover)
+                    .press(t.press)
                     .on_press(move |s: &mut State| goto_marker(s, i))
                     .child(
                         text("●")
@@ -1338,6 +1342,17 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     // workspace-agnostic. See docs/DOPESHEET.md.
     if !collapsed && s.workspace == crate::rune_sec::workspaces::Workspace::Animate {
         content = content.child(crate::rune_sec::dopesheet::dopesheet_lane(s, t));
+    }
+    // Wave P (P32): the subtitle lane — cue blocks under
+    // their frames, pressing to select the cue. Gated on
+    // `!collapsed` only (the clips lane's gate): the lane
+    // must show in the Audio workspace, where the P31
+    // Subtitles panel lives, not just in Animate. The
+    // builder is `None` on a cue-free project.
+    if !collapsed {
+        if let Some(subtitles) = crate::rune_sec::subtitle_lane::subtitle_lane(s, t) {
+            content = content.child(subtitles);
+        }
     }
     let timeline = row().key("timeline").child(content).scroll_x().w_full();
     // Phase N (charter §13, see the module docs' Timeline
@@ -2454,6 +2469,7 @@ mod tests {
             frame_ops: FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            subtitle_panel: crate::rune_sec::subtitle_panel::SubtitlePanelState::new(),
             menus: crate::rune_sec::menus::MenusState::default(),
             palette: crate::rune_sec::command_palette::PaletteState::new(),
             settings: crate::rune_sec::settings_popover::SettingsState::default(),
@@ -2462,6 +2478,7 @@ mod tests {
             name_edit: rune::TextEdit::new(""),
             export_use_range: false,
             fx_selected: None,
+            subtitle_selected: None,
             pose_clipboard: None,
             last_status: String::new(),
             toast_now: 0.0,

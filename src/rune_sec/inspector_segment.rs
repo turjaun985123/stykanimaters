@@ -966,12 +966,22 @@ fn prose_readout_row(label: &str, value: String, t: &Theme) -> El {
 /// (charter §6): the label grows, then the − button,
 /// the value as the kit's centred mono readout
 /// (`design::stepper_value`), and the + button (chrome
-/// `btn` styling, GPUI inspector keys).
+/// `btn` styling, GPUI inspector keys). The buttons
+/// are the kit's `design::step_btn` (Wave Q): the
+/// caller passes each direction's [`design::StepForm`]
+/// computed from the same value it renders, mirroring
+/// its op's clamp — `adjust_length` clamps to
+/// 4..=220 and `adjust_thickness` to 1..=18
+/// (editor.rs), so at those bounds the step can only
+/// no-op and the button renders inert instead of
+/// reporting the unchanged value as a step.
 fn stepper_row(
     label: &str,
     value: String,
     dn_key: &str,
     up_key: &str,
+    dn_form: design::StepForm,
+    up_form: design::StepForm,
     t: &Theme,
     dn: impl Fn(&mut State) + 'static,
     up: impl Fn(&mut State) + 'static,
@@ -986,9 +996,9 @@ fn stepper_row(
                 .color(t.text_secondary)
                 .grow(1.0),
         )
-        .child(btn(dn_key, "−", false, t, dn))
+        .child(design::step_btn(dn_key, "−", dn_form, t, dn))
         .child(design::stepper_value(&value, t))
-        .child(btn(up_key, "+", false, t, up))
+        .child(design::step_btn(up_key, "+", up_form, t, up))
 }
 
 /// One colour swatch: the kit's single swatch
@@ -1119,6 +1129,16 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
             format_whole_number(st.length),
             "insp-len-dn",
             "insp-len-up",
+            if st.length <= 4.0 {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            if st.length >= 220.0 {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
             t,
             |s| s.core.adjust_length(-LENGTH_STEP),
             |s| s.core.adjust_length(LENGTH_STEP),
@@ -1130,6 +1150,16 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
             format_whole_number(st.thickness),
             "insp-th-dn",
             "insp-th-up",
+            if st.thickness <= 1.0 {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            if st.thickness >= 18.0 {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
             t,
             |s| s.core.adjust_thickness(-THICKNESS_STEP),
             |s| s.core.adjust_thickness(THICKNESS_STEP),
@@ -1899,6 +1929,32 @@ mod tests {
     }
 
     #[test]
+    fn stepper_row_constructs_in_every_form() {
+        // Wave Q: the row builds with each StepForm
+        // branch on each side, under both themes.
+        for dark in [true, false] {
+            let t = rune::tok::theme(dark);
+            for form in [
+                design::StepForm::Live,
+                design::StepForm::Noop,
+                design::StepForm::MutedLive,
+            ] {
+                let _ = stepper_row(
+                    "Length",
+                    "42".to_string(),
+                    "dn",
+                    "up",
+                    form,
+                    form,
+                    &t,
+                    |_| {},
+                    |_| {},
+                );
+            }
+        }
+    }
+
+    #[test]
     fn panel_builds_with_and_without_selection() {
         let t = rune::tok::theme(true);
         let bare = State {
@@ -1913,6 +1969,7 @@ mod tests {
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            subtitle_panel: crate::rune_sec::subtitle_panel::SubtitlePanelState::new(),
             menus: crate::rune_sec::menus::MenusState::default(),
             palette: crate::rune_sec::command_palette::PaletteState::new(),
             settings: crate::rune_sec::settings_popover::SettingsState::default(),
@@ -1921,6 +1978,7 @@ mod tests {
             name_edit: rune::TextEdit::new(""),
             export_use_range: false,
             fx_selected: None,
+            subtitle_selected: None,
             pose_clipboard: None,
             last_status: String::new(),
             toast_now: 0.0,
@@ -1962,6 +2020,7 @@ playback_speed: 1.0,
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            subtitle_panel: crate::rune_sec::subtitle_panel::SubtitlePanelState::new(),
             menus: crate::rune_sec::menus::MenusState::default(),
             palette: crate::rune_sec::command_palette::PaletteState::new(),
             settings: crate::rune_sec::settings_popover::SettingsState::default(),
@@ -1970,6 +2029,7 @@ playback_speed: 1.0,
             name_edit: rune::TextEdit::new(""),
             export_use_range: false,
             fx_selected: None,
+            subtitle_selected: None,
             pose_clipboard: None,
             last_status: String::new(),
             toast_now: 0.0,
@@ -2011,6 +2071,7 @@ playback_speed: 1.0,
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            subtitle_panel: crate::rune_sec::subtitle_panel::SubtitlePanelState::new(),
             menus: crate::rune_sec::menus::MenusState::default(),
             palette: crate::rune_sec::command_palette::PaletteState::new(),
             settings: crate::rune_sec::settings_popover::SettingsState::default(),
@@ -2019,6 +2080,7 @@ playback_speed: 1.0,
             name_edit: rune::TextEdit::new(""),
             export_use_range: false,
             fx_selected: None,
+            subtitle_selected: None,
             pose_clipboard: None,
             last_status: String::new(),
             toast_now: 0.0,

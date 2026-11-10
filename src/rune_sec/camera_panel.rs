@@ -1162,13 +1162,37 @@ pub fn panel(s: &State, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
-                .child(btn("cam-zoom-out", "-", false, t, |s: &mut State| {
-                    s.core.camera_zoom_by(1.0 / ZOOM_STEP)
-                }))
+                .child(design::step_btn(
+                    "cam-zoom-out",
+                    "-",
+                    // Wave Q: `camera_zoom_by` clamps to
+                    // 0.3..=4.0 and snapshots BEFORE the
+                    // clamp, so a press at the limit
+                    // spends an undo step on an identical
+                    // key — inert there (StepForm::Noop),
+                    // computed from the same
+                    // `camera_here` zoom the readout
+                    // renders.
+                    if core.camera_here().2 <= 0.3 {
+                        design::StepForm::Noop
+                    } else {
+                        design::StepForm::Live
+                    },
+                    t,
+                    |s: &mut State| s.core.camera_zoom_by(1.0 / ZOOM_STEP),
+                ))
                 .child(zoom_readout(core, t))
-                .child(btn("cam-zoom-in", "+", false, t, |s: &mut State| {
-                    s.core.camera_zoom_by(ZOOM_STEP)
-                })),
+                .child(design::step_btn(
+                    "cam-zoom-in",
+                    "+",
+                    if core.camera_here().2 >= 4.0 {
+                        design::StepForm::Noop
+                    } else {
+                        design::StepForm::Live
+                    },
+                    t,
+                    |s: &mut State| s.core.camera_zoom_by(ZOOM_STEP),
+                )),
         )
         .child(
             row()
@@ -1325,13 +1349,36 @@ pub fn overlay(core: &EditorCore) -> El {
         }))
         .child(btn("view-centre", "Centre", false, &t, view_centre))
         .child(btn("view-actual", "1:1", false, &t, view_actual))
-        .child(btn("cam-zoom-out", "-", false, &t, |s: &mut State| {
-            crate::stage_view::view_zoom_by(1.0 / ZOOM_STEP)
-        }))
+        .child(design::step_btn(
+            "cam-zoom-out",
+            "-",
+            // Wave Q: the view zoom clamps to
+            // VIEW_ZOOM_MIN..=VIEW_ZOOM_MAX in
+            // `set_view_nav`, so at the ends the step
+            // can only no-op — inert there, computed
+            // from the stepped value itself (the
+            // readout renders the effective product,
+            // camera × view).
+            if crate::stage_view::view_nav().zoom <= crate::stage_view::VIEW_ZOOM_MIN {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            &t,
+            |s: &mut State| crate::stage_view::view_zoom_by(1.0 / ZOOM_STEP),
+        ))
         .child(view_zoom_readout(core, &t))
-        .child(btn("cam-zoom-in", "+", false, &t, |s: &mut State| {
-            crate::stage_view::view_zoom_by(ZOOM_STEP)
-        }))
+        .child(design::step_btn(
+            "cam-zoom-in",
+            "+",
+            if crate::stage_view::view_nav().zoom >= crate::stage_view::VIEW_ZOOM_MAX {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            &t,
+            |s: &mut State| crate::stage_view::view_zoom_by(ZOOM_STEP),
+        ))
 }
 
 #[cfg(test)]
@@ -1343,6 +1390,30 @@ mod tests {
         let core = EditorCore::new();
         assert_eq!(zoom_pct(&core), 100);
         assert_eq!(zoom_label(&core), "100%");
+    }
+
+    #[test]
+    fn zoom_steppers_construct_at_the_clamps() {
+        // Wave Q: the panel pair builds in its inert
+        // branches at the authored clamp (0.3 / 4.0)
+        // and live between them, under both themes;
+        // the overlay pair builds at the view clamp
+        // (VIEW_ZOOM_MIN / MAX) and between.
+        let mut s = crate::init();
+        for dark in [true, false] {
+            let t = tok::theme(dark);
+            for zoom in [0.3, 1.0, 4.0] {
+                s.core.project.set_camera_key(0, 0.0, 0.0, zoom);
+                let _ = panel(&s, &t);
+            }
+        }
+        crate::stage_view::set_view_nav(crate::stage_view::ViewNav::IDENTITY);
+        let _ = overlay(&s.core);
+        crate::stage_view::view_zoom_by(100.0);
+        let _ = overlay(&s.core);
+        crate::stage_view::view_zoom_by(0.0001);
+        let _ = overlay(&s.core);
+        crate::stage_view::set_view_nav(crate::stage_view::ViewNav::IDENTITY);
     }
 
     #[test]
@@ -1789,6 +1860,7 @@ mod tests {
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            subtitle_panel: crate::rune_sec::subtitle_panel::SubtitlePanelState::new(),
             menus: crate::rune_sec::menus::MenusState::default(),
             palette: crate::rune_sec::command_palette::PaletteState::new(),
             settings: crate::rune_sec::settings_popover::SettingsState::default(),
@@ -1797,6 +1869,7 @@ mod tests {
             name_edit: rune::TextEdit::new(""),
             export_use_range: false,
             fx_selected: None,
+            subtitle_selected: None,
             pose_clipboard: None,
             last_status: String::new(),
             toast_now: 0.0,

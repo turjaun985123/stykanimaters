@@ -198,6 +198,7 @@ pub struct State {
     pub frame_ops: rune_sec::frame_ops::FrameOpsState,
     pub graph_panel: rune_sec::graph_panel::GraphPanelState,
     pub audio_panel: rune_sec::audio_panel::AudioPanelState,
+    pub subtitle_panel: rune_sec::subtitle_panel::SubtitlePanelState,
     pub menus: rune_sec::menus::MenusState,
     pub palette: rune_sec::command_palette::PaletteState,
     pub settings: rune_sec::settings_popover::SettingsState,
@@ -210,6 +211,13 @@ pub struct State {
     /// Selected FX clip (fx_clips section; the core has no
     /// FX-clip selection state).
     pub fx_selected: Option<usize>,
+    /// Selected subtitle cue, index into
+    /// `project.subtitles` — written by the timeline's
+    /// subtitle lane (`subtitle_lane::press_cue`), read
+    /// by the Subtitles panel (P31). The core has no
+    /// subtitle selection state (subtitle_lane section,
+    /// Wave P).
+    pub subtitle_selected: Option<usize>,
     /// Pose clipboard (pose_tools section; the core clipboard
     /// holds whole frames, not single poses).
     pub pose_clipboard: Option<Pose>,
@@ -359,6 +367,7 @@ fn init() -> State {
         },
         graph_panel: Default::default(),
         audio_panel: rune_sec::audio_panel::AudioPanelState::new(),
+        subtitle_panel: rune_sec::subtitle_panel::SubtitlePanelState::new(),
         menus: Default::default(),
         palette: rune_sec::command_palette::PaletteState::new(),
         settings: Default::default(),
@@ -367,6 +376,7 @@ fn init() -> State {
         name_edit: TextEdit::new(name),
         export_use_range: false,
         fx_selected: None,
+        subtitle_selected: None,
         pose_clipboard: None,
         workspace: rune_sec::workspaces::from_prefs(&layout),
         guides: false,
@@ -442,10 +452,33 @@ fn stage_drag(s: &mut State, d: &mut Drag) {
             }
         }
         Phase::Up => {
+            // Wave Q (Q2; P6's filed observation): a
+            // cancelled gesture — Escape, focus loss, the
+            // pointer taken away (`Drag::cancelled`, whose
+            // own framework doc says "put back whatever
+            // the drag moved") — rolls back like the graph
+            // canvas's `drag_up`. Every stage gesture
+            // takes exactly one snapshot at Down
+            // (`begin_drag` on a hit, `begin_camera_drag`,
+            // `begin_draw`), so one `undo()` after the
+            // gesture-end call restores the pre-gesture
+            // project; the end call runs first so the
+            // drag/draw state clears (its recap is
+            // superseded by the undo's "Undone.").
+            // `gesture_live` is captured before the end
+            // call clears the state it reads, and guards
+            // the one Down that takes no snapshot — a
+            // pose press that missed every joint and only
+            // picked a stroke — so a cancelled miss never
+            // pops an unrelated edit.
+            let gesture_live = core.dragging.is_some() || core.draw_mode;
             if core.draw_mode {
                 core.end_draw();
             } else {
                 core.end_drag();
+            }
+            if d.cancelled() && gesture_live {
+                core.undo();
             }
         }
     }
@@ -580,6 +613,8 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
                 s.stroke_selected = None;
                 s.particle_selected = None;
                 s.fx_selected = None;
+                s.subtitle_selected = None;
+                s.subtitle_panel.text_target = None;
                 s.confirm_action = None;
             }
             // Wave 12 (E7): refresh the core's cached project
@@ -769,6 +804,8 @@ fn text_focused(s: &State) -> bool {
     s.palette.query.focused
         || s.name_edit.focused
         || s.audio_panel.name.focused
+        || s.subtitle_panel.path.focused
+        || (s.subtitle_panel.text_target.is_some() && s.subtitle_panel.text.focused)
         || s.home_panel.search.focused
         || s.library_panel.search.focused
         || s.text_tool.field.focused
@@ -779,15 +816,29 @@ fn text_focused(s: &State) -> bool {
         || s.figures_panel.filter.focused
         || s.pose_rename.field.focused
         || s.pose_library.filter.focused
+        // Wave P (P9): the Home rename session's field —
+        // the one live TextEdit this list missed when the
+        // session landed (UI mission Wave 4), so typing a
+        // project name there fell through to the global
+        // bindings (Space toggled playback, N added a
+        // frame, Delete deleted a segment mid-rename).
+        // Counted only while the session is armed:
+        // `cancel_rename` stands the session down without
+        // resetting the buffer, so the bare focus flag can
+        // outlive the field's last render, and a bare-flag
+        // check would leave every shortcut dead afterwards.
+        || (s.home_rename.armed.is_some() && s.home_rename.edit.focused)
 }
 
 /// App shortcuts. The command palette gets first claim
 /// (Ctrl+K opens it; arrows/Enter/Escape drive it while
-/// open). While a text field is focused, everything else is
+/// open). Escape then cancels the topmost remaining scope
+/// (an open menu, an armed destructive confirm, Home's
+/// armed delete confirm — see the tier block in the body).
+/// While a text field is focused, everything else is
 /// left to the field. Then: Ctrl+Z undo, Ctrl+Shift+Z /
 /// Ctrl+Y redo, Ctrl+S quick-save (the app-bar Save
-/// button's press, nothing more), Escape closes an open
-/// menu, Space play/pause,
+/// button's press, nothing more), Space play/pause,
 /// Left/Right frame step, Delete removes the selected stroke
 /// if one is selected, else the selected particle event,
 /// else the selected segment (`delete_segment` no-ops safely
@@ -798,6 +849,37 @@ fn text_focused(s: &State) -> bool {
 fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     if rune_sec::command_palette::palette_handle_key(s, ev) {
         return true;
+    }
+    // Escape discipline (Phase O charter rule 8; Wave P,
+    // P9): Escape cancels the topmost open scope and never
+    // falls through to the stage. The palette claimed its
+    // Escape above — it sits above every scope here. The
+    // remaining tiers, topmost first: an open menu; an
+    // armed destructive confirm (the shell-wide
+    // ConfirmAction gate); Home's armed per-row delete
+    // confirm. Both confirm scopes are press-again gates
+    // that had no keyboard exit at all before this. The
+    // tiers run *before* the text-field bail on purpose:
+    // a menu opened by mouse over a still-flagged field is
+    // the topmost scope, and its Escape used to die on the
+    // bail and leave the menu open. Disarming is silent,
+    // matching the poll loop's project-swap clear of the
+    // same state. With no scope open, Escape falls through
+    // untouched — a focused field's own Escape (the
+    // framework blurs the field) or nothing at all.
+    if matches!(ev.key, Key::Escape) {
+        if s.menus.open.is_some() {
+            s.menus.close();
+            return true;
+        }
+        if s.confirm_action.is_some() {
+            s.confirm_action = None;
+            return true;
+        }
+        if s.home_panel.confirm_delete.is_some() {
+            rune_sec::home_panel::cancel_delete(&mut s.home_panel);
+            return true;
+        }
     }
     if text_focused(s) {
         return false;
@@ -838,10 +920,8 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         return true;
     }
     match &ev.key {
-        Key::Escape if s.menus.open.is_some() => {
-            s.menus.close();
-            true
-        }
+        // No Escape arm here: the tier block at the top of
+        // this function owns Escape (Wave P, P9).
         Key::Text(text) if text == " " && !ev.mods.cmd && !ev.mods.ctrl && !ev.mods.alt => {
             chrome_view::toggle_play(s);
             true
@@ -1323,8 +1403,23 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     root
 }
 
+/// Wave P (P19): the window-exit flush. The Rune framework
+/// offers no close veto (its window close runs the hooks,
+/// then closes unconditionally — wave-p/findings/p19.md),
+/// so a dirty exit cannot be confirmed or refused;
+/// fail-closed here means the exit loses nothing: any
+/// counted edit the 25-edit autosave cadence has not yet
+/// captured is flushed to the recovery snapshot the
+/// startup offer reads. Registered on both exit hooks —
+/// `on_close` (window close) and `on_quit` (OS quit /
+/// session end) — and the flush is idempotent, so the
+/// second hook to run writes nothing.
+fn flush_on_exit(s: &mut State, _tx: &mut Tx) {
+    s.core.flush_recovery_on_close();
+}
+
 fn main() {
-    rune::run(AppSpec::<State> {
+    rune::App::new(AppSpec::<State> {
         min_size: Some((1280.0, 720.0)),
         scenes: Box::leak(rune_sec::scenes::scenes().into_boxed_slice()),
         poll: Some(poll),
@@ -1336,5 +1431,234 @@ fn main() {
         // proven floor; the waker is additive.
         setup: Some(|_: &mut State, waker| live_mcp::set_waker(waker)),
         ..AppSpec::new("StykAnimate RS", (1440.0, 900.0), init, view)
-    });
+    })
+    .on_close(flush_on_exit)
+    .on_quit(flush_on_exit)
+    .run();
+}
+
+/// Wave P (P9) — key-routing pins: the Escape tier order,
+/// the text-field scoping of the global bindings, and the
+/// zero-key-loss census of every binding `on_key` owns.
+/// The census test presses each documented binding once;
+/// Ctrl+S is the one exception — its arm runs
+/// `core.save()`, and the suite's no-pollution rule bars
+/// writing `./projects` from a test, so that arm is
+/// verified by the unchanged code path (and by the help
+/// panel / palette hint drift guards), not by a press.
+#[cfg(test)]
+mod key_routing_tests {
+    use super::{init, on_key, text_focused, ConfirmAction, State};
+    use crate::rune_sec;
+    use rune::{Key, KeyEvent, Mods, Tx};
+    use std::path::PathBuf;
+
+    fn plain(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            mods: Mods::default(),
+        }
+    }
+
+    fn typed(text: &str) -> KeyEvent {
+        plain(Key::Text(text.to_string()))
+    }
+
+    fn command(c: char) -> KeyEvent {
+        KeyEvent {
+            key: Key::Command(c),
+            mods: Mods {
+                shift: false,
+                cmd: true,
+                alt: false,
+                ctrl: true,
+                logo: false,
+            },
+        }
+    }
+
+    fn press(s: &mut State, ev: &KeyEvent) -> bool {
+        let mut tx = Tx::default();
+        on_key(s, ev, &mut tx)
+    }
+
+    #[test]
+    fn esc_closes_the_menu_even_while_a_field_is_focused() {
+        // The regression: the menu's Escape used to sit
+        // below the text-field bail, so a menu opened by
+        // mouse over a still-flagged field could not be
+        // Escaped out of.
+        let mut s = init();
+        s.menus.open = Some(rune_sec::menus::FILE);
+        s.name_edit.focused = true;
+        assert!(press(&mut s, &plain(Key::Escape)), "Escape is consumed");
+        assert_eq!(s.menus.open, None, "the topmost scope closed");
+    }
+
+    #[test]
+    fn esc_closes_the_menu_with_no_field_focused() {
+        let mut s = init();
+        s.menus.open = Some(rune_sec::menus::FILE);
+        assert!(press(&mut s, &plain(Key::Escape)));
+        assert_eq!(s.menus.open, None);
+    }
+
+    #[test]
+    fn esc_disarms_an_armed_confirm_without_running_it() {
+        let mut s = init();
+        s.core.project.name = "Unsaved Work".into();
+        s.confirm_action = Some(ConfirmAction::NewProject);
+        assert!(press(&mut s, &plain(Key::Escape)));
+        assert_eq!(s.confirm_action, None, "Escape disarms the gate");
+        assert_eq!(
+            s.core.project.name, "Unsaved Work",
+            "the gated op did not run"
+        );
+    }
+
+    #[test]
+    fn esc_disarms_homes_armed_delete_confirm() {
+        let mut s = init();
+        s.home_panel.confirm_delete = Some(PathBuf::from("projects/demo.json"));
+        assert!(press(&mut s, &plain(Key::Escape)));
+        assert_eq!(s.home_panel.confirm_delete, None);
+    }
+
+    #[test]
+    fn esc_takes_the_topmost_scope_first() {
+        let mut s = init();
+        s.menus.open = Some(rune_sec::menus::FILE);
+        s.confirm_action = Some(ConfirmAction::OpenProject);
+        assert!(press(&mut s, &plain(Key::Escape)));
+        assert_eq!(s.menus.open, None, "menu (topmost) closed first");
+        assert_eq!(
+            s.confirm_action,
+            Some(ConfirmAction::OpenProject),
+            "the confirm stays armed"
+        );
+        assert!(press(&mut s, &plain(Key::Escape)));
+        assert_eq!(s.confirm_action, None, "second Escape reaches it");
+    }
+
+    #[test]
+    fn esc_with_no_scope_open_falls_through() {
+        let mut s = init();
+        assert!(
+            !press(&mut s, &plain(Key::Escape)),
+            "nothing claims it — the field/framework layer owns Escape"
+        );
+    }
+
+    #[test]
+    fn home_rename_typing_never_reaches_the_global_bindings() {
+        // The leak this wave fixes: the Home rename field
+        // was missing from `text_focused`, so its typing
+        // drove the stage bindings.
+        let mut s = init();
+        rune_sec::home_panel::begin_rename(
+            &mut s.home_rename,
+            PathBuf::from("projects/demo.json"),
+            "Demo",
+        );
+        assert!(text_focused(&s), "the armed, focused field scopes keys");
+        let frames = s.core.frame_count();
+        let playing = s.core.playing;
+        assert!(!press(&mut s, &typed("n")), "N belongs to the field");
+        assert!(!press(&mut s, &typed(" ")), "Space belongs to the field");
+        assert!(
+            !press(&mut s, &plain(Key::Delete)),
+            "Delete edits text, not the segment"
+        );
+        assert!(
+            !press(&mut s, &command('z')),
+            "Ctrl+Z belongs to the field, not undo"
+        );
+        assert_eq!(s.core.frame_count(), frames, "no frame was added");
+        assert_eq!(s.core.playing, playing, "playback did not toggle");
+    }
+
+    #[test]
+    fn home_rename_stale_focus_flag_alone_scopes_nothing() {
+        // `cancel_rename` leaves the buffer's focus flag
+        // set after the session stands down; unarmed, that
+        // stale flag must not scope keys (the conjunction
+        // in `text_focused` is what stands between this
+        // wart and a dead keyboard).
+        let mut s = init();
+        s.home_rename.edit.focused = true;
+        assert!(!text_focused(&s));
+        let frames = s.core.frame_count();
+        assert!(press(&mut s, &typed("n")), "global bindings are live");
+        assert_eq!(s.core.frame_count(), frames + 1);
+    }
+
+    #[test]
+    fn binding_census_every_documented_binding_still_fires() {
+        let mut s = init();
+        // Ctrl+K opens the palette; Escape closes it.
+        assert!(press(&mut s, &command('k')));
+        assert!(s.palette.open);
+        assert!(press(&mut s, &plain(Key::Escape)));
+        assert!(!s.palette.open);
+        // Alt+2 switches to the Draw workspace.
+        let alt2 = KeyEvent {
+            key: Key::Text("2".into()),
+            mods: Mods {
+                shift: false,
+                cmd: false,
+                alt: true,
+                ctrl: false,
+                logo: false,
+            },
+        };
+        assert!(press(&mut s, &alt2));
+        assert_eq!(s.workspace, rune_sec::workspaces::Workspace::Draw);
+        // N adds a frame; Ctrl+Z undoes it; Ctrl+Shift+Z
+        // and Ctrl+Y redo it.
+        let frames = s.core.frame_count();
+        assert!(press(&mut s, &typed("n")));
+        assert_eq!(s.core.frame_count(), frames + 1);
+        assert!(press(&mut s, &command('z')));
+        assert_eq!(s.core.frame_count(), frames);
+        let shift_z = KeyEvent {
+            key: Key::Command('z'),
+            mods: Mods {
+                shift: true,
+                cmd: true,
+                alt: false,
+                ctrl: true,
+                logo: false,
+            },
+        };
+        assert!(press(&mut s, &shift_z));
+        assert_eq!(s.core.frame_count(), frames + 1);
+        assert!(press(&mut s, &command('z')));
+        assert!(press(&mut s, &command('y')));
+        assert_eq!(s.core.frame_count(), frames + 1);
+        // Right steps the playhead (wrapping); Left back.
+        let n = s.core.frame_count() as i32;
+        let cur = s.core.current as i32;
+        assert!(press(&mut s, &plain(Key::Right)));
+        assert_eq!(s.core.current as i32, (cur + 1).rem_euclid(n));
+        assert!(press(&mut s, &plain(Key::Left)));
+        assert_eq!(s.core.current as i32, cur);
+        // Space toggles playback; C camera mode; O onion.
+        let playing = s.core.playing;
+        assert!(press(&mut s, &typed(" ")));
+        assert_eq!(s.core.playing, !playing);
+        let cam = s.core.camera_mode;
+        assert!(press(&mut s, &typed("c")));
+        assert_eq!(s.core.camera_mode, !cam);
+        let onion = s.core.onion;
+        assert!(press(&mut s, &typed("o")));
+        assert_eq!(s.core.onion, !onion);
+        // I inserts an inbetween (playhead is at frame 0
+        // of a multi-frame project here, so it lands).
+        let frames = s.core.frame_count();
+        assert!(press(&mut s, &typed("i")));
+        assert_eq!(s.core.frame_count(), frames + 1);
+        // Delete is claimed (the op no-ops safely — status
+        // only — when nothing deletable is selected).
+        assert!(press(&mut s, &plain(Key::Delete)));
+    }
 }

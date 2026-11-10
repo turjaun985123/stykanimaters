@@ -915,13 +915,26 @@ fn export_mp4_action(s: &mut State) {
             // file cannot be probed or decoded fails the
             // export instead of being dropped silently.
             match stykanimate_rs::export::export_mp4_range(&s.core.project, a, b, &path) {
-                Ok(()) => {
-                    s.core.status = format!(
-                        "Exported MP4 (frames {}–{}) to {}",
-                        a + 1,
-                        b + 1,
-                        path.display()
-                    )
+                Ok(outcome) => {
+                    // Wave P (P15): clips whose files are
+                    // missing are named in the status instead
+                    // of being dropped silently; with every
+                    // clip present the status is the sentence
+                    // it always was.
+                    s.core.status = match outcome.missing_audio_note() {
+                        Some(note) => format!(
+                            "Exported MP4 (frames {}–{}) to {}. {note}",
+                            a + 1,
+                            b + 1,
+                            path.display()
+                        ),
+                        None => format!(
+                            "Exported MP4 (frames {}–{}) to {}",
+                            a + 1,
+                            b + 1,
+                            path.display()
+                        ),
+                    }
                 }
                 Err(e) => s.core.status = format!("MP4 export failed: {e}"),
             }

@@ -190,7 +190,7 @@
 //! ```
 
 use rune::tok::{type_, Theme};
-use rune::{row, text, text_input, Color, El, TextEdit, Tx};
+use rune::{row, text, Color, El, TextEdit, Tx};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::{btn, danger_btn};
@@ -728,7 +728,7 @@ fn name_field_row(s: &State, t: &Theme) -> El {
         .gap(8.0)
         .child(text("Name").font(type_::LABEL).color(t.text_secondary))
         .child(
-            text_input(&s.inspector_figure.name, type_::BODY)
+            design::text_field(&s.inspector_figure.name, type_::BODY, s.inspector_figure.name.focused, t)
                 .key("fig-name")
                 .single_line()
                 .grow(1.0)
@@ -847,13 +847,32 @@ fn opacity_stepper_row(st: &InspectorFigureState, t: &Theme) -> El {
                 .color(t.text_secondary)
                 .grow(1.0),
         )
-        .child(btn("insp-fop-dn", "−", false, t, move |s: &mut State| {
-            s.core.step_figure_opacity(fi, -OPACITY_STEP)
-        }))
+        .child(design::step_btn(
+            "insp-fop-dn",
+            "−",
+            // Wave P: inert at the readout's own
+            // bounds — the op clamps opacity to
+            // 0..=1 (0% / 100%).
+            if st.opacity_pct == 0 {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            t,
+            move |s: &mut State| s.core.step_figure_opacity(fi, -OPACITY_STEP),
+        ))
         .child(design::stepper_value(&format!("{}%", st.opacity_pct), t))
-        .child(btn("insp-fop-up", "+", false, t, move |s: &mut State| {
-            s.core.step_figure_opacity(fi, OPACITY_STEP)
-        }))
+        .child(design::step_btn(
+            "insp-fop-up",
+            "+",
+            if st.opacity_pct == 100 {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            t,
+            move |s: &mut State| s.core.step_figure_opacity(fi, OPACITY_STEP),
+        ))
 }
 
 /// Head-ring scale step for the −/+ stepper: a tenth
@@ -960,16 +979,38 @@ fn ring_stepper_row(core: &EditorCore, t: &Theme) -> El {
                 .color(t.text_secondary)
                 .grow(1.0),
         )
-        .child(btn("fig-ring-dn", "−", false, t, |s: &mut State| {
-            step_head_ring_scale(&mut s.core, -HEAD_RING_STEP);
-        }))
+        .child(design::step_btn(
+            "fig-ring-dn",
+            "−",
+            // Wave P: inert at `set_head_ring_scale`'s
+            // 0.5..=2.0 clamp edges.
+            if core.project.head_ring_scale <= 0.5 {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            t,
+            |s: &mut State| {
+                step_head_ring_scale(&mut s.core, -HEAD_RING_STEP);
+            },
+        ))
         .child(design::stepper_value(
             &head_ring_value(core.project.head_ring_scale),
             t,
         ))
-        .child(btn("fig-ring-up", "+", false, t, |s: &mut State| {
-            step_head_ring_scale(&mut s.core, HEAD_RING_STEP);
-        }))
+        .child(design::step_btn(
+            "fig-ring-up",
+            "+",
+            if core.project.head_ring_scale >= 2.0 {
+                design::StepForm::Noop
+            } else {
+                design::StepForm::Live
+            },
+            t,
+            |s: &mut State| {
+                step_head_ring_scale(&mut s.core, HEAD_RING_STEP);
+            },
+        ))
 }
 
 /// The placement row: Centre figure / Ground figure,
@@ -1351,6 +1392,7 @@ mod tests {
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            subtitle_panel: crate::rune_sec::subtitle_panel::SubtitlePanelState::new(),
             menus: crate::rune_sec::menus::MenusState::default(),
             palette: crate::rune_sec::command_palette::PaletteState::new(),
             settings: crate::rune_sec::settings_popover::SettingsState::default(),
@@ -1359,6 +1401,7 @@ mod tests {
             name_edit: rune::TextEdit::new(""),
             export_use_range: false,
             fx_selected: None,
+            subtitle_selected: None,
             pose_clipboard: None,
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
             last_status: String::new(),
@@ -1402,6 +1445,7 @@ playback_speed: 1.0,
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            subtitle_panel: crate::rune_sec::subtitle_panel::SubtitlePanelState::new(),
             menus: crate::rune_sec::menus::MenusState::default(),
             palette: crate::rune_sec::command_palette::PaletteState::new(),
             settings: crate::rune_sec::settings_popover::SettingsState::default(),
@@ -1410,6 +1454,7 @@ playback_speed: 1.0,
             name_edit: rune::TextEdit::new(""),
             export_use_range: false,
             fx_selected: None,
+            subtitle_selected: None,
             pose_clipboard: None,
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
             last_status: String::new(),

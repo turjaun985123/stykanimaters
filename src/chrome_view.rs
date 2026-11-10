@@ -507,6 +507,13 @@ pub fn timeline_row(s: &State, t: &Theme) -> El {
                 .radius(6.0)
                 .fill(if active { accent } else { t.card })
                 .hover(if active { accent } else { t.control_track })
+                // Wave P (P4): the press half of the `btn`
+                // state table (active → accent, inactive →
+                // `control_off`); the chips carried hover
+                // only. This builder is unmounted (see the
+                // fn docs) — the fix keeps the retained
+                // census baseline honest, not live UI.
+                .press(if active { accent } else { t.control_off })
                 .center()
                 .on_press(move |s: &mut State| s.core.goto(i))
                 .child(
@@ -736,6 +743,20 @@ mod tests {
             "clean press loads immediately: {}",
             s.core.status
         );
+    }
+
+    /// Wave P (P4): the legacy timeline chips construct
+    /// with their press state in place, on a populated
+    /// project under both themes. Construction is the
+    /// assertable level (element internals are opaque,
+    /// as above); the builder is unmounted, so this pins
+    /// the retained census baseline only.
+    #[test]
+    fn timeline_row_chips_construct_under_both_themes() {
+        let s = crate::init();
+        assert!(s.core.frame_count() > 0, "the demo project has frames");
+        let _ = timeline_row(&s, &tok::theme(true));
+        let _ = timeline_row(&s, &tok::theme(false));
     }
 
     #[test]

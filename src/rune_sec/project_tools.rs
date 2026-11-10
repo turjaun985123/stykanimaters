@@ -36,7 +36,7 @@
 //! | *(title row, unkeyed)* | "Project" header (`design::panel_title`: folder-open glyph + SECTION title, kit divider under — Phase N) | — container, no handler | ok |
 //! | *(autosave line, unkeyed)* | the autosave status line on its own full-width row under the title (kit prose treatment: `.wrap().w_full()`) | renders `autosave_line(core.edits_since_autosave())` (editor.rs:1599) | fixed in Wave 10 — it trailed the title as one unwrapped text until the Wave 9 headless scan caught it at +25.6 pt past the card edge whenever edits ≥ 1 (see [`project_section`]); the counter it renders is the core's — see the autosave note on [`autosave_line`] |
 //! | `proj-name-field` | name-field wrapper (el) | — container, no handler | ok |
-//! | `proj-name` | text input | `on_edit` → `&mut State::name_edit`; `on_submit` → [`apply_name`] | ok — Enter and "Set name" share one path |
+//! | `proj-name` | text input (kit `design::text_field`, Wave Q) | `on_edit` → `&mut State::name_edit`; `on_submit` → [`apply_name`] | ok — Enter and "Set name" share one path; the kit field carries the focus border + caret/selection colours inside the unchanged `proj-name-field` wrapper |
 //! | `proj-set-name` | "Set name" button (`icon_btn`, "check" icon) | [`apply_name`] → [`apply_project_name`]: trims, writes `Project::name` directly (no core rename op or setter exists — editor.rs has no `rename*` fn; the file-level rename is Home's `projects::rename_project`) | ok — Wave 10: a rename that changes the name takes a core snapshot first (a counted edit, so the dirty signal and the autosave cadence see it, and Undo can restore the old name); a same-name press counts nothing |
 //! | `proj-current-file` | "Current file: …" muted line under the name field (conditional — present only when the line resolves) | renders [`current_file_line`]: the `shell::last_opened_project` display name, shown only when it exactly matches `Project::name` | ok — Phase I §31; the match guard is the Phase G §32 lesson (recents store names, not the open file, so a mismatch would lie). `home_panel::current_project_path` was NOT used: it is the selector cursor, which `cycle-project` moves without opening |
 //! | `proj-current-meta` | "{size} · modified {time}" muted line under `proj-current-file` (conditional — present only when the §31 match holds AND the file resolves and stats) | renders [`current_file_meta`]: the §31 match (via [`current_file_path`]) gates it, the path resolves over `core.project_files` by the crate's slug rule ([`resolve_project_file`]), size via [`human_size`], time via [`modified_label`] | ok — Phase J §27; gated on the §31 decision itself, so the two lines can never disagree about which file the session is on |
@@ -73,7 +73,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use rune::tok::{type_, Theme};
-use rune::{col, el, row, text, text_input, El, Tx};
+use rune::{col, el, row, text, El, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{Easing, FigureDef, FigureInstance, Frame, Project};
 
@@ -319,6 +319,9 @@ pub fn blank_project(name: &str) -> Project {
         texts: Vec::new(),
         weather: None,
         head_ring_scale: 1.0,
+        subtitles: Vec::new(),
+        subtitle_style: Default::default(),
+        format_version: crate::model::FORMAT_VERSION_CURRENT,
     }
 }
 
@@ -1152,7 +1155,7 @@ pub fn project_section(s: &State, t: &Theme) -> El {
                         .border(1.0, t.card_border)
                         .center_y()
                         .child(
-                            text_input(&s.name_edit, type_::BODY)
+                            design::text_field(&s.name_edit, type_::BODY, s.name_edit.focused, t)
                                 .key("proj-name")
                                 .single_line()
                                 .color(t.text)
@@ -1338,6 +1341,7 @@ mod tests {
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            subtitle_panel: crate::rune_sec::subtitle_panel::SubtitlePanelState::new(),
             menus: crate::rune_sec::menus::MenusState::default(),
             palette: crate::rune_sec::command_palette::PaletteState::new(),
             settings: crate::rune_sec::settings_popover::SettingsState::default(),
@@ -1346,6 +1350,7 @@ mod tests {
             name_edit: rune::TextEdit::new(""),
             export_use_range: false,
             fx_selected: None,
+            subtitle_selected: None,
             pose_clipboard: None,
             last_status: String::new(),
             toast_now: 0.0,
@@ -2016,6 +2021,23 @@ playback_speed: 1.0,
         s.name_edit.focused = false;
         sync_name_edit(&mut s);
         assert_eq!(s.name_edit.text, "Other Project");
+    }
+
+    #[test]
+    fn project_section_constructs_with_the_name_field_in_both_focus_branches() {
+        // Wave Q: `proj-name` is the kit
+        // `design::text_field` — the section builds
+        // with the field resting (hairline border)
+        // and focused (accent border + caret colours)
+        // under both themes.
+        let mut s = test_state(EditorCore::new());
+        for dark in [true, false] {
+            let t = rune::tok::theme(dark);
+            s.name_edit.focused = false;
+            let _ = project_section(&s, &t);
+            s.name_edit.focused = true;
+            let _ = project_section(&s, &t);
+        }
     }
 
     /// A scratch path for the reload tests, unique to this

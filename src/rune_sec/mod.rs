@@ -58,6 +58,8 @@ pub mod stage_text;
 pub mod stats_view;
 pub mod status_strip;
 pub mod stroke_inspector;
+pub mod subtitle_lane;
+pub mod subtitle_panel;
 pub mod text_tool;
 pub mod three_d_panel;
 pub mod timeline_marks;

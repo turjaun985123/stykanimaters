@@ -169,10 +169,13 @@ pub fn step_is_noop(cur: u8, delta: i32) -> bool {
     step_depth(cur, delta) == cur
 }
 
-/// One depth-stepper button: the live `btn` while the
+/// One depth-stepper button: the live form while the
 /// section is live and the step would change the depth,
-/// the handler-free `btn_inert` (same key, same box) when
-/// it can only no-op.
+/// the handler-free inert form (same key, same box)
+/// when it can only no-op. Delegates to the kit's
+/// [`design::step_btn`] (Wave P — this file's copy was
+/// one of the four private implementations the kit
+/// item unifies).
 fn step_btn(
     key: &str,
     label: &str,
@@ -182,11 +185,12 @@ fn step_btn(
     t: &Theme,
     f: impl Fn(&mut State) + 'static,
 ) -> El {
-    if live && !step_is_noop(cur, delta) {
-        btn(key, label, false, t, f)
+    let form = if live && !step_is_noop(cur, delta) {
+        design::StepForm::Live
     } else {
-        btn_inert(key, label, t)
-    }
+        design::StepForm::Noop
+    };
+    design::step_btn(key, label, form, t, f)
 }
 
 /// The legend line under the controls. Wording is pinned by

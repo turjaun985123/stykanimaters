@@ -128,10 +128,13 @@
 //!   own docs for the exact semantics).
 
 use rune::tok::{self, type_, Theme};
-use rune::{canvas, col, el, row, text, Color, Drag, El, Phase, Shape, Tx};
+use rune::{
+    canvas, col, el, row, text, text_input, Color, Drag, El, Phase, Shape, TextEdit, TextStyle, Tx,
+};
 use stykanimate_rs::graph::TangentPreset;
 use stykanimate_rs::graph_panel::preset_preview;
 
+use crate::chrome_view;
 use crate::rune_sec::icons;
 use crate::State;
 
@@ -452,6 +455,142 @@ pub fn stepper_value(value: &str, t: &Theme) -> El {
             .font(type_::MONO_CAPTION.mono())
             .color(t.text),
     )
+}
+
+/// Which of the button family's three forms a stepper
+/// button takes (Wave P, charter item 3 — the stepper's
+/// disabled states, named once in the kit).
+///
+/// The shell's stepper panels each grew this exact
+/// three-way split privately (onion_controls, text_tool,
+/// sprites_panel, draw_tools — four copies of one
+/// doctrine, the chrome_view P05 §4/§5.2 rule):
+///
+/// * [`StepForm::Live`] — the step would change the
+///   value: the plain `chrome_view::btn`.
+/// * [`StepForm::Noop`] — the step can only no-op (the
+///   value sits at the clamp the step pushes against)
+///   and the op has nothing to say about it: the
+///   handler-free `btn_inert`, same key, same box, so a
+///   press at the limit cannot fire a snapshot or
+///   re-report an unchanged value as if it had stepped.
+/// * [`StepForm::MutedLive`] — the control is gated
+///   (its target does not exist yet) but the handler
+///   HAS a refusal worth delivering ("Load a text
+///   first.", "Weather is off — pick a kind first."):
+///   `btn_muted_live` — the inert visual with the
+///   handler kept, so the status line answers instead.
+///
+/// Callers compute the form from the same values they
+/// render (the panels' pure `*_after` / `*_stepped`
+/// helpers mirror their ops' clamps, so the button and
+/// the op cannot disagree).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepForm {
+    /// The step would change the value.
+    Live,
+    /// The step can only no-op and has nothing to say.
+    Noop,
+    /// Gated, but the handler's refusal is the feedback.
+    MutedLive,
+}
+
+/// One stepper button in the form its state dictates
+/// (see [`StepForm`]): the kit's single implementation
+/// of the stepper disabled-state doctrine, over the
+/// chrome button family. The key, label and handler are
+/// the caller's, attached untouched in the forms that
+/// keep a handler — exactly as with [`toggle_row`].
+pub fn step_btn(
+    key: &str,
+    label: &str,
+    form: StepForm,
+    t: &Theme,
+    f: impl Fn(&mut State) + 'static,
+) -> El {
+    match form {
+        StepForm::Live => chrome_view::btn(key, label, false, t, f),
+        StepForm::Noop => chrome_view::btn_inert(key, label, t),
+        StepForm::MutedLive => chrome_view::btn_muted_live(key, label, false, t, f),
+    }
+}
+
+/// A text field's border colour (Wave P, charter
+/// item 3 — the input focus state): the accent while
+/// the field holds keyboard focus, the card hairline
+/// at rest. Pure, so the state logic is pinnable
+/// without a Runtime.
+pub fn field_border(focused: bool, t: &Theme) -> Color {
+    if focused {
+        accent()
+    } else {
+        t.card_border
+    }
+}
+
+/// A text field's caret and selection colours (Wave
+/// P): the accent for the caret, the accent at 30%
+/// alpha for the selection wash. These exist because
+/// Rune's `text_input` defaults are dark-theme-only —
+/// a WHITE caret and a white-at-20% selection
+/// (rune `el.rs` `DEFAULT_SELECTION`), which on the
+/// light theme's near-white card are effectively
+/// invisible: before this kit item, a focused field in
+/// the light theme showed no caret and no selection at
+/// all. The accent reads on both themes' cards (it is
+/// the same token the button family's active state
+/// fills with). Pure, pinnable.
+pub fn field_caret() -> (Color, Color) {
+    (accent(), accent().alpha(0.30))
+}
+
+/// The kit's one text field (Wave P, charter item 3):
+/// Rune's `text_input` with the shell's input states
+/// applied uniformly — the construction all fourteen
+/// hand-rolled field sites previously repeated minus
+/// the states none of them had:
+///
+/// * **Rest:** `control_off` fill (the kit's inset-
+///   control fill, as on [`kbd`]), a 1 pt hairline
+///   border in [`field_border`]'s resting colour,
+///   [`CONTROL_RADIUS`], 8 pt of horizontal air so the
+///   text never touches the border.
+/// * **Focus:** the border turns accent — the field's
+///   designed focus state, driven by the caller's
+///   `TextEdit::focused` flag (the same flag the
+///   shell's shortcut guard reads, so the visual and
+///   the behaviour can never disagree) — and the caret
+///   / selection take [`field_caret`]'s colours.
+/// * **Hover:** NOT expressible without faking it —
+///   Rune offers only overlay fills on hover, and an
+///   overlay would wash over the field's own glyphs;
+///   a hover border colour does not exist in the
+///   pinned rev. Named here as an engine limit per
+///   charter rule 3, not imitated.
+/// * **Invalid / disabled:** no builder form, by
+///   design — no field in the shell validates its text
+///   (invalid is unreachable upstream; see the Wave P
+///   P5 findings) and no field is ever disabled
+///   (rename fields unmount instead). A state with no
+///   reachable path is not drawn.
+///
+/// Keys, placeholders, submit/edit handlers and
+/// `.grow` stay at the call site, chained onto the
+/// returned element exactly as they were chained onto
+/// the bare `text_input` — the builder owns the box
+/// and the states, the caller owns the field's
+/// identity and behaviour.
+pub fn text_field(edit: &TextEdit, font: TextStyle, focused: bool, t: &Theme) -> El {
+    let (caret, selection) = field_caret();
+    text_input(edit, font)
+        .single_line()
+        .color(t.text)
+        .caret(caret, selection)
+        .fill(t.control_off)
+        .border(1.0, field_border(focused, t))
+        .radius(CONTROL_RADIUS)
+        .px(8.0)
+        .py(3.0)
 }
 
 /// Slider geometry — the shell's established drag
@@ -841,6 +980,35 @@ mod tests {
     }
 
     #[test]
+    fn field_border_is_accent_only_when_focused() {
+        for dark in [true, false] {
+            let t = tok::theme(dark);
+            assert_eq!(field_border(true, &t), accent());
+            assert_eq!(field_border(false, &t), t.card_border);
+            // A real state change, not a restatement:
+            // the two branches must differ on both
+            // themes or the focus state would be
+            // invisible by construction.
+            assert_ne!(field_border(true, &t), field_border(false, &t));
+        }
+    }
+
+    #[test]
+    fn field_caret_is_the_accent_never_the_white_default() {
+        let (caret, selection) = field_caret();
+        assert_eq!(caret, accent());
+        // The defect this fixes: Rune's defaults are
+        // a white caret and a white 20% selection —
+        // invisible on the light theme's card.
+        assert_ne!(caret, Color::WHITE);
+        assert_eq!(
+            (selection.r, selection.g, selection.b),
+            (caret.r, caret.g, caret.b)
+        );
+        assert_eq!(selection.a, 0.30);
+    }
+
+    #[test]
     fn clamp_frac_bounds_and_rejects_non_finite() {
         assert_eq!(clamp_frac(-0.5), 0.0);
         assert_eq!(clamp_frac(0.0), 0.0);
@@ -882,6 +1050,11 @@ mod tests {
             let _ = toggle_row("tog-row", "Loop", true, &t, |_| {});
             let _ = toggle_row("tog-row", "Loop", false, &t, |_| {});
             let _ = stepper_value("42", &t);
+            let _ = step_btn("step", "-", StepForm::Live, &t, |_| {});
+            let _ = step_btn("step", "-", StepForm::Noop, &t, |_| {});
+            let _ = step_btn("step", "-", StepForm::MutedLive, &t, |_| {});
+            let _ = text_field(&TextEdit::new("x"), type_::BODY, true, &t);
+            let _ = text_field(&TextEdit::new(""), type_::BODY, false, &t);
             let _ = slider_track(0.0, &t);
             let _ = slider_track(0.5, &t);
             let _ = slider_track(1.0, &t);

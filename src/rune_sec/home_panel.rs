@@ -468,7 +468,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use rune::tok::{self, type_, Theme};
-use rune::{col, el, row, text, text_input, El, TextEdit, Tx};
+use rune::{col, el, row, text, El, TextEdit, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::Project;
 use stykanimate_rs::projects::{self, ProjectInfo};
@@ -499,7 +499,9 @@ pub struct HomePanelState {
     /// — captured by [`initial_state`] at boot, and by
     /// [`toggle_open`] before its snapshot write on every
     /// later open (see the module docs). Cleared by a
-    /// successful Recover press.
+    /// successful Recover press, or by a Discard press
+    /// (which also deletes the snapshot file, so the
+    /// offer does not return at the next capture).
     pub recovery_offer: bool,
     /// The Wave 15 scan cache: `(projects-dir mtime, scan)`
     /// — `None` until the first render fills it. Interior
@@ -1958,6 +1960,29 @@ pub fn dispatch_recover(core: &mut EditorCore) {
     }
 }
 
+/// Discard the recovery snapshot in `dir`: delete the
+/// file (`shell::clear_recovery_in` — the delete command
+/// existed in shell.rs since the store landed but had no
+/// caller anywhere in the app; Wave P, P42 wires it
+/// here) and report whether it is actually gone. The
+/// verdict is read back off the disk rather than assumed:
+/// `clear_recovery_in` swallows the remove result by
+/// design (no error if already gone), so existence is
+/// the only honest success signal. Already-gone counts
+/// as discarded — the user's intent ("no snapshot") is
+/// the state either way.
+pub fn discard_recovery_in(dir: &Path) -> bool {
+    shell::clear_recovery_in(dir);
+    !dir.join(shell::RECOVERY_FILE).exists()
+}
+
+/// [`discard_recovery_in`] for the real `./projects`
+/// directory (the `_in` convention of
+/// [`startup_recovery`] / [`startup_recovery_in`]).
+pub fn discard_recovery() -> bool {
+    discard_recovery_in(&projects_dir())
+}
+
 /// New project: install the starter project
 /// (`Project::new_demo`, model.rs:725) with the standard
 /// session reset. The undo stack is left alone, as
@@ -2043,6 +2068,29 @@ fn recover_banner_pressed(s: &mut State) {
     dispatch_recover(&mut s.core);
     s.stroke_selected = None;
     s.home_panel.recovery_offer = false;
+}
+
+/// The recovery banner's Discard press (Wave P, P42):
+/// delete the snapshot through [`discard_recovery`] and
+/// clear the offer. The session itself is untouched —
+/// discarding declines the *snapshot*, never the work on
+/// screen — so no ConfirmAction arm gates it (arming
+/// exists to protect the session; a new arm variant
+/// would be an integrator action in main.rs). Like every
+/// press in this panel it stands down an arm left by
+/// another button. The offer is cleared only when the
+/// file is verified gone; on failure the banner stays
+/// and the status says so, rather than claiming a
+/// discard the disk disagrees with.
+fn discard_recovery_pressed(s: &mut State) {
+    s.confirm_action = None;
+    if discard_recovery() {
+        s.home_panel.recovery_offer = false;
+        *s.home_panel.offer_mark.borrow_mut() = None;
+        s.core.status = "Recovery snapshot discarded.".into();
+    } else {
+        s.core.status = "Could not discard the recovery snapshot — it is still on disk.".into();
+    }
 }
 
 /// Flip the panel open/closed (the "Home" toggle's
@@ -2189,7 +2237,11 @@ fn initial_state_for(decision: StartupRecovery) -> HomePanelState {
 /// (UI mission Wave 4, audit S06-3): `armed` swaps the
 /// button for its danger re-render under the same key,
 /// and the confirming press is [`recover_banner_pressed`]
-/// again.
+/// again. Discard (Wave P, P42) deletes the snapshot
+/// file itself ([`discard_recovery_pressed`]) — before
+/// it landed, the offer could only be cleared in memory
+/// by recovering, and the file (still newer) re-offered
+/// itself at the next startup.
 fn recovery_banner(s: &State, t: &Theme) -> El {
     let accent = tok::accent(0, true);
     let armed = s.confirm_action == Some(ConfirmAction::RecoverSnapshot);
@@ -2214,6 +2266,13 @@ fn recovery_banner(s: &State, t: &Theme) -> El {
                 // Prose wraps (the kit's treatment).
                 .wrap(),
         )
+        .child(btn(
+            "home-recovery-discard",
+            "Discard",
+            false,
+            t,
+            discard_recovery_pressed,
+        ))
         .child(if armed {
             danger_btn("recover", "Discard changes?", t, recover_banner_pressed)
         } else {
@@ -2324,7 +2383,7 @@ fn project_row_marked(
             return design::list_row(&format!("home-row-{i}"), selected, t)
                 .w_full()
                 .child(
-                    text_input(edit, type_::BODY.lh(26.0))
+                    design::text_field(edit, type_::BODY.lh(26.0), edit.focused, t)
                         .key("home-proj-rename-field")
                         .single_line()
                         .grow(1.0)
@@ -2613,7 +2672,7 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
             .center_y()
             .child(icon_el("magnifying-glass", 12.0, t.text_secondary))
             .child(
-                text_input(&home.search, type_::BODY.lh(26.0))
+                design::text_field(&home.search, type_::BODY.lh(26.0), home.search.focused, t)
                     .key("home-search")
                     .single_line()
                     .grow(1.0)
@@ -3855,6 +3914,69 @@ mod tests {
         set_mtime(&saved, t2);
         assert_eq!(startup_recovery_in(&dir), StartupRecovery::None);
         assert_eq!(startup_status_in(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discard_recovery_deletes_the_snapshot_and_ends_the_offer() {
+        // Wave P (P42): the Discard wiring's testable core.
+        // A live offer, discarded: the file is gone, the
+        // startup verdict flips to None, and a second
+        // discard is still a success (already gone is the
+        // state the user asked for).
+        let dir = temp_dir("discard-recovery");
+        shell::write_recovery_in(&dir, &Project::new_demo()).unwrap();
+        assert_eq!(startup_recovery_in(&dir), StartupRecovery::Offer);
+        assert!(discard_recovery_in(&dir), "the delete reports success");
+        assert!(!dir.join(shell::RECOVERY_FILE).exists(), "snapshot file gone");
+        assert!(shell::read_recovery_in(&dir).is_none());
+        assert!(!shell::recovery_is_newer_than_last_project_in(&dir));
+        assert_eq!(startup_recovery_in(&dir), StartupRecovery::None);
+        assert!(discard_recovery_in(&dir), "discarding nothing still succeeds");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clean_save_refresh_offers_a_content_identical_snapshot() {
+        // Wave P (P42) — the spurious offer, pinned as the
+        // tree's current truth (reported for the user's
+        // decision, NOT fixed here): the GUI save path
+        // (`save_named_pressed`, project_tools.rs) writes
+        // the named save and THEN refreshes the recovery
+        // snapshot with the same project, so the snapshot
+        // is strictly newer than the save while holding
+        // byte-identical content — and the mtime-only
+        // offer condition offers it at the next startup.
+        let dir = temp_dir("spurious-offer");
+        let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let t1 = t0 + std::time::Duration::from_secs(60);
+        let mut project = Project::new_demo();
+        project.name = "Spur Check".into();
+        // The named save, holding exactly the bytes the
+        // snapshot will hold.
+        let snapshot = shell::write_recovery_in(&dir, &project).unwrap();
+        let bytes = std::fs::read(&snapshot).unwrap();
+        let saved = dir.join("spur-check.json");
+        std::fs::write(&saved, &bytes).unwrap();
+        shell::touch_recent_in(&dir, "Spur Check");
+        // The save path's write order, as mtimes: save
+        // first, snapshot refresh second.
+        set_mtime(&saved, t0);
+        set_mtime(&snapshot, t1);
+        assert_eq!(
+            std::fs::read(&saved).unwrap(),
+            std::fs::read(&snapshot).unwrap(),
+            "the two files are byte-identical"
+        );
+        assert!(
+            shell::recovery_is_newer_than_last_project_in(&dir),
+            "identical content still reads as newer work"
+        );
+        assert_eq!(startup_recovery_in(&dir), StartupRecovery::Offer);
+        // The user's way out, now that Discard exists:
+        // discarding the snapshot ends the spurious offer.
+        assert!(discard_recovery_in(&dir));
+        assert_eq!(startup_recovery_in(&dir), StartupRecovery::None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
