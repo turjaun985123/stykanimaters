@@ -3557,6 +3557,44 @@ mod range_mux_tests {
         path.to_string_lossy().into_owned()
     }
 
+    /// Write a REAL WAV of `secs` seconds at `rate` Hz
+    /// carrying a 440 Hz tone and return its path. The WebM
+    /// range pins (Wave W, W6) call this helper; it was
+    /// referenced but never defined, which the Wave W CI
+    /// round-1 build caught as E0425 in the lib test target
+    /// (the headless workflow, which builds no test targets,
+    /// stayed green). A tone rather than silence keeps the
+    /// fixture honest as audible content; the mux path the
+    /// pins exercise is identical either way.
+    fn temp_tone_wav(tag: &str, secs: f32, rate: u32) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "styk-range-tone-{tag}-{}.wav",
+            std::process::id()
+        ));
+        let n = (secs * rate as f32).round() as usize;
+        let samples = (0..n)
+            .map(|i| {
+                (2.0 * std::f32::consts::PI * 440.0 * i as f32 / rate as f32).sin() * 0.5
+            })
+            .collect();
+        let data = crate::audio_edit::WavData {
+            sample_rate: rate,
+            channels: 1,
+            samples,
+        };
+        std::fs::write(&path, crate::audio_edit::write_wav(&data)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// True when the EBML bytes carry an Opus audio track:
+    /// the `A_OPUS` CodecID appears verbatim in the WebM
+    /// Tracks element. Companion to `temp_tone_wav` — also
+    /// referenced by W6's pins but never defined (E0425,
+    /// Wave W CI round 1).
+    fn webm_has_opus(bytes: &[u8]) -> bool {
+        bytes.windows(6).any(|w| w == b"A_OPUS")
+    }
+
     /// A demo project at 10 fps carrying exactly the given
     /// `(path, start_frame, gain)` audio clips.
     fn project_with(clips: Vec<(&str, usize, f32)>) -> Project {
