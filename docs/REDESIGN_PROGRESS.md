@@ -11306,3 +11306,25 @@ briefs still own — chain-
 spanning media (4) is now the
 largest of those, fully designed
 and priced.
+
+**Wave Z CLOSED GREEN in CI round 4** (integration HEAD
+`232f439`; build 42803905598 — 4,295 tests, 0 failed;
+headless 42803945367 SUCCESS, transcripts verified:
+SUBTITLE CENSUS PASS, HOME THUMBNAIL PROBE PASS, MCP
+PROBE PASS, both Home markers present; artifact 38 dumps
+with `tree-states-populated.json` among them, overflow
+scan CLEAN — the fourth consecutive CLEAN dispatch, the
+new state row inside its card). Rounds 1–3 failed only in
+compile/test targets: r1 E0004 (the single-format worker's
+match missed Z8's bundle kinds — the arms return a
+dispatch error; bundle jobs run through their own
+worker), r2 two test-module import gaps (graph types in
+media's tests, GenericImageView in mcp_io's), r3 two
+pre-existing media-shape pins that predate the stored
+opacity field (updated to the IA-Z5-2 shape, `"opacity":
+1.0`). No product behaviour changed in any fix round.
+Settled counts at the close: MCP 392, i18n 694 ×28 (693
++ IA-Z8-1's key), element keys ≥ 1017 (floor), palette
+135, scenes 35, SCAN_SET 19 required / 0 pending. Wave AA
+(the panel catches up with the engine) was boarded
+before this close and launches on this HEAD.
