@@ -839,7 +839,27 @@ def entry_field(chunk: str) -> str | None:
 # (Z8) rides outside this counter as a tuple-carried key
 # (F6's artefact, above). Floor raised 1017 -> 1019 so
 # Wave AA starts from the integrated truth.
-KEY_TOTAL_FLOOR = 1019
+# Wave AC ratchet (AC12's recount, 2026-11-10): on the
+# clean Wave AB closing HEAD (fd5aef2, detached git
+# worktree) this counter reads 1019 total (889 static +
+# 130 dynamic, 61 files) — the AB closing truth, the
+# 1019 floor already exact. On the Wave AC tree this
+# counter reads 1020 (890 static + 130 dynamic, 61
+# files): the wave's only counted growth is AC5's
+# seg-media-from-clip literal (inspector_segment.rs),
+# zero lost proven by the two-tree inventory diff
+# (fd5aef2 vs the AC tree, per file). AC1's two new
+# keys (keyframe-follow / key-follow, the
+# FOLLOW_ROW_KEY / FOLLOW_BUTTON_KEY constants in
+# keyframe_tools.rs) are const-carried and ride
+# outside this counter, joining the four const-carried
+# keys the baseline already carries outside it
+# (keyframe-no-joint-note, keyframe-actions,
+# key-delete, panel-3d-preview) and the tuple-carried
+# xc-progress-bundle (F6's artefact, above). Floor
+# raised 1019 -> 1020 so Wave AC closes from the
+# integrated truth.
+KEY_TOTAL_FLOOR = 1020
 
 
 def inventory_counts() -> tuple[int, int, int, int]:

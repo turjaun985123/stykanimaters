@@ -10,7 +10,7 @@
 //! The language set mirrors the original app's locale packs
 //! (`src/locales/packs/` in StykAnimate-App: 27 packs) plus Bengali,
 //! which the port added for its user — 28 languages in total.
-//! Every table carries exactly the same 695 keys.
+//! Every table carries exactly the same 697 keys.
 //!
 //! Translation approach: established animation terms are used where
 //! a language has them (French "pelure d'oignon", Polish "skórka
@@ -929,6 +929,8 @@ static EN: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite rotation"),
     ("segment_media_opacity", "Sprite opacity"),
     ("segment_media_flip", "Flip sprite"),
+    ("segment_media_from_clip", "Media from clip: {name}"),
+    ("segment_media_flipped", "Flipped"),
     ("segment_media_reset_transform", "Reset transform"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "frames {first}–{last}"),
@@ -1671,6 +1673,8 @@ static BN: &[(&str, &str)] = &[
     ("segment_media_rotate", "স্প্রাইট ঘূর্ণন"),
     ("segment_media_opacity", "স্প্রাইটের অস্বচ্ছতা"),
     ("segment_media_flip", "স্প্রাইট উল্টান"),
+    ("segment_media_from_clip", "ক্লিপ থেকে মিডিয়া: {name}"),
+    ("segment_media_flipped", "উল্টানো"),
     ("segment_media_reset_transform", "রূপান্তর রিসেট করুন"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "ফ্রেম {first}–{last}"),
@@ -2413,6 +2417,8 @@ static ES: &[(&str, &str)] = &[
     ("segment_media_rotate", "Rotación del sprite"),
     ("segment_media_opacity", "Opacidad del sprite"),
     ("segment_media_flip", "Voltear sprite"),
+    ("segment_media_from_clip", "Medios del clip: {name}"),
+    ("segment_media_flipped", "Volteado"),
     ("segment_media_reset_transform", "Restablecer transformación"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "fotogramas {first}–{last}"),
@@ -3155,6 +3161,8 @@ static AR: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite rotation"),
     ("segment_media_opacity", "عتامة السبرايت"),
     ("segment_media_flip", "Flip sprite"),
+    ("segment_media_from_clip", "الوسائط من المقطع: {name}"),
+    ("segment_media_flipped", "مقلوب"),
     ("segment_media_reset_transform", "Reset transform"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "frames {first}–{last}"),
@@ -3897,6 +3905,8 @@ static CS: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite rotation"),
     ("segment_media_opacity", "Krytí spritu"),
     ("segment_media_flip", "Flip sprite"),
+    ("segment_media_from_clip", "Média z klipu: {name}"),
+    ("segment_media_flipped", "Převráceno"),
     ("segment_media_reset_transform", "Reset transform"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "frames {first}–{last}"),
@@ -4639,6 +4649,8 @@ static DA: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite rotation"),
     ("segment_media_opacity", "Spritens opacitet"),
     ("segment_media_flip", "Flip sprite"),
+    ("segment_media_from_clip", "Medie fra klip: {name}"),
+    ("segment_media_flipped", "Vend"),
     ("segment_media_reset_transform", "Reset transform"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "frames {first}–{last}"),
@@ -5381,6 +5393,8 @@ static DE: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite-Drehung"),
     ("segment_media_opacity", "Sprite-Deckkraft"),
     ("segment_media_flip", "Sprite spiegeln"),
+    ("segment_media_from_clip", "Medien aus Clip: {name}"),
+    ("segment_media_flipped", "Gespiegelt"),
     ("segment_media_reset_transform", "Transformation zurücksetzen"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "Frames {first}–{last}"),
@@ -6123,6 +6137,8 @@ static EL: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite rotation"),
     ("segment_media_opacity", "Αδιαφάνεια του sprite"),
     ("segment_media_flip", "Flip sprite"),
+    ("segment_media_from_clip", "Πολυμέσα από κλιπ: {name}"),
+    ("segment_media_flipped", "Αναστραμμένο"),
     ("segment_media_reset_transform", "Reset transform"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "frames {first}–{last}"),
@@ -6865,6 +6881,8 @@ static ES419: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite rotation"),
     ("segment_media_opacity", "Opacidad del sprite"),
     ("segment_media_flip", "Flip sprite"),
+    ("segment_media_from_clip", "Medios del clip: {name}"),
+    ("segment_media_flipped", "Volteado"),
     ("segment_media_reset_transform", "Reset transform"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "frames {first}–{last}"),
@@ -7607,6 +7625,8 @@ static FI: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite rotation"),
     ("segment_media_opacity", "Spriten peittävyys"),
     ("segment_media_flip", "Flip sprite"),
+    ("segment_media_from_clip", "Media leikkeestä: {name}"),
+    ("segment_media_flipped", "Käännetty"),
     ("segment_media_reset_transform", "Reset transform"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "frames {first}–{last}"),
@@ -8349,6 +8369,8 @@ static FR: &[(&str, &str)] = &[
     ("segment_media_rotate", "Rotation du sprite"),
     ("segment_media_opacity", "Opacité du sprite"),
     ("segment_media_flip", "Retourner le sprite"),
+    ("segment_media_from_clip", "Média du clip : {name}"),
+    ("segment_media_flipped", "Retourné"),
     ("segment_media_reset_transform", "Réinitialiser la transformation"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "images {first}–{last}"),
@@ -9091,6 +9113,8 @@ static HE: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite rotation"),
     ("segment_media_opacity", "אטימות הספרייט"),
     ("segment_media_flip", "Flip sprite"),
+    ("segment_media_from_clip", "מדיה מהקליפ: {name}"),
+    ("segment_media_flipped", "הפוך"),
     ("segment_media_reset_transform", "Reset transform"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "frames {first}–{last}"),
@@ -9833,6 +9857,8 @@ static HR: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite rotation"),
     ("segment_media_opacity", "Neprozirnost spritea"),
     ("segment_media_flip", "Flip sprite"),
+    ("segment_media_from_clip", "Mediji iz isječka: {name}"),
+    ("segment_media_flipped", "Preokrenuto"),
     ("segment_media_reset_transform", "Reset transform"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "frames {first}–{last}"),
@@ -10575,6 +10601,8 @@ static HU: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite rotation"),
     ("segment_media_opacity", "Sprite fedettsége"),
     ("segment_media_flip", "Flip sprite"),
+    ("segment_media_from_clip", "Média a klipből: {name}"),
+    ("segment_media_flipped", "Tükrözve"),
     ("segment_media_reset_transform", "Reset transform"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "frames {first}–{last}"),
@@ -11317,6 +11345,8 @@ static ID: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite rotation"),
     ("segment_media_opacity", "Opasitas sprite"),
     ("segment_media_flip", "Flip sprite"),
+    ("segment_media_from_clip", "Media dari klip: {name}"),
+    ("segment_media_flipped", "Dibalik"),
     ("segment_media_reset_transform", "Reset transform"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "frames {first}–{last}"),
@@ -12059,6 +12089,8 @@ static IT: &[(&str, &str)] = &[
     ("segment_media_rotate", "Rotazione dello sprite"),
     ("segment_media_opacity", "Opacità dello sprite"),
     ("segment_media_flip", "Capovolgi sprite"),
+    ("segment_media_from_clip", "Media dalla clip: {name}"),
+    ("segment_media_flipped", "Capovolto"),
     ("segment_media_reset_transform", "Reimposta trasformazione"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "fotogrammi {first}–{last}"),
@@ -12801,6 +12833,8 @@ static KK: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite rotation"),
     ("segment_media_opacity", "Спрайттың мөлдірсіздігі"),
     ("segment_media_flip", "Flip sprite"),
+    ("segment_media_from_clip", "Клиптен алынған медиа: {name}"),
+    ("segment_media_flipped", "Аударылған"),
     ("segment_media_reset_transform", "Reset transform"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "frames {first}–{last}"),
@@ -13543,6 +13577,8 @@ static NB: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite rotation"),
     ("segment_media_opacity", "Sprite-dekkevne"),
     ("segment_media_flip", "Flip sprite"),
+    ("segment_media_from_clip", "Media fra klipp: {name}"),
+    ("segment_media_flipped", "Vend"),
     ("segment_media_reset_transform", "Reset transform"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "frames {first}–{last}"),
@@ -14285,6 +14321,8 @@ static NL: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite rotation"),
     ("segment_media_opacity", "Sprite-dekking"),
     ("segment_media_flip", "Flip sprite"),
+    ("segment_media_from_clip", "Media uit clip: {name}"),
+    ("segment_media_flipped", "Omgedraaid"),
     ("segment_media_reset_transform", "Reset transform"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "frames {first}–{last}"),
@@ -15027,6 +15065,8 @@ static PL: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite rotation"),
     ("segment_media_opacity", "Krycie sprite'a"),
     ("segment_media_flip", "Flip sprite"),
+    ("segment_media_from_clip", "Multimedia z klipu: {name}"),
+    ("segment_media_flipped", "Odbite"),
     ("segment_media_reset_transform", "Reset transform"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "frames {first}–{last}"),
@@ -15769,6 +15809,8 @@ static PT_BR: &[(&str, &str)] = &[
     ("segment_media_rotate", "Rotação do sprite"),
     ("segment_media_opacity", "Opacidade do sprite"),
     ("segment_media_flip", "Inverter sprite"),
+    ("segment_media_from_clip", "Mídia do clipe: {name}"),
+    ("segment_media_flipped", "Invertido"),
     ("segment_media_reset_transform", "Redefinir transformação"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "quadros {first}–{last}"),
@@ -16511,6 +16553,8 @@ static RO: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite rotation"),
     ("segment_media_opacity", "Opacitatea sprite-ului"),
     ("segment_media_flip", "Flip sprite"),
+    ("segment_media_from_clip", "Media din clip: {name}"),
+    ("segment_media_flipped", "Inversat"),
     ("segment_media_reset_transform", "Reset transform"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "frames {first}–{last}"),
@@ -17253,6 +17297,8 @@ static RU: &[(&str, &str)] = &[
     ("segment_media_rotate", "Поворот спрайта"),
     ("segment_media_opacity", "Непрозрачность спрайта"),
     ("segment_media_flip", "Отразить спрайт"),
+    ("segment_media_from_clip", "Медиа из клипа: {name}"),
+    ("segment_media_flipped", "Отражено"),
     ("segment_media_reset_transform", "Сбросить преобразование"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "кадры {first}–{last}"),
@@ -17995,6 +18041,8 @@ static SL: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite rotation"),
     ("segment_media_opacity", "Motnost sprita"),
     ("segment_media_flip", "Flip sprite"),
+    ("segment_media_from_clip", "Mediji iz posnetka: {name}"),
+    ("segment_media_flipped", "Obrnjeno"),
     ("segment_media_reset_transform", "Reset transform"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "frames {first}–{last}"),
@@ -18737,6 +18785,8 @@ static TR: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite rotation"),
     ("segment_media_opacity", "Sprite opaklığı"),
     ("segment_media_flip", "Flip sprite"),
+    ("segment_media_from_clip", "Klipten medya: {name}"),
+    ("segment_media_flipped", "Çevrildi"),
     ("segment_media_reset_transform", "Reset transform"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "frames {first}–{last}"),
@@ -19479,6 +19529,8 @@ static UK: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite rotation"),
     ("segment_media_opacity", "Непрозорість спрайта"),
     ("segment_media_flip", "Flip sprite"),
+    ("segment_media_from_clip", "Медіа з кліпу: {name}"),
+    ("segment_media_flipped", "Віддзеркалено"),
     ("segment_media_reset_transform", "Reset transform"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "frames {first}–{last}"),
@@ -20221,6 +20273,8 @@ static VI: &[(&str, &str)] = &[
     ("segment_media_rotate", "Sprite rotation"),
     ("segment_media_opacity", "Độ mờ của sprite"),
     ("segment_media_flip", "Flip sprite"),
+    ("segment_media_from_clip", "Phương tiện từ clip: {name}"),
+    ("segment_media_flipped", "Đã lật"),
     ("segment_media_reset_transform", "Reset transform"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "frames {first}–{last}"),
@@ -20963,6 +21017,8 @@ static ZH_HANS: &[(&str, &str)] = &[
     ("segment_media_rotate", "精灵旋转"),
     ("segment_media_opacity", "精灵不透明度"),
     ("segment_media_flip", "翻转精灵"),
+    ("segment_media_from_clip", "来自片段的媒体：{name}"),
+    ("segment_media_flipped", "已翻转"),
     ("segment_media_reset_transform", "重置变换"),
     // FX clips readouts (Wave U, IA-U8-1)
     ("fx_window", "第 {first}–{last} 帧"),

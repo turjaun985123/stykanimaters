@@ -235,6 +235,31 @@
 //!   This is the media payload's own opacity — NOT
 //!   the export alpha toggle, which stays a standing
 //!   user decision, unbuilt.
+//! * Clip-def fallback media (Wave AC, AC5) — key
+//!   `seg-media-from-clip`. A movieclip instance whose
+//!   node carries no media renders the clip def's
+//!   media at that index (media.rs, Wave 14 C1), but
+//!   this section read only the node's own slot, so
+//!   such a segment announced "No media attached"
+//!   while a sprite drew on it, and the media's
+//!   values were visible nowhere in the panel.
+//!   `segment_state` now also resolves the fallback
+//!   with the funnel's own rule (`clip_media`):
+//!   while it is live the readout names the clip's
+//!   media, a provenance line names the clip it
+//!   comes from, and an Image payload's transform +
+//!   opacity appear as READ-ONLY readout rows (the
+//!   writable block's labels and formatters, no
+//!   presses). The writable surface is unchanged and
+//!   keeps its meaning: the picker, import, steppers
+//!   and Clear write the node's own slot — attaching
+//!   over a fallback is the funnel's documented
+//!   override (the instance's media wins), never a
+//!   silent edit of the clip's store, which is
+//!   edited through the MCP clip doors
+//!   (`clip_get_node_media` / `clip_asset_attach` /
+//!   `clip_clear_node_media`). The two new labels
+//!   ride IA-AC5-1.
 //! * + Segment → `add_segment()` (editor.rs:402) — key
 //!   `add-seg`.
 //! * Delete segment → `delete_segment()` (editor.rs:434) —
@@ -442,6 +467,38 @@ pub const MEDIA_ROTATE_STEP: f32 = 5.0;
 /// panel's and the sprite panel's `OPACITY_STEP`.
 pub const MEDIA_OPACITY_STEP: f32 = 0.05;
 
+/// Media the selected node renders through the
+/// movieclip fallback (Wave AC, AC5): the figure is
+/// a clip instance, its node's own media slot is
+/// empty, and the clip def's node at the same index
+/// carries media — the payload every surface renders
+/// (media.rs, Wave 14 C1). Carried so the Media
+/// section can present it READ-ONLY: the section's
+/// presses write the node's own slot, never the
+/// clip's store, so this state feeds text readouts
+/// only — no stepper, no button.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipMediaState {
+    /// The clip's name, fitted like the media
+    /// label's asset names — the provenance line's
+    /// `{name}`.
+    pub clip_name: String,
+    /// `media_label` over the clip node's media —
+    /// the same readout text the node's own media
+    /// would produce, so the readout names what
+    /// renders.
+    pub label: String,
+    /// The clip payload's local transform, when it
+    /// is `SegmentMedia::Image` — the values behind
+    /// the read-only transform rows. `None` for a
+    /// text label.
+    pub transform: Option<MediaTransformState>,
+    /// The clip payload's stored opacity, sanitised
+    /// by the funnel's rule — `Some` exactly when
+    /// `transform` is.
+    pub opacity: Option<f32>,
+}
+
 /// Derived view-state for the panel: everything the builder
 /// renders, computed once from the core so the builder stays
 /// a pure function of it (and so the readout math is unit
@@ -522,6 +579,13 @@ pub struct InspectorSegmentState {
     /// `media_transform` is (both read the sprite
     /// payload); `None` for a text label or no media.
     pub media_opacity: Option<f32>,
+    /// The clip-def fallback media this node renders
+    /// (Wave AC, AC5), resolved with the funnel's own
+    /// rule: `Some` only while the node's own media
+    /// slot is empty AND the figure's clip def carries
+    /// media at this node index. Read-only
+    /// presentation state — see `ClipMediaState`.
+    pub clip_media: Option<ClipMediaState>,
     /// Readout text for the Media section: the attached
     /// sprite's asset name, the text label's content, or
     /// "No media attached" (see `media_label`).
@@ -1669,6 +1733,56 @@ pub fn segment_state(core: &EditorCore) -> Option<InspectorSegmentState> {
         .copied()
         .unwrap_or(0.0)
         .to_degrees();
+    // Wave AC (AC5): the clip-def fallback, resolved
+    // with the funnel's own rule (media.rs, Wave 14
+    // C1): the node's own media wins; only an empty
+    // slot falls back to the same node index on the
+    // figure's clip def, via the same `get` chains —
+    // a stale clip index or an out-of-range clip node
+    // simply has no fallback. The presentation is
+    // derived here so the Media section shows the
+    // media every surface actually renders instead of
+    // "No media attached"; it stays read-only in the
+    // builder because the section's presses write the
+    // node's own slot (the clip def's media is edited
+    // through the MCP clip doors, `clip_*_node_media`).
+    let clip_media = match &node.media {
+        Some(_) => None,
+        None => fig.clip.and_then(|ci| {
+            let clip = core.project.clips.get(ci)?;
+            let clip_node = clip.def.nodes.get(ni)?;
+            let media = clip_node.media.as_ref()?;
+            Some(ClipMediaState {
+                clip_name: fit_segment_header_name(&clip.name),
+                label: media_label(
+                    core,
+                    &clip_node.media,
+                    &core.project.assets,
+                ),
+                transform: match media {
+                    SegmentMedia::Image {
+                        offset,
+                        scale,
+                        angle_offset,
+                        flip,
+                        ..
+                    } => Some(MediaTransformState {
+                        offset: *offset,
+                        scale: *scale,
+                        angle_offset: *angle_offset,
+                        flip: *flip,
+                    }),
+                    _ => None,
+                },
+                opacity: match media {
+                    SegmentMedia::Image { opacity, .. } => {
+                        Some(sanitise_media_opacity(*opacity))
+                    }
+                    _ => None,
+                },
+            })
+        }),
+    };
     Some(InspectorSegmentState {
         figure: fi,
         node: ni,
@@ -1708,6 +1822,7 @@ pub fn segment_state(core: &EditorCore) -> Option<InspectorSegmentState> {
             }
             _ => None,
         },
+        clip_media,
         media: node.media.clone(),
         asset_names: core
             .project
@@ -2328,11 +2443,36 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
             t,
         ))
         .child(
-            text(st.media_label.clone())
-                .key("seg-media-readout")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
+            text(match &st.clip_media {
+                // Wave AC (AC5): while the clip
+                // fallback is live, the readout names
+                // the media that actually renders —
+                // the provenance line below says whose
+                // it is.
+                Some(cm) => cm.label.clone(),
+                None => st.media_label.clone(),
+            })
+            .key("seg-media-readout")
+            .font(type_::LABEL)
+            .color(t.text_secondary),
         );
+    // Wave AC (AC5): the clip fallback's provenance
+    // line. The picker below writes the node's OWN
+    // slot (attaching over a fallback is the funnel's
+    // documented override — the instance's media
+    // wins); this line keeps that press from ever
+    // reading as an edit of the clip's store.
+    if let Some(cm) = &st.clip_media {
+        panel = panel.child(
+            text(
+                i18n_wire::tr(&s.core, "segment_media_from_clip")
+                    .replace("{name}", &cm.clip_name),
+            )
+            .key("seg-media-from-clip")
+            .font(type_::LABEL)
+            .color(t.text_secondary),
+        );
+    }
     if !st.asset_names.is_empty() {
         let mut picker = row().gap(6.0).w_full().flex_wrap();
         for (idx, name) in st
@@ -2526,6 +2666,54 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
             ));
         }
         panel = panel.child(flip_row);
+    }
+    // Wave AC (AC5): the clip fallback's values,
+    // read-only — the writable block's own labels and
+    // formatters as plain readout rows, with no press
+    // behind any of them, so nothing here can be
+    // mistaken for an edit of the clip's store. The
+    // block is mutually exclusive with the writable
+    // one above by construction (`clip_media` is
+    // `Some` only while the node's own slot is
+    // empty). The Flip row renders only while
+    // flipped — the Reset rule: a state at its
+    // default is not presented.
+    if let Some(cm) = &st.clip_media {
+        if let (Some(mt), Some(opacity)) = (cm.transform, cm.opacity) {
+            panel = panel
+                .child(readout_row(
+                    &i18n_wire::tr(&s.core, "segment_media_offset_x"),
+                    format_whole_number(mt.offset[0]),
+                    t,
+                ))
+                .child(readout_row(
+                    &i18n_wire::tr(&s.core, "segment_media_offset_y"),
+                    format_whole_number(mt.offset[1]),
+                    t,
+                ))
+                .child(readout_row(
+                    &i18n_wire::tr(&s.core, "segment_media_scale"),
+                    format_media_scale(mt.scale),
+                    t,
+                ))
+                .child(readout_row(
+                    &i18n_wire::tr(&s.core, "segment_media_rotate"),
+                    format_deg(mt.angle_offset),
+                    t,
+                ))
+                .child(readout_row(
+                    &i18n_wire::tr(&s.core, "segment_media_opacity"),
+                    format_media_opacity(opacity),
+                    t,
+                ));
+            if mt.flip {
+                panel = panel.child(prose_readout_row(
+                    &i18n_wire::tr(&s.core, "segment_media_flip"),
+                    i18n_wire::tr(&s.core, "segment_media_flipped"),
+                    t,
+                ));
+            }
+        }
     }
     // Import + Clear row: "Attach from import" is the
     // core's import-folder op (with an empty asset
@@ -3228,6 +3416,7 @@ mod tests {
             show_left: true,
             show_right: true,
             key_clipboard: None,
+            key_follow_graph: false,
             export_recap: String::new(),
             export_job: None,
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
@@ -3280,6 +3469,7 @@ playback_speed: 1.0,
             show_left: true,
             show_right: true,
             key_clipboard: None,
+            key_follow_graph: false,
             export_recap: String::new(),
             export_job: None,
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
@@ -3332,6 +3522,7 @@ playback_speed: 1.0,
             show_left: true,
             show_right: true,
             key_clipboard: None,
+            key_follow_graph: false,
             export_recap: String::new(),
             export_job: None,
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
@@ -4178,6 +4369,195 @@ playback_speed: 1.0,
         ] {
             assert_eq!(i18n_wire::tr(&core, key), english, "key {key}");
         }
+    }
+
+    /// A core whose selected figure is a movieclip
+    /// instance (Wave AC, AC5): node 1's own media
+    /// slot is empty and the clip def's node 1
+    /// carries the first asset as a sprite with a
+    /// non-identity transform — the fallback case.
+    /// The clip's single frame is the demo pose, so
+    /// the funnel evaluates the demo geometry (the
+    /// media.rs `clip_project` pattern).
+    fn core_with_clip_fallback() -> EditorCore {
+        let mut core = core_with_assets(Some(1), &["hero.png"]);
+        let fi = core.selected_figure;
+        let mut def = core.project.figures[fi].def.clone();
+        def.nodes[1].media = Some(SegmentMedia::Image {
+            asset: 0,
+            offset: [4.0, -2.0],
+            scale: 1.5,
+            angle_offset: 10.0,
+            flip: true,
+            opacity: 0.5,
+        });
+        let pose = core.project.frames[0].poses[fi].clone();
+        core.project.clips.push(stykanimate_rs::model::ClipDef {
+            name: "Leap".into(),
+            def,
+            frames: vec![pose],
+            loop_mode: stykanimate_rs::model::ClipLoop::Loop,
+        });
+        core.project.figures[fi].clip = Some(0);
+        core
+    }
+
+    fn set_clip_media_opacity(core: &mut EditorCore, opacity: f32) {
+        match &mut core.project.clips[0].def.nodes[1].media {
+            Some(SegmentMedia::Image { opacity: slot, .. }) => {
+                *slot = opacity
+            }
+            other => panic!("expected clip image media, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clip_fallback_media_is_presented_read_only_in_state() {
+        // Wave AC (AC5): the state carries the
+        // fallback the funnel renders — label,
+        // transform and opacity from the CLIP def's
+        // node — while every instance-store field
+        // stays empty, so the writable surface's
+        // state (and the presses behind it) still
+        // speaks only about the node's own slot.
+        let core = core_with_clip_fallback();
+        let st = segment_state(&core).expect("node 1 is selected");
+        let cm = st.clip_media.expect("the fallback is live");
+        assert_eq!(cm.clip_name, "Leap");
+        assert_eq!(cm.label, "Sprite: hero.png");
+        assert_eq!(
+            cm.transform,
+            Some(MediaTransformState {
+                offset: [4.0, -2.0],
+                scale: 1.5,
+                angle_offset: 10.0,
+                flip: true,
+            })
+        );
+        assert_eq!(cm.opacity, Some(0.5));
+        assert_eq!(st.media, None);
+        assert_eq!(st.media_label, "No media attached");
+        assert_eq!(st.attached_asset, None);
+        assert_eq!(st.media_transform, None);
+        assert_eq!(st.media_opacity, None);
+    }
+
+    #[test]
+    fn clip_fallback_yields_to_the_nodes_own_media() {
+        // The funnel's precedence, mirrored: the
+        // moment the node's own slot carries media,
+        // the fallback presentation disappears and
+        // the writable surface takes over.
+        let mut core = core_with_clip_fallback();
+        let fi = core.selected_figure;
+        core.project.figures[fi].def.nodes[1].media =
+            Some(SegmentMedia::Image {
+                asset: 0,
+                offset: [0.0, 0.0],
+                scale: 1.0,
+                angle_offset: 0.0,
+                flip: false,
+                opacity: 1.0,
+            });
+        let st = segment_state(&core).expect("node 1 is selected");
+        assert_eq!(st.clip_media, None);
+        assert!(st.media_transform.is_some());
+        assert_eq!(st.media_label, "Sprite: hero.png");
+    }
+
+    #[test]
+    fn clip_fallback_needs_the_whole_clip_chain() {
+        // No clip at all: the plain demo figure.
+        let core = core_with_assets(Some(1), &["hero.png"]);
+        assert_eq!(segment_state(&core).unwrap().clip_media, None);
+        // A stale clip index has no fallback (the
+        // funnel's `get` chain, never an index).
+        let mut core = core_with_clip_fallback();
+        core.project.figures[core.selected_figure].clip = Some(9);
+        assert_eq!(segment_state(&core).unwrap().clip_media, None);
+        // A clip node carrying no media supplies none.
+        let mut core = core_with_clip_fallback();
+        core.project.clips[0].def.nodes[1].media = None;
+        assert_eq!(segment_state(&core).unwrap().clip_media, None);
+        // A clip def shorter than the instance def:
+        // the trailing node simply has no fallback.
+        let mut core = core_with_clip_fallback();
+        core.project.clips[0].def.nodes.truncate(1);
+        assert_eq!(segment_state(&core).unwrap().clip_media, None);
+    }
+
+    #[test]
+    fn clip_fallback_text_media_presents_label_without_values() {
+        // A text payload falls back through the same
+        // funnel arm; its presentation is the label
+        // alone — text has no transform/opacity rows
+        // on ANY surface (its editing is the text
+        // tool's).
+        let mut core = core_with_clip_fallback();
+        core.project.clips[0].def.nodes[1].media =
+            Some(SegmentMedia::Text {
+                content: "Boo".into(),
+                size: 14.0,
+            });
+        let st = segment_state(&core).expect("node 1 is selected");
+        let cm = st.clip_media.expect("the fallback is live");
+        assert_eq!(cm.label, "Text: Boo");
+        assert_eq!(cm.transform, None);
+        assert_eq!(cm.opacity, None);
+    }
+
+    #[test]
+    fn clip_fallback_opacity_matches_the_funnels_factor() {
+        // Wave AC (AC5): the cross-surface pin in
+        // AB10's shape, on the fallback carrier. On
+        // ONE project, the presented opacity is the
+        // media factor of the funnel's composed
+        // alpha — figure (instance) × style (the
+        // CLIP node, the carrier) × media — and a
+        // corrupt store sanitises identically on
+        // both surfaces.
+        let mut core = core_with_clip_fallback();
+        core.project.assets[0].png = funnel_png();
+        let fi = core.selected_figure;
+        core.project.figures[fi].opacity = 0.5;
+        core.project.clips[0].def.nodes[1].style.opacity = 0.5;
+        let st = segment_state(&core).expect("node 1 is selected");
+        let cm = st.clip_media.expect("the fallback is live");
+        assert_eq!(cm.opacity, Some(0.5));
+        assert_eq!(
+            format_media_opacity(cm.opacity.expect("an opacity")),
+            "50%"
+        );
+        assert_eq!(funnel_alpha(&core), 0.125, "figure × clip style × media");
+        // Corrupt store: NaN reads as 1.0 on the
+        // panel and in the funnel alike.
+        let mut core = core_with_clip_fallback();
+        core.project.assets[0].png = funnel_png();
+        set_clip_media_opacity(&mut core, f32::NAN);
+        let st = segment_state(&core).expect("node 1 is selected");
+        assert_eq!(
+            st.clip_media.expect("the fallback is live").opacity,
+            Some(1.0)
+        );
+        assert_eq!(funnel_alpha(&core), 1.0, "the funnel reads NaN as 1 too");
+    }
+
+    #[test]
+    fn clip_media_labels_resolve_through_the_catalogue() {
+        // IA-AC5-1-dependent, in the IA-Y4-1 pattern:
+        // these two keys enter the catalogue through
+        // the integrator; until the insertion lands
+        // `tr` returns the key itself and this pin
+        // fails BY DESIGN — it passes on insertion,
+        // proving the panel's provenance and flipped
+        // labels are the catalogue's strings.
+        let core = EditorCore::new();
+        assert_eq!(
+            i18n_wire::tr(&core, "segment_media_from_clip")
+                .replace("{name}", "Leap"),
+            "Media from clip: Leap"
+        );
+        assert_eq!(i18n_wire::tr(&core, "segment_media_flipped"), "Flipped");
     }
 
     #[test]

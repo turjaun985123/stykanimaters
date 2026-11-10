@@ -70,8 +70,10 @@
 //!   clipboard anywhere in the engine; Phase E added the
 //!   engine helpers, and this section supplies the shell
 //!   clipboard (`State::key_clipboard`, an
-//!   `Option<Vec<Key>>` owned by the shell — the core's own
-//!   clipboard holds whole frames, not keys). Copy stores the
+//!   `Option<KeyClipboard>` owned by the shell — the
+//!   core's own clipboard holds whole frames, not keys;
+//!   the tag is Wave AC's, see the follow-mode bullet
+//!   below). Copy stores the
 //!   selected angle channel's keys; Paste inserts them at
 //!   the current frame into the channel the panel targets
 //!   at paste time — `paste_keys` rebases the group so its
@@ -134,6 +136,29 @@
 //!   the target frame and leaves the source in place: the
 //!   "hold this pose for 10 frames" move.
 //!
+//! * Follow-the-graph mode (Wave AC, AC1) → the same
+//!   single-target cluster under a second resolution:
+//!   with the section's "Follow graph channel" toggle
+//!   on, every op above resolves through the graph
+//!   panel's `effective_channel_index` — the DRAWN
+//!   channel, whichever target it carries, duplicates
+//!   included — through the `*_follow` twin beside each
+//!   op. The primary button becomes the generic key op
+//!   [`key_here_follow`] (the core's `key_graph_angle`
+//!   is angle-only by construction) under a dynamic
+//!   "Key {target} here" label, and the target line and
+//!   indicator name and read the drawn channel. The
+//!   clipboard is tagged with its source channel
+//!   ([`KeyClipboard`]): a paste whose target KIND
+//!   differs from the copied channel's is refused,
+//!   naming both targets, because key values are
+//!   unit-typed by kind (degrees / radians / stage
+//!   units) — a silent cross-kind paste would be a
+//!   silent corruption. The wide ops (Auto tangents,
+//!   the tangent presets, Key all here) are untouched
+//!   by the mode: their write sets were already wider
+//!   than either resolution and already labelled.
+//!
 //! The keyed-frame indicator is a read-only graph query over
 //! `core.project.channels` — the same channel
 //! `key_graph_angle` authors.
@@ -187,6 +212,27 @@
 //! (2)); this note is the standing record it pointed
 //! at, and the scope changes only by a board call,
 //! never as an audit side effect.
+//!
+//! Wave AC (AC1) is that board call. The board adopted
+//! the drawn-target design priced in Wave AB's AB5
+//! findings (Variant D) with its recommended defaults:
+//! the follow toggle (default OFF, session-only — the
+//! new `State::key_follow_graph` field beside the
+//! clipboard) makes the single-target ops resolve
+//! through the graph panel's `effective_channel_index`
+//! instead of `(selected_figure, Angle(selected_node))`.
+//! The charter above still governs the default state:
+//! with the toggle off, every op resolves exactly as
+//! this note describes and the AA4 pin proves it
+//! unchanged. With it on, a scope label and the target
+//! line name the drawn channel before any press, the
+//! key-value rule and the origin authoring refusals
+//! are inherited exactly (AB5 Q4/Q8), the clipboard
+//! carries its source tag (Q6), and the wide ops keep
+//! the write sets recorded here (Q9). The section
+//! holds no second selection state — it consumes the
+//! graph panel's pick — so the two co-visible sections
+//! can never disagree about which channel is live.
 //!
 //! Phase H (section 18/40) puts Font Awesome glyphs on four
 //! of this section's controls through `icon_btn`: "Key all
@@ -446,13 +492,16 @@
 //!   SECTION face). Clean.
 
 use rune::tok::{type_, Theme};
-use rune::{row, text, El};
+use rune::{col, row, text, El};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::graph::{Channel, ChannelTarget, Interp, Key, TangentPreset};
 use stykanimate_rs::graph_keys;
 
 use crate::chrome_view::{btn, btn_inert};
 use crate::rune_sec::design;
+use crate::rune_sec::graph_panel::{
+    channel_label, effective_channel_index, effective_target, GraphPanelState,
+};
 use crate::rune_sec::icon_btn::{
     danger_icon_btn, icon_btn, icon_btn_inert, icon_only_btn, icon_only_btn_inert,
 };
@@ -481,6 +530,121 @@ pub fn selected_angle_channel(core: &EditorCore) -> Option<&Channel> {
 pub fn selected_angle_channel_index(core: &EditorCore) -> Option<usize> {
     let ni = core.selected_node?;
     graph_keys::channel_index_of(core, core.selected_figure, ChannelTarget::Angle(ni))
+}
+
+/// The shell key clipboard's contents (Wave AC, AC1):
+/// one channel's copied keys PLUS the channel they were
+/// copied from — its figure and target — recorded at
+/// copy time. The Phase E clipboard was a bare
+/// `Vec<Key>` and paste resolved only its destination;
+/// once this section can follow the graph panel's drawn
+/// channel, a cross-TARGET paste becomes reachable, and
+/// key values are bare `f32`s whose units differ by
+/// target kind (degrees / radians / stage units):
+/// pasting bend keys into an angle channel would be
+/// mechanically valid and semantically wrong. The tag
+/// is what the follow-mode paste refuses on (see
+/// [`paste_keys_here_follow`]). The figure is recorded
+/// for the refusal's wording; the refusal itself keys
+/// on the target KIND ([`same_target_kind`]) — a paste
+/// onto the same kind on another joint stays the
+/// accepted looseness it has always been (the joint may
+/// change between copy and paste, as it could before
+/// the tag existed). Session-only shell state, like the
+/// clipboard has always been: no persistence, no format
+/// impact.
+#[derive(Clone, Debug)]
+pub struct KeyClipboard {
+    /// Figure the keys were copied from (0-based).
+    pub figure: usize,
+    /// Channel target the keys were copied from.
+    pub target: ChannelTarget,
+    /// The copied keys themselves.
+    pub keys: Vec<Key>,
+}
+
+/// Whether two channel targets share a target KIND —
+/// Angle with Angle, Length with Length, Bend with
+/// Bend, Root X with Root X, Root Y with Root Y — the
+/// node index erased. This is the clipboard's paste
+/// rule (Wave AC, AC1, on AB5's §5.2 ruling): key
+/// values are unit-typed by kind (degrees for Angle,
+/// radians for Bend, stage units for Length and the
+/// roots), so a paste is unit-safe exactly when the
+/// kinds match; the joint a kind names is part of the
+/// accepted looseness (copy from joint 1, paste onto
+/// joint 2's angle channel — degrees to degrees). Root
+/// X and Root Y are distinct kinds: both carry stage
+/// units, but an X-motion group is not a Y-motion
+/// group.
+pub fn same_target_kind(a: ChannelTarget, b: ChannelTarget) -> bool {
+    use ChannelTarget::*;
+    matches!(
+        (a, b),
+        (Angle(_), Angle(_))
+            | (Length(_), Length(_))
+            | (Bend(_), Bend(_))
+            | (RootX, RootX)
+            | (RootY, RootY)
+    )
+}
+
+/// The channel this section acts on in follow mode: the
+/// graph panel's DRAWN channel, resolved through the
+/// panel's own `effective_channel_index` — the single
+/// resolution its builder, list, stats and drags share,
+/// so this section and the panel above it can never
+/// disagree about which channel is live. The resolution
+/// is index-exact: a picked duplicate row resolves to
+/// THAT twin, where the charter resolution
+/// ([`selected_angle_channel_index`]) is first-match.
+/// `None` when the selected figure has no channel for
+/// the effective target.
+pub fn follow_channel_index(core: &EditorCore, gp: &GraphPanelState) -> Option<usize> {
+    effective_channel_index(core, gp)
+}
+
+/// The drawn channel itself — the reference form of
+/// [`follow_channel_index`].
+pub fn follow_channel<'a>(core: &'a EditorCore, gp: &GraphPanelState) -> Option<&'a Channel> {
+    follow_channel_index(core, gp).map(|ci| &core.project.channels[ci])
+}
+
+/// Whether `target` is an ORIGIN target — the node-0
+/// form of a segment target (Bend / Angle / Length on
+/// node 0). Keying one authors a value into a slot
+/// nothing renders, refused by every door (Wave AA
+/// AA5's Bend(0) call, Wave AB AB4's Angle(0) /
+/// Length(0) call) with the family's exact sentences —
+/// see [`origin_key_refusal`]. Root targets have no
+/// origin form: the root is a real, rendered position.
+pub fn is_origin_target(target: ChannelTarget) -> bool {
+    matches!(
+        target,
+        ChannelTarget::Bend(0) | ChannelTarget::Angle(0) | ChannelTarget::Length(0)
+    )
+}
+
+/// The authoring-refusal sentence for an origin target,
+/// verbatim the sentence the owning door already uses:
+/// `key_bend` and MCP `graph_key` for Bend(0),
+/// `EditorCore::key_graph_angle` for Angle(0), MCP
+/// `graph_key` for Length(0). `None` for a non-origin
+/// target. The follow-mode key op ([`key_here_follow`])
+/// refuses with these BEFORE any snapshot, on an
+/// existing drawn origin channel too — keying one
+/// would re-open the dead-write hole AA5 closed. The
+/// refusal blocks authoring only: the non-authoring
+/// follow ops (delete, nudge, clear, fill, cycle,
+/// stamp) act on an existing origin channel freely,
+/// exactly as the graph panel's do.
+pub fn origin_key_refusal(target: ChannelTarget) -> Option<&'static str> {
+    match target {
+        ChannelTarget::Bend(0) => Some("The origin has no segment to bend."),
+        ChannelTarget::Angle(0) => Some("The origin has no angle to key."),
+        ChannelTarget::Length(0) => Some("The origin has no length to key."),
+        _ => None,
+    }
 }
 
 /// Whether `keys` holds a key at `frame` (the engine's own
@@ -702,6 +866,68 @@ pub fn indicator_text(core: &EditorCore) -> String {
     }
 }
 
+/// The follow-mode target line: "Figure 1 · Bend 3" —
+/// the figure and the DRAWN channel, named by the graph
+/// panel's own `channel_label`. With no channel drawn
+/// yet it names the effective target (the channel a Key
+/// press would create one on), so the line never claims
+/// a joint the section is not acting on: the charter
+/// line's "joint {ni}" framing is false for a drawn
+/// Root channel and for another joint's channel, the
+/// two cases follow mode exists for.
+pub fn target_text_follow(core: &EditorCore, gp: &GraphPanelState) -> String {
+    let target = follow_channel(core, gp)
+        .map(|ch| ch.target)
+        .unwrap_or_else(|| effective_target(core, gp.target));
+    format!("Figure {} · {}", core.selected_figure + 1, channel_label(target))
+}
+
+/// The follow-mode keyed-frame indicator: the charter
+/// indicator's sentences read over the DRAWN channel.
+/// (The word "channel" was already target-neutral; the
+/// honesty comes from [`target_text_follow`] naming
+/// that channel in the line above.) No joint need be
+/// selected — a drawn Root channel keys, deletes and
+/// nudges with no joint at all. With no channel drawn,
+/// the line names the effective target a Key press
+/// would create one on, mirroring the charter None
+/// branch's shape.
+pub fn indicator_text_follow(core: &EditorCore, gp: &GraphPanelState) -> String {
+    match follow_channel(core, gp) {
+        None => {
+            let target = effective_target(core, gp.target);
+            format!(
+                "No keys yet on {} · frame {}",
+                channel_label(target),
+                core.current + 1
+            )
+        }
+        Some(ch) => {
+            let n = ch.keys.len();
+            let noun = if n == 1 { "key" } else { "keys" };
+            if keyed_here(&ch.keys, core.current) {
+                format!("● Key at frame {} · {n} {noun} on channel", core.current + 1)
+            } else {
+                format!("○ No key at frame {} · {n} {noun} on channel", core.current + 1)
+            }
+        }
+    }
+}
+
+/// The follow-mode Key button's label: "Key {target}
+/// here", naming the channel a press would key — the
+/// drawn channel, or the effective target a press would
+/// create one on. Dynamic by the board's call (AB5 Q7):
+/// a fixed "Key channel here" would hide WHICH channel,
+/// and the charter's "Key angle here" would lie
+/// outright over a drawn Bend channel.
+pub fn key_button_label_follow(core: &EditorCore, gp: &GraphPanelState) -> String {
+    let target = follow_channel(core, gp)
+        .map(|ch| ch.target)
+        .unwrap_or_else(|| effective_target(core, gp.target));
+    format!("Key {} here", channel_label(target))
+}
+
 /// Delete the key at (nearest to) the current frame on the
 /// selected angle channel. Returns whether a key was removed.
 /// See the module docs for why this is composed from the
@@ -729,9 +955,15 @@ pub fn delete_key_here_core(core: &mut EditorCore) -> bool {
     removed
 }
 
-/// `State` wrapper for [`delete_key_here_core`].
+/// `State` wrapper for [`delete_key_here_core`],
+/// dispatching on the section's mode (follow →
+/// [`delete_key_here_follow`]).
 pub fn delete_key_here(s: &mut State) {
-    delete_key_here_core(&mut s.core);
+    if s.key_follow_graph {
+        delete_key_here_follow(&mut s.core, &s.graph_panel);
+    } else {
+        delete_key_here_core(&mut s.core);
+    }
 }
 
 /// Copy the selected angle channel's keys via
@@ -794,19 +1026,46 @@ pub fn paste_keys_here_core(core: &mut EditorCore, clipboard: Option<&[Key]>) ->
     graph_keys::paste_keys(core, ci, keys, core.current as f32)
 }
 
-/// `State` wrapper for [`copy_keys_here_core`]: stores the
-/// copied keys into the shell key clipboard.
+/// `State` wrapper for the copy op, dispatching on the
+/// section's mode: charter → [`copy_keys_here_core`],
+/// follow → [`copy_keys_here_follow`]. Either way the
+/// shell clipboard stores the keys TAGGED with the
+/// channel they came from ([`KeyClipboard`], Wave AC
+/// AC1) — the charter source is the selected joint's
+/// angle channel by construction (a successful copy
+/// proves the joint and channel both exist).
 pub fn copy_keys_here(s: &mut State) {
-    if let Some(keys) = copy_keys_here_core(&mut s.core) {
-        s.key_clipboard = Some(keys);
+    if s.key_follow_graph {
+        if let Some(clip) = copy_keys_here_follow(&mut s.core, &s.graph_panel) {
+            s.key_clipboard = Some(clip);
+        }
+    } else if let Some(keys) = copy_keys_here_core(&mut s.core) {
+        if let Some(ni) = s.core.selected_node {
+            s.key_clipboard = Some(KeyClipboard {
+                figure: s.core.selected_figure,
+                target: ChannelTarget::Angle(ni),
+                keys,
+            });
+        }
     }
 }
 
-/// `State` wrapper for [`paste_keys_here_core`]: pastes
-/// from the shell key clipboard (read-only — a clipboard
-/// can be pasted more than once).
+/// `State` wrapper for the paste op, dispatching on the
+/// section's mode: charter → [`paste_keys_here_core`]
+/// over the clipboard's keys (the pre-tag behaviour,
+/// byte-identical), follow →
+/// [`paste_keys_here_follow`], which reads the tag and
+/// refuses a cross-kind paste. Read-only either way —
+/// a clipboard can be pasted more than once.
 pub fn paste_keys_here(s: &mut State) {
-    paste_keys_here_core(&mut s.core, s.key_clipboard.as_deref());
+    if s.key_follow_graph {
+        paste_keys_here_follow(&mut s.core, &s.graph_panel, s.key_clipboard.as_ref());
+    } else {
+        paste_keys_here_core(
+            &mut s.core,
+            s.key_clipboard.as_ref().map(|c| c.keys.as_slice()),
+        );
+    }
 }
 
 /// What nudging the key at the playhead by `delta` frames
@@ -943,9 +1202,15 @@ pub fn nudge_key_here_core(core: &mut EditorCore, delta: i32) -> bool {
     }
 }
 
-/// `State` wrapper for [`nudge_key_here_core`].
+/// `State` wrapper for [`nudge_key_here_core`],
+/// dispatching on the section's mode (follow →
+/// [`nudge_key_here_follow`]).
 pub fn nudge_key_here(s: &mut State, delta: i32) {
-    nudge_key_here_core(&mut s.core, delta);
+    if s.key_follow_graph {
+        nudge_key_here_follow(&mut s.core, &s.graph_panel, delta);
+    } else {
+        nudge_key_here_core(&mut s.core, delta);
+    }
 }
 
 /// Remove every key from a bare channel, returning how
@@ -989,9 +1254,15 @@ pub fn clear_channel_keys_core(core: &mut EditorCore) -> usize {
     n
 }
 
-/// `State` wrapper for [`clear_channel_keys_core`].
+/// `State` wrapper for [`clear_channel_keys_core`],
+/// dispatching on the section's mode (follow →
+/// [`clear_channel_keys_follow`]).
 pub fn clear_channel_keys_here(s: &mut State) {
-    clear_channel_keys_core(&mut s.core);
+    if s.key_follow_graph {
+        clear_channel_keys_follow(&mut s.core, &s.graph_panel);
+    } else {
+        clear_channel_keys_core(&mut s.core);
+    }
 }
 
 /// Clear the selected angle channel's keys whose frames
@@ -1024,9 +1295,15 @@ pub fn clear_keys_in_range_core(core: &mut EditorCore) -> usize {
     )
 }
 
-/// `State` wrapper for [`clear_keys_in_range_core`].
+/// `State` wrapper for [`clear_keys_in_range_core`],
+/// dispatching on the section's mode (follow →
+/// [`clear_keys_in_range_follow`]).
 pub fn clear_keys_in_range_here(s: &mut State) {
-    clear_keys_in_range_core(&mut s.core);
+    if s.key_follow_graph {
+        clear_keys_in_range_follow(&mut s.core, &s.graph_panel);
+    } else {
+        clear_keys_in_range_core(&mut s.core);
+    }
 }
 
 /// Fill the loop range's keyless frames on the
@@ -1065,9 +1342,15 @@ pub fn fill_keys_in_range_core(core: &mut EditorCore) -> usize {
     graph_keys::fill_keys_in_range(core, ci, a, b)
 }
 
-/// `State` wrapper for [`fill_keys_in_range_core`].
+/// `State` wrapper for [`fill_keys_in_range_core`],
+/// dispatching on the section's mode (follow →
+/// [`fill_keys_in_range_follow`]).
 pub fn fill_keys_in_range_here(s: &mut State) {
-    fill_keys_in_range_core(&mut s.core);
+    if s.key_follow_graph {
+        fill_keys_in_range_follow(&mut s.core, &s.graph_panel);
+    } else {
+        fill_keys_in_range_core(&mut s.core);
+    }
 }
 
 /// Cycle the interp mode of the selected angle
@@ -1115,9 +1398,15 @@ pub fn cycle_key_interp_core(core: &mut EditorCore) -> bool {
     graph_keys::set_key_interp(core, ci, ki, next_interp(current))
 }
 
-/// `State` wrapper for [`cycle_key_interp_core`].
+/// `State` wrapper for [`cycle_key_interp_core`],
+/// dispatching on the section's mode (follow →
+/// [`cycle_key_interp_follow`]).
 pub fn cycle_key_interp_here(s: &mut State) {
-    cycle_key_interp_core(&mut s.core);
+    if s.key_follow_graph {
+        cycle_key_interp_follow(&mut s.core, &s.graph_panel);
+    } else {
+        cycle_key_interp_core(&mut s.core);
+    }
 }
 
 /// Key one bare channel at `frame` with the value the
@@ -1246,9 +1535,558 @@ pub fn copy_key_to_frame_core(core: &mut EditorCore) -> bool {
     }
 }
 
-/// `State` wrapper for [`copy_key_to_frame_core`].
+/// `State` wrapper for [`copy_key_to_frame_core`],
+/// dispatching on the section's mode (follow →
+/// [`copy_key_to_frame_follow`]).
 pub fn copy_key_to_frame(s: &mut State) {
-    copy_key_to_frame_core(&mut s.core);
+    if s.key_follow_graph {
+        copy_key_to_frame_follow(&mut s.core, &s.graph_panel);
+    } else {
+        copy_key_to_frame_core(&mut s.core);
+    }
+}
+
+/// The follow mode's key op — the generic "key the
+/// section's channel here" the charter's angle-only core
+/// op cannot express, composed in this file on the graph
+/// panel's `key_bend` precedent (Wave AC, AC1, on AB5
+/// §5.1 and the board's Q4 key-value rule):
+///
+/// * A channel already exists for the drawn target →
+///   key its EVALUATED value (`Channel::value_at`, via
+///   [`key_channel_here`]): keying pins the curve
+///   without moving it at the keyed frame.
+/// * No channel yet → key the target's pose-store
+///   value, creating the channel: Angle delegates to
+///   the core op `key_graph_angle` (its pose-angle read
+///   and its origin refusal are the angle door's own),
+///   Bend delegates to the graph panel's `key_bend`
+///   (its `bends_at` read, its origin refusal), and
+///   Length / Root read their stores through
+///   [`pose_store_value`].
+///
+/// Origin targets are refused BEFORE any snapshot with
+/// the family's exact sentences ([`origin_key_refusal`])
+/// — on the existing-channel path too: keying a drawn
+/// Bend(0) channel would re-open the dead-write hole
+/// AA5 closed. (On the creation path the pre-check also
+/// covers Angle(0) / Bend(0) before the delegated doors
+/// can be reached; those doors refuse identically
+/// themselves.) The refusal blocks authoring only —
+/// every non-authoring follow op below acts on an
+/// existing origin channel freely. One snapshot per
+/// landed key; refusals are status-only. Returns
+/// whether a key was authored.
+pub fn key_here_follow(core: &mut EditorCore, gp: &GraphPanelState) -> bool {
+    let fi = core.selected_figure;
+    let frame = core.current as f32;
+    if let Some(ci) = follow_channel_index(core, gp) {
+        let target = core.project.channels[ci].target;
+        if let Some(sentence) = origin_key_refusal(target) {
+            core.status = sentence.into();
+            return false;
+        }
+        let value = core.project.channels[ci].value_at(frame);
+        core.snapshot();
+        key_channel_here(&mut core.project.channels[ci], frame);
+        core.status = format!(
+            "Graph key: figure {} {} = {} @ frame {}.",
+            fi + 1,
+            channel_label(target),
+            crate::rune_sec::graph_panel::channel_value_text(target, value),
+            core.current + 1
+        );
+        return true;
+    }
+    // No channel yet: create one on the effective target
+    // from its pose-store value. (The effective target is
+    // the graph panel's own fallback resolution, so an
+    // Angle or Bend target here names the selected node —
+    // the delegated doors key exactly that node.)
+    let target = effective_target(core, gp.target);
+    if let Some(sentence) = origin_key_refusal(target) {
+        core.status = sentence.into();
+        return false;
+    }
+    match target {
+        ChannelTarget::Angle(_) => {
+            // The angle door's own op: pose read, origin
+            // refusal, snapshot and status are all its.
+            core.key_graph_angle();
+            true
+        }
+        ChannelTarget::Bend(_) => {
+            // The graph panel's bend door, same reasoning.
+            crate::rune_sec::graph_panel::key_bend(core);
+            true
+        }
+        ChannelTarget::Length(_) | ChannelTarget::RootX | ChannelTarget::RootY => {
+            let Some(value) = pose_store_value(core, target) else {
+                core.status = format!(
+                    "No value to key {} from at this frame.",
+                    channel_label(target)
+                );
+                return false;
+            };
+            core.snapshot();
+            let ch = stykanimate_rs::graph::channel_mut(&mut core.project.channels, fi, target);
+            ch.add_key(frame, value);
+            core.status = format!(
+                "Graph key: figure {} {} = {} @ frame {}.",
+                fi + 1,
+                channel_label(target),
+                crate::rune_sec::graph_panel::channel_value_text(target, value),
+                core.current + 1
+            );
+            true
+        }
+    }
+}
+
+/// The pose-store value a follow-mode Key press authors
+/// when the target has no channel yet (the board's Q4
+/// rule: a new channel keys the value the target
+/// currently evaluates to, so creating the channel never
+/// moves the figure). Per target:
+///
+/// * Length reads the figure def's node length — the
+///   store lengths live in outside channels: evaluation
+///   starts from the def and length channels override
+///   it (graph.rs `apply_channels`), so the def value
+///   IS the node's current length.
+/// * Root X / Root Y read the frame's pose root
+///   (`Project::poses_at`, the same evaluation the
+///   stage draws — clips applied), the store root
+///   channels override the same way.
+///
+/// Angle and Bend are NOT read here: their doors exist
+/// (`key_graph_angle`, `key_bend`) and the key op
+/// delegates to them. `None` when the store has no
+/// value to read (no such joint, no frames) — the
+/// caller refuses rather than keying a silent 0.0.
+pub fn pose_store_value(core: &EditorCore, target: ChannelTarget) -> Option<f32> {
+    let fi = core.selected_figure;
+    match target {
+        ChannelTarget::Length(ni) => core
+            .project
+            .figures
+            .get(fi)
+            .and_then(|f| f.def.nodes.get(ni))
+            .map(|n| n.length),
+        ChannelTarget::RootX => core
+            .project
+            .poses_at(core.current as f32)
+            .get(fi)
+            .map(|p| p.root[0]),
+        ChannelTarget::RootY => core
+            .project
+            .poses_at(core.current as f32)
+            .get(fi)
+            .map(|p| p.root[1]),
+        _ => None,
+    }
+}
+
+/// `State` dispatcher for the section's primary Key
+/// button: charter → the core op `key_graph_angle`
+/// (the "Key angle here" press, unchanged), follow →
+/// [`key_here_follow`].
+pub fn key_here(s: &mut State) {
+    if s.key_follow_graph {
+        key_here_follow(&mut s.core, &s.graph_panel);
+    } else {
+        s.core.key_graph_angle();
+    }
+}
+
+/// Delete the key at (nearest to) the current frame on
+/// the DRAWN channel (follow mode). Returns whether a
+/// key was removed. The charter twin's discipline,
+/// transposed: no drawn channel and no key here are
+/// status-only refusals, and the snapshot lands only
+/// when a key will actually be removed. Non-authoring:
+/// an existing origin channel's keys delete freely.
+pub fn delete_key_here_follow(core: &mut EditorCore, gp: &GraphPanelState) -> bool {
+    let Some(ci) = follow_channel_index(core, gp) else {
+        core.status = "No graph channel is drawn to delete a key from.".into();
+        return false;
+    };
+    if !keyed_here(&core.project.channels[ci].keys, core.current) {
+        core.status = format!("No key at frame {} to delete.", core.current + 1);
+        return false;
+    }
+    core.snapshot();
+    let removed = core.project.channels[ci].remove_key(core.current as f32);
+    if removed {
+        core.status = format!("Deleted graph key at frame {}.", core.current + 1);
+    }
+    removed
+}
+
+/// Copy the DRAWN channel's keys (follow mode),
+/// returning them as a tagged [`KeyClipboard`] — the
+/// tag is read from the channel itself, so a picked
+/// duplicate row tags that twin's pair (the keys are
+/// that channel's own either way). `None` (status set)
+/// when no channel is drawn or the drawn channel holds
+/// no keys — an empty copy never reaches the clipboard,
+/// so Paste's muted state always means "nothing to
+/// paste", as in charter mode.
+pub fn copy_keys_here_follow(
+    core: &mut EditorCore,
+    gp: &GraphPanelState,
+) -> Option<KeyClipboard> {
+    let Some(ci) = follow_channel_index(core, gp) else {
+        core.status = "No graph channel is drawn to copy keys from.".into();
+        return None;
+    };
+    let keys = graph_keys::copy_keys(core, ci)?;
+    let ch = &core.project.channels[ci];
+    let (figure, target) = (ch.figure, ch.target);
+    if keys.is_empty() {
+        core.status = format!("No graph keys on {} to copy.", channel_label(target));
+        return None;
+    }
+    core.status = format!(
+        "Copied {} keys from figure {} {}.",
+        keys.len(),
+        figure + 1,
+        channel_label(target)
+    );
+    Some(KeyClipboard {
+        figure,
+        target,
+        keys,
+    })
+}
+
+/// Paste the clipboard's keys at the current frame into
+/// the DRAWN channel (follow mode), through the
+/// library's `graph_keys::paste_keys` — it rebases,
+/// snapshots and reports the paste itself, so this
+/// wrapper sets status only for its own pre-checks.
+/// The tag check comes first among them (AB5 §5.2
+/// ruling (i), with (iii)'s naming): a clipboard whose
+/// target KIND differs from the drawn channel's is
+/// refused, naming both targets, before any snapshot —
+/// the values are unit-typed by kind and a cross-kind
+/// paste would silently corrupt the curve. Same-kind
+/// pastes (including cross-joint, the standing
+/// looseness) and the no-drawn-channel refusal mirror
+/// the charter op's discipline.
+pub fn paste_keys_here_follow(
+    core: &mut EditorCore,
+    gp: &GraphPanelState,
+    clipboard: Option<&KeyClipboard>,
+) -> bool {
+    let Some(clip) = clipboard.filter(|c| !c.keys.is_empty()) else {
+        core.status = "Copy some keys first, then Paste keys.".into();
+        return false;
+    };
+    let Some(ci) = follow_channel_index(core, gp) else {
+        core.status = "No graph channel is drawn to paste into — key it once first.".into();
+        return false;
+    };
+    let dst = core.project.channels[ci].target;
+    if !same_target_kind(clip.target, dst) {
+        core.status = format!(
+            "Paste refused: the copied keys are {} keys, but the drawn channel is {}.",
+            channel_label(clip.target),
+            channel_label(dst)
+        );
+        return false;
+    }
+    graph_keys::paste_keys(core, ci, &clip.keys, core.current as f32)
+}
+
+/// Clear every key on the DRAWN channel (follow mode),
+/// as one undo step; returns the number of keys
+/// removed. The charter twin's discipline: every no-op
+/// — no drawn channel, an already-empty channel —
+/// returns 0 with a status line and NO snapshot. The
+/// channel itself stays, figure/target pairing intact.
+pub fn clear_channel_keys_follow(core: &mut EditorCore, gp: &GraphPanelState) -> usize {
+    let Some(ci) = follow_channel_index(core, gp) else {
+        core.status = "No graph channel is drawn to clear.".into();
+        return 0;
+    };
+    if core.project.channels[ci].keys.is_empty() {
+        let target = core.project.channels[ci].target;
+        core.status = format!("No graph keys on {} to clear.", channel_label(target));
+        return 0;
+    }
+    core.snapshot();
+    let n = clear_channel_keys(&mut core.project.channels[ci]);
+    let ch = &core.project.channels[ci];
+    core.status = format!(
+        "Cleared {n} graph key(s) from figure {} {}.",
+        ch.figure + 1,
+        channel_label(ch.target)
+    );
+    n
+}
+
+/// Whether Clear channel keys would remove anything in
+/// follow mode — the render-time twin of
+/// [`clear_channel_keys_follow`]'s refusal set: a
+/// channel is drawn and it holds at least one key.
+pub fn clear_channel_enabled_follow(core: &EditorCore, gp: &GraphPanelState) -> bool {
+    follow_channel(core, gp).is_some_and(|ch| !ch.keys.is_empty())
+}
+
+/// Clear the DRAWN channel's keys whose frames lie
+/// inside the loop range (follow mode); returns how
+/// many keys were removed. The removal is the library's
+/// `graph_keys::delete_keys_in_range_at` — the INDEX
+/// twin of the charter op's range clear, so a picked
+/// duplicate row clears THAT twin, never its first
+/// match — and it owns the single snapshot and the
+/// status line. The refusal the library cannot phrase
+/// — no loop range set, no channel drawn — is answered
+/// here, status-only with NO snapshot; the button
+/// renders inert in the range state (see
+/// [`clear_range_enabled_follow`]), so a press can
+/// never reach it.
+pub fn clear_keys_in_range_follow(core: &mut EditorCore, gp: &GraphPanelState) -> usize {
+    let Some((a, b)) = core.loop_range else {
+        core.status = "Set a loop range first, then Clear keys in range.".into();
+        return 0;
+    };
+    let Some(ci) = follow_channel_index(core, gp) else {
+        core.status = "No graph channel is drawn to clear keys from.".into();
+        return 0;
+    };
+    graph_keys::delete_keys_in_range_at(core, ci, a as f32, b as f32)
+}
+
+/// Whether Clear keys in loop range would remove
+/// anything in follow mode — the render-time twin of
+/// [`clear_keys_in_range_follow`]'s refusal set: a loop
+/// range is set, a channel is drawn, and the DRAWN
+/// channel holds at least one key inside the range,
+/// counted on the drawn channel itself (index-exact,
+/// where the charter guard counts through the library's
+/// first-match `keys_in_range`).
+pub fn clear_range_enabled_follow(core: &EditorCore, gp: &GraphPanelState) -> bool {
+    let Some((a, b)) = core.loop_range else {
+        return false;
+    };
+    let Some(ch) = follow_channel(core, gp) else {
+        return false;
+    };
+    let (a, b) = (a as f32, b as f32);
+    ch.keys.iter().any(|k| (a..=b).contains(&k.frame))
+}
+
+/// Fill the loop range's keyless frames on the DRAWN
+/// channel with copies of the key at the current frame
+/// (follow mode); returns how many keys were inserted.
+/// The fill is the library's
+/// `graph_keys::fill_keys_in_range` over the drawn
+/// index — it owns the single snapshot and the status
+/// line, including its nothing-to-fill refusal. The
+/// refusals it cannot phrase — no loop range set, no
+/// channel drawn — are answered here, status-only with
+/// NO snapshot; the button renders inert in the range
+/// state (see [`fill_range_enabled_follow`]).
+pub fn fill_keys_in_range_follow(core: &mut EditorCore, gp: &GraphPanelState) -> usize {
+    let Some((a, b)) = core.loop_range else {
+        core.status = "Set a loop range first, then Fill range.".into();
+        return 0;
+    };
+    let Some(ci) = follow_channel_index(core, gp) else {
+        core.status = "No graph channel is drawn to fill from.".into();
+        return 0;
+    };
+    graph_keys::fill_keys_in_range(core, ci, a, b)
+}
+
+/// The interp mode of the DRAWN channel's key at the
+/// current frame (follow mode), read through the
+/// library's `graph_keys::key_interp_at` over the drawn
+/// index. `None` when no channel is drawn or no key
+/// sits at the playhead. Pure: reads only.
+pub fn current_key_interp_follow(core: &EditorCore, gp: &GraphPanelState) -> Option<Interp> {
+    let ci = follow_channel_index(core, gp)?;
+    graph_keys::key_interp_at(core, ci, core.current as f32)
+}
+
+/// Whether Cycle interp would change anything in
+/// follow mode — the render-time twin of
+/// [`cycle_key_interp_follow`]'s refusal set.
+pub fn interp_cycle_enabled_follow(core: &EditorCore, gp: &GraphPanelState) -> bool {
+    current_key_interp_follow(core, gp).is_some()
+}
+
+/// Whether Fill range can act in follow mode — the
+/// render-time guard beside
+/// [`fill_keys_in_range_follow`]: a loop range is set
+/// and the drawn channel holds a key at the current
+/// frame to fill FROM, read through
+/// [`current_key_interp_follow`] — the interp guard's
+/// own test — so the two follow guards can never
+/// disagree about the playhead key, exactly as their
+/// charter twins cannot. The op's all-keyed refusal is
+/// deliberately not read here (the charter guard's
+/// Phase H precedent: a wired press on the op's own
+/// refusal, snapshot-free).
+pub fn fill_range_enabled_follow(core: &EditorCore, gp: &GraphPanelState) -> bool {
+    core.loop_range.is_some() && current_key_interp_follow(core, gp).is_some()
+}
+
+/// The follow-mode `key-interp` button label: "Interp:
+/// {current}" while a key sits at the playhead on the
+/// drawn channel, the bare "Interp" in the inert state
+/// — the charter label's rule, transposed.
+pub fn interp_button_label_follow(core: &EditorCore, gp: &GraphPanelState) -> String {
+    match current_key_interp_follow(core, gp) {
+        Some(interp) => format!("Interp: {}", interp_name(interp)),
+        None => "Interp".to_string(),
+    }
+}
+
+/// Cycle the interp mode of the DRAWN channel's key at
+/// the current frame (follow mode) — Hermite → Linear →
+/// Step → Hermite — and return whether the key's mode
+/// changed. The charter twin's contract transposed: the
+/// key AT the playhead (the engine's 0.5-frame window),
+/// never the nearest however far; the write is the
+/// library's `graph_keys::set_key_interp` over the
+/// drawn index, which owns the snapshot and the status
+/// line. Panel-side refusals are status-only, NO
+/// snapshot, and the button renders inert in exactly
+/// those states.
+pub fn cycle_key_interp_follow(core: &mut EditorCore, gp: &GraphPanelState) -> bool {
+    let Some(ci) = follow_channel_index(core, gp) else {
+        core.status = "No graph channel is drawn to cycle.".into();
+        return false;
+    };
+    let Some(current) = graph_keys::key_interp_at(core, ci, core.current as f32) else {
+        core.status = format!("No key at frame {} to cycle.", core.current + 1);
+        return false;
+    };
+    let Some(ki) = key_index_near(&core.project.channels[ci].keys, core.current as f32) else {
+        core.status = format!("No key at frame {} to cycle.", core.current + 1);
+        return false;
+    };
+    graph_keys::set_key_interp(core, ci, ki, next_interp(current))
+}
+
+/// Whether planning a move of the DRAWN channel's
+/// playhead key by `delta` frames lands — the follow
+/// twin of [`plan_would_move`], running the same
+/// [`nudge_plan`] over the drawn channel's keys, so it
+/// is false for exactly the follow nudge/stamp refusal
+/// set. Pure: reads only.
+fn plan_would_move_follow(core: &EditorCore, gp: &GraphPanelState, delta: i32) -> bool {
+    match follow_channel(core, gp) {
+        Some(ch) => matches!(
+            nudge_plan(&ch.keys, core.current as f32, delta),
+            NudgeOutcome::Moved { .. }
+        ),
+        None => false,
+    }
+}
+
+/// Whether the follow-mode Nudge button for `delta`
+/// would move a key — the render-time twin of
+/// [`nudge_key_here_follow`]'s refusals.
+pub fn nudge_enabled_follow(core: &EditorCore, gp: &GraphPanelState, delta: i32) -> bool {
+    plan_would_move_follow(core, gp, delta)
+}
+
+/// Whether follow-mode Copy key +10 would stamp a key —
+/// the render-time twin of
+/// [`copy_key_to_frame_follow`]'s refusals, planned
+/// through the same [`nudge_plan`] with the stamp
+/// offset as its delta.
+pub fn copy_key_enabled_follow(core: &EditorCore, gp: &GraphPanelState) -> bool {
+    plan_would_move_follow(core, gp, COPY_KEY_OFFSET_FRAMES)
+}
+
+/// Nudge the key at the current frame on the DRAWN
+/// channel by `delta` frames (follow mode), as one undo
+/// step. Returns whether a key moved. The charter
+/// twin's composition transposed: the plan is checked
+/// first ([`nudge_plan`] over the drawn channel), only
+/// a `Moved` plan snapshots, and the refusal sentences
+/// are the charter op's own — the collision, no-key and
+/// before-start outcomes are channel-agnostic facts.
+pub fn nudge_key_here_follow(core: &mut EditorCore, gp: &GraphPanelState, delta: i32) -> bool {
+    let Some(ci) = follow_channel_index(core, gp) else {
+        core.status = "No graph channel is drawn to nudge.".into();
+        return false;
+    };
+    let frame = core.current as f32;
+    match nudge_plan(&core.project.channels[ci].keys, frame, delta) {
+        NudgeOutcome::Moved { from, to } => {
+            core.snapshot();
+            let applied = nudge_key_in_channel(&mut core.project.channels[ci], frame, delta);
+            debug_assert_eq!(applied, NudgeOutcome::Moved { from, to });
+            core.status = format!(
+                "Moved graph key from frame {} to frame {}.",
+                from + 1.0,
+                to + 1.0
+            );
+            true
+        }
+        NudgeOutcome::NoKeyHere => {
+            core.status = format!("No key at frame {} to nudge.", core.current + 1);
+            false
+        }
+        NudgeOutcome::Blocked { at } => {
+            core.status = format!("Frame {} already has a key on this channel.", at + 1.0);
+            false
+        }
+        NudgeOutcome::BeforeStart { from } => {
+            core.status = format!("Key at frame {} cannot move earlier.", from + 1.0);
+            false
+        }
+    }
+}
+
+/// Stamp a copy of the DRAWN channel's key at the
+/// current frame onto the frame
+/// [`COPY_KEY_OFFSET_FRAMES`] later (follow mode), as
+/// one undo step. Returns whether a stamp landed. The
+/// charter twin's composition transposed: the stamp
+/// plans through [`nudge_plan`] with the offset as its
+/// delta, so the collision rule and its refusal
+/// sentences are shared exactly.
+pub fn copy_key_to_frame_follow(core: &mut EditorCore, gp: &GraphPanelState) -> bool {
+    let Some(ci) = follow_channel_index(core, gp) else {
+        core.status = "No graph channel is drawn to copy a key from.".into();
+        return false;
+    };
+    let frame = core.current as f32;
+    match nudge_plan(&core.project.channels[ci].keys, frame, COPY_KEY_OFFSET_FRAMES) {
+        NudgeOutcome::Moved { from, to } => {
+            core.snapshot();
+            let applied =
+                copy_key_in_channel(&mut core.project.channels[ci], frame, COPY_KEY_OFFSET_FRAMES);
+            debug_assert_eq!(applied, NudgeOutcome::Moved { from, to });
+            core.status = format!(
+                "Copied graph key from frame {} to frame {}.",
+                from + 1.0,
+                to + 1.0
+            );
+            true
+        }
+        NudgeOutcome::NoKeyHere => {
+            core.status = format!("No key at frame {} to copy.", core.current + 1);
+            false
+        }
+        NudgeOutcome::Blocked { at } => {
+            core.status = format!("Frame {} already has a key on this channel.", at + 1.0);
+            false
+        }
+        NudgeOutcome::BeforeStart { from } => {
+            // Unreachable for a +10 stamp, as in the
+            // charter twin — the match stays exhaustive.
+            core.status = format!("Key at frame {} cannot move earlier.", from + 1.0);
+            false
+        }
+    }
 }
 
 /// Element key of the dedicated no-joint note row
@@ -1288,6 +2126,31 @@ pub const AUTO_TANGENTS_SCOPE_LABEL: &str = "Smoothing — every channel in the 
 /// at the playhead. Same discipline as
 /// [`AUTO_TANGENTS_SCOPE_LABEL`].
 pub const PRESET_SCOPE_LABEL: &str = "Tangent presets — selected figure, all keys";
+
+/// Element key of the follow-mode row (Wave AC, AC1):
+/// the row holding the "Follow graph channel" toggle,
+/// between the indicator and the actions row. One of
+/// the mode's two new element keys.
+pub const FOLLOW_ROW_KEY: &str = "keyframe-follow";
+
+/// Element key of the follow-mode toggle button itself
+/// (Wave AC, AC1) — the mode's second new element key.
+/// The button renders accent-filled while the mode is
+/// on, the Delete button's state idiom.
+pub const FOLLOW_BUTTON_KEY: &str = "key-follow";
+
+/// Scope label under the follow toggle, shown ONLY
+/// while follow mode is on (Wave AC, AC1): it names
+/// the write set the single-target cluster takes in
+/// that mode — the graph panel's drawn channel — before
+/// any press, in the same idiom as
+/// [`AUTO_TANGENTS_SCOPE_LABEL`] / [`PRESET_SCOPE_LABEL`]
+/// and under the same ≤43-character discipline (the
+/// dynamic channel name itself belongs to the target
+/// line, per AB5 §3: a dynamic section_label would be
+/// a new precedent). Kept as a constant so the tests
+/// can pin the wording.
+pub const FOLLOW_SCOPE_LABEL: &str = "Keys — the graph panel's drawn channel";
 
 /// The note shown when no joint is selected, or `None`
 /// when one is. The text is [`target_text`]'s no-joint
@@ -1354,10 +2217,84 @@ pub fn no_joint_note_row(core: &EditorCore, t: &Theme) -> Option<El> {
 /// bare target line; with none it is the dedicated
 /// [`no_joint_note_row`], so the note can never paint
 /// across the actions row beneath it.
+/// Follow mode (Wave AC) inserts one more row under
+/// the indicator: the "Follow graph channel" toggle
+/// ([`FOLLOW_ROW_KEY`] / [`FOLLOW_BUTTON_KEY`]),
+/// accent-filled while on, with [`FOLLOW_SCOPE_LABEL`]
+/// under it in that state. In follow mode the target
+/// slot always carries the follow target line, the
+/// single-target guards and labels come from the
+/// `*_follow` twins, and the Key button's label names
+/// the drawn channel; the wide rows (Auto tangents,
+/// presets, Key all here) render identically in both
+/// modes.
 pub fn keyframe_section(s: &State, t: &Theme) -> El {
     let core = &s.core;
-    let keyed = selected_angle_channel(core).is_some_and(|ch| keyed_here(&ch.keys, core.current));
-    let interp_label = interp_button_label(core);
+    let gp = &s.graph_panel;
+    // Follow mode (Wave AC, AC1): with the toggle on,
+    // every single-target guard, label and read below
+    // resolves through the graph panel's drawn channel
+    // (the `*_follow` twins); with it off, everything
+    // resolves through the charter angle channel exactly
+    // as before. The handlers dispatch on the mode
+    // themselves (the reworked `*_here` wrappers), so a
+    // press always matches the render that offered it.
+    let follow = s.key_follow_graph;
+    let keyed = if follow {
+        follow_channel(core, gp).is_some_and(|ch| keyed_here(&ch.keys, core.current))
+    } else {
+        selected_angle_channel(core).is_some_and(|ch| keyed_here(&ch.keys, core.current))
+    };
+    let interp_label = if follow {
+        interp_button_label_follow(core, gp)
+    } else {
+        interp_button_label(core)
+    };
+    let key_label = if follow {
+        key_button_label_follow(core, gp)
+    } else {
+        "Key angle here".to_string()
+    };
+    let copy_live = if follow {
+        follow_channel_index(core, gp).is_some()
+    } else {
+        selected_angle_channel_index(core).is_some()
+    };
+    let clear_live = if follow {
+        clear_channel_enabled_follow(core, gp)
+    } else {
+        clear_channel_enabled(core)
+    };
+    let range_live = if follow {
+        clear_range_enabled_follow(core, gp)
+    } else {
+        clear_range_enabled(core)
+    };
+    let fill_live = if follow {
+        fill_range_enabled_follow(core, gp)
+    } else {
+        fill_range_enabled(core)
+    };
+    let interp_live = if follow {
+        interp_cycle_enabled_follow(core, gp)
+    } else {
+        interp_cycle_enabled(core)
+    };
+    let nudge_l_live = if follow {
+        nudge_enabled_follow(core, gp, -1)
+    } else {
+        nudge_enabled(core, -1)
+    };
+    let nudge_r_live = if follow {
+        nudge_enabled_follow(core, gp, 1)
+    } else {
+        nudge_enabled(core, 1)
+    };
+    let stamp_live = if follow {
+        copy_key_enabled_follow(core, gp)
+    } else {
+        copy_key_enabled(core)
+    };
     let mut presets = row().key("keyframe-presets").gap(6.0).flex_wrap();
     for (preset, label, suffix) in preset_options() {
         presets = presets.child(design::tangent_preset_chip(
@@ -1382,8 +2319,18 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
             // The target slot (Phase J): the no-joint
             // note gets its own row; a selected joint
             // keeps the bare target line it has always
-            // had, in the same slot.
-            if let Some(note_row) = no_joint_note_row(core, t) {
+            // had, in the same slot. Follow mode (Wave
+            // AC) always renders its own bare target
+            // line here, with or without a joint — the
+            // no-joint note's premise (nothing in this
+            // section can act without a joint) is false
+            // when a drawn channel exists, and the line
+            // names that channel instead.
+            if follow {
+                text(target_text_follow(core, gp))
+                    .font(type_::LABEL)
+                    .color(t.text_secondary)
+            } else if let Some(note_row) = no_joint_note_row(core, t) {
                 note_row
             } else {
                 text(target_text(core))
@@ -1392,10 +2339,32 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
             },
         )
         .child(
-            text(indicator_text(core))
-                .font(type_::LABEL)
-                .color(t.text_secondary),
+            text(if follow {
+                indicator_text_follow(core, gp)
+            } else {
+                indicator_text(core)
+            })
+            .font(type_::LABEL)
+            .color(t.text_secondary),
         )
+        .child({
+            // The follow toggle block (Wave AC): the
+            // toggle row, accent-filled while the mode
+            // is on (the Delete button's state idiom),
+            // with the mode's scope label under it —
+            // shown only in follow mode, naming the
+            // write set before any press.
+            let mut block = col()
+                .key(FOLLOW_ROW_KEY)
+                .gap(6.0)
+                .child(btn(FOLLOW_BUTTON_KEY, "Follow graph channel", follow, t, |s| {
+                    s.key_follow_graph = !s.key_follow_graph
+                }));
+            if follow {
+                block = block.child(design::section_label(FOLLOW_SCOPE_LABEL, t));
+            }
+            block
+        })
         .child(
             // Phase O (p05, O-5): the actions row joins
             // the panel's wrap discipline — the p05
@@ -1407,9 +2376,7 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                 .key(ACTIONS_ROW_KEY)
                 .gap(6.0)
                 .flex_wrap()
-                .child(btn("key-angle", "Key angle here", false, t, |s| {
-                    s.core.key_graph_angle()
-                }))
+                .child(btn("key-angle", &key_label, false, t, |s| key_here(s)))
                 .child(btn(DELETE_KEY_BUTTON_KEY, "Delete key here", keyed, t, |s| {
                     delete_key_here(s)
                 })),
@@ -1431,12 +2398,12 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                 .key("keyframe-clipboard")
                 .gap(6.0)
                 .flex_wrap()
-                .child(if selected_angle_channel_index(core).is_some() {
+                .child(if copy_live {
                     btn("key-copy", "Copy keys", false, t, |s| copy_keys_here(s))
                 } else {
                     btn_inert("key-copy", "Copy keys", t)
                 })
-                .child(if s.key_clipboard.as_ref().is_some_and(|k| !k.is_empty()) {
+                .child(if s.key_clipboard.as_ref().is_some_and(|c| !c.keys.is_empty()) {
                     btn("key-paste", "Paste keys", false, t, |s| {
                         paste_keys_here(s)
                     })
@@ -1448,7 +2415,7 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
             row()
                 .key("keyframe-clear-channel")
                 .gap(6.0)
-                .child(if clear_channel_enabled(core) {
+                .child(if clear_live {
                     danger_icon_btn(
                         "key-clear-channel",
                         "xmark",
@@ -1465,7 +2432,7 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
             row()
                 .key("keyframe-clear-range")
                 .gap(6.0)
-                .child(if clear_range_enabled(core) {
+                .child(if range_live {
                     danger_icon_btn(
                         "key-clear-range",
                         "eraser",
@@ -1482,7 +2449,7 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
             row()
                 .key("keyframe-fill-range")
                 .gap(6.0)
-                .child(if fill_range_enabled(core) {
+                .child(if fill_live {
                     icon_btn(
                         "key-fill-range",
                         "grip-vertical",
@@ -1499,7 +2466,7 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
             row()
                 .key("keyframe-interp")
                 .gap(6.0)
-                .child(if interp_cycle_enabled(core) {
+                .child(if interp_live {
                     icon_btn(
                         "key-interp",
                         "bezier-curve",
@@ -1516,14 +2483,14 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
             row()
                 .key("keyframe-nudge")
                 .gap(6.0)
-                .child(if nudge_enabled(core, -1) {
+                .child(if nudge_l_live {
                     icon_only_btn("key-nudge-l", "chevron-left", "Nudge key earlier", 26.0, false, t, |s| {
                         nudge_key_here(s, -1)
                     })
                 } else {
                     icon_only_btn_inert("key-nudge-l", "chevron-left", "Nudge key earlier", 26.0, t)
                 })
-                .child(if nudge_enabled(core, 1) {
+                .child(if nudge_r_live {
                     icon_only_btn("key-nudge-r", "chevron-right", "Nudge key later", 26.0, false, t, |s| {
                         nudge_key_here(s, 1)
                     })
@@ -1542,7 +2509,7 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                 } else {
                     icon_btn_inert("key-all-here", "key", "Key all here", t)
                 })
-                .child(if copy_key_enabled(core) {
+                .child(if stamp_live {
                     icon_btn(
                         "key-copy-to-frame",
                         "copy",
@@ -2737,6 +3704,7 @@ mod tests {
             show_left: true,
             show_right: true,
             key_clipboard: None,
+            key_follow_graph: false,
             export_recap: String::new(),
             export_job: None,
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
@@ -2901,5 +3869,537 @@ mod tests {
             Interp::Hermite,
             "the distant key keeps its mode"
         );
+    }
+
+    // ---- Wave AC (AC1): drawn-target (follow) mode ----
+
+    /// Figure 0 carrying an Angle(1) channel (keys at
+    /// 0/2) and a Bend(1) channel (keys at 0/2), joint 1
+    /// selected — the mode-pair fixture: identical state
+    /// driven through the charter ops and their follow
+    /// twins.
+    fn core_with_angle_and_bend_keys() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(1),
+            keys: vec![Key::flat(0.0, 10.0), Key::flat(2.0, 30.0)],
+        });
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Bend(1),
+            keys: vec![Key::flat(0.0, 0.3), Key::flat(2.0, -0.4)],
+        });
+        core.selected_figure = 0;
+        core.selected_node = Some(1);
+        core
+    }
+
+    /// A graph-panel state whose pick is `target`.
+    fn gp_with_target(target: ChannelTarget) -> GraphPanelState {
+        GraphPanelState {
+            target: Some(target),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn follow_mode_delete_acts_on_the_drawn_channel_charter_on_the_angle() {
+        // Charter half — the AA4 pin's scenario restated
+        // on this fixture: delete removes the ANGLE key;
+        // the same joint's bend channel is untouched.
+        let mut core = core_with_angle_and_bend_keys();
+        core.current = 0;
+        assert!(delete_key_here_core(&mut core));
+        assert_eq!(
+            core.project.channels[0].keys.len(),
+            1,
+            "charter delete took the angle key"
+        );
+        assert_eq!(
+            core.project.channels[1].keys.len(),
+            2,
+            "the bend channel is untouched"
+        );
+
+        // Follow half, identical fixture: the drawn
+        // channel is Bend(1), so delete removes the BEND
+        // key and the angle channel is untouched — the
+        // mode pair AB5's re-cut of the AA4 pin calls
+        // for. The AA4 test itself
+        // (`single_target_ops_never_touch_the_joints_other_channels`)
+        // stands unchanged above as the charter contract.
+        let mut core = core_with_angle_and_bend_keys();
+        let gp = gp_with_target(ChannelTarget::Bend(1));
+        core.current = 0;
+        assert!(delete_key_here_follow(&mut core, &gp));
+        assert_eq!(
+            core.project.channels[1].keys.len(),
+            1,
+            "follow delete took the bend key"
+        );
+        assert_eq!(core.project.channels[1].keys[0].frame, 2.0);
+        assert_eq!(
+            core.project.channels[0].keys.len(),
+            2,
+            "the angle channel is untouched"
+        );
+    }
+
+    #[test]
+    fn follow_resolution_is_index_exact_for_a_duplicate_row() {
+        // Two Bend(1) channels (duplicates): the graph
+        // panel's row pick names the SECOND twin, and the
+        // follow resolution honours the index exactly —
+        // where the charter resolution is first-match.
+        let mut core = EditorCore::new();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Bend(1),
+            keys: vec![Key::flat(0.0, 0.1)],
+        });
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Bend(1),
+            keys: vec![Key::flat(0.0, 0.2), Key::flat(2.0, 0.5)],
+        });
+        core.selected_figure = 0;
+        core.selected_node = Some(1);
+        let gp = GraphPanelState {
+            target: Some(ChannelTarget::Bend(1)),
+            selected_channel: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(
+            follow_channel_index(&core, &gp),
+            Some(1),
+            "the picked row is the second twin"
+        );
+        core.current = 0;
+        assert!(delete_key_here_follow(&mut core, &gp));
+        assert_eq!(
+            core.project.channels[0].keys.len(),
+            1,
+            "the first twin is untouched"
+        );
+        assert_eq!(
+            core.project.channels[1].keys.len(),
+            1,
+            "the picked twin lost its frame-0 key"
+        );
+        assert_eq!(core.project.channels[1].keys[0].frame, 2.0);
+    }
+
+    #[test]
+    fn origin_targets_and_sentences_match_the_doors() {
+        assert!(is_origin_target(ChannelTarget::Bend(0)));
+        assert!(is_origin_target(ChannelTarget::Angle(0)));
+        assert!(is_origin_target(ChannelTarget::Length(0)));
+        assert!(!is_origin_target(ChannelTarget::Bend(1)));
+        assert!(!is_origin_target(ChannelTarget::RootX));
+        assert_eq!(
+            origin_key_refusal(ChannelTarget::Bend(0)),
+            Some("The origin has no segment to bend.")
+        );
+        assert_eq!(
+            origin_key_refusal(ChannelTarget::Angle(0)),
+            Some("The origin has no angle to key.")
+        );
+        assert_eq!(
+            origin_key_refusal(ChannelTarget::Length(0)),
+            Some("The origin has no length to key.")
+        );
+        assert_eq!(origin_key_refusal(ChannelTarget::RootY), None);
+    }
+
+    #[test]
+    fn follow_key_refuses_drawn_origin_channels_without_snapshotting() {
+        // Q8, non-negotiable: keying a drawn origin
+        // channel is refused with the owning door's exact
+        // sentence, before any snapshot — for all three
+        // segment targets. The stored channel itself
+        // stays fully editable by the non-authoring ops.
+        for (target, sentence) in [
+            (ChannelTarget::Bend(0), "The origin has no segment to bend."),
+            (ChannelTarget::Angle(0), "The origin has no angle to key."),
+            (ChannelTarget::Length(0), "The origin has no length to key."),
+        ] {
+            let mut core = EditorCore::new();
+            core.project.channels.push(Channel {
+                figure: 0,
+                target,
+                keys: vec![Key::flat(0.0, 0.5)],
+            });
+            core.selected_figure = 0;
+            core.selected_node = Some(0);
+            let gp = gp_with_target(target);
+            let edits = core.edits_since_autosave();
+            assert!(!key_here_follow(&mut core, &gp), "{target:?} keying is refused");
+            assert_eq!(core.status, sentence);
+            assert_eq!(
+                core.edits_since_autosave(),
+                edits,
+                "the refusal never snapshots"
+            );
+            assert_eq!(
+                core.project.channels[0].keys.len(),
+                1,
+                "no key was authored"
+            );
+            // Delete — a non-authoring op — still acts on
+            // the stored origin channel.
+            core.current = 0;
+            assert!(
+                delete_key_here_follow(&mut core, &gp),
+                "delete stays allowed on a stored origin channel"
+            );
+            assert!(core.project.channels[0].keys.is_empty());
+        }
+    }
+
+    #[test]
+    fn follow_key_on_an_existing_channel_keys_its_evaluated_value() {
+        let mut core = EditorCore::new();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Bend(2),
+            keys: vec![Key::flat(0.0, 0.0), Key::flat(4.0, 0.4)],
+        });
+        core.selected_figure = 0;
+        core.selected_node = Some(2);
+        core.current = 2;
+        let gp = gp_with_target(ChannelTarget::Bend(2));
+        // The expectation is the engine's own evaluation,
+        // read before keying — never hand-computed math.
+        let expected = core.project.channels[0].value_at(2.0);
+        let edits = core.edits_since_autosave();
+        assert!(key_here_follow(&mut core, &gp));
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits + 1,
+            "exactly one snapshot"
+        );
+        let ch = &core.project.channels[0];
+        assert_eq!(ch.keys.len(), 3);
+        let keyed = ch
+            .keys
+            .iter()
+            .find(|k| (k.frame - 2.0).abs() <= 0.5)
+            .expect("a key at frame 2");
+        assert_eq!(keyed.value, expected, "the key stores the evaluated value");
+        assert_eq!(
+            ch.value_at(2.0),
+            expected,
+            "the curve is unmoved at the keyed frame"
+        );
+        assert!(
+            core.status.contains("Bend 2"),
+            "the status names the channel: {}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn follow_key_creates_a_root_channel_from_the_pose_root() {
+        let mut core = EditorCore::new();
+        core.project.channels.clear();
+        // No joint selected: the graph panel's effective
+        // target is Root X, and follow mode can author
+        // its first key from the pose store.
+        core.selected_node = None;
+        core.current = 0;
+        let expected = core.project.poses_at(0.0)[0].root[0];
+        let gp = GraphPanelState::default();
+        assert_eq!(follow_channel_index(&core, &gp), None);
+        assert!(key_here_follow(&mut core, &gp));
+        assert_eq!(core.project.channels.len(), 1);
+        let ch = &core.project.channels[0];
+        assert_eq!(ch.target, ChannelTarget::RootX);
+        assert_eq!(ch.keys.len(), 1);
+        assert_eq!(
+            ch.keys[0].value, expected,
+            "the key stores the pose's root X"
+        );
+    }
+
+    #[test]
+    fn pose_store_value_reads_def_length_and_pose_root() {
+        let core = EditorCore::new();
+        let def_len = core.project.figures[0].def.nodes[1].length;
+        assert_eq!(
+            pose_store_value(&core, ChannelTarget::Length(1)),
+            Some(def_len),
+            "a length's store is the figure def"
+        );
+        let root_x = core.project.poses_at(core.current as f32)[0].root[0];
+        assert_eq!(
+            pose_store_value(&core, ChannelTarget::RootX),
+            Some(root_x)
+        );
+        // No such joint: no value — never a silent 0.0.
+        assert_eq!(pose_store_value(&core, ChannelTarget::Length(999)), None);
+        // Angle/Bend are not read here: their doors
+        // exist and the key op delegates to them.
+        assert_eq!(pose_store_value(&core, ChannelTarget::Angle(1)), None);
+        assert_eq!(pose_store_value(&core, ChannelTarget::Bend(1)), None);
+    }
+
+    #[test]
+    fn same_target_kind_erases_the_node_but_not_the_kind() {
+        assert!(same_target_kind(
+            ChannelTarget::Angle(1),
+            ChannelTarget::Angle(2)
+        ));
+        assert!(same_target_kind(
+            ChannelTarget::Bend(0),
+            ChannelTarget::Bend(3)
+        ));
+        assert!(same_target_kind(
+            ChannelTarget::Length(2),
+            ChannelTarget::Length(1)
+        ));
+        assert!(same_target_kind(ChannelTarget::RootX, ChannelTarget::RootX));
+        assert!(!same_target_kind(ChannelTarget::RootX, ChannelTarget::RootY));
+        assert!(!same_target_kind(
+            ChannelTarget::Angle(1),
+            ChannelTarget::Bend(1)
+        ));
+        assert!(!same_target_kind(
+            ChannelTarget::Length(1),
+            ChannelTarget::Angle(1)
+        ));
+    }
+
+    #[test]
+    fn follow_paste_refuses_cross_kind_and_names_both_targets() {
+        let mut core = core_with_angle_and_bend_keys();
+        let gp_bend = gp_with_target(ChannelTarget::Bend(1));
+        let clip = copy_keys_here_follow(&mut core, &gp_bend).expect("bend keys copy");
+        assert_eq!(clip.target, ChannelTarget::Bend(1));
+        assert_eq!(clip.keys.len(), 2);
+        // Aim the paste at the angle channel: refused,
+        // naming both targets, before any snapshot, with
+        // nothing pasted — radians never land in a
+        // degrees channel silently.
+        let gp_angle = gp_with_target(ChannelTarget::Angle(1));
+        core.current = 4;
+        let edits = core.edits_since_autosave();
+        assert!(!paste_keys_here_follow(&mut core, &gp_angle, Some(&clip)));
+        assert!(
+            core.status.contains("Paste refused"),
+            "status: {}",
+            core.status
+        );
+        assert!(
+            core.status.contains("Bend 1") && core.status.contains("Angle 1"),
+            "both targets are named: {}",
+            core.status
+        );
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits,
+            "the refusal never snapshots"
+        );
+        assert_eq!(
+            core.project.channels[0].keys.len(),
+            2,
+            "nothing was pasted"
+        );
+    }
+
+    #[test]
+    fn follow_paste_allows_the_same_kind_on_another_joint() {
+        // The standing looseness, preserved under the
+        // tag: keys copied from Angle(1) paste onto
+        // Angle(2) — degrees to degrees, the joint may
+        // change between copy and paste.
+        let mut core = EditorCore::new();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(2),
+            keys: vec![Key::flat(0.0, 5.0)],
+        });
+        core.selected_figure = 0;
+        core.selected_node = Some(2);
+        let clip = KeyClipboard {
+            figure: 0,
+            target: ChannelTarget::Angle(1),
+            keys: vec![Key::flat(0.0, 10.0), Key::flat(2.0, 30.0)],
+        };
+        let gp = gp_with_target(ChannelTarget::Angle(2));
+        core.current = 1;
+        assert!(paste_keys_here_follow(&mut core, &gp, Some(&clip)));
+        let ch = &core.project.channels[0];
+        assert_eq!(ch.keys.len(), 3, "the group landed beside the existing key");
+        assert!(ch.keys.iter().any(|k| k.frame == 1.0 && k.value == 10.0));
+        assert!(ch.keys.iter().any(|k| k.frame == 3.0 && k.value == 30.0));
+    }
+
+    #[test]
+    fn follow_ops_work_with_no_joint_selected_on_a_root_channel() {
+        let mut core = EditorCore::new();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: vec![Key::flat(0.0, 100.0), Key::flat(2.0, 140.0)],
+        });
+        core.selected_figure = 0;
+        core.selected_node = None;
+        let gp = gp_with_target(ChannelTarget::RootX);
+        assert_eq!(target_text_follow(&core, &gp), "Figure 1 · Root X");
+        core.current = 0;
+        assert!(indicator_text_follow(&core, &gp).starts_with('●'));
+        assert!(
+            delete_key_here_follow(&mut core, &gp),
+            "delete acts with no joint selected"
+        );
+        assert_eq!(core.project.channels[0].keys.len(), 1);
+        // The nudge moves the surviving root key too.
+        core.current = 2;
+        assert!(nudge_key_here_follow(&mut core, &gp, 1));
+        assert_eq!(core.project.channels[0].keys[0].frame, 3.0);
+    }
+
+    #[test]
+    fn follow_range_ops_act_on_the_drawn_channel_only() {
+        let mut core = core_with_spread_angle_keys(); // Angle(1) at 0/2/4
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Bend(1),
+            keys: vec![
+                Key::flat(0.0, 0.1),
+                Key::flat(2.0, 0.2),
+                Key::flat(4.0, 0.3),
+            ],
+        });
+        let gp = gp_with_target(ChannelTarget::Bend(1));
+        core.loop_range = Some((1, 3));
+        assert!(clear_range_enabled_follow(&core, &gp));
+        assert_eq!(clear_keys_in_range_follow(&mut core, &gp), 1);
+        let bend = &core.project.channels[1];
+        let frames: Vec<f32> = bend.keys.iter().map(|k| k.frame).collect();
+        assert_eq!(
+            frames,
+            vec![0.0, 4.0],
+            "only the drawn channel's in-range key is gone"
+        );
+        assert_eq!(
+            core.project.channels[0].keys.len(),
+            3,
+            "the angle channel is untouched"
+        );
+        assert!(
+            core.status.contains("Cleared 1 key(s)"),
+            "the library owns the status: {}",
+            core.status
+        );
+        // Fill: the playhead sits on the frame-4 bend
+        // key and frame 3 is keyless inside the range.
+        core.loop_range = Some((3, 4));
+        core.current = 4;
+        assert!(fill_range_enabled_follow(&core, &gp));
+        assert_eq!(fill_keys_in_range_follow(&mut core, &gp), 1);
+        assert_eq!(core.project.channels[1].keys.len(), 3);
+        assert_eq!(core.project.channels[1].keys[1].frame, 3.0);
+        assert_eq!(core.project.channels[1].keys[1].value, 0.3);
+    }
+
+    #[test]
+    fn follow_interp_cycle_reads_the_drawn_channels_key() {
+        let mut core = core_with_angle_and_bend_keys();
+        let gp = gp_with_target(ChannelTarget::Bend(1));
+        core.current = 2;
+        assert!(interp_cycle_enabled_follow(&core, &gp));
+        assert_eq!(interp_button_label_follow(&core, &gp), "Interp: Hermite");
+        assert!(cycle_key_interp_follow(&mut core, &gp));
+        assert_eq!(core.project.channels[1].keys[1].interp, Interp::Linear);
+        assert_eq!(
+            core.project.channels[0].keys[1].interp,
+            Interp::Hermite,
+            "the angle key's mode is untouched"
+        );
+    }
+
+    #[test]
+    fn follow_refusals_are_status_only_when_nothing_is_drawn() {
+        let mut core = EditorCore::new();
+        core.project.channels.clear();
+        core.selected_node = Some(1);
+        let gp = GraphPanelState::default();
+        let edits = core.edits_since_autosave();
+        assert!(!delete_key_here_follow(&mut core, &gp));
+        assert!(core.status.contains("No graph channel is drawn"));
+        assert!(!nudge_key_here_follow(&mut core, &gp, 1));
+        assert_eq!(clear_channel_keys_follow(&mut core, &gp), 0);
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits,
+            "no refusal snapshots"
+        );
+        assert!(
+            core.project.channels.is_empty(),
+            "no channel was created by a refusal"
+        );
+        // The guards agree: the whole single-target
+        // cluster is inert with nothing drawn.
+        assert!(!clear_channel_enabled_follow(&core, &gp));
+        assert!(!nudge_enabled_follow(&core, &gp, 1));
+        assert!(!copy_key_enabled_follow(&core, &gp));
+        assert!(!interp_cycle_enabled_follow(&core, &gp));
+    }
+
+    #[test]
+    fn follow_labels_name_the_drawn_channel_and_the_scope() {
+        let core = core_with_angle_and_bend_keys();
+        let gp = gp_with_target(ChannelTarget::Bend(1));
+        assert_eq!(target_text_follow(&core, &gp), "Figure 1 · Bend 1");
+        assert_eq!(key_button_label_follow(&core, &gp), "Key Bend 1 here");
+        let gp_angle = gp_with_target(ChannelTarget::Angle(1));
+        assert_eq!(key_button_label_follow(&core, &gp_angle), "Key Angle 1 here");
+        // The scope label: pinned wording, inside the
+        // section's ≤43-character label discipline (the
+        // Wave 10 labels' budget).
+        assert_eq!(FOLLOW_SCOPE_LABEL, "Keys — the graph panel's drawn channel");
+        assert!(FOLLOW_SCOPE_LABEL.chars().count() <= 43);
+        // The mode's two new element keys are the values
+        // the builder renders under — and the only keys
+        // the mode adds.
+        assert_eq!(FOLLOW_ROW_KEY, "keyframe-follow");
+        assert_eq!(FOLLOW_BUTTON_KEY, "key-follow");
+        // The whole section builds in follow mode, with
+        // a joint selected and without one.
+        let t = rune::tok::theme(true);
+        let mut st = state_with(core_with_angle_and_bend_keys());
+        st.key_follow_graph = true;
+        st.graph_panel = gp_with_target(ChannelTarget::Bend(1));
+        let _ = keyframe_section(&st, &t);
+        let mut bare = EditorCore::new();
+        bare.selected_node = None;
+        let mut st = state_with(bare);
+        st.key_follow_graph = true;
+        let _ = keyframe_section(&st, &t);
+    }
+
+    #[test]
+    fn state_copy_tags_the_clipboard_and_charter_paste_still_lands() {
+        // The tag lands through the State wrapper in
+        // charter mode too — and charter paste behaviour
+        // is byte-identical over the tagged clipboard.
+        let mut st = state_with(core_with_angle_keys());
+        copy_keys_here(&mut st);
+        let clip = st
+            .key_clipboard
+            .clone()
+            .expect("the copy reached the clipboard");
+        assert_eq!(clip.figure, 0);
+        assert_eq!(clip.target, ChannelTarget::Angle(1));
+        assert_eq!(clip.keys.len(), 2);
+        st.core.project.channels[0].keys.clear();
+        st.core.current = 1;
+        paste_keys_here(&mut st);
+        let ch = selected_angle_channel(&st.core).expect("channel survives paste");
+        assert_eq!(ch.keys.len(), 2);
+        assert_eq!((ch.keys[0].frame, ch.keys[0].value), (1.0, 10.0));
+        assert_eq!((ch.keys[1].frame, ch.keys[1].value), (3.0, 30.0));
     }
 }

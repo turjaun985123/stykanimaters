@@ -1491,3 +1491,123 @@ newest CLEAN frame on record and is
 upkeep, landed beside this entry).
 §19.6's remaining rows stand as their
 own waves' records left them.
+
+### 19.12 Wave AB closing frame — aligned (Wave AC, AC17)
+
+§19.11 closed by pointing forward: §10's
+source was then the Wave AA frame, its
+O-measurement streak at eight, AB12's
+upkeep. AC11 has since taken the next
+upkeep on the frame of this entry
+(IA-AC11-1, discharged here): §10's
+current source is `42813458176`, and
+§10's figures for the new frame agree
+with the verification below. The two
+streaks are kept distinct, as §19.11
+separated them: the **scanned-CLEAN
+streak at this frame stands at seven**
+(the recount is this entry's, below);
+the **nine is §10's own count** —
+consecutive dispatches reproducing the
+O-1…O-9 measurements exactly, the AB
+frame the ninth. Neither number is the
+other.
+
+The Wave AB closing frame, verified from
+the artifacts and logs first-hand: Build,
+Test & Binary `42813405873` and Headless
+Rune probe `42813458176`, both **SUCCESS**
+on `4edd39b` (the Wave AB integration
+HEAD at its CI close; the round history
+— a lib-test scope round, green at
+round 2 — is §6.22's and the close
+commit's record, not re-derived here;
+`fd5aef2` docs-close and `75c8854`
+roadmap sit on top, docs only). Build
+totals summed from the run's own log:
+**4,339 passed, 0 failed** (56
+`test result:` lines) — +22 over Wave
+AA's 4,317, exactly the arithmetic
+AB19 rehearsed. The headless artifact
+holds 227 files, **38 tree dumps**, and
+every `.exit` file in it reads 0. The
+transcripts read: subtitle census
+**PASS** (0 FAIL), both Home markers
+**PASS** (missing-audio, scan-fallback),
+MCP probe **PASS**, and the Home
+thumbnail probe **PASS** in full — the
+populated pairwise ink-coverage
+distances read 0 / 51 / 48 against the
+floor of 12, the missing-audio thumbnail
+reads 0 from the singleton row and 48
+from the pair, and the geometry leg
+holds (thumbnail band 112×83/84, spreads
+within tolerance 1). The overflow scan
+over the artifact reads **CLEAN (0 hits,
+scan set complete)** — the **seventh
+consecutive scanned-CLEAN dispatch**,
+the chain in full: `42792705307`,
+`42798031914`, `42803118202`,
+`42803945367`, `42807209856`,
+`42808095941`, `42813458176`. AC10's
+independent second look at this frame
+agrees in every particular.
+
+The frame's stillness is itself the
+record: all 38 per-tree counts reproduce
+the Wave AA frame exactly (AC11's
+measurer, calibrated on the previously
+cited artifact before it was trusted on
+this one), the `tree-default.json` key
+diff is +0/−0, and every O-1…O-9
+measurement reproduces — the first §10
+citation upgrade that moves no number at
+all. The causes are Wave AB's own: the
+catalogue re-verification is docs and
+pins, the Angle(0)/Length(0) refusals
+fire inside existing rows, the v5 flip
+carriage writes export bytes, the bundle
+totals move arithmetic behind the
+panel's delegating wrapper, and AB3's
+frame-bend strip renders only over
+stored bend rows no headless scene
+planted on this frame. So
+`tree-loop-range.json` stands as §19.11
+left it — 1,254 elements counted from
+the artifact's `elements` list, the ●
+beside the pose ◆, both glyphs at
+y 780.5, and no strip pill anywhere in
+the tree.
+
+Against that stillness, the forward
+check for Wave AC's closing frame
+(AC10's §8, carried here so §19 holds
+it; AC3's plant is its cause): on the
+AC closing headless artifact,
+`tree-loop-range.json` must read
+**exactly 1,262 elements** (1,254 + 8,
+no more, no fewer); cells
+`dope-cell-0-1` and `dope-cell-0-3` must
+each carry **8 elements** (the existing
+four plus col, area, strip holder and
+the strip pill) and no other cell may
+change; the two strip pills must be
+**18×2, at [500, 796] and [568, 796]**,
+strictly inside their cell rects; both
+cells' glyph rows must sit at
+**y 779.5** (from this frame's 780.5);
+the overflow scan over that artifact
+must stay **CLEAN**; and the other 37
+dumps must stand element-for-element
+unchanged from this frame unless
+another AC seat's findings predict a
+delta for them. Any other loop-range
+delta is not AC3's. This check is the
+AC closing frame verifier's charge.
+
+This frame is the newest CLEAN frame on
+record and is §10's current citation
+source (AC11's upkeep, landed beside
+this entry). §19.6's remaining rows
+stand as their own waves' records left
+them.

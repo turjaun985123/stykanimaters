@@ -185,7 +185,13 @@ present and fall back to a folder-based flow when neither exists.
   composing with the pose and state marks in the same
   cell, so a figure animated purely from the graph panel
   shows its keys in the sheet and gets its rows instead
-  of the "No keyframes yet" empty state. Keying a bend
+  of the "No keyframes yet" empty state. Stored frame
+  bends mark the sheet too: a frame whose stored bend row
+  changes from the frame before it gains a thin bar at the
+  bottom of its cell — a position mark rather than a fourth
+  glyph, so it composes with the pose, state and channel
+  marks in the same cell — and a figure bent only by hand
+  gets its rows from those marks as well. Keying a bend
   channel on the origin node is refused at both authoring
   doors — the graph panel's Key bend button and MCP
   `graph_key` both answer "The origin has no segment to
@@ -193,7 +199,24 @@ present and fall back to a folder-based flow when neither exists.
   made, and no undo step is spent; a bend channel an
   existing project already carries on the origin still
   loads, saves unchanged, and keeps its keys movable and
-  deletable — only new keys are refused. Motion statistics are
+  deletable — only new keys are refused. Keying an angle
+  channel on the origin is refused at both of its doors
+  too — the graph panel's Key angle button and MCP
+  `graph_key` answer "The origin has no angle to key." —
+  and a length channel at its only door, MCP `graph_key`,
+  with "The origin has no length to key.", under the same
+  rules. The keyframe tools section can also follow the
+  graph panel: with its Follow graph channel toggle on
+  (off by default, session-only), the section's
+  single-target ops — key, delete, nudge, copy-to-frame,
+  clear, fill, interp cycling and key copy/paste — act on
+  the panel's drawn channel of any target instead of the
+  selected joint's angle channel, keying an existing
+  channel at its evaluated value and creating one from
+  the pose store where a source exists, under the same
+  origin refusals; copied keys are tagged with their
+  source target kind, and a paste onto a channel of a
+  different kind is refused. Motion statistics are
   computed alongside the project statistics.
 - **Camera** — per-frame keys (centre, zoom **and rotation**) with
   interpolation; camera mode pans by dragging; a follow target can
@@ -262,8 +285,12 @@ present and fall back to a folder-based flow when neither exists.
   gain; playback mixes **all** clips audible at the playhead
   at their gains, synced via `ffplay`, and MP4 exports mix
   every clip into the soundtrack at its frame offset and
-  gain — frame-range MP4 and WebM exports mix the clips
-  inside the range the same way (WebM carries its audio as
+  gain — a full-length MP4 export decodes non-WAV clips
+  and applies every clip's gain exactly as the range path
+  does, and a clip that cannot be probed or decoded fails
+  the export outright instead of dropping the rest of the
+  mix silently — frame-range MP4 and WebM exports mix
+  the clips inside the range the same way (WebM carries its audio as
   Opus; a full WebM export is video-only); per-clip
   normalise / split
   (including split at silences) / crossfade plus pitch shift
@@ -314,7 +341,11 @@ present and fall back to a folder-based flow when neither exists.
     nothing, authors no key at a keyless frame and spends
     no undo step) — re-pointed at another asset
     without losing its keys, reordered in draw order, and
-    navigated from its own dopesheet lane.
+    navigated from its own dopesheet lane. A right-press
+    on the stage picks through the same stack — figure or
+    joint first, then a sprite, then a stroke under the
+    point — but only ever selects: it arms no drag, and
+    while playback runs it changes nothing.
     Image assets import from PNG or JPEG files, detected by
     content rather than by file name. A **layered set** imports
     too: a SpriteLoop package folder (`spriteloop.import.json`
@@ -405,7 +436,7 @@ present and fall back to a folder-based flow when neither exists.
   (`src/projects.rs`), a recovery snapshot and
   session-continuity helpers (`src/shell.rs`), native open/save
   dialogs, save/load as JSON (`project.styk.json`), and
-  **28 languages** (the original's 27 + Bengali; 695 UI
+  **28 languages** (the original's 27 + Bengali; 697 UI
   strings in each language's table) in `src/i18n.rs`.
   These library features survived the Rune
   migration untouched, and the Home panel and settings
@@ -475,7 +506,12 @@ enabled), which is exactly why it no longer starts on its own.
   glyph outline (cross-verified with the original's codecs) and
   recovered on import — readable, but blocky by construction:
   the port has no vector font outlines to write. (Image side
-  tables, per-frame lengths and bends round-trip too.)
+  tables, per-frame lengths and bends round-trip too, and
+  v5 export writes a segment image's mirror flip as the
+  format's endpoint-reversal/baseline-reflection byte pair
+  (both bytes set), so the flip crosses over — the rest of
+  the image's local payload, its offset, scale, angle and
+  opacity, stays behind.)
 - **3D is a session, not a document feature.** 3D figures are
   posed in the 3D mode and baked to native 2D figures; exports
   render the 2D result.

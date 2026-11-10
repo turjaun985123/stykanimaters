@@ -4324,6 +4324,93 @@ mod tests {
     }
 
     #[test]
+    fn job_lines_keys_are_exactly_the_tuple_carried_population() {
+        // Wave AC (AC9): the F6 artefact, pinned as a
+        // closed set. `job_lines` returns its keys as
+        // (key, line) tuple data, applied through a
+        // variable at the readout's render site,
+        // so no gate extractor pattern — a key literal
+        // in a `.key()` call, a helper-call literal,
+        // a `key:` field — captures them: the four line
+        // keys ride OUTSIDE the phase_j_checks counter
+        // by design, disclosed in that script's floor
+        // ledger at every ratchet since Wave W. The
+        // per-shape pins above assert each key's value
+        // at its own site; this pin asserts the
+        // population: across every job shape, the union
+        // of returned keys is exactly the four known
+        // keys, so a fifth tuple-carried key cannot
+        // join the artefact silently — it fails here
+        // until it is named in the ledger and in this
+        // set deliberately.
+        let core = EditorCore::new();
+        let mk = |kind: JobKind| {
+            let (_tx, rx) = mpsc::channel::<ExportJobOutcome>();
+            ExportJob {
+                kind,
+                dest: PathBuf::from("out-test"),
+                render: Arc::new(PhaseProgress::default()),
+                encode: Arc::new(PhaseProgress::default()),
+                bundle: Arc::new(PhaseProgress::default()),
+                outcome: rx,
+                shown_render: PhaseSnapshot::default(),
+                shown_encode: PhaseSnapshot::default(),
+                shown_bundle: PhaseSnapshot::default(),
+            }
+        };
+        let mut seen: Vec<&'static str> = Vec::new();
+        let mut collect = |job: &ExportJob| {
+            for (key, _line) in job_lines(&core, job) {
+                if !seen.contains(&key) {
+                    seen.push(key);
+                }
+            }
+        };
+        // A single-format job before any event: the
+        // working line only.
+        collect(&mk(JobKind::PngFull));
+        // A single-format job with both phases
+        // reported: the render and encode lines.
+        let job = mk(JobKind::Mp4Full);
+        job.render
+            .store_render(stykanimate_rs::export::RenderProgressEvent {
+                rendered_frames: 1,
+                total_frames: 2,
+                finished: false,
+            });
+        job.encode
+            .store_encode(stykanimate_rs::export::EncodeProgressEvent {
+                encoded_frames: 1,
+                total_frames: 2,
+                finished: false,
+            });
+        collect(&job);
+        // A bundle job before any event: the working
+        // line again — no new key.
+        collect(&mk(JobKind::BundleImages));
+        // A bundle job with a bundle event reported:
+        // the bundle line.
+        let job = mk(JobKind::BundleVideo);
+        job.bundle
+            .store_bundle(stykanimate_rs::export::BundleProgressEvent {
+                completed_frames: 1,
+                total_frames: 2,
+                finished: false,
+            });
+        collect(&job);
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            vec![
+                "xc-progress-bundle",
+                "xc-progress-encode",
+                "xc-progress-render",
+                "xc-progress-working",
+            ]
+        );
+    }
+
+    #[test]
     fn bundle_press_is_a_no_op_while_a_job_runs() {
         let mut s = crate::init();
         let release = blocked_job(

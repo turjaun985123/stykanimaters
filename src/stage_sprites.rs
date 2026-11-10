@@ -98,7 +98,10 @@
 //! order. Since Wave X (X5) the pointer path exists:
 //! `main.rs::stage_drag` calls [`sprite_pick_at`] on a
 //! joint miss and writes the hit into the Sprites panel's
-//! selection.
+//! selection. Since Wave AC (AC6) the right-press pick
+//! stack (`main.rs::secondary_pick_stack`) calls it on a
+//! core-pick miss the same way — selection only there:
+//! the hit is written, no drag is armed.
 //!
 //! ## Dragging (Wave Z, Z3)
 //!
@@ -581,8 +584,11 @@ pub fn sprite_at_point(quads: &[SpriteQuad], p: V2) -> Option<usize> {
 /// display frame — the stage pointer path's pick (Wave X,
 /// X5, SpriteLoop GAP P-3): `main.rs::stage_drag` converts
 /// the press to stage coordinates and calls this on a
-/// joint miss, so the sprite the user sees on top is the
-/// sprite the click selects (the result feeds the Sprites
+/// joint miss — and the right-press pick stack
+/// (`main.rs::secondary_pick_stack`, Wave AC, AC6) calls
+/// it on a core-pick miss identically — so the sprite
+/// the user sees on top is the sprite the click selects
+/// (the result feeds the Sprites
 /// panel's selection, which the stage's own prim pass
 /// already draws corner marks for). Read-only: picking
 /// never snapshots and never sets the status — selection

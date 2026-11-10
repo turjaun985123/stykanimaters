@@ -115,6 +115,9 @@
 //! and the audit trail (Wave AA, AA4). The library takes
 //! no part in that choice — the same ops serve the graph
 //! panel's drawn channel, of any target, unchanged.
+//! Since Wave AC (AC1) the keyframe tools section also
+//! follows the drawn channel under its follow toggle,
+//! default off; its module docs carry both scopes.
 
 use crate::editor::EditorCore;
 use crate::graph::{ChannelTarget, Interp, Key};
@@ -1772,6 +1775,88 @@ mod tests {
     }
 
     #[test]
+    fn paste_into_an_existing_angle_zero_channel() {
+        // Wave AC (AC2), generalising AB11's Bend(0) pin to
+        // AB4's origin targets: the Angle(0) refusal lives in
+        // the authoring doors only. Paste resolves a channel
+        // by index and never consults the target, so a stored
+        // Angle(0) channel — one a saved project carries —
+        // accepts pasted keys like any other channel:
+        // rebased, exactly one snapshot, the stored key
+        // untouched.
+        let mut core = core_with_angle_zero();
+        let copied = copy_keys(&core, 0).unwrap();
+        let edits_before = core.edits_since_autosave();
+        assert!(paste_keys(&mut core, 2, &copied, 2.0));
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits_before + 1,
+            "the paste into Angle(0) is exactly one snapshot"
+        );
+        let ch = &core.project.channels[2];
+        assert_eq!(ch.target, ChannelTarget::Angle(0));
+        assert_eq!(ch.keys.len(), 4, "the stored key plus three pasted keys");
+        let frames: Vec<f32> = ch.keys.iter().map(|k| k.frame).collect();
+        assert!(
+            approx(frames[0], 0.0)
+                && approx(frames[1], 2.0)
+                && approx(frames[2], 6.0)
+                && approx(frames[3], 12.0),
+            "stored key kept, pasted keys rebased: {frames:?}"
+        );
+        assert!(
+            approx(ch.keys[0].value, 0.3),
+            "the stored key is untouched by the paste"
+        );
+        core.undo();
+        assert_eq!(
+            core.project.channels[2].keys.len(),
+            1,
+            "undo reverts the paste"
+        );
+    }
+
+    #[test]
+    fn paste_into_an_existing_length_zero_channel() {
+        // Wave AC (AC2): the Length(0) twin of the pin
+        // above — same door, same boundary. Length's only
+        // authoring door is MCP `graph_key` (AB4), and it
+        // is not this one: library paste by index is
+        // target-blind, so the stored channel accepts the
+        // keys, rebased, in one snapshot.
+        let mut core = core_with_length_zero();
+        let copied = copy_keys(&core, 0).unwrap();
+        let edits_before = core.edits_since_autosave();
+        assert!(paste_keys(&mut core, 2, &copied, 2.0));
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits_before + 1,
+            "the paste into Length(0) is exactly one snapshot"
+        );
+        let ch = &core.project.channels[2];
+        assert_eq!(ch.target, ChannelTarget::Length(0));
+        assert_eq!(ch.keys.len(), 4, "the stored key plus three pasted keys");
+        let frames: Vec<f32> = ch.keys.iter().map(|k| k.frame).collect();
+        assert!(
+            approx(frames[0], 0.0)
+                && approx(frames[1], 2.0)
+                && approx(frames[2], 6.0)
+                && approx(frames[3], 12.0),
+            "stored key kept, pasted keys rebased: {frames:?}"
+        );
+        assert!(
+            approx(ch.keys[0].value, 60.0),
+            "the stored key is untouched by the paste"
+        );
+        core.undo();
+        assert_eq!(
+            core.project.channels[2].keys.len(),
+            1,
+            "undo reverts the paste"
+        );
+    }
+
+    #[test]
     fn paste_into_same_channel_at_a_new_frame() {
         let mut core = core_with_channels();
         let copied = copy_keys(&core, 0).unwrap();
@@ -1863,6 +1948,39 @@ mod tests {
         core
     }
 
+    /// A core whose project carries, beside the standard
+    /// RootX/RootY pair of [`core_with_channels`], an Angle(0)
+    /// channel on figure 0 at index 2 holding one stored key
+    /// (frame 0, 0.3) — the channel a saved project can
+    /// carry but no authoring door will create since Wave AB
+    /// (AB4 refused Angle(0) in `key_graph_angle` and
+    /// `tool_graph_key` only). The AC2 pins record what the
+    /// rest of the library still does with it.
+    fn core_with_angle_zero() -> EditorCore {
+        let mut core = core_with_channels();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(0),
+            keys: vec![Key::flat(0.0, 0.3)],
+        });
+        core
+    }
+
+    /// The Length(0) twin of [`core_with_angle_zero`]: a
+    /// stored Length(0) channel at index 2 holding one key
+    /// (frame 0, 60.0) — carried by saved projects, authored
+    /// by no door since AB4 (`graph_key` is Length's only
+    /// door, and it refuses the origin).
+    fn core_with_length_zero() -> EditorCore {
+        let mut core = core_with_channels();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Length(0),
+            keys: vec![Key::flat(0.0, 60.0)],
+        });
+        core
+    }
+
     #[test]
     fn duplicate_channel_carries_a_bend_zero_channel_verbatim() {
         // Wave AB (AB11): duplicating a stored Bend(0)
@@ -1916,6 +2034,127 @@ mod tests {
             figure: 0,
             target: ChannelTarget::Bend(0),
             keys: vec![Key::flat(0.0, 0.3)],
+        });
+        let idx = shrunk.project.channels.len() - 1;
+        assert!(
+            duplicate_channel_to_figure(&mut shrunk, idx, 1),
+            "node 0 exists even on a one-node rig"
+        );
+    }
+
+    #[test]
+    fn duplicate_channel_carries_an_angle_zero_channel_verbatim() {
+        // Wave AC (AC2): duplicating a stored Angle(0)
+        // channel is propagation, not authoring — AB4 left
+        // the clone path untouched on purpose. The
+        // destination-node check names Angle(n) beside
+        // Bend(n), and node 0 exists on every rig, so it
+        // can never refuse Angle(0); the clone lands with
+        // target and keys verbatim, in one snapshot.
+        let mut core = core_with_two_figures();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(0),
+            keys: vec![
+                Key::flat(0.0, 0.3),
+                Key::flat(4.0, -0.2).with_interp(Interp::Linear),
+            ],
+        });
+        let idx = core.project.channels.len() - 1;
+        let source_keys = core.project.channels[idx].keys.clone();
+        let undo_before = core.undo_depth();
+        assert!(duplicate_channel_to_figure(&mut core, idx, 1));
+        assert_eq!(
+            core.undo_depth(),
+            undo_before + 1,
+            "one snapshot for the clone"
+        );
+        let copy = core.project.channels.last().expect("clone appended");
+        assert_eq!(copy.figure, 1);
+        assert_eq!(copy.target, ChannelTarget::Angle(0));
+        assert_eq!(copy.keys, source_keys, "keys carried verbatim");
+        assert_eq!(
+            core.project.channels[idx].figure, 0,
+            "the source channel is untouched"
+        );
+        // A second duplication refuses on the standing
+        // shadow rule — figure 1 now HAS an Angle(0)
+        // channel — not on any origin rule.
+        assert!(!duplicate_channel_to_figure(&mut core, idx, 1));
+        assert!(
+            core.status.contains("already has a channel for Angle 0"),
+            "status: {}",
+            core.status
+        );
+
+        // Even a rig shrunk to the origin alone still has
+        // node 0, so the clone lands there too.
+        let mut shrunk = core_with_two_figures();
+        shrunk.project.figures[1].def.nodes.truncate(1);
+        shrunk.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(0),
+            keys: vec![Key::flat(0.0, 0.3)],
+        });
+        let idx = shrunk.project.channels.len() - 1;
+        assert!(
+            duplicate_channel_to_figure(&mut shrunk, idx, 1),
+            "node 0 exists even on a one-node rig"
+        );
+    }
+
+    #[test]
+    fn duplicate_channel_carries_a_length_zero_channel_verbatim() {
+        // Wave AC (AC2): the Length(0) twin of the pin
+        // above — the clone path's node check names
+        // Length(n) in the same match arm as Angle(n) and
+        // Bend(n), so the stored channel clones verbatim
+        // onto any rig, and the shadow rule, never an
+        // origin rule, is what refuses a second clone.
+        let mut core = core_with_two_figures();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Length(0),
+            keys: vec![
+                Key::flat(0.0, 60.0),
+                Key::flat(4.0, 45.0).with_interp(Interp::Linear),
+            ],
+        });
+        let idx = core.project.channels.len() - 1;
+        let source_keys = core.project.channels[idx].keys.clone();
+        let undo_before = core.undo_depth();
+        assert!(duplicate_channel_to_figure(&mut core, idx, 1));
+        assert_eq!(
+            core.undo_depth(),
+            undo_before + 1,
+            "one snapshot for the clone"
+        );
+        let copy = core.project.channels.last().expect("clone appended");
+        assert_eq!(copy.figure, 1);
+        assert_eq!(copy.target, ChannelTarget::Length(0));
+        assert_eq!(copy.keys, source_keys, "keys carried verbatim");
+        assert_eq!(
+            core.project.channels[idx].figure, 0,
+            "the source channel is untouched"
+        );
+        // A second duplication refuses on the standing
+        // shadow rule — figure 1 now HAS a Length(0)
+        // channel — not on any origin rule.
+        assert!(!duplicate_channel_to_figure(&mut core, idx, 1));
+        assert!(
+            core.status.contains("already has a channel for Length 0"),
+            "status: {}",
+            core.status
+        );
+
+        // Even a rig shrunk to the origin alone still has
+        // node 0, so the clone lands there too.
+        let mut shrunk = core_with_two_figures();
+        shrunk.project.figures[1].def.nodes.truncate(1);
+        shrunk.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Length(0),
+            keys: vec![Key::flat(0.0, 60.0)],
         });
         let idx = shrunk.project.channels.len() - 1;
         assert!(
@@ -2896,6 +3135,30 @@ mod mcp_graph_tool_tests {
         core
     }
 
+    // Wave AC (AC2): the sibling module's own copies of
+    // `core_with_angle_zero` / `core_with_length_zero`
+    // (same shapes as in `mod tests`, per this module's
+    // standing helper rule).
+    fn core_with_angle_zero() -> EditorCore {
+        let mut core = core_with_channels();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(0),
+            keys: vec![Key::flat(0.0, 0.3)],
+        });
+        core
+    }
+
+    fn core_with_length_zero() -> EditorCore {
+        let mut core = core_with_channels();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Length(0),
+            keys: vec![Key::flat(0.0, 60.0)],
+        });
+        core
+    }
+
     /// Two DUPLICATE (figure 0, RootX) channels told apart
     /// by their keys — twin 0 holds values 100/140, twin 1
     /// holds a single key 42 — plus an empty RootY channel.
@@ -3135,7 +3398,19 @@ mod mcp_graph_tool_tests {
             "status: {}",
             out["status"]
         );
-        // With a joint selected it authors the angle key.
+        // Node 0 is the origin: since Wave AB (AB4) the
+        // core op refuses it ("The origin has no angle to
+        // key.") before any snapshot, so the direct call
+        // below authors nothing and the tool call refuses
+        // the same way, returning Ok with the refusal on
+        // the status line. The assertion only proves the
+        // tool call survives the refusal without shrinking
+        // the channel list (the count is unchanged, so
+        // `>=` holds as equality). The refusal's terms
+        // for this exact scenario — no channel authored,
+        // no snapshot spent, a stored Angle(0) channel
+        // gains no key — are pinned in editor.rs by
+        // `key_graph_angle_refuses_the_origin_without_a_snapshot`.
         core.selected_node = Some(0);
         core.key_graph_angle();
         let before = core.project.channels.len();
@@ -3243,6 +3518,196 @@ mod mcp_graph_tool_tests {
                 key(0.0, 0.0, 0.0, 0.0, Interp::Linear),
                 key(2.0, 0.45, 0.0, 0.0, Interp::Linear),
                 key(4.0, 0.9, 0.0, 0.0, Interp::Linear),
+            ],
+        });
+        let out = tool_graph_reduce_keys(
+            &mut core,
+            &json!({ "channel": 2, "tolerance": 0.01 }),
+        )
+        .unwrap();
+        assert_eq!(out["removed"], 1);
+        let ch = &core.project.channels[2];
+        assert_eq!(ch.keys.len(), 2, "endpoints kept, interior dropped");
+        assert!(approx(ch.keys[0].frame, 0.0) && approx(ch.keys[1].frame, 4.0));
+    }
+
+    #[test]
+    fn key_all_channels_at_hold_keys_an_angle_zero_channel() {
+        // Wave AC (AC2), generalising AB11's Bend(0) pin:
+        // "key all" iterates EXISTING channels and hold-keys
+        // each at its evaluated value — AB4 recorded it as
+        // propagation, and a stored Angle(0) channel is
+        // keyed with the rest, in the same single snapshot
+        // the whole op always takes.
+        let mut core = core_with_angle_zero();
+        let depth = core.undo_depth();
+        let keyed = key_all_channels_at(&mut core, 2.0);
+        assert_eq!(keyed, 3, "all three channels keyed, Angle(0) included");
+        assert_eq!(
+            core.undo_depth(),
+            depth + 1,
+            "one snapshot for the whole op"
+        );
+        let ch = &core.project.channels[2];
+        assert_eq!(ch.keys.len(), 2);
+        assert!(approx(ch.keys[1].frame, 2.0));
+        assert!(
+            approx(ch.keys[1].value, 0.3),
+            "the held value is the channel's own evaluated value \
+             (a lone key clamps to itself everywhere)"
+        );
+        core.undo();
+        assert_eq!(
+            core.project.channels[2].keys.len(),
+            1,
+            "undo reverts the hold-key"
+        );
+    }
+
+    #[test]
+    fn key_all_channels_at_hold_keys_a_length_zero_channel() {
+        // Wave AC (AC2): the Length(0) twin of the pin
+        // above — the iteration never consults the target,
+        // so the stored channel is hold-keyed at its own
+        // evaluated 60.0 with the rest, one snapshot total.
+        let mut core = core_with_length_zero();
+        let depth = core.undo_depth();
+        let keyed = key_all_channels_at(&mut core, 2.0);
+        assert_eq!(keyed, 3, "all three channels keyed, Length(0) included");
+        assert_eq!(
+            core.undo_depth(),
+            depth + 1,
+            "one snapshot for the whole op"
+        );
+        let ch = &core.project.channels[2];
+        assert_eq!(ch.keys.len(), 2);
+        assert!(approx(ch.keys[1].frame, 2.0));
+        assert!(
+            approx(ch.keys[1].value, 60.0),
+            "the held value is the channel's own evaluated value \
+             (a lone key clamps to itself everywhere)"
+        );
+        core.undo();
+        assert_eq!(
+            core.project.channels[2].keys.len(),
+            1,
+            "undo reverts the hold-key"
+        );
+    }
+
+    #[test]
+    fn angle_zero_channel_keys_shift_move_and_delete_like_any_channel() {
+        // Wave AC (AC2): the transform family resolves a
+        // channel by index and never consults the refusal —
+        // a stored Angle(0) channel's keys stay movable and
+        // deletable, and the channel itself deletable, so
+        // AB4's authoring refusal never traps stored data.
+        let mut core = core_with_angle_zero();
+        core.project.channels[2].keys.push(Key::flat(4.0, 0.9));
+        // Shift (the nudge family): every key moves.
+        assert!(shift_keys(&mut core, 2, 2.0));
+        let frames: Vec<f32> = core.project.channels[2].keys.iter().map(|k| k.frame).collect();
+        assert!(
+            approx(frames[0], 2.0) && approx(frames[1], 6.0),
+            "shifted: {frames:?}"
+        );
+        // Move one key; its value travels with it.
+        assert!(move_key_at(&mut core, 2, 6.0, 3.0, None));
+        let ch = &core.project.channels[2];
+        assert!(approx(ch.keys[0].frame, 2.0) && approx(ch.keys[1].frame, 3.0));
+        assert!(
+            approx(ch.keys[1].value, 0.9),
+            "the value travelled with the moved key"
+        );
+        // Delete one key, then the channel itself.
+        assert!(remove_key_at(&mut core, 2, 3.0));
+        assert_eq!(core.project.channels[2].keys.len(), 1);
+        assert!(delete_channel(&mut core, 2));
+        assert_eq!(
+            core.project.channels.len(),
+            2,
+            "the Angle(0) channel itself is deletable"
+        );
+    }
+
+    #[test]
+    fn length_zero_channel_keys_shift_move_and_delete_like_any_channel() {
+        // Wave AC (AC2): the Length(0) twin of the pin
+        // above — same index-resolved family, same
+        // guarantee: shift, move, key delete and channel
+        // delete all reach the stored channel.
+        let mut core = core_with_length_zero();
+        core.project.channels[2].keys.push(Key::flat(4.0, 90.0));
+        // Shift (the nudge family): every key moves.
+        assert!(shift_keys(&mut core, 2, 2.0));
+        let frames: Vec<f32> = core.project.channels[2].keys.iter().map(|k| k.frame).collect();
+        assert!(
+            approx(frames[0], 2.0) && approx(frames[1], 6.0),
+            "shifted: {frames:?}"
+        );
+        // Move one key; its value travels with it.
+        assert!(move_key_at(&mut core, 2, 6.0, 3.0, None));
+        let ch = &core.project.channels[2];
+        assert!(approx(ch.keys[0].frame, 2.0) && approx(ch.keys[1].frame, 3.0));
+        assert!(
+            approx(ch.keys[1].value, 90.0),
+            "the value travelled with the moved key"
+        );
+        // Delete one key, then the channel itself.
+        assert!(remove_key_at(&mut core, 2, 3.0));
+        assert_eq!(core.project.channels[2].keys.len(), 1);
+        assert!(delete_channel(&mut core, 2));
+        assert_eq!(
+            core.project.channels.len(),
+            2,
+            "the Length(0) channel itself is deletable"
+        );
+    }
+
+    #[test]
+    fn angle_zero_channel_reduces_like_any_channel() {
+        // Wave AC (AC2): reduce resolves by index too. The
+        // keys are collinear (Linear), so the interior key
+        // contributes nothing and goes; the endpoints stay.
+        // The tool applies the caller's tolerance in the
+        // channel's own units — it has no target table, so
+        // a stored Angle(0) channel reduces exactly as a
+        // stored Bend(0) channel does (AB11).
+        let mut core = core_with_channels();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(0),
+            keys: vec![
+                key(0.0, 0.0, 0.0, 0.0, Interp::Linear),
+                key(2.0, 0.45, 0.0, 0.0, Interp::Linear),
+                key(4.0, 0.9, 0.0, 0.0, Interp::Linear),
+            ],
+        });
+        let out = tool_graph_reduce_keys(
+            &mut core,
+            &json!({ "channel": 2, "tolerance": 0.01 }),
+        )
+        .unwrap();
+        assert_eq!(out["removed"], 1);
+        let ch = &core.project.channels[2];
+        assert_eq!(ch.keys.len(), 2, "endpoints kept, interior dropped");
+        assert!(approx(ch.keys[0].frame, 0.0) && approx(ch.keys[1].frame, 4.0));
+    }
+
+    #[test]
+    fn length_zero_channel_reduces_like_any_channel() {
+        // Wave AC (AC2): the Length(0) twin of the pin
+        // above — collinear Linear keys in stage units,
+        // the interior key dropped at the caller's
+        // tolerance, endpoints kept.
+        let mut core = core_with_channels();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Length(0),
+            keys: vec![
+                key(0.0, 40.0, 0.0, 0.0, Interp::Linear),
+                key(2.0, 60.0, 0.0, 0.0, Interp::Linear),
+                key(4.0, 80.0, 0.0, 0.0, Interp::Linear),
             ],
         });
         let out = tool_graph_reduce_keys(

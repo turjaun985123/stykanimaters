@@ -13501,3 +13501,1550 @@ IA-AB6-1 were discharged inside
 the integration push itself.
 Wave AC launches on this
 closing frame.
+
+
+### 6.23 Wave AC — the
+drawn-target wave: follow mode
+built, the P0 audio fix, the
+standing board calls; the Wave
+AB frame closed (2026-11-10)
+
+Ordered 2026-11-10 (the standing
+continuous order; the board was
+written while Wave AB's CI ran,
+so this wave launched the moment
+Wave AB closed): twenty-one
+seats, AC0–AC20, one owner per
+file, integrator surfaces via
+filed actions (board:
+`~/workspace/wave-ac/BOARD.md`;
+findings:
+`~/workspace/wave-ac/findings/`).
+The board's base is the Wave AB
+closing HEAD `fd5aef2` — the
+closing HEAD `4edd39b` plus the
+§6.22 close note, nothing else
+(MCP 392, i18n 695 × 28, element
+keys 1019 floor, palette 135,
+State 49 fields / 22 literals,
+scenes 35, SCAN_SET 19 required
+/ 0 pending);
+`src/i18n.rs` and
+`src/rune_sec/i18n_wire.rs` are
+frozen to this wave's agents,
+all key work arriving via IA.
+
+**Record-time caveat.** This
+section was written while the
+wave runs. Thirteen sibling
+findings had landed when it was
+composed (AC0–AC8, AC10–AC13);
+seven had not (AC9, AC14–AC19),
+and their paragraphs below are
+built from the board, the
+actions routed through them,
+and the seats that cite them —
+each says so, and the standing
+rule holds: where a late finding
+contradicts its paragraph, the
+finding wins and the discrepancy
+is recorded in the next section,
+not silently patched (remainder
+(10)). Every Wave AC status is
+IMPLEMENTED until Wave AC's
+integration CI.
+
+**The Wave AB integration
+ledger.** Three slices on
+`2b68393`, in order: (1)
+`a1344a2`'s code slice —
+AB3's frame-bend dopesheet
+strip, AB4's Angle(0)/Length(0)
+authoring refusals at both
+doors, AB6's Pivot v5 flip
+carriage, AB7's bundle totals
+unified behind core
+`export::bundle_member_totals`
+with IA-AB7-1's panel wrapper,
+AB11's Bend(0) edge pins, AB9's
+sprite-drag grab-frame pin,
+AB10's opacity cross-surface
+pins. (2) The IA-AB6-1 slice —
+both piv media notes
+re-qualified in all 28 tables
+× 2 keys ("only the flip
+crosses over — the offset,
+scale, angle and opacity stay
+behind"), the four export-panel
+exact-text pins moving in the
+same commit. (3) The docs slice
+— AB15's MCP.md sync with
+IA-AB4-1's sentence, AB17's
+README truth pass 9, AB12's
+PHASE_O §10 citation on the AA
+frame, AB18's QA_RUNE §19.11,
+AB20's §6.22 record. The
+integration HEAD is `a1344a2`;
+the round-2 fix `4edd39b` and
+the docs-close `fd5aef2` follow
+below.
+
+**The Wave AB CI frame** (AC18's
+charge; adopted from AC10's
+independent verification and
+AC11's frame measurements, both
+first-hand — see their
+paragraphs). First, the pair
+§6.22 (3) deferred: on
+`2b68393` (the AA docs-close
+record), build 42810159846 was
+**CANCELLED by supersession**
+— this wave's own integration
+push triggered the branch's
+cancel-in-progress; not a
+failure, and its content is
+covered by the descendant build
+below — and headless
+42810189452 **SUCCESS**.
+**Round 1** (`a1344a2`): build
+42812652116 FAILURE in the lib
+TEST target only — 10 scope
+errors (AB7's totals pin sat in
+`range_export_tests`, whose
+selective imports named neither
+`bundle_member_totals` nor
+`BundleKind`, 8 errors; AB11's
+`core_with_bend_zero` helper
+existed only in the test module
+that does not hold two of its
+pins, 2 errors); headless
+42812685642 **SUCCESS**. No
+product code was implicated.
+Fixed in `4edd39b`: the import
+list extended, the sibling
+module given its own helper
+copy per the file's standing
+pattern. **Round 2 GREEN**:
+build 42813405873 **SUCCESS —
+4,339 tests passed, 0 failed**
+(+22 over Wave AA's 4,317,
+exactly AB19's rehearsed
+arithmetic, re-summed from the
+log by AC10); headless
+42813458176 **SUCCESS** — every
+transcript PASS read from both
+the log and the artifact files
+(subtitle census, Home
+thumbnail probe content-faithful
+at coverage distances 0 / 48,
+both Home markers, live MCP
+probe), 38 dumps, every `.exit`
+0, and the downloaded artifact's
+overflow scan CLEAN — the
+**seventh consecutive
+scanned-CLEAN** dispatch
+(IA-AC11-1's chain: 42792705307
+→ 42798031914 → 42803118202 →
+42803945367 → 42807209856 →
+42808095941 → 42813458176).
+§6.22 (1) is discharged. The
+docs-close round on `fd5aef2`:
+build 42816200335 **SUCCESS**;
+its headless 42816228545 was
+still in flight when this
+record's sources close —
+docs only, verdicts to the
+next record (remainder (4)).
+One further docs-only commit,
+`75c8854`, landed the 30-agent
+UI/UX analysis as
+`docs/UI_UX_Roadmap.MD` between
+the docs-close and this wave's
+integration; it moves no count
+and no behaviour.
+
+**AC0 — Full-export audio
+parity (the P0 fix):
+IMPLEMENTED.** The defect A10
+recorded is closed at its root:
+`mux_audio` no longer falls
+back to the earliest audible
+clip when the WAV-only mix
+fails. A new `full_mix_segments`
+builds whole-file
+`RangeSegment`s from the
+unchanged `mux_plan` (probe
+injected, exactly like the
+range planner), and
+`mux_full_mix` renders them
+through the range machinery's
+own `mix_range_segments` —
+non-WAV clips decoded to temp
+WAVs by ffmpeg, gains applied —
+then muxes via `mux_mixed_wav`.
+`MuxPlan::Mixed` and the gained
+`MuxPlan::Single` route through
+it, so both full-length callers
+(and with them panel, MCP and
+bundle MP4 exports) inherit the
+fix; the unity-gain single-clip
+direct path is byte-for-byte
+the old one, needing no probe.
+An unprobeable clip is now an
+`io::Error` refusal in the
+range refusal's wording, naming
+every unmeasured clip; a mix
+that still cannot render is
+also an `Err`. **The
+earliest-clip fallback no
+longer exists.** Seven pins:
+the board's three (multi-format
+mix totals at 4.5 s under a
+fake probe; a gained lone MP3
+keeping its 0.25 gain; the
+unprobeable refusal end to end,
+output never written) plus the
+gained-lone refusal mirror and
+two export-level route guards.
+Three doc passages kept
+truthful, including the range
+mux doc's surrender of its old
+"mirrors the full path" claim.
+No IA — no frozen surface
+needed changes, and no class-C
+sentence was reworded (the
+refusal is an error, surfaced
+like the range one). Two
+behaviour deltas are recorded,
+not hidden: a valid-but-empty
+WAV inside a mix now refuses
+(the range path's existing
+treatment, via the same probe),
+and the full-path refusal fires
+after the silent encode where
+the range entries refuse before
+it (remainder (7)).
+
+**AC1 — Drawn-target mode,
+BUILD (Variant D):
+IMPLEMENTED.** AB5's design is
+built as boarded, in
+`src/rune_sec/keyframe_tools.rs`
+alone (+1,544/−44): the
+keyframe section's single-target
+ops resolve through the graph
+panel's own
+`effective_channel_index` when
+the follow toggle is on, so the
+two co-visible sections can
+never disagree about which
+channel is live — index-exact,
+a picked duplicate row resolving
+to that twin. Every single-target
+op gained a `*_follow` twin
+composed on the same helpers as
+its charter twin, which stands
+byte-identical beside it; the
+builder precomputes every guard
+per mode. The board's defaults
+hold throughout: Q1 D, Q2 reach
+as drawn, Q3 Root in, Q5 default
+OFF and session-only (one new
+shell field, never persisted),
+Q7 dynamic labels literal
+English under a pinned
+38-character scope label, Q9
+wide ops untouched, Q10 MCP
+angle tools unchanged. Q4's two
+unverified sources are now
+verified in-tree: Root keys the
+frame's pose root via
+`Project::poses_at`, Length the
+def's node length (evaluation
+starts from the def; channels
+override it) — and
+`pose_store_value` returns
+`None` where no store value
+exists, so the op refuses
+naming the target rather than
+keying a silent 0.0. **Q8 held
+verbatim**: origin targets are
+refused before any snapshot
+with the family's exact three
+sentences, on the
+existing-channel path too, while
+delete/nudge/clear/fill/cycle
+act on a stored origin channel
+freely, as the graph panel's
+ops do. Q6's tagged clipboard
+lands: paste in follow mode
+refuses a cross-KIND target
+naming both ends, before any
+snapshot; same-kind cross-joint
+paste stays allowed, and
+charter-mode paste is
+byte-identical over the tag.
+Fourteen pins, including the
+AA4 charter pin re-cut as a
+mode pair. §6.22 (5) is
+discharged — the design is no
+longer awaiting its questions.
+Three IAs: IA-AC1-1 (the mode
+field + tagged clipboard type
+in `src/main.rs`, with the
+field line owed at 20 further
+`State` literal sites — the
+tree does not compile until it
+lands, remainder (2)), IA-AC1-2
+(one scope sentence for
+`src/graph_keys.rs`), IA-AC1-3
+(one qualifier on the
+`graph_key_angle` row, routed
+to AC14). The priced +2 element
+keys exist — as named constants,
+which is where AC12's settlement
+takes them up.
+
+**AC2 — Angle(0)/Length(0)
+stored-channel edge pins:
+IMPLEMENTED, pins only.** AB11's
+Bend(0) second look generalised
+to the origin's other two
+refused targets, with the same
+outcome: **no contradiction of
+AB4's guarantees was found, and
+no production code changed.**
+The refusals live only in the
+authoring doors; a stored
+Angle(0)/Length(0) channel a
+saved project carries stays
+selectable, propagatable,
+hold-keyable, movable, reducible
+and deletable everywhere else.
+Thirteen tests + four fixture
+helpers, all pure insertions
+(`src/graph_keys.rs` +450,
+`src/mcp_tools.rs` +104,
+`src/rune_sec/graph_panel.rs`
++129): paste rebasing into the
+stored channel in both MCP
+target forms while `graph_key`
+still refuses onto it with
+AB4's exact sentences; duplicate
+carrying the channel verbatim
+and refusing a second clone on
+the shadow rule ("already has a
+channel for Angle 0" / "Length
+0"), never an origin rule;
+key-all hold-keying at the
+stored key's own evaluated
+value; the shift/move/delete
+and reduce family; the panel's
+selector resolving the stored
+channel with node 1 selected,
+proving the entry comes from
+the store, not the pin. The
+origin-refusal family is now
+pinned end to end for all three
+targets. No IA. Coordination
+with AC19's region in the same
+file held — its test is
+untouched.
+
+**AC3 — Bend-strip headless
+proof: IMPLEMENTED, planted.**
+AB3's frame-bend strip rendered
+in no closing artifact because
+no scene planted stored bend
+rows; now one does. The plant
+sits in the existing
+`loop-range` scene — the
+Animate-workspace scene whose
+tree already carries the
+dopesheet cells — mirroring the
+scene's own fiction: figure 0,
+node 6 (the demo wave's forearm
+R), frames 1 and 3 (the loop's
+ends, where its channel keys
+already sit), at +0.35 / +0.7,
+`cycle_bend`'s first two authored
+steps, stored full-length
+exactly as that op's own writes
+store rows. The write is a
+direct `Frame::bends` write
+under the module's named
+graph-duplicates exception,
+documented in module and scene
+docs: the only bend op cycles
+the selected node at the current
+frame, and using it would move
+the playhead and selection the
+scene's tree stands on. One pin
+derives `bend_key_frames ==
+[1, 3]` through the lane's own
+fn (the frame-2 disappearance
+correctly never marks). The
+tree delta is measured
+element-by-element against the
+AB closing artifact: cells
+`dope-cell-0-1` / `dope-cell-0-3`
+go 4 → 8 elements each (col,
+area, strip holder, the 18×2
+strip pill at [500, 796] /
+[568, 796]), glyphs shift
+y 780.5 → 779.5, tree total
+**1,254 → 1,262 (+8)**, every
+new rect strictly inside the
+existing cell rects — the proof
+is a prediction the AC closing
+scan must confirm (remainder
+(1); AC10's §8 carries the
+forward check). Zero element
+keys added or lost (the strip's
+elements are unkeyed by AB3's
+design), and no IA to AC13: the
+scene set is unchanged, so
+SCAN_SET stays 19/0.
+
+**AC4 — Pose-drag mid-gesture
+frame-step audit: IMPLEMENTED —
+a proven inconsistency, built.**
+AB9's open question splits in
+two. The pose drag's COMMIT
+never crossed frames:
+`begin_drag` takes exactly one
+whole-project snapshot before
+the first write, `end_drag`'s
+verdict feeds nothing but the
+status post, and one undo
+restores every frame the chase
+wrote across (pinned). Its
+gesture-end RECAP did cross:
+pre-fix `end_drag` compared the
+release frame's pose against the
+grab frame's baseline, and all
+three failure shapes are
+constructible — a false positive
+(unmoved press + step posts
+"Posed figure N at frame …" for
+a frame never written, against
+P6's dead-zone discipline),
+false attribution (the recap
+names the release frame), and a
+false negative (a step to a
+frame whose pose equals the
+grab baseline silences a real
+edit). The chase itself was NOT
+changed — AB9's reasoning
+stands; only the comparison
+crossed. The repair, in
+`src/editor.rs` only (+203/−29):
+per-frame baselines
+(`drag_poses_before` /
+`drag_cameras_before` as
+frame-tagged vecs, lazily
+captured before a stepped-to
+frame's first write), and
+`end_drag` comparing each
+written frame against its own
+baseline, naming the last frame
+actually changed, sentences and
+epsilons byte-unchanged; a
+no-step gesture behaves
+byte-identically. The camera
+twin — the identical crossed
+comparison in the same owned
+function, under P6's one charter
+for both gestures — was repaired
+with the same pattern, its
+hunks separable if the board
+wants the diff pose-only. The
+setup drag is exempt by
+construction (its baseline is
+rest angles, frame-independent
+data) and the exemption is now
+recorded in the field doc. Two
+pins beside P6's, which is
+unedited. No IA. Three
+remainders are recorded plainly
+(remainder (6)).
+
+**AC5 — Clip-def fallback media
+in the segment inspector:
+IMPLEMENTED.** AB10's scope
+note was true for all five media
+rows: the funnel falls back
+per-node to the clip def's media
+when the instance node's slot is
+empty, and the inspector read
+only the node's own slot — so a
+fallback segment announced "No
+media attached" while the stage
+drew the clip's sprite on it,
+and none of the composed values
+were visible anywhere in the
+panel. The honesty question is
+answered by shape, not by
+press: editable rows writing the
+clip def were **rejected** (a
+press in the segment inspector
+silently rewriting a shared def —
+every clip instance changes —
+would lie about which store it
+writes, and the module's ops are
+instance-shaped). What was built,
+in `src/rune_sec/inspector_segment.rs`
+alone (+381/−4), composes
+without lying: a `ClipMediaState`
+derived in `segment_state`
+mirroring the funnel arm for arm
+(stale clip, out-of-range node,
+media-free clip node ⇒ no
+fallback, exactly as the funnel
+skips); the existing readout
+names the clip media while the
+fallback is live; a provenance
+line under it keyed
+**`seg-media-from-clip`** (+1
+element key — the wave's only
+counted key growth, AC12 §2)
+names the source clip; read-only
+Offset/Scale/Rotate/Opacity rows
+reuse the writable rows' own
+labels and formatters,
+mutually exclusive with the
+writable block by construction;
+a Flip row renders only while
+flipped. The writable surface
+keeps its single meaning — it
+writes the node's own slot, and
+attaching over a fallback is now
+visibly the funnel's documented
+instance-wins override. Six pins,
+including AB10's cross-surface
+shape on the fallback carrier
+(0.5 × 0.5 × 0.5 → presented
+"50%", funnel alpha exactly
+0.125; NaN sanitising to 1.0 on
+both surfaces) and the
+IA-dependent catalogue pin,
+which fails BY DESIGN until
+insertion, in the IA-Y4-1
+pattern. **IA-AC5-1**: insert
+`segment_media_from_clip`
+("Media from clip: {name}") and
+`segment_media_flipped`
+("Flipped") into `src/i18n.rs`
+× 28 at the family position,
+`{name}` kept verbatim — the
+catalogue goes to 697 × 28 when
+it lands (AC15 verifies arrival;
+the counts block below).
+
+**AC6 — Right-press sprite/stroke
+pick: IMPLEMENTED.** The feature
+X5, Z3 and AB9 each recorded as
+a remainder is built, in the
+shell handler only, with
+`secondary_select`'s core charter
+untouched (the function is
+unmodified). A new
+`secondary_pick_stack` in
+`src/main.rs` resolves the left
+press's pick stack in its order,
+with its selection writes: (1)
+core figure/joint via
+`secondary_select` — a hit ends
+the press, joint priority
+preserved; (2) sprite via
+`sprite_pick_at` — writes
+`sprites_panel.selected` and
+clears `stroke_selected`, but
+deliberately never
+`sprite_drag_down`: selection
+only, no drag arms on a
+secondary press, ever; (3) stroke
+via `stroke_at_point` with the
+left press's assignment semantics
+(a clean miss clears the stroke
+pick only). No snapshot anywhere
+(undo depth pinned at 0). Two
+judgment calls are named in code
+and findings, not buried:
+**playing gates the whole stack**
+— `secondary_select`'s documented
+rule is "while playing, nothing
+changes", and extending picks
+into playback would silently
+repeal it, so the shell legs run
+only when `!core.playing` (the
+one deliberate non-parity point);
+and a **locked joint falls
+through** to the sprite leg,
+which is parity, not invention —
+the left press falls through a
+locked `begin_drag` to the
+identical legs. Six pins in a new
+`secondary_pick_tests` module;
+`src/stage_sprites.rs` took
+docs only (the second caller
+recorded at both `sprite_pick_at`
+doc sites; AB9's regions
+untouched). No IA — no i18n keys,
+no State fields, no new controls,
+zero element keys added or lost.
+
+**AC7 — `graph_key` schema
+description: IMPLEMENTED.** The
+twice-deferred call is taken:
+the `graph_key` Tool description
+in `src/mcp_tools.rs` gains the
+docs row's two refusal sentences
+verbatim after its first sentence
+— `bend:0` refused in its own
+clause ("the origin has no
+segment to bend (the same refusal
+as set_bend)"), `angle:0` and
+`length:0` in the combined one
+("the origin has no angle or
+length to key (evaluate never
+reads either)"). MCP clients read
+the schema, not the docs; now
+both carry the refusals. Agreement
+was verified mechanically: the
+schema literal and the
+`docs/MCP.md` row are
+character-identical once the one
+established marking difference is
+normalised (backticks in the row,
+escaped quotes in the schema).
+No docs edit was needed — the row
+already carried the clauses via
+IA-AB4-1 — so there is **nothing
+for AC14 to apply** on this row;
+its catalogue re-run will find
+the row in agreement for the
+first time. The handler's behaviour
+is unchanged and was already
+pinned (both target forms per
+refusal, including onto an
+existing channel). One line
+changed; no description-content
+pin was added, since the pin
+would live in AC2's owned test
+region — the option is recorded,
+not filed. §6.22 (7) is
+discharged. No IA.
+
+**AC8 — Bundle-cancel core stop
+signal: DESIGNED — NOT BUILT,
+by the board's own charge.** AA2's
+first prerequisite, priced. The
+design's headline: a real stop
+signal is buildable **without
+touching the observer
+contracts** — a polled flag, not
+a callback change. `StopSignal`
+(a clonable `Arc<AtomicBool>`,
+one per job, created by the
+driver) is passed to the funnels
+as an input beside the progress
+callbacks, which stay
+observe-only, so the contracts'
+load-bearing guarantee — an
+observer can neither fail nor
+affect an export — survives
+intact, and "no hook installed"
+and "no stop requested" stay
+independent facts. (The
+`ControlFlow` alternative is
+priced and rejected on file: it
+repeals that guarantee, makes
+stop-ability depend on a callback
+existing, and re-types every
+callback consumer.) Four
+observation points: **P1**
+between members in both drivers'
+loops; **P2** per frame at the
+render-loop heads (sequence
+loops, the video funnel's render
+loop, the SVG frame loop, the
+spritesheet tile loops); **P3**
+after encode, before the audio
+mux; **P4** inside the ffmpeg
+encode — the one restructure,
+a `try_wait` poll at the panel's
+100 ms cadence with `child.kill()`
+on observation and exact
+precedence rules (a child already
+exited 0 means the member
+succeeded; our kill means the
+member is stopped, never
+"exited with signal"; a genuine
+failure stays failed even if the
+flag is set). What a stop leaves
+is stated per member kind —
+sequence/SVG prefixes on disk,
+spritesheet and pre-mux video
+nothing at the destination — with
+one sharp edge named: with NO
+audible audio the encode targets
+the final path directly, so a
+killed ffmpeg would leave a
+truncated file there; if P4 is
+bought, routing that leg through
+temp + rename is **part of the
+scope, not optional**.
+Classification gains a third
+state through one dedicated
+`Interrupted` stop error and an
+`is_stop_error` predicate no
+other path can trip: completed /
+stopped (at most one) / skipped
+(never started, listed by the P1
+check, never inferred), the
+coincidence rule keeping a
+self-failed member *failed* even
+when the press coincides. The
+tracker needs no change. Prices:
+scope **A** (P1 only) ≈ M once
+Q1/Q2 are ruled; **B** (+ P2/P3)
+≈ M–L; **C** (+ P4 and its
+companion leg) ≈ L, splittable
+across 2–3 seats; live-bridge
+MCP cancellation adds M, stdio
+support is L and recommended
+**out** of the first slice.
+Nothing was built and no IA is
+filed — a design files questions:
+the six that remain are the
+user's, carried verbatim into
+remainder (5).
+
+**AC9 — `xc-progress-bundle` key
+artefact audit: paragraph from
+the board and AC12's first-hand
+account; this seat's own findings
+file had not landed when the
+record was composed** (remainder
+(10)). The artefact on the table:
+the bundle progress key has
+ridden OUTSIDE the gate counter
+since F6, carried as a tuple
+rather than a literal at a use
+site. AC12's membership test,
+run against the counter's own
+sets on the baseline tree, finds
+the artefact is a **family**, not
+a singleton: four const-carried
+keys already ride outside the
+counter at base
+(`keyframe-no-joint-note`,
+`keyframe-actions`, `key-delete`
+— all in `keyframe_tools.rs`
+itself — and `panel-3d-preview`),
+beside the tuple-carried
+`xc-progress-bundle`; AC1's two
+new keys joined the family this
+wave by the same mechanism. The
+counter counts key *literals at
+use sites*; a key carried by a
+named constant is invisible to
+it, and that has been the files'
+standing practice, not a drift
+introduced by any one wave. The
+settlement AC12 records, and
+this record adopts: **the floor
+follows the counter's verified
+truth** (1020, below) — ratcheting
+to a number no gate run produces
+would assert a reading that does
+not exist. The conversion of the
+family to countable literals is
+recorded as a conditional, not
+filed as an action: on the day an
+integrator ruling makes it, the
+floor arithmetic becomes
+1020 + 2 for AC1's pair, plus
+whatever the same ruling does to
+the four baseline const-carried
+keys and `xc-progress-bundle` —
+that arithmetic belongs to the
+audit and the ruling, and is not
+guessed here.
+
+
+**AC10 — Wave AB closing-frame
+overflow verification: DONE —
+the integrator's claims
+CONFIRMED independently in every
+particular.** Report only;
+nothing built, nothing edited.
+Every figure was re-derived
+first-hand, the integrator's
+verdicts treated as claims, not
+inputs: both runs confirmed via
+`gh` as completed / success on
+`4edd39b`; the artifact carries
+**38 `tree-*.json` dumps** with
+every `.exit` file 0; this seat's
+own run of
+`scripts/overflow_scan.py --dir`
+over the downloaded artifact
+reads **CLEAN (0 hits, scan set
+complete)** — the verdict taken
+from the scan output itself, per
+the standing rule; the build tally
+re-summed from build 42813405873's
+log is **4,339 passed / 0 failed**
+(the one failure-shaped line in
+the log is a passing test's name);
+all five headless transcripts
+re-read from both the log and the
+artifact's own transcript files,
+PASS in both. The ancestor checks
+land as the board named them:
+AB3's bend strip appears nowhere
+on this frame (zero 18×2 elements
+in `tree-loop-range.json`; cells
+0-1/0-3 hold exactly 4 elements,
+glyphs at y 780.5 — a
+scene-content fact, not a
+rendering failure, and AC3's
+remainder, now landed), and
+AB4/AB7 change no trees. The
+loop-range baseline is confirmed
+at **1,254 elements**, so AC3's
+predicted +8 is measurable
+against this frame with no
+ambiguity; the forward check for
+the AC closing frame's verifier
+is filed in the findings (§8) and
+carried into remainder (1).
+
+**AC11 — PHASE_O §10 upkeep on
+the AB frame: DONE — the citation
+stands on the Wave AB closing
+dispatch.** Docs only
+(`docs/PHASE_O.md`, +117/−2, four
+hunks inside §10, this seat's
+board assignment rather than an
+IA). AB12's method throughout:
+the measurer was calibrated on
+the currently cited artifact
+first (all 38 counts and all 26
+O-item checks reproduce §10's
+table exactly; a second
+instrument built from AA12's
+description agrees on every
+figure, so the choice of
+instrument moves nothing),
+artifact distinctness was checked
+rather than assumed (77 of 227
+files differ between the AA and
+AB dispatches; the three Home
+dumps differ only in
+modified-time strings), and only
+then was the new artifact
+measured. The verdict is a first:
+**this is the first citation
+upgrade that moves no number at
+all** — all 38 per-tree counts
+and windows, every O-1…O-9
+measurement, the z-row, and the
+`tree-default.json` key set
+(+0/−0) reproduce the AA frame
+exactly. The stillness has named
+causes, all Wave AB's own: the
+catalogue pass is docs/pins, the
+origin refusals fire inside
+existing rows, the v5 flip
+carriage writes export bytes, the
+bundle totals moved behind the
+panel's wrapper, and AB3's strip
+renders only over stored bend
+rows no scene planted. The scan
+table is therefore not edited;
+only its source advanced — §10's
+"Current source" now stands on
+42813458176, the previous
+paragraph demoted, text
+unchanged. The streaks, kept
+distinct: **O-1…O-9 reproduction
+stands at nine** consecutive
+dispatches by §10's own count;
+**scanned-CLEAN stands at
+seven** in the §19.11 chain.
+**IA-AC11-1** files the matching
+pointer for QA_RUNE §19 to AC17,
+with both streaks stated.
+A watch item is carried for the
+next §10 seat: on the AC closing
+frame, expect `tree-loop-range`
+at 1,262 with its glyphs at
+y 779.5 (AC3) — and treat any
+other loop-range delta as
+not-AC3.
+
+**AC12 — Gate/census floors:
+SETTLED, and the one floor change
+made** in this seat's own owned
+file. Method: a clean detached
+worktree of `fd5aef2` for the
+baseline (gate PASS 10/10 there),
+structural parses on both trees,
+multi-line-tuple-safe — the i18n
+parse slices each table and
+extracts tuple-start keys under
+DOTALL, so `status_ready`'s
+multi-line tuple is counted (a
+single-line parser undercounts
+exactly there, the settled
+AB-era lesson). Baseline, all
+first-hand: keys **1019** (889
+static + 130 dynamic, 61 files),
+MCP **392** (44 + 330 + 9 + 4 +
+5), State **49 / 22**, palette 135
+→ 95 tools, icons 163, scenes 35,
+i18n **695 × 28** with every
+table's key sequence identical
+to EN. On the AC tree the
+two-tree inventory diff is exact:
+**zero keys lost**; exactly one
+counted addition —
+`seg-media-from-clip` (AC5;
+cross-checked against AC5's own
+36 → 37 count in its file).
+Every other counted file is
+byte-identical in key sets.
+The AB5 "+2" pricing question is
+resolved with evidence: AC1's
+two keys exist as **named
+constants** (`FOLLOW_ROW_KEY`,
+`FOLLOW_BUTTON_KEY`, values
+asserted verbatim by AC1's pins),
+and the counter's regexes match
+literals at use sites — the keys
+join the const-carried family
+AC9's paragraph records. The
+floor therefore follows the
+counter's verified truth:
+**`KEY_TOTAL_FLOOR` 1019 → 1020**,
+edited in
+`scripts/phase_j_checks.py` with
+the house ledger paragraph at
+the constant (21 insertions, 1
+deletion); `MCP_SURFACE_FLOOR =
+392` stands untouched — the
+census is identical on both
+trees, no seat adds or removes a
+tool. i18n carries no gate
+constant; the integration target
+is settled here instead: **697
+× 28 if IA-AC5-1 is applied as
+filed** (695 verified on both
+trees + AC5's two keys, verified
+absent from EN today). The State
+watch is named for the
+integration-eve rehearsal: both
+trees read 49/22 at recount time
+because IA-AC1-1 had not yet
+landed in `src/main.rs`; when it
+lands the census becomes **50
+fields**, and check 3 will
+require the field in every full
+`State` literal. No IA filed by
+this seat.
+
+**AC13 — Headless machinery
+maintenance: verified exact,
+report-only; nothing built,
+nothing edited.** Every board
+claim re-derived first-hand by
+scripted set-equality, not
+eyeball diff: the scene registry
+in `src/rune_sec/scenes.rs`
+counts **35**; both workflow
+loops in `headless.yml` (tree
+dumps, snap renders) parse to 35
+names each, set-equal to the
+registry and to each other;
+SCAN_SET reads **19 total / 19
+required / 0 pending** via the
+scanner module itself, all 19 a
+subset of the registry.
+AC3's incoming claim is verified
+in both halves: `loop-range` was
+already SCAN_SET-required and
+already in both loops, so the
+plant changed one scene's tree
+contents, not any set — SCAN_SET
+stays 19/0 and no promotion IA
+was owed or is outstanding. The
+rest of the machinery, for the
+record: the 1280×720 legs are
+explicit single-scene probes,
+not a third loop, so dump
+arithmetic closes at 35 + 3 =
+**38 dumps**, matching the AB
+closing artifact; 16 registry
+scenes are dumped but not
+SCAN_SET members, which is the
+standing design (membership has
+only ever grown by a named IA);
+the scanner's self-test passes;
+both owned files are unmodified
+in the tree. No IA. One watch
+item handed forward: AC3's strip
+makes its first artifact
+appearance inside a
+SCAN_SET-required tree — inside
+the scanned set, not an
+informational one.
+
+**AC14 — MCP docs sync + the
+integrated-tree catalogue
+re-run: paragraph from the board
+and the actions routed through
+it; this seat's own findings file
+had not landed when the record
+was composed** (remainder (10)).
+The seat's charge is AB15's
+remainder: census, escaped-pipe
+sweep, and AB1/AB2's schema
+comparison re-run against the
+integrated tree, so the zero-drift
+verdict covers this wave's own
+source diffs too. Its inputs are
+on file. **IA-AC1-3 is routed to
+this seat**: one sentence
+appended to the `graph_key_angle`
+row of `docs/MCP.md` — the
+keyframe section's Key button is
+that op's twin only in charter
+(angle) mode; in follow mode it
+keys the drawn channel of any
+target through the section's
+generic composition, and
+`graph_key` is the MCP door for
+that. And AC7 leaves this seat
+**nothing to apply** on the
+`graph_key` row: schema and row
+already agree character-for-
+character (modulo the marking
+convention), so the re-run will
+find that row in agreement for
+the first time rather than
+repairing it. MCP itself is
+untouched by the wave — census
+392 on both trees (AC12) — so
+the re-run's expected verdict is
+zero drift, now over a tree that
+includes AC1's follow mode and
+AC7's description.
+
+**AC15 — i18n hygiene pass 4:
+paragraph from the board and the
+seats that cite it; this seat's
+own findings file had not landed
+when the record was composed**
+(remainder (10)). The pass's
+verification list is fully on
+file. IA-AC5-1's two keys —
+`segment_media_from_clip` and
+`segment_media_flipped` — are
+the wave's only i18n arrivals,
+and their consumer spans are
+named in AC5's findings (the
+provenance line and the read-only
+Flip row in the segment panel
+builder), with AC5's catalogue
+pin as the proof of insertion.
+AC12 verified the arithmetic the
+pass must land on: 695 × 28 on
+both trees today, sequences
+identical to EN position for
+position, and **697 × 28** the
+integration target if IA-AC5-1
+is applied as filed — the two
+keys verified absent from EN at
+recount time, so arrival is
+checkable, not assumable. AC1
+adds no keys (zero i18n/`tr(`
+references in its diff — its
+dynamic labels are literal
+English under board default Q7),
+and AC6/AC7 add none either.
+`status_ready` is not
+re-litigated, per the board and
+IA-AA16-1's decision C.
+
+**AC16 — README truth pass 10:
+paragraph from the board; this
+seat's own findings file had not
+landed when the record was
+composed** (remainder (10)). The
+pass's charge is fixed: Wave
+AB's landed work claimed
+accurately — the frame-bend
+dopesheet strip, the
+Angle(0)/Length(0) refusals, the
+v5 flip carriage, bundle totals
+one home, the catalogue verified
+whole at 392 rows with zero
+drift. AC11's record notes the
+README counts stand in this
+seat's care while §10 advanced.
+The standing flags carry
+verbatim, as every pass has
+carried them: the absent LICENSE
+file is a flag, never an edit.
+Nothing in the wave changes the
+README's count story except
+through this seat: MCP 392 and
+i18n 695 × 28 were the AB
+closing figures the pass starts
+from; the AC figures (697 × 28
+after IA-AC5-1, keys 1020) are
+the next pass's material, not
+this one's retroactive edit.
+
+**AC17 — QA_RUNE alignment:
+paragraph from the board and the
+action routed to it; this seat's
+own findings file had not landed
+when the record was composed**
+(remainder (10)). The charge:
+QA_RUNE §19 aligned to Wave AB's
+closing frame, all figures
+first-hand, the two streaks kept
+distinct — the discipline §6.22's
+AB18 entry established when it
+corrected the record (the
+AA-era close note's "fifth" and
+§19.10's addendum "seven"
+superseded). **IA-AC11-1 is
+routed to this seat** and carries
+the figures to enter: §10's
+citation now stands on
+42813458176 (the AB closing
+dispatch, `4edd39b`; build
+42813405873 SUCCESS, 4,339 / 0),
+under the unchanged 19-tree
+SCAN_SET; the **scanned-CLEAN
+streak stands at seven** (the
+§19.11 chain extended by
+42813458176) and the **O-1…O-9
+reproduction streak stands at
+nine** by §10's own count — two
+streaks, two numbers, neither
+borrowed from the other. The
+generation's moved numbers for
+the §19 entry: none — AC11's
+zero-movement verdict is the
+fact to record. The entry is
+written supersede-don't-rewrite,
+as §19's own convention requires;
+AC11 did not edit QA_RUNE,
+because the board assigns that
+alignment to this seat.
+
+**AC18 — Rehearsal support:
+paragraph from the board; this
+seat's own findings file had not
+landed when the record was
+composed** (remainder (10)). The
+charge was the full Wave AB CI
+frame assembled from artifacts —
+every round, both workflows,
+totals from logs, transcripts on
+the SUCCESS dispatches, the
+`2b68393` docs-close pair
+included. That frame stands in
+this record's ledger above, and
+its substance was discharged
+first-hand by two sibling seats
+working the same artifacts
+independently: AC10 re-derived
+every figure (runs, tally,
+transcripts from log and artifact
+alike, 38 dumps, own scan CLEAN,
+the loop-range baseline) and
+AC11 measured the frame for the
+§10 citation (calibration,
+distinctness, zero movement).
+Where AC18's file lands with
+figures of its own, the standing
+rule applies — the finding wins,
+and any discrepancy is recorded
+in the next section. The one
+piece of the frame no seat could
+close at compose time is named
+in remainder (4): the `fd5aef2`
+docs-close headless, in flight.
+
+**AC19 — graph_keys origin-test
+hygiene: paragraph from the board
+and §6.22 (6); this seat's own
+findings file had not landed
+when the record was composed**
+(remainder (10)). The charge is
+AB4's flag, carried as §6.22's
+remainder (6): in
+`src/graph_keys.rs`, the test
+`key_all_and_key_angle_and_clear_channels_tools`
+selects node 0 through
+`key_graph_angle` under a comment
+from before the refusal era. The
+test still passes — its assertion
+is a `>=` across the calls, so
+the refusal does not break it —
+but the fixture no longer
+demonstrates authoring: since
+AB4, that call is refused, and
+the comment says otherwise. The
+seat corrects the comment to the
+refusal-era truth and pins the
+refusal's interaction with that
+test's scenario explicitly (the
+file's owner may also switch the
+fixture to `Some(1)` and assert
+the count grows — §6.22 (6)'s own
+suggested shape). Coordination
+held from the other side: AC2's
+pins occupy their named regions
+of the same file and record this
+seat's test untouched, and AC1's
+IA-AC1-2 scope sentence for the
+same file is the integrator's,
+not either seat's. With this
+seat, §6.22 (6) is discharged.
+
+**AC20 — this section** (§6.23,
+composed as IA-AC20-1 in this
+seat's findings, append-only at
+integration — the seat did not
+edit `docs/REDESIGN_PROGRESS.md`).
+The record's own facts: thirteen
+findings digested first-hand,
+seven paragraphs (AC9, AC14–AC19)
+built from board + cross-citation
+and marked as such in place; the
+AB ledger and CI frame adopted
+from AC10/AC11's independent
+verification; the integration-eve
+rehearsal taken against AC12's
+settled counts (the block below).
+No seat paragraph in this section
+asserts a figure its source does
+not carry.
+
+**Integrator actions filed by
+this wave, and their
+disposition.** IA-AC1-1
+(`src/main.rs`: `key_follow_graph`
+field + `key_clipboard` retyped
+to the tagged `KeyClipboard`,
+the field line at 20 further
+`State` literals in 11 files) —
+**required before the tree
+compiles**; the State census
+becomes 50 fields when it lands.
+IA-AC1-2 (one scope sentence,
+`src/graph_keys.rs` module docs)
+— applies with integration.
+IA-AC1-3 (`docs/MCP.md`
+`graph_key_angle` qualifier) —
+routed to AC14, applies verbatim.
+IA-AC5-1 (two keys × 28,
+`src/i18n.rs`) — applies at
+integration; AC5's catalogue pin
+fails by design until it lands,
+and the catalogue reads 697 × 28
+after it. IA-AC11-1 (QA_RUNE §19
+pointer) — routed to AC17.
+IA-AC20-1 (this section) —
+append-only, at integration.
+AC12's floor ratchet is **not**
+an IA: it was made in that seat's
+own owned file. AC7, AC2, AC3,
+AC4, AC6, AC10 and AC13 filed no
+IA; AC8 filed none by design —
+a design files questions, and
+its six are remainder (5).
+
+**Counts at close
+(integration-eve rehearsal,
+against AC12's settlement).**
+MCP **392** — census identical
+on both trees, floor stands.
+Element keys **1020 counted**
+(floor ratcheted by AC12:
+1019 baseline + AC5's one
+counted key, zero lost) **plus
+the const-carried family outside
+the counter** — four at base
+(`keyframe-no-joint-note`,
+`keyframe-actions`, `key-delete`,
+`panel-3d-preview`), the
+tuple-carried `xc-progress-bundle`
+(F6), and AC1's two
+(`keyframe-follow`, `key-follow`)
+joining it this wave. i18n
+**697 × 28** after IA-AC5-1
+(695 verified on both trees +
+2, sequences identical). State
+**50 fields / 22 literals**
+after IA-AC1-1 (49/22 until it
+lands). Palette **135**, icons
+**163**, scenes **35**, SCAN_SET
+**19 required / 0 pending**.
+Every Wave AC status above is
+IMPLEMENTED until the integration
+CI below.
+
+**Remainders.** (1) **The Wave
+AC integration CI + its first
+headless dispatch.** Everything
+above is IMPLEMENTED until that
+CI; the dispatch must produce
+**38 dumps**, and
+`tree-loop-range.json` must read
+exactly **1,262 elements** —
+AC3's +8 and no more — with the
+strip pills 18×2 at [500, 796]
+and [568, 796] inside their
+cells and both cells' glyphs at
+y 779.5 (AC10's §8 forward check
+is the verifier's list; if that
+artifact's loop-range delta is
+anything else, a second change
+rode in). The Graph workspace
+trees gain AC1's follow row —
+one section one row taller; the
+closing overflow scan is the
+check, its verdict stated from
+the scan output itself, never a
+workflow-log grep. Overflow
+repair, if any, belongs to the
+owning panel seat — no
+exemption, no threshold move.
+(2) **IA-AC1-1's compile
+dependency.** The integrated
+tree does not compile until the
+`main.rs` leg lands, and AC12's
+State watch rides with it: at
+50 fields, gate check 3 requires
+`key_follow_graph: false` in
+every full `State` literal —
+the IA names 20 sites in 11
+files, and any further
+construction the compiler flags
+gets the same line. (3)
+**IA-AC5-1's by-design red
+pin.** AC5's
+`clip_media_labels_resolve_through_the_catalogue`
+fails until the two keys are
+inserted, in the IA-Y4-1
+pattern; a red integration run
+that names only that pin is the
+IA outstanding, not a seat
+defect — and a green run without
+the insertion is impossible,
+which is the point of the
+pattern. (4) **The `fd5aef2`
+docs-close headless**
+(42816228545) was in flight when
+this record's sources close;
+its build (42816200335) is
+SUCCESS on record. Docs only,
+no product behaviour — its
+verdict is recorded by the next
+record, not asserted here.
+(5) **Bundle cancel — AC8's six
+questions are NEW pending user
+rulings**, joining the standing
+list below; nothing is built
+until they are answered. **Q1**
+— the class-C recap sentence
+for a stopped bundle: (a) a
+third bucket ("…; cancelled:
+MP4, WebM", one group for the
+stopped and skipped members
+alike), (b) two groups naming
+the stopped member separately
+from the never-started, (c) the
+two existing buckets untouched
+with stopped/skipped reported
+in a separate non-class-C line
+beside the recap, or (d) a
+distinct whole sentence; folding
+stopped/skipped into "; failed:"
+is recorded as **rejected, not
+an option** (known to be false,
+AA2 §2). **Q2** — the readout
+rule between press and effect:
+(a) no acknowledgement until the
+outcome lands, (b) a panel-local
+"Stop requested" line (a fact
+about the press, never written
+to `core.status`), or (c) a new
+core contract event making the
+acknowledgement delivered data
+(S–M if chosen; (a)/(b) cost
+nothing in core). **Q3** — stop
+scope: A (between members only),
+B (+ render loops and the
+pre-mux point), or C (+ the
+ffmpeg kill, with the no-audio
+direct-encode leg's temp +
+rename fix inside the scope,
+not optional within it) — AC8's
+§7 latency table is the evidence
+the ruling is taken against.
+**Q4** — a stopped sequence
+member's partial artifacts: the
+written prefix stays on disk
+(the standing mid-loop-failure
+behaviour) or the stop deletes
+it; PNG/JPEG/SVG prefixes only.
+**Q5** — single-format jobs:
+the same flag and control extend
+to the panel's PNG/JPEG/MP4/WebM
+jobs in the build slice, or
+bundles first (their recaps are
+class-C too, so Q1's shape will
+likely be asked again there).
+**Q6** — MCP parity and
+vocabulary: the MCP driver
+honours the flag in the same
+slice (live-bridge cancellation
+wiring; stdio offered or
+explicitly not), and the MCP
+reply may name a member
+"cancelled" (its JSON is not
+class-C) ahead of, or only
+together with, the Q1 ruling.
+The design is boardable the
+moment Q1 and Q2 are ruled;
+Q3–Q6 set its scope. (6)
+**AC4's three remainders.**
+Playback starting mid-gesture
+(Space) is the same door as the
+arrow step — `advance_play`
+walks `current` under a live
+drag; the recap now stays
+per-frame truthful through it,
+but whether a pose drag should
+survive playback starting at all
+is a shell-level call no seat
+took. Undo mid-gesture replaces
+the project under a live drag;
+the recap degrades safely, and
+`drag_to`'s direct-indexing
+exposure in that scenario is
+pre-existing and unchanged. The
+recap names one frame — the
+last the gesture changed; the
+sentence shape is P6's and was
+not renegotiated. (7) **AC0's
+structural delta.** The
+full-path audio refusal fires
+after the silent video encode;
+the range entries refuse before
+encoding. Recorded as a
+pre-existing structural
+difference the fix inherited,
+not harmonised by the seat; a
+future export seat may take it
+up, with the range path as the
+model. (8) **AC5's scope
+edges.** The clips panel still
+has no node-media surface — the
+segment inspector's read-only
+presentation is the whole panel
+story this wave, and clip-store
+writes remain the three MCP
+tools' door, as the help
+catalogue already tells users.
+Whether a clip editing session
+gains a media surface is a
+future board call, not an
+oversight in this seat. (9)
+**AC6's mirror question.**
+Whether the LEFT press should
+also go inert while playing (its
+picks currently stand during
+playback, only drag-arming
+refuses) is the primary path's
+question; AC6's playing gate was
+taken for the secondary path
+from that path's own documented
+rule, and nothing here changes
+the left press. (10) **This
+record's own reconciliation —
+open by construction.** Seven
+findings (AC9, AC14–AC19) had
+not landed when the record was
+composed; their paragraphs rest
+on the board, the routed actions
+and first-hand cross-citations,
+and say so in place. When those
+files land, any paragraph they
+contradict is corrected in the
+next section under the standing
+rule — the finding wins — and
+AC9's audit in particular owns
+the final arithmetic of the
+const-carried family if its
+numbers differ from AC12's
+membership test. (11) **All
+standing user decisions from
+§6.22's list stand untouched by
+this wave:** white-on-accent
+contrast 3.14:1, panel splitter,
+File-menu Save As, the
+two-"New project" results,
+`tab_visits_controls` OFF,
+project-swap undo, skew channel,
+whole-figure pose transform,
+MCP write_recovery, waveform
+badge, GIF import, panel
+export-scale control, panel
+export alpha toggle,
+subtitle-stack cap/wrap, the
+export class-C status/recap
+sentences (machine-read —
+AC8's Q1 asks the user to add a
+sentence, and no seat has
+written one), serialised
+vocabularies in English, the
+Settings-card Esc / menu-open
+non-Esc key leak (PHASE_O §9),
+the figure-inspector
+stale-selection copy (PHASE_O
+§4) pending a product ruling,
+IA-AA9-1's set-rest clamp,
+`status_ready` under IA-AA16-1
+option C, chain-spanning media
+(§6.21 (4) — still fully
+designed, still awaiting its
+Q1–Q9), figure-library states
+(a format change awaiting a
+user brief), joint-role metadata
+for a whole-figure limit sweep,
+v5 import modelling image
+artwork (standing design), and
+the absent LICENSE file (a flag,
+never an edit). Bundle cancel's
+older prerequisites are
+superseded in form, not in
+substance: AA2's core stop
+signal now exists as AC8's
+priced design, and what remains
+is exactly remainder (5)'s six
+rulings. Sound remains
+user-verified only. The
+SpriteLoop GAP list stays
+exhausted except what user
+briefs still own.

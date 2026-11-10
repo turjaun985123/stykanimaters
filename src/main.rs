@@ -248,8 +248,16 @@ pub struct State {
     /// sidebar) has no persisted mirror and never did.
     pub show_left: bool,
     pub show_right: bool,
-    /// Graph-key clipboard (keyframe_tools section).
-    pub key_clipboard: Option<Vec<stykanimate_rs::graph::Key>>,
+    /// Graph-key clipboard (keyframe_tools section):
+    /// the copied keys tagged with their source channel
+    /// (Wave AC, AC1 — see `KeyClipboard` there).
+    pub key_clipboard: Option<rune_sec::keyframe_tools::KeyClipboard>,
+    /// Keyframe tools follow-the-graph-channel mode
+    /// (keyframe_tools section, Wave AC, AC1): when on,
+    /// the section's single-target ops act on the graph
+    /// panel's drawn channel instead of the selected
+    /// joint's angle channel. Session-only, default off.
+    pub key_follow_graph: bool,
     /// Last export recap line (export_panel section).
     pub export_recap: String,
     /// The export panel's running background export job,
@@ -406,6 +414,7 @@ fn init() -> State {
         show_left: layout.sidebar_visible,
         show_right: true,
         key_clipboard: None,
+        key_follow_graph: false,
         export_recap: String::new(),
         export_job: None,
         inspector_figure: rune_sec::inspector_figure::InspectorFigureEditState::new(),
@@ -548,10 +557,8 @@ fn stage_drag(s: &mut State, d: &mut Drag) {
 /// navigation included) — built from the stage size `view`
 /// last laid out (see `STAGE_EL_SIZE`; before any layout
 /// the project stage size stands in, the same fallback
-/// `view` itself uses) — then hand over to
-/// `stage_view::secondary_select`, which mirrors
-/// `begin_drag`'s selection writes without starting a
-/// drag or taking a snapshot.
+/// `view` itself uses) — then resolve the pick at the
+/// stage point through [`secondary_pick_stack`].
 fn stage_secondary(s: &mut State, e: PointerEvent) {
     let size = STAGE_EL_SIZE.with(|c| c.get());
     let size = if size[0] > 0.0 && size[1] > 0.0 {
@@ -561,7 +568,58 @@ fn stage_secondary(s: &mut State, e: PointerEvent) {
     };
     let rt = stage_view::drag_transform(&s.core, size);
     let p = rt.to_stage([e.x, e.y]);
-    stage_view::secondary_select(&mut s.core, p);
+    secondary_pick_stack(s, p);
+}
+
+/// The right-press pick stack at stage point `p` (Wave
+/// AC, AC6): the selection half of the left press's
+/// composite in `stage_drag`'s Down phase, resolved in
+/// the same order with the same selection writes —
+/// core figure/joint first (`stage_view::secondary_
+/// select`, whose charter is untouched: it still mirrors
+/// `begin_drag`'s core writes only, no more, no less),
+/// then the sprite over the point, then the stroke
+/// under it. Selection only, by the seat's charter: no
+/// snapshot is taken, no drag starts, and the sprite
+/// leg deliberately does NOT arm
+/// `stage_sprites::sprite_drag_down` — a right-press
+/// picks, it never drags.
+///
+/// The fall-through runs whenever the core pick did
+/// not land — a joint miss, or a locked figure's joint
+/// (whose status `secondary_select` has already set,
+/// exactly as the left press falls through a locked
+/// `begin_drag` to the same legs) — with one exception:
+/// while playing, `secondary_select`'s standing rule
+/// for this path is that nothing changes, so the shell
+/// legs stay inert too rather than repealing that rule
+/// for the composite path as a whole.
+fn secondary_pick_stack(s: &mut State, p: [f32; 2]) {
+    if stage_view::secondary_select(&mut s.core, p) {
+        return;
+    }
+    if s.core.playing {
+        return;
+    }
+    if let Some(sprite) = stage_sprites::sprite_pick_at(&s.core, p) {
+        // The same two writes the left press makes on
+        // a sprite pick: the sprite composites over the
+        // stroke it covers, so the stroke pick goes.
+        s.sprites_panel.selected = Some(sprite);
+        s.stroke_selected = None;
+    } else {
+        // The left press's stroke leg, verbatim: the
+        // stroke pick becomes whatever stroke is at the
+        // point — a clean miss clears the stroke
+        // selection, and nothing else (figure and
+        // sprite selections are not this leg's to
+        // clear, on either press).
+        s.stroke_selected = rune_sec::stage_layers::stroke_at_point(
+            &s.core,
+            p,
+            rune_sec::stage_layers::PICK_TOLERANCE,
+        );
+    }
 }
 
 /// Canvas wheel → VIEW zoom (UI mission Wave 5, audit
@@ -1772,5 +1830,216 @@ mod chrome_i18n_tests {
             assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
             assert_eq!(i18n_wire::tr(&core, key), english);
         }
+    }
+}
+
+#[cfg(test)]
+mod secondary_pick_tests {
+    //! Wave AC (AC6): the right-press pick stack
+    //! (`secondary_pick_stack`) — the left press's
+    //! selection composite resolved without any drag.
+    //! The core leg's own four cases stay pinned in
+    //! stage_view's tests; these pin the shell legs,
+    //! their order, and the selection-only charter.
+
+    use super::{init, secondary_pick_stack, stage_sprites, State};
+    use stykanimate_rs::model::{ImageAsset, InstanceKey, SpriteInstance, Stroke};
+
+    /// A real 4x2 PNG (the stage_sprites fixture's
+    /// idiom): sprite quads derive from the decoded
+    /// asset, so a dummy byte string would exercise
+    /// only the failure path.
+    fn tiny_png() -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(4, 2, image::Rgba([0, 200, 0, 255]));
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .expect("encoding a 4x2 PNG cannot fail");
+        buf
+    }
+
+    fn key(x: f32, y: f32) -> InstanceKey {
+        InstanceKey {
+            frame: 0.0,
+            x,
+            y,
+            scale: 10.0,
+            angle: 0.0,
+            opacity: 1.0,
+            flip_x: false,
+            flip_y: false,
+            scale_y: 0.0,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
+        }
+    }
+
+    /// The demo project plus one sprite (the 4x2 asset
+    /// at scale 10 → a 40x20 quad centred on (300, 200))
+    /// and one stroke (frame 0, along y = 100 from
+    /// x = 80 to x = 120) — placed apart from each other
+    /// and from the demo figure's joints (rooted at
+    /// (480, 470)), so each leg of the stack can be
+    /// pressed in isolation.
+    fn state_with_sprite_and_stroke() -> State {
+        let mut s = init();
+        s.core.project.assets.push(ImageAsset {
+            name: "badge.png".into(),
+            png: tiny_png(),
+        });
+        s.core.project.sprites.push(SpriteInstance {
+            asset: 0,
+            keys: vec![key(300.0, 200.0)],
+        });
+        s.core.project.strokes.push(Stroke {
+            frame: 0,
+            points: vec![[80.0, 100.0], [120.0, 100.0]],
+            color: 0x111111,
+            width: 4.0,
+            widths: Vec::new(),
+            fill: None,
+            spray: None,
+            opacity: 1.0,
+            scatter: 0.0,
+        });
+        s
+    }
+
+    /// Move the fixture's sprite so its quad centres
+    /// exactly on figure 0's root joint at frame 0, and
+    /// return that point.
+    fn cover_first_joint(s: &mut State) -> [f32; 2] {
+        let jp = s.core.positions(0, 0)[0];
+        s.core.project.sprites[0].keys[0].x = jp[0];
+        s.core.project.sprites[0].keys[0].y = jp[1];
+        jp
+    }
+
+    #[test]
+    fn right_press_on_a_sprite_selects_it_and_clears_the_stroke_pick() {
+        let mut s = state_with_sprite_and_stroke();
+        s.stroke_selected = Some(0);
+        secondary_pick_stack(&mut s, [300.0, 200.0]);
+        assert_eq!(s.sprites_panel.selected, Some(0), "the sprite is picked");
+        assert_eq!(
+            s.stroke_selected, None,
+            "the sprite composites over the stroke pick it covers"
+        );
+        // Selection only: no drag of either family is
+        // armed and no undo step is spent.
+        assert!(s.core.dragging.is_none(), "no pose drag starts");
+        assert!(
+            !stage_sprites::sprite_drag_active(),
+            "no sprite drag is armed"
+        );
+        assert_eq!(s.core.undo_depth(), 0, "picking never snapshots");
+    }
+
+    #[test]
+    fn right_press_on_a_stroke_picks_it() {
+        let mut s = state_with_sprite_and_stroke();
+        secondary_pick_stack(&mut s, [100.0, 100.0]);
+        assert_eq!(
+            s.stroke_selected,
+            Some(0),
+            "the stroke under the point is picked"
+        );
+        assert_eq!(s.sprites_panel.selected, None, "no sprite was at the point");
+        assert_eq!(s.core.undo_depth(), 0);
+    }
+
+    #[test]
+    fn right_press_clean_miss_clears_only_the_stroke_pick() {
+        let mut s = state_with_sprite_and_stroke();
+        s.stroke_selected = Some(0);
+        s.sprites_panel.selected = Some(0);
+        let node_before = s.core.selected_node;
+        let figure_before = s.core.selected_figure;
+        secondary_pick_stack(&mut s, [10.0, 10.0]);
+        assert_eq!(
+            s.stroke_selected, None,
+            "the left press's miss rule: the stroke pick clears"
+        );
+        assert_eq!(
+            s.sprites_panel.selected,
+            Some(0),
+            "the sprite selection is not the stroke leg's to clear"
+        );
+        assert_eq!(
+            s.core.selected_node, node_before,
+            "the core selection is untouched on a miss"
+        );
+        assert_eq!(s.core.selected_figure, figure_before);
+        assert_eq!(s.core.undo_depth(), 0);
+    }
+
+    #[test]
+    fn right_press_prefers_the_joint_over_the_sprite_covering_it() {
+        let mut s = state_with_sprite_and_stroke();
+        let jp = cover_first_joint(&mut s);
+        secondary_pick_stack(&mut s, jp);
+        assert_eq!(
+            s.core.selected_node,
+            Some(0),
+            "the joint wins, as on the left press"
+        );
+        assert_eq!(s.sprites_panel.selected, None, "the sprite leg never ran");
+        assert!(
+            s.core.dragging.is_none(),
+            "selection only — the drag half of begin_drag stays home"
+        );
+        assert_eq!(s.core.undo_depth(), 0, "no snapshot was taken");
+    }
+
+    #[test]
+    fn right_press_while_playing_changes_nothing() {
+        let mut s = state_with_sprite_and_stroke();
+        s.core.playing = true;
+        s.stroke_selected = Some(0);
+        let figure_before = s.core.selected_figure;
+        let node_before = s.core.selected_node;
+        // Over the sprite, over the stroke, and over
+        // empty stage: the whole stack stays inert.
+        secondary_pick_stack(&mut s, [300.0, 200.0]);
+        secondary_pick_stack(&mut s, [100.0, 100.0]);
+        secondary_pick_stack(&mut s, [10.0, 10.0]);
+        assert_eq!(s.sprites_panel.selected, None, "no sprite pick while playing");
+        assert_eq!(
+            s.stroke_selected,
+            Some(0),
+            "the stroke pick is neither made nor cleared"
+        );
+        assert_eq!(s.core.selected_figure, figure_before);
+        assert_eq!(s.core.selected_node, node_before);
+        assert_eq!(s.core.undo_depth(), 0);
+    }
+
+    #[test]
+    fn right_press_on_a_locked_joint_falls_through_to_the_sprite() {
+        // The left press falls through a locked
+        // begin_drag to the same legs; the stack keeps
+        // that parity. The core leg sets the locked
+        // status (its own behaviour, pinned in
+        // stage_view's tests); the sprite covering the
+        // joint is then picked.
+        let mut s = state_with_sprite_and_stroke();
+        let jp = cover_first_joint(&mut s);
+        s.core.project.figures[0].locked = true;
+        let node_before = s.core.selected_node;
+        secondary_pick_stack(&mut s, jp);
+        assert_eq!(
+            s.core.status, "Figure is locked — unlock it in the figures list.",
+            "the core leg's status stands"
+        );
+        assert_eq!(
+            s.core.selected_node, node_before,
+            "the locked figure selects nothing"
+        );
+        assert_eq!(
+            s.sprites_panel.selected,
+            Some(0),
+            "the covering sprite is picked"
+        );
+        assert_eq!(s.core.undo_depth(), 0);
     }
 }

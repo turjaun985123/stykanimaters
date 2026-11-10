@@ -2826,6 +2826,7 @@ mod tests {
             show_left: true,
             show_right: true,
             key_clipboard: None,
+            key_follow_graph: false,
             export_recap: String::new(),
             export_job: None,
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),

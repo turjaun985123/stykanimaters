@@ -477,7 +477,9 @@ dispatch (Wave Z, Z12), and upgraded
 again to the Wave Z closing dispatch
 (Wave AA, AA12), and upgraded again
 to the Wave AA closing dispatch
-(Wave AB, AB12); the Wave X
+(Wave AB, AB12), and upgraded again
+to the Wave AB closing dispatch
+(Wave AC, AC11); the Wave X
 integration dispatch was checked in full and
 not taken (Wave Y, Y15 — its scan reads NOT
 CLEAN; see the upgrade notes below).** Original source:
@@ -635,7 +637,7 @@ CLEAN at 1306 elements. Every O-1…O-9
 measurement reproduces exactly — the
 seventh consecutive dispatch to do so.
 
-Current source: **Headless Rune probe run
+Previous source: **Headless Rune probe run
 `42808095941`**, completed **SUCCESS** on
 `3ef120765acb81a0d84ab4b3babf7e6d857ec1d0`
 (`3ef1207`, the Wave AA integrated tree at
@@ -669,6 +671,42 @@ the upgrade notes carry the anatomy).
 Every O-1…O-9 measurement reproduces
 exactly — the eighth consecutive dispatch
 to do so.
+
+Current source: **Headless Rune probe run
+`42813458176`**, completed **SUCCESS** on
+`4edd39b9929e8b737cf97d6378162a4fefcb8a56`
+(`4edd39b`, the Wave AB integrated tree at
+its CI close; the build beside it,
+`42813405873`, completed **SUCCESS** with
+test totals summed from its own log at
+**4,339 passed, 0 failed**), artifact
+`headless-probe-output` (227 files, 38
+`tree-*.json` dumps). Its scan reads
+`OVERFLOW SCAN: CLEAN (0 hits, scan set
+complete)` — the contract standing at 19
+required trees, unchanged since the last
+citation — its `subtitle-census.txt` reads
+`SUBTITLE CENSUS: PASS` (19 PASS, 0 FAIL),
+both Home markers read `PASS`, its Home
+thumbnail probe reads
+`HOME THUMBNAIL PROBE: PASS` (pairwise
+ink-coverage distances 0 / 51 / 48; the
+band geometry leg within tolerance at
+112×83/84), and its live-MCP probe reads
+`MCP PROBE: PASS` — all read from the
+artifact itself, not from the workflow
+conclusion. Every figure below was
+re-measured in these dumps: all 38 counts
+reproduce exactly — no tree moved (Wave
+AB's landed work is the catalogue
+re-verification, the origin refusals, the
+v5 flip carriage and the bundle-totals
+unification, none of which adds a panel
+row; AB3's frame-bend strip renders only
+over stored bend rows, which no scene
+planted). Every O-1…O-9 measurement
+reproduces exactly — the ninth
+consecutive dispatch to do so.
 Per §2's output shape each
 scene's hit list is empty, so the table records
 the verdict per scene:
@@ -1099,6 +1137,83 @@ measurement reproduces exactly — the
 **eighth** consecutive dispatch to do
 so — so the per-item table's measured
 column stands unchanged.
+
+**Upgrade notes (Wave AC, AC11).** The
+citation upgrades to the Wave AB closing
+dispatch `42813458176`, above — the
+seventh consecutive dispatch in the
+closing sequence whose scan reads CLEAN
+(AB18's §19.11 chain, extended by this
+one — that recount supersedes the
+tallies in the earlier upgrade notes)
+and the first carrying Wave AB's landed
+work. What verified on its artifact,
+read first-hand: scan `OVERFLOW SCAN:
+CLEAN (0 hits, scan set complete)` under
+the contract as it now stands — 19
+required trees, unchanged since the last
+citation; `SUBTITLE CENSUS: PASS` (19
+PASS, 0 FAIL); both Home markers `PASS`;
+the thumbnail probe PASS (pairwise
+distances 0 / 51 / 48 against the floor
+of 12; legacy legs at control shares
+0.008 / 0.004, rows 0.333/0.337/0.339,
+ink 115/115/59; the band geometry leg
+spreads within tolerance 1 at 112×83/84);
+`MCP PROBE: PASS`. The build beside it,
+`42813405873` on the same commit,
+completed **SUCCESS**, its test totals
+summed from its own log at **4,339
+passed, 0 failed**. The measurer was
+calibrated before any number was trusted
+(X15's discipline): AB12's instrument,
+run against the previous citation's
+artifact (`42808095941`, AB12's own
+download), reproduces all 38 per-tree
+counts and windows and every O-1…O-9
+subtree right edge in the table exactly —
+and AA12's independently written
+measurer, run beside it, agrees on every
+count, every O-1 worst chip and the
+z-row — so the stillness below is the
+new artifact's fact, not instrument
+drift. (The two artifacts are distinct
+dispatches: 77 of their 227 files differ
+— the snap logs, several PNGs, and the
+Home dumps' modified-time text among
+them — while 35 of the 38 dumps are
+byte-identical and the three Home dumps
+differ only in those clock strings.)
+Per-tree counts moved in **zero** trees —
+the first citation upgrade that moves no
+number at all. The causes are Wave AB's
+own: AB1+AB2 re-verified the catalogue
+(docs and pins, no surface), AB4's
+Angle(0)/Length(0) refusals fire inside
+existing rows, AB6's flip carriage writes
+export bytes, AB7's totals unification
+moved arithmetic into core behind the
+panel's delegating wrapper, and AB3's
+frame-bend strip — the wave's one new
+mark — renders only in cells whose
+frames carry stored bend rows, which no
+headless scene planted, so it appears in
+no tree of this dispatch (AC3 plants the
+rows; the strip's first tree belongs to
+the Wave AC frame). The
+`tree-default.json` key diff against the
+previously cited artifact is exactly
+zero keys added, none lost. The defect
+the Wave Z upgrade closed stands closed:
+`sprite-z-front` ends at **1194.5** and
+the `sprite-z-row` subtree at 1412.0, as
+on the cited frame. Every O-1…O-9
+measurement reproduces exactly — the
+**ninth** consecutive dispatch to do
+so — so the per-item table's measured
+column stands unchanged, and the scan
+table above stands byte-identical: only
+this citation's source advanced.
 
 **CI, stated once and exactly.** The last completed
 master CI run before Wave R was on `0b75051`

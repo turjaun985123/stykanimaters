@@ -329,6 +329,32 @@
 //! row form (fact 37). No direct write: the op
 //! exists, so the module's discipline needs no
 //! new exception.
+//!
+//! The Wave AC change (AC3) gives the frame-bend
+//! dopesheet strip (Wave AB, AB3) the headless
+//! proof it shipped without: no scene planted
+//! stored bend rows, so the strip rendered in no
+//! closing tree. `loop-range` — one of the two
+//! channel-planted scenes the closing verification
+//! already watches (AB8) — now also plants stored
+//! bend rows on figure 0 at exactly the loop's two
+//! ends (node 6, the demo wave's own forearm:
+//! +0.35 at frame 1, +0.7 at frame 3 —
+//! `cycle_bend`'s first two authored steps), by
+//! direct `Frame::bends` write: the
+//! `graph-duplicates` exception again, because
+//! the only bend op, `EditorCore::cycle_bend`,
+//! cycles the SELECTED node's bend at the CURRENT
+//! frame — planting chosen rows at chosen frames
+//! through it would move the playhead and the
+//! selection this scene's loop and channel facts
+//! stand on, and rewrite the status line. The
+//! planted rows are stored exactly as
+//! `cycle_bend`'s own writes store them (the
+//! figure's row grown to the def's node count),
+//! and the lane derives its marks from them
+//! through its normal path
+//! (`dopesheet::bend_key_frames` → [1, 3]).
 
 use crate::State;
 
@@ -597,6 +623,19 @@ fn scene_three_d_stage(s: &mut State) {
 /// left selected, since channel resolution scopes to
 /// the selected figure; on a figure-less project the
 /// scene stops after setting the range.
+/// The scene also plants stored bend rows for figure 0
+/// at the same two frames (Wave AC, AC3): node 6 —
+/// the demo wave's forearm — at +0.35 on frame 1 and
+/// +0.7 on frame 3, `cycle_bend`'s first two authored
+/// steps, so the dopesheet lane's frame-bend strip
+/// (Wave AB, AB3) renders in this scene's tree on
+/// exactly the cells that already carry the channel
+/// dot: `bend_key_frames` derives [1, 3] from the
+/// plant. The plant is a direct `Frame::bends` write
+/// under the module docs' exception (the only bend
+/// op cycles the selected node at the current
+/// frame); each row is stored full-length, as the
+/// op's own writes store it.
 fn scene_loop_range(s: &mut State) {
     use stykanimate_rs::graph::{Channel, ChannelTarget, Key};
     crate::rune_sec::workspaces::select_workspace(
@@ -613,6 +652,25 @@ fn scene_loop_range(s: &mut State) {
         target: ChannelTarget::RootX,
         keys: vec![Key::flat(1.0, 0.0), Key::flat(3.0, 48.0)],
     });
+    // Wave AC (AC3): stored bend rows at the loop's two
+    // ends, so the dopesheet lane's frame-bend strip
+    // renders in this scene's tree (see the scene docs).
+    // Guarded so the scene stays total on a shorter
+    // timeline or a smaller figure: the plant simply
+    // does not happen there.
+    let nodes = s.core.project.figures[0].def.nodes.len();
+    if nodes > 6 && s.core.project.frames.len() > 3 {
+        for (frame, bend) in [(1usize, 0.35f32), (3usize, 0.7f32)] {
+            let fr = &mut s.core.project.frames[frame];
+            if fr.bends.is_empty() {
+                fr.bends.resize(1, Vec::new());
+            }
+            if fr.bends[0].len() < nodes {
+                fr.bends[0].resize(nodes, 0.0);
+            }
+            fr.bends[0][6] = bend;
+        }
+    }
 }
 
 /// `"palette-open"` — the command palette open over the
@@ -2440,6 +2498,53 @@ mod tests {
             frames,
             vec![1.0, 3.0],
             "the keys sit at exactly the loop range's ends"
+        );
+    }
+
+    /// The loop-range scene's bend plant (Wave AC, AC3):
+    /// stored rows on figure 0 at frames 1 and 3 — node 6
+    /// at `cycle_bend`'s first two authored steps, each
+    /// row stored full-length — and no bend data on any
+    /// other frame, so the dopesheet lane's own
+    /// derivation marks exactly the loop's two ends in
+    /// this scene's tree (the strip's headless proof).
+    #[test]
+    fn loop_range_scene_plants_stored_bend_rows_at_the_loop_ends() {
+        let mut s = init();
+        scene_loop_range(&mut s);
+        let project = &s.core.project;
+        let nodes = project.figures[0].def.nodes.len();
+        for (f, frame) in project.frames.iter().enumerate() {
+            match f {
+                1 | 3 => {
+                    let row = &frame.bends[0];
+                    assert_eq!(
+                        row.len(),
+                        nodes,
+                        "frame {f}'s bend row is stored full-length"
+                    );
+                    let want = if f == 1 { 0.35 } else { 0.7 };
+                    assert_eq!(
+                        row[6], want,
+                        "frame {f} bends node 6 by the authored step"
+                    );
+                    assert!(
+                        row.iter()
+                            .enumerate()
+                            .all(|(i, b)| i == 6 || *b == 0.0),
+                        "frame {f} bends node 6 only"
+                    );
+                }
+                _ => assert!(
+                    frame.bends.is_empty(),
+                    "frame {f} carries no bend rows"
+                ),
+            }
+        }
+        assert_eq!(
+            crate::rune_sec::dopesheet::bend_key_frames(project, 0),
+            vec![1, 3],
+            "the lane derives bend keys at exactly the loop's ends"
         );
     }
 

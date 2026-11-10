@@ -2722,6 +2722,135 @@ mod tests {
     }
 
     #[test]
+    fn angle_zero_channel_stays_selectable_and_editable_in_the_panel() {
+        // Wave AC (AC2), generalising AB11's Bend(0) pin to
+        // AB4's origin targets: the panel refusal blocks Key
+        // angle only. A stored Angle(0) channel — one a
+        // saved project carries — is a selector entry in its
+        // own right (node 1 is selected here, so the entry
+        // comes from the stored channel itself, not the
+        // selected-node pin), resolves as the drawn channel
+        // through a row pick, and the drawn-channel
+        // transforms (reduce, shift, delete) act on it: the
+        // authoring refusal never traps stored data.
+        let mut core = EditorCore::new();
+        core.selected_node = Some(1);
+        core.project.channels = vec![channel(
+            ChannelTarget::Angle(0),
+            vec![
+                Key::flat(0.0, 0.0),
+                Key::flat(2.0, 0.45),
+                Key::flat(4.0, 0.9),
+            ],
+        )];
+        assert!(
+            selector_entries(&core).contains(&ChannelTarget::Angle(0)),
+            "the stored channel is offered in the selector"
+        );
+        let mut sel = GraphPanelState::default();
+        sel.selected_channel = Some(0);
+        assert_eq!(
+            effective_channel_index(&core, &sel),
+            Some(0),
+            "a row pick draws the Angle(0) channel"
+        );
+        // Panel reduce reaches it: the interior key is
+        // collinear (flat tangents make the two-key probe
+        // pass exactly through it), so it goes.
+        apply_reduce(&mut core, ChannelTarget::Angle(0));
+        assert_eq!(
+            core.project.channels[0].keys.len(),
+            2,
+            "interior key reduced"
+        );
+        assert!(
+            core.status.contains("removed 1 key(s)"),
+            "status: {}",
+            core.status
+        );
+        // Shift acts on it through the drawn resolution.
+        shift_drawn_channel(&mut core, &sel, 1.0);
+        let frames: Vec<f32> = core.project.channels[0]
+            .keys
+            .iter()
+            .map(|k| k.frame)
+            .collect();
+        assert!(
+            approx(frames[0], 1.0) && approx(frames[1], 5.0),
+            "shifted: {frames:?}"
+        );
+        // And Delete removes the channel outright.
+        delete_drawn_channel(&mut core, &mut sel);
+        assert!(
+            core.project.channels.is_empty(),
+            "the channel itself is deletable"
+        );
+    }
+
+    #[test]
+    fn length_zero_channel_stays_selectable_and_editable_in_the_panel() {
+        // Wave AC (AC2): the Length(0) twin of the pin
+        // above — Length has no Key button in this panel at
+        // all (AB4), so the stored channel's only panel
+        // life is exactly this: a selector entry once a
+        // channel exists, the drawn channel through a row
+        // pick, and the drawn-channel transforms acting on
+        // it.
+        let mut core = EditorCore::new();
+        core.selected_node = Some(1);
+        core.project.channels = vec![channel(
+            ChannelTarget::Length(0),
+            vec![
+                Key::flat(0.0, 40.0),
+                Key::flat(2.0, 60.0),
+                Key::flat(4.0, 80.0),
+            ],
+        )];
+        assert!(
+            selector_entries(&core).contains(&ChannelTarget::Length(0)),
+            "the stored channel is offered in the selector"
+        );
+        let mut sel = GraphPanelState::default();
+        sel.selected_channel = Some(0);
+        assert_eq!(
+            effective_channel_index(&core, &sel),
+            Some(0),
+            "a row pick draws the Length(0) channel"
+        );
+        // Panel reduce reaches it: the interior key is
+        // collinear (flat tangents make the two-key probe
+        // pass exactly through it), so it goes.
+        apply_reduce(&mut core, ChannelTarget::Length(0));
+        assert_eq!(
+            core.project.channels[0].keys.len(),
+            2,
+            "interior key reduced"
+        );
+        assert!(
+            core.status.contains("removed 1 key(s)"),
+            "status: {}",
+            core.status
+        );
+        // Shift acts on it through the drawn resolution.
+        shift_drawn_channel(&mut core, &sel, 1.0);
+        let frames: Vec<f32> = core.project.channels[0]
+            .keys
+            .iter()
+            .map(|k| k.frame)
+            .collect();
+        assert!(
+            approx(frames[0], 1.0) && approx(frames[1], 5.0),
+            "shifted: {frames:?}"
+        );
+        // And Delete removes the channel outright.
+        delete_drawn_channel(&mut core, &mut sel);
+        assert!(
+            core.project.channels.is_empty(),
+            "the channel itself is deletable"
+        );
+    }
+
+    #[test]
     fn effective_target_fallback_order() {
         let mut core = EditorCore::new();
         core.selected_node = Some(1);

@@ -1880,6 +1880,9 @@ impl Mp4ExportOutcome {
 /// at its start frame. Errors if ffmpeg is missing. A clip whose
 /// file is missing never fails the export: it is skipped and
 /// named in the outcome's `missing_audio` ([`Mp4ExportOutcome`]).
+/// A clip that exists but cannot be probed or mixed (see
+/// [`mux_audio`]) fails the export instead of being dropped
+/// silently.
 pub fn export_mp4(project: &Project, path: &Path) -> std::io::Result<Mp4ExportOutcome> {
     export_mp4_with_encode_progress(project, path, None)
 }
@@ -3405,17 +3408,93 @@ fn mux_mixed_wav_with_audio_codec(
     Ok(status?.success())
 }
 
+/// Build the mix segments for a full export from the audible
+/// clips [`mux_plan`] decided on — `(path, start_secs, gain)`
+/// triples — probing each clip's length with `probe`: every
+/// clip becomes a [`RangeSegment`] playing its whole file
+/// from its start offset (no file offset, no trim past the
+/// probed length), the full-timeline counterpart of the
+/// segments [`range_plan_outcome`] builds for a window. A
+/// clip no probe can measure cannot be scheduled into the
+/// mix at all — rather than drop it the build fails with
+/// the list of such clips, and [`mux_audio`] turns that
+/// into the export's refusal, the stance
+/// [`export_mp4_range`] takes toward the same clips. Pure
+/// in `probe`, so the decision is testable without ffprobe.
+fn full_mix_segments(
+    clips: &[(String, f32, f32)],
+    probe: &dyn Fn(&str) -> Option<f32>,
+) -> Result<Vec<RangeSegment>, Vec<String>> {
+    let mut segments = Vec::with_capacity(clips.len());
+    let mut unprobeable = Vec::new();
+    for (path, start_secs, gain) in clips {
+        match probe(path) {
+            Some(dur) => segments.push(RangeSegment {
+                path: path.clone(),
+                file_offset_secs: 0.0,
+                placement_secs: *start_secs,
+                len_secs: dur,
+                gain: *gain,
+            }),
+            None => unprobeable.push(path.clone()),
+        }
+    }
+    if unprobeable.is_empty() {
+        Ok(segments)
+    } else {
+        Err(unprobeable)
+    }
+}
+
+/// Mix a full export's audible clips into one WAV and mux
+/// it onto the silent `video` (see [`mux_audio`]): the
+/// segments come from [`full_mix_segments`] with the real
+/// probe ([`probe_duration_secs`]) and are rendered by the
+/// range machinery's own [`mix_range_segments`], so a
+/// non-WAV clip is decoded to a temporary WAV by ffmpeg
+/// and mixed with its gain applied, exactly as a range
+/// export mixes it. Either failure — a clip no probe can
+/// measure, or a mix that cannot be rendered — is an
+/// `Err`: the export refuses rather than degrade to a
+/// subset of its audio.
+fn mux_full_mix(
+    clips: &[(String, f32, f32)],
+    video: &Path,
+    out: &Path,
+) -> std::io::Result<bool> {
+    let segments = full_mix_segments(clips, &probe_duration_secs).map_err(|unprobeable| {
+        std::io::Error::other(format!(
+            "audio could not be included in the export: the length of {} \
+             clip(s) could not be probed (not readable as WAV, and ffprobe \
+             failed or is not installed), so they cannot be mixed in: {}",
+            unprobeable.len(),
+            unprobeable.join(", ")
+        ))
+    })?;
+    let mixed = mix_range_segments(&segments).map_err(|e| {
+        std::io::Error::other(format!("audio could not be mixed for the export: {e}"))
+    })?;
+    mux_mixed_wav(video, &mixed, out)
+}
+
 /// Mux the project's audio into an already-encoded silent MP4.
 /// With exactly one audible clip at unity gain its file is passed
-/// to ffmpeg directly, offset by its start frame (`-itsoffset`).
-/// With two or more clips — or a single clip whose gain is not
-/// 1.0, which the direct path cannot scale — every clip is first
-/// mixed into one WAV with `audio_edit::mix` (each clip placed at
-/// its start-frame offset and scaled by its gain) and the mix is
-/// muxed instead; the mixed WAV starts at t=0
-/// because the offsets are baked into it, so that ffmpeg call has
-/// no `-itsoffset`. Clips whose files are missing are skipped; with
-/// no audible clip at all this returns `Ok(false)`.
+/// to ffmpeg directly, offset by its start frame (`-itsoffset`) —
+/// ffmpeg reads any format itself, and there is no gain to apply
+/// and no second clip to lose, so that path needs no preparation.
+/// Every other case — two or more clips, or a single clip whose
+/// gain is not 1.0, which the direct path cannot scale — is mixed
+/// into one WAV first ([`mux_full_mix`]): each clip placed at its
+/// start-frame offset and scaled by its gain, a non-WAV clip
+/// decoded to WAV for the mix by the range machinery
+/// ([`mix_range_segments`]), so MP3/OGG clips mix and gain exactly
+/// as WAV clips do. A clip no probe can measure, or a mix that
+/// cannot be rendered, fails the export with an error naming the
+/// problem: the full export never falls back to a subset of its
+/// audio (the pre-Wave-AC behaviour dropped every clip but the
+/// earliest on a non-WAV mix failure, and a gained non-WAV lone
+/// clip's gain with it). Clips whose files are missing are
+/// skipped; with no audible clip at all this returns `Ok(false)`.
 pub fn mux_audio(project: &Project, video: &Path, out: &Path) -> std::io::Result<bool> {
     match mux_plan(project) {
         MuxPlan::None => Ok(false),
@@ -3426,22 +3505,9 @@ pub fn mux_audio(project: &Project, video: &Path, out: &Path) -> std::io::Result
         } => {
             if gain != 1.0 {
                 // The direct ffmpeg path cannot scale a file's
-                // volume, so a gained lone clip renders a one-clip
-                // mix with the gain applied and muxes that. The
-                // mix engine reads WAV only: if the clip is not
-                // WAV the mix fails and we fall through to the
-                // direct path below (gain unapplied), mirroring
-                // the multi-clip fallback.
-                let mix_clips = vec![crate::audio_edit::MixClip {
-                    path: path.clone(),
-                    start_secs,
-                    gain,
-                    fade_in: 0.0,
-                    fade_out: 0.0,
-                }];
-                if let Ok(mixed) = crate::audio_edit::mix(&mix_clips) {
-                    return mux_mixed_wav(video, &mixed, out);
-                }
+                // volume, so a gained lone clip renders a
+                // one-clip mix with the gain applied.
+                return mux_full_mix(&[(path, start_secs, gain)], video, out);
             }
             let status = std::process::Command::new("ffmpeg")
                 .args([
@@ -3468,53 +3534,7 @@ pub fn mux_audio(project: &Project, video: &Path, out: &Path) -> std::io::Result
                 .status()?;
             Ok(status.success())
         }
-        MuxPlan::Mixed(clips) => {
-            let mix_clips: Vec<crate::audio_edit::MixClip> = clips
-                .iter()
-                .map(|(path, start_secs, gain)| crate::audio_edit::MixClip {
-                    path: path.clone(),
-                    start_secs: *start_secs,
-                    gain: *gain,
-                    fade_in: 0.0,
-                    fade_out: 0.0,
-                })
-                .collect();
-            let mixed = match crate::audio_edit::mix(&mix_clips) {
-                Ok(m) => m,
-                Err(_) => {
-                    // The mix engine reads WAV only: with a non-WAV
-                    // clip among the audible ones, fall back to the
-                    // earliest audible clip alone (the pre-Wave-10
-                    // behaviour) instead of failing the export.
-                    let (path, start_secs, _gain) = &clips[0];
-                    let status = std::process::Command::new("ffmpeg")
-                        .args([
-                            "-y",
-                            "-i",
-                            video.to_str().unwrap_or(""),
-                            "-itsoffset",
-                            &format!("{start_secs:.3}"),
-                            "-i",
-                            path,
-                            "-map",
-                            "0:v",
-                            "-map",
-                            "1:a",
-                            "-c:v",
-                            "copy",
-                            "-c:a",
-                            "aac",
-                            "-shortest",
-                            out.to_str().unwrap_or(""),
-                        ])
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status()?;
-                    return Ok(status.success());
-                }
-            };
-            mux_mixed_wav(video, &mixed, out)
-        }
+        MuxPlan::Mixed(clips) => mux_full_mix(&clips, video, out),
     }
 }
 
@@ -4030,9 +4050,11 @@ fn mux_audio_range_webm(plan: &RangeMuxPlan, video: &Path, out: &Path) -> std::i
 /// placement baked in; a non-WAV segment is decoded to WAV
 /// for the mix, see [`mix_range_segments`]). If the mix
 /// cannot be rendered the earliest segment is muxed
-/// directly instead, gain unapplied, mirroring the full
-/// path's mix-failure fallback. A `None` plan muxes nothing
-/// and returns `Ok(false)`.
+/// directly instead, gain unapplied — a range-only
+/// fallback: the full path refuses in that case instead
+/// (see [`mux_audio`]), because its window is the whole
+/// timeline and a partial mix would lose whole clips.
+/// A `None` plan muxes nothing and returns `Ok(false)`.
 fn mux_audio_range_with_audio_codec(
     plan: &RangeMuxPlan,
     video: &Path,
@@ -4057,8 +4079,12 @@ fn mux_audio_range_with_audio_codec(
 
 #[cfg(test)]
 mod mux_tests {
-    use super::{mux_plan, MuxPlan};
+    use super::{
+        full_mix_segments, mix_range_segments, mux_audio, mux_plan, probe_duration_secs,
+        range_plan_outcome, MuxPlan, RangeMuxPlan, RangeSegment,
+    };
     use crate::model::{AudioClip, Project};
+    use std::path::Path;
 
     /// Create an empty uniquely-named temp file (the plan decision
     /// only checks existence) and return its path as a String.
@@ -4218,6 +4244,145 @@ mod mux_tests {
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
     }
+
+    // ---- full_mix_segments: the full-timeline segment
+    // ---- build (Wave AC, AC0) ----
+
+    #[test]
+    fn full_mix_segments_span_whole_clips_at_their_offsets_and_gains() {
+        // The mix-totals pin: two non-WAV clips and a WAV,
+        // measured by a fake probe (the build is pure in
+        // it). Each segment plays its whole file from its
+        // start offset with its own gain, and the mix's
+        // total length is the latest segment end.
+        let clips = vec![
+            ("song.mp3".to_string(), 0.0, 1.0),
+            ("voice.ogg".to_string(), 1.5, 0.5),
+            ("bed.wav".to_string(), 0.5, 2.0),
+        ];
+        let probe = |path: &str| match path {
+            "song.mp3" => Some(2.0),
+            "voice.ogg" => Some(3.0),
+            "bed.wav" => Some(1.0),
+            _ => None,
+        };
+        let segments = full_mix_segments(&clips, &probe).unwrap();
+        assert_eq!(
+            segments,
+            vec![
+                RangeSegment {
+                    path: "song.mp3".into(),
+                    file_offset_secs: 0.0,
+                    placement_secs: 0.0,
+                    len_secs: 2.0,
+                    gain: 1.0,
+                },
+                RangeSegment {
+                    path: "voice.ogg".into(),
+                    file_offset_secs: 0.0,
+                    placement_secs: 1.5,
+                    len_secs: 3.0,
+                    gain: 0.5,
+                },
+                RangeSegment {
+                    path: "bed.wav".into(),
+                    file_offset_secs: 0.0,
+                    placement_secs: 0.5,
+                    len_secs: 1.0,
+                    gain: 2.0,
+                },
+            ]
+        );
+        let total = segments
+            .iter()
+            .map(|s| s.placement_secs + s.len_secs)
+            .fold(0.0f32, f32::max);
+        assert_eq!(total, 4.5);
+    }
+
+    #[test]
+    fn full_mix_segments_keep_a_gained_lone_non_wav_clips_gain() {
+        // The gained lone MP3 the old mux sent down the
+        // direct path with its gain silently unapplied:
+        // the segment build keeps the gain, so the
+        // one-clip mix applies it.
+        let clips = vec![("line.mp3".to_string(), 2.5, 0.25)];
+        let segments = full_mix_segments(&clips, &|_| Some(1.25)).unwrap();
+        assert_eq!(
+            segments,
+            vec![RangeSegment {
+                path: "line.mp3".into(),
+                file_offset_secs: 0.0,
+                placement_secs: 2.5,
+                len_secs: 1.25,
+                gain: 0.25,
+            }]
+        );
+    }
+
+    #[test]
+    fn full_mix_segments_name_every_unprobeable_clip() {
+        let clips = vec![
+            ("ok.wav".to_string(), 0.0, 1.0),
+            ("bad.mp3".to_string(), 1.0, 1.0),
+            ("worse.ogg".to_string(), 2.0, 0.5),
+        ];
+        let probe = |path: &str| if path == "ok.wav" { Some(1.0) } else { None };
+        let err = full_mix_segments(&clips, &probe).unwrap_err();
+        assert_eq!(err, vec!["bad.mp3".to_string(), "worse.ogg".to_string()]);
+    }
+
+    #[test]
+    fn mux_audio_refuses_a_mix_it_cannot_probe() {
+        // End to end at the mux: two audible clips whose
+        // files exist but no probe can measure (empty
+        // files decode as neither WAV nor ffprobe-able
+        // audio). The old mux answered a failed mix by
+        // muxing the earliest clip alone and reporting
+        // success; the refusal names both clips and writes
+        // nothing. The refusal precedes every ffmpeg call,
+        // so the pin holds with or without ffmpeg
+        // installed.
+        let a = temp_audio("refuse-a");
+        let b = temp_audio("refuse-b");
+        let project = project_with(vec![(a.as_str(), 0), (b.as_str(), 10)]);
+        let out = std::env::temp_dir().join(format!(
+            "styk-mux-refuse-out-{}.mp4",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&out);
+        let err = mux_audio(&project, Path::new("unused-video.mp4"), &out).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("could not be probed"), "{msg}");
+        assert!(msg.contains(a.as_str()), "{msg}");
+        assert!(msg.contains(b.as_str()), "{msg}");
+        assert!(!out.exists(), "a refused mux writes nothing");
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    #[test]
+    fn mux_audio_refuses_a_gained_lone_clip_it_cannot_probe() {
+        // The gained-lone-clip mirror: one audible clip at
+        // gain 0.5 whose file no probe can measure. The
+        // old mux fell through to the direct path and
+        // shipped the clip with its gain silently
+        // unapplied; now the export refuses, naming it.
+        let a = temp_audio("refuse-gain");
+        let project = project_with_gains(vec![(a.as_str(), 25, 0.5)]);
+        let out = std::env::temp_dir().join(format!(
+            "styk-mux-refuse-gain-out-{}.mp4",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&out);
+        let err = mux_audio(&project, Path::new("unused-video.mp4"), &out).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("could not be probed"), "{msg}");
+        assert!(msg.contains(a.as_str()), "{msg}");
+        assert!(!out.exists(), "a refused mux writes nothing");
+        let _ = std::fs::remove_file(&a);
+    }
+
 }
 
 #[cfg(test)]
@@ -8480,6 +8645,88 @@ mod range_export_tests {
         let outcome = export_mp4(&project, &path).unwrap();
         assert!(outcome.missing_audio.is_empty());
         assert_eq!(outcome.missing_audio_note(), None);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    #[test]
+    fn mp4_export_mixes_two_wav_clips_with_gains() {
+        // Wave AC (AC0): the full export's mix now routes
+        // through the range machinery's segment mix
+        // (probe, decode, trim, temp files) instead of the
+        // WAV-only direct mix. Two real WAVs at different
+        // frames, one of them gained, must still produce a
+        // complete MP4 with nothing reported missing.
+        let a = std::env::temp_dir().join(format!(
+            "styk-export-mix-a-{}.wav",
+            std::process::id()
+        ));
+        let b = std::env::temp_dir().join(format!(
+            "styk-export-mix-b-{}.wav",
+            std::process::id()
+        ));
+        for p in [&a, &b] {
+            let data = crate::audio_edit::WavData {
+                sample_rate: 8000,
+                channels: 1,
+                samples: vec![0.25; 4000],
+            };
+            std::fs::write(p, crate::audio_edit::write_wav(&data)).unwrap();
+        }
+        let mut project = tiny_project();
+        project.audio = vec![
+            AudioClip {
+                path: a.to_string_lossy().into_owned(),
+                start_frame: 0,
+                gain: 1.0,
+                muted: false,
+            },
+            AudioClip {
+                path: b.to_string_lossy().into_owned(),
+                start_frame: 2,
+                gain: 0.5,
+                muted: false,
+            },
+        ];
+        let path = temp_file("mp4-mix-two", "mp4");
+        let outcome = export_mp4(&project, &path).unwrap();
+        assert!(outcome.missing_audio.is_empty());
+        assert!(outcome.frames > 0, "the video itself is complete");
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[4..8], b"ftyp", "not an MP4 container");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    #[test]
+    fn mp4_export_still_exports_a_gained_lone_wav_clip() {
+        // Wave AC (AC0): a lone gained WAV used to render
+        // its one-clip mix inline in `mux_audio`; it now
+        // goes through the same segment mix as every other
+        // mix case. The export must stay complete and
+        // quiet.
+        let wav = std::env::temp_dir().join(format!(
+            "styk-export-gained-{}.wav",
+            std::process::id()
+        ));
+        let data = crate::audio_edit::WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: vec![0.25; 8000],
+        };
+        std::fs::write(&wav, crate::audio_edit::write_wav(&data)).unwrap();
+        let mut project = tiny_project();
+        project.audio = vec![AudioClip {
+            path: wav.to_string_lossy().into_owned(),
+            start_frame: 0,
+            gain: 0.5,
+            muted: false,
+        }];
+        let path = temp_file("mp4-gained-audio", "mp4");
+        let outcome = export_mp4(&project, &path).unwrap();
+        assert!(outcome.missing_audio.is_empty());
+        assert!(outcome.frames > 0, "the video itself is complete");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&wav);
     }

@@ -4121,7 +4121,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "graph_key",
-            description: "Add a graph-editor channel key: target is \"root_x\", \"root_y\", \"angle:N\", \"length:N\", \"bend:N\" or {\"angle\": node}; frame and value are numbers (degrees for angles).",
+            description: "Add a graph-editor channel key: target is \"root_x\", \"root_y\", \"angle:N\", \"length:N\", \"bend:N\" or {\"angle\": node}; frame and value are numbers (degrees for angles). Target \"bend:0\" is refused — the origin has no segment to bend (the same refusal as set_bend). Targets \"angle:0\" and \"length:0\" are refused too — the origin has no angle or length to key (evaluate never reads either).",
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
@@ -7414,6 +7414,110 @@ mod tests {
             3,
             "the refusal added nothing"
         );
+    }
+
+    #[test]
+    fn graph_transforms_still_reach_existing_angle_and_length_zero_channels() {
+        // Wave AC (AC2), generalising AB11's Bend(0) pin to
+        // AB4's two origin targets: the graph_key refusals
+        // guard AUTHORING. Angle(0) and Length(0) channels a
+        // saved project already carries — planted here
+        // directly, as a load would deliver them — stay
+        // fully reachable by the transform tools, which share
+        // `parse_graph_target` with graph_key but were
+        // deliberately left able: their keys copy out and
+        // paste back in, in both target forms — while
+        // graph_key itself still refuses to add to either.
+        // The refusals are about authoring, not existence.
+        let tools = tools();
+        let mut core = EditorCore::new();
+        core.project.channels.push(crate::graph::Channel {
+            figure: 0,
+            target: crate::graph::ChannelTarget::Angle(0),
+            keys: vec![crate::graph::Key::flat(0.0, 0.3)],
+        });
+        core.project.channels.push(crate::graph::Channel {
+            figure: 0,
+            target: crate::graph::ChannelTarget::Length(0),
+            keys: vec![crate::graph::Key::flat(0.0, 60.0)],
+        });
+        let cases = [
+            (
+                0usize,
+                json!("angle:0"),
+                json!({ "angle": 0 }),
+                "The origin has no angle to key.",
+            ),
+            (
+                1usize,
+                json!("length:0"),
+                json!({ "length": 0 }),
+                "The origin has no length to key.",
+            ),
+        ];
+        for (idx, text_form, object_form, sentence) in cases {
+            // Copy reads the stored keys back.
+            let r = call(
+                &mut core,
+                &tools,
+                "graph_copy_keys",
+                json!({ "figure": 0, "target": text_form.clone() }),
+            )
+            .unwrap();
+            assert_eq!(r["key_count"], 1);
+            let copied = r["keys"].clone();
+            // Paste into the same channel at frames 4 and 8,
+            // once per target form: the stored key survives
+            // (both landings are far outside the replace
+            // window) and each pasted key lands rebased.
+            call(
+                &mut core,
+                &tools,
+                "graph_paste_keys",
+                json!({
+                    "figure": 0, "target": text_form.clone(),
+                    "keys": copied, "at_frame": 4.0
+                }),
+            )
+            .unwrap();
+            call(
+                &mut core,
+                &tools,
+                "graph_paste_keys",
+                json!({
+                    "figure": 0, "target": object_form,
+                    "keys": copied, "at_frame": 8.0
+                }),
+            )
+            .unwrap();
+            let frames: Vec<f32> = core.project.channels[idx]
+                .keys
+                .iter()
+                .map(|k| k.frame)
+                .collect();
+            assert_eq!(
+                frames,
+                vec![0.0, 4.0, 8.0],
+                "stored key plus both pastes: {frames:?}"
+            );
+            // And graph_key still refuses to author onto the
+            // channel — its existence changes nothing.
+            let err = call(
+                &mut core,
+                &tools,
+                "graph_key",
+                json!({
+                    "figure": 0, "target": text_form, "frame": 12.0, "value": 0.5
+                }),
+            )
+            .expect_err("graph_key refuses the origin target even when the channel exists");
+            assert_eq!(err, sentence);
+            assert_eq!(
+                core.project.channels[idx].keys.len(),
+                3,
+                "the refusal added nothing"
+            );
+        }
     }
 
     #[test]

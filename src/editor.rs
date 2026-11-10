@@ -43,21 +43,39 @@ pub struct EditorCore {
     /// When true, canvas drags move the camera instead of posing.
     pub camera_mode: bool,
     camera_last: Option<V2>,
-    /// Wave P (P6): the pose of the figure a stage pose drag
-    /// grabbed, captured in `begin_drag` before the first
-    /// `drag_to` writes, so `end_drag` can tell a real move
-    /// from a press that changed nothing and post the
-    /// gesture-end recap only for the former.
-    drag_pose_before: Option<crate::model::Pose>,
+    /// Wave P (P6): the pre-gesture poses of a stage pose
+    /// drag — one `(frame, pose)` baseline per frame the
+    /// gesture has written, the grab frame's captured in
+    /// `begin_drag` before the first `drag_to` writes and
+    /// any later frame's lazily in `drag_to` (Wave AC,
+    /// AC4: a mid-gesture frame step — the arrow-key
+    /// `goto` does not end the drag — retargets the
+    /// chase, and the newly targeted frame's baseline is
+    /// taken before its first write). `end_drag` compares
+    /// each written frame against its OWN baseline to
+    /// tell a real move from a press that changed nothing
+    /// and post the gesture-end recap only for the
+    /// former; comparing the release frame against the
+    /// grab frame's baseline (the pre-AC4 shape) posted
+    /// the recap for presses that never touched the
+    /// release frame and swallowed it for real edits
+    /// whenever the two frames' poses happened to agree.
+    drag_poses_before: Vec<(usize, crate::model::Pose)>,
     /// Wave Y (Y8): the grabbed figure's rest angles
     /// captured at a setup drag's start, for
-    /// `end_drag`'s recap decision — `drag_pose_before`'s
-    /// setup twin.
+    /// `end_drag`'s recap decision — `drag_poses_before`'
+    /// setup twin. One baseline suffices here: rest
+    /// angles are frame-independent data, so a
+    /// mid-gesture step cannot cross its comparison
+    /// (Wave AC, AC4).
     drag_rest_before: Option<Vec<f32>>,
     /// Wave P (P6): the camera in effect when a camera drag
     /// began — `end_drag`'s comparison baseline for its pan
-    /// recap, mirroring `drag_pose_before`.
-    drag_camera_before: Option<(f32, f32, f32)>,
+    /// recap, mirroring `drag_poses_before` (Wave AC,
+    /// AC4: per-frame baselines for the same reason —
+    /// the grab frame's `camera_at` at capture, then
+    /// lazily per stepped-to frame in `drag_to`).
+    drag_cameras_before: Vec<(usize, (f32, f32, f32))>,
     pub status: String,
     undo: Vec<String>,
     redo: Vec<String>,
@@ -274,9 +292,9 @@ impl EditorCore {
             playing: false,
             camera_mode: false,
             camera_last: None,
-            drag_pose_before: None,
+            drag_poses_before: Vec::new(),
             drag_rest_before: None,
-            drag_camera_before: None,
+            drag_cameras_before: Vec::new(),
             status: "Drag a joint to pose. Hands and feet use IK; drag the hips to move.".into(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -588,9 +606,13 @@ impl EditorCore {
         } else {
             DragKind::Aim(ni)
         };
-        // Wave P (P6): the pre-drag pose, for `end_drag`'s
-        // recap decision (see the field docs).
-        self.drag_pose_before = Some(self.project.frames[self.current].poses[fi].clone());
+        // Wave P (P6) + Wave AC (AC4): the grab frame's
+        // pre-drag pose — the first of `end_drag`'s
+        // per-frame recap baselines (see the field docs).
+        self.drag_poses_before = vec![(
+            self.current,
+            self.project.frames[self.current].poses[fi].clone(),
+        )];
         self.dragging = Some(kind);
         self.drag_to(p);
         true
@@ -661,9 +683,10 @@ impl EditorCore {
     /// Start a camera drag (camera mode): snapshots once, then
     /// `drag_to` pans the key at the current frame.
     pub fn begin_camera_drag(&mut self, p: V2) {
-        // Wave P (P6): the pre-drag camera, for `end_drag`'s
-        // recap decision (see the field docs).
-        self.drag_camera_before = Some(self.camera_here());
+        // Wave P (P6) + Wave AC (AC4): the grab frame's
+        // pre-drag camera — the first of `end_drag`'s
+        // per-frame recap baselines (see the field docs).
+        self.drag_cameras_before = vec![(self.current, self.camera_here())];
         self.snapshot();
         self.dragging = Some(DragKind::Camera);
         self.camera_last = Some(p);
@@ -672,6 +695,14 @@ impl EditorCore {
     pub fn drag_to(&mut self, p: V2) {
         let Some(kind) = self.dragging else { return };
         if let DragKind::Camera = kind {
+            // Wave AC (AC4): a mid-gesture frame step
+            // retargets the pan at a new frame — capture
+            // its pre-gesture camera before the first
+            // write lands on it (see the field docs).
+            if !self.drag_cameras_before.iter().any(|(f, _)| *f == self.current) {
+                let here = self.camera_here();
+                self.drag_cameras_before.push((self.current, here));
+            }
             if let Some(last) = self.camera_last {
                 let (x, y, zoom) = self.camera_here();
                 self.project.set_camera_key(
@@ -708,6 +739,14 @@ impl EditorCore {
         }
         let fi = self.selected_figure;
         let frame = self.current;
+        // Wave AC (AC4): the camera arm's retarget rule —
+        // a stepped-to frame's pre-gesture pose is
+        // captured before the gesture's first write
+        // lands on it (see the field docs).
+        if !self.drag_poses_before.iter().any(|(f, _)| *f == frame) {
+            let before = self.project.frames[frame].poses[fi].clone();
+            self.drag_poses_before.push((frame, before));
+        }
         let fig = &self.project.figures[fi];
         let pose = &mut self.project.frames[frame].poses[fi];
         match kind {
@@ -741,20 +780,26 @@ impl EditorCore {
     pub fn end_drag(&mut self) {
         let kind = self.dragging.take();
         self.camera_last = None;
-        let pose_before = self.drag_pose_before.take();
+        let poses_before = std::mem::take(&mut self.drag_poses_before);
         let rest_before = self.drag_rest_before.take();
-        let camera_before = self.drag_camera_before.take();
+        let cameras_before = std::mem::take(&mut self.drag_cameras_before);
         match kind {
             Some(DragKind::Camera) => {
-                if let Some(before) = camera_before {
-                    let now = self.camera_here();
+                // Wave AC (AC4): the last frame the
+                // gesture actually moved, each frame
+                // compared against its own baseline.
+                let mut moved_at = None;
+                for (frame, before) in &cameras_before {
+                    let now = self.project.camera_at(*frame as f32);
                     if (now.0 - before.0).abs() > 0.01
                         || (now.1 - before.1).abs() > 0.01
                         || (now.2 - before.2).abs() > 0.0001
                     {
-                        self.status =
-                            format!("Camera key moved at frame {}.", self.current + 1);
+                        moved_at = Some(*frame);
                     }
+                }
+                if let Some(frame) = moved_at {
+                    self.status = format!("Camera key moved at frame {}.", frame + 1);
                 }
             }
             Some(DragKind::SetupIk(_)) | Some(DragKind::SetupAim(_)) => {
@@ -780,12 +825,16 @@ impl EditorCore {
                 }
             }
             Some(_) => {
-                if let Some(before) = pose_before {
-                    let fi = self.selected_figure;
+                let fi = self.selected_figure;
+                // Wave AC (AC4): the last frame the
+                // gesture actually changed, each frame
+                // compared against its own baseline.
+                let mut posed_at = None;
+                for (frame, before) in &poses_before {
                     let changed = self
                         .project
                         .frames
-                        .get(self.current)
+                        .get(*frame)
                         .and_then(|f| f.poses.get(fi))
                         .map(|now| {
                             (now.root[0] - before.root[0]).abs() > 0.01
@@ -799,9 +848,12 @@ impl EditorCore {
                         })
                         .unwrap_or(false);
                     if changed {
-                        self.status =
-                            format!("Posed figure {} at frame {}.", fi + 1, self.current + 1);
+                        posed_at = Some(*frame);
                     }
+                }
+                if let Some(frame) = posed_at {
+                    self.status =
+                        format!("Posed figure {} at frame {}.", fi + 1, frame + 1);
                 }
             }
             None => {}
@@ -9125,6 +9177,128 @@ mod tests {
         assert_eq!(c.status, before, "an untravelled camera press posts no recap");
         c.begin_camera_drag([5.0, 5.0]);
         c.drag_to([35.0, 15.0]);
+        c.end_drag();
+        assert_eq!(c.status, "Camera key moved at frame 1.");
+    }
+
+    #[test]
+    fn wave_ac_end_drag_recap_compares_each_frame_to_its_own_baseline() {
+        // Wave AC (AC4): the arrow-key `goto` does not end
+        // a live pose drag — the drag chases `current`, so
+        // a step retargets the gesture's writes mid-flight.
+        // The gesture-end recap must therefore compare
+        // every frame the gesture wrote against THAT
+        // frame's pre-gesture pose. The pre-AC4 shape
+        // compared the release frame against the grab
+        // frame's baseline, which posted the recap for
+        // presses that never touched the release frame
+        // and swallowed it for real edits whenever the
+        // two frames' poses happened to agree. The write
+        // chase itself is unchanged (AB9's census: the
+        // pose drag carries no grab-time payload, so
+        // chasing is its honest shape) — only the recap's
+        // comparison crossed frames.
+        //
+        // (1) An unmoved press, stepped, released: silent,
+        // even though the stepped-to frame's pose differs
+        // from the grab frame's.
+        let mut c = EditorCore::new();
+        let root = c.positions(0, 0)[0];
+        c.project.frames[2].poses[0].root = [root[0] + 120.0, root[1] + 60.0];
+        let before = c.status.clone();
+        assert!(c.begin_drag(root));
+        c.goto(2);
+        c.end_drag();
+        assert_eq!(c.status, before, "an unmoved press posts no recap, stepped or not");
+        //
+        // (2) A real move at the grab frame, stepped to a
+        // frame holding the SAME pose, released unmoved:
+        // the recap fires and names the grab frame.
+        let mut c = EditorCore::new();
+        let root = c.positions(0, 0)[0];
+        let grab_pose = c.project.frames[0].poses[0].clone();
+        c.project.frames[2].poses[0] = grab_pose;
+        assert!(c.begin_drag(root));
+        c.drag_to([root[0] + 40.0, root[1] + 25.0]);
+        c.goto(2);
+        c.end_drag();
+        assert_eq!(c.status, "Posed figure 1 at frame 1.");
+        //
+        // (3) Press, step, THEN the first move lands on
+        // the stepped-to frame: the recap names that
+        // frame and the grab frame stays byte-untouched.
+        // Frame 2 starts displaced; the move drags its
+        // root exactly onto the grab frame's root — equal
+        // to the OLD baseline, different from its own.
+        let mut c = EditorCore::new();
+        let root = c.positions(0, 0)[0];
+        let grab_pose = c.project.frames[0].poses[0].clone();
+        c.project.frames[2].poses[0].root = [root[0] + 120.0, root[1] + 60.0];
+        assert!(c.begin_drag(root));
+        c.goto(2);
+        c.drag_to(root);
+        c.end_drag();
+        assert_eq!(c.status, "Posed figure 1 at frame 3.");
+        let f0 = &c.project.frames[0].poses[0];
+        assert_eq!(f0.root, grab_pose.root);
+        assert_eq!(f0.angles, grab_pose.angles);
+        //
+        // (4) Step-and-continue: both frames keep their
+        // writes, the recap names the last changed frame,
+        // and the gesture's ONE snapshot (taken at the
+        // grab) undoes both frames' writes together —
+        // the commit never crossed frames, only the
+        // recap did.
+        let mut c = EditorCore::new();
+        let root = c.positions(0, 0)[0];
+        let pre0 = c.project.frames[0].poses[0].clone();
+        let pre2 = c.project.frames[2].poses[0].clone();
+        assert!(c.begin_drag(root));
+        c.drag_to([root[0] + 40.0, root[1]]);
+        c.goto(2);
+        let root2 = c.project.frames[2].poses[0].root;
+        c.drag_to([root2[0] - 30.0, root2[1]]);
+        c.end_drag();
+        assert_eq!(c.status, "Posed figure 1 at frame 3.");
+        c.undo();
+        let f0 = &c.project.frames[0].poses[0];
+        assert_eq!(f0.root, pre0.root);
+        assert_eq!(f0.angles, pre0.angles);
+        let f2 = &c.project.frames[2].poses[0];
+        assert_eq!(f2.root, pre2.root);
+        assert_eq!(f2.angles, pre2.angles);
+    }
+
+    #[test]
+    fn wave_ac_camera_drag_recap_compares_each_frame_to_its_own_baseline() {
+        // Wave AC (AC4): the camera drag is the pose
+        // drag's P6 twin (same end_drag charter, same
+        // chase, baselines documented as mirroring), and
+        // it carried the identical crossed comparison —
+        // `camera_here()` at the release frame against
+        // the grab frame's camera. Same repair: per-frame
+        // baselines via `camera_at`.
+        //
+        // An untravelled camera press stepped to a frame
+        // whose evaluated camera differs: silent.
+        let mut c = EditorCore::new();
+        c.project.set_camera_key(0, 0.0, 0.0, 1.0);
+        c.project.set_camera_key(2, 100.0, 0.0, 1.0);
+        let before = c.status.clone();
+        c.begin_camera_drag([5.0, 5.0]);
+        c.goto(2);
+        c.end_drag();
+        assert_eq!(c.status, before, "an untravelled camera press posts no recap, stepped or not");
+        //
+        // A real pan at the grab frame, stepped to a frame
+        // whose camera equals the grab baseline: the recap
+        // fires and names the grab frame.
+        let mut c = EditorCore::new();
+        c.project.set_camera_key(0, 0.0, 0.0, 1.0);
+        c.project.set_camera_key(2, 0.0, 0.0, 1.0);
+        c.begin_camera_drag([5.0, 5.0]);
+        c.drag_to([35.0, 15.0]);
+        c.goto(2);
         c.end_drag();
         assert_eq!(c.status, "Camera key moved at frame 1.");
     }
