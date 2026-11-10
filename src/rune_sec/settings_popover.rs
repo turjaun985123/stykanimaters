@@ -268,9 +268,9 @@
 //! earlier note here claimed otherwise and the Phase N
 //! hygiene audit disproved it against the source). The
 //! Live MCP toggle is the one control with its own field:
-//! `LayoutPrefs.live_mcp` (serde-defaulted on, so a prefs
-//! file written before the field existed gets a launch
-//! start attempt), written by [`toggle_live_mcp`]
+//! `LayoutPrefs.live_mcp` (serde-defaulted off, so live
+//! control starts only when the user has enabled it and
+//! the choice persisted), written by [`toggle_live_mcp`]
 //! through the same load-modify-save `poll` uses for the
 //! theme.
 //!
@@ -1423,6 +1423,7 @@ mod tests {
             show_right: true,
             key_clipboard: None,
             export_recap: String::new(),
+            export_job: None,
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
             clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
             fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
@@ -1489,6 +1490,7 @@ playback_speed: 1.0,
             show_right: true,
             key_clipboard: None,
             export_recap: String::new(),
+            export_job: None,
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
             clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
             fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),

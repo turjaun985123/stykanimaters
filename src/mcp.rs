@@ -32,6 +32,22 @@
 //! `server_info` tool, the live health document) comes
 //! from [`SERVER_NAME`] / [`SERVER_VERSION`] — the crate
 //! version — defined once below.
+//! Progress (Wave W, W3): a client that passes
+//! `_meta.progressToken` in a `tools/call` asks for
+//! `notifications/progress` while the call runs. The router
+//! honours that only when the transport installed a
+//! notification sink ([`McpServer::set_notification_sink`])
+//! — the stdio shell can stream messages mid-call; the live
+//! bridge answers one POST with one response and cannot, so
+//! it never installs one and tokened calls there run exactly
+//! as untokened ones. When both are present the router parks
+//! a [`ProgressSink`] on the core for the handler's duration
+//! (see [`crate::editor::EditorCore::progress_sink`]); the
+//! export handlers feed it from U11/V12's phase contracts —
+//! encode counts for video, render counts for sequences,
+//! never both under one token — and the reply stays
+//! byte-identical to the untokened call's.
+//!
 //! Tool-level failures (a handler's `Err`) are reported inside
 //! the result as `isError: true`, per the MCP spec, not as
 //! protocol errors — the one exception is an unknown tool name,
@@ -136,6 +152,111 @@ pub fn all_tools() -> Vec<Tool> {
     tools
 }
 
+// ---------------------------------------------------------------------
+// Progress transport (Wave W, W3)
+// ---------------------------------------------------------------------
+
+/// Which export phase a [`ProgressReport`] counts. The two
+/// phases have separate core contracts (Wave U, U11 for
+/// encode; Wave V, V12 for render) and are never merged into
+/// one number: a `tools/call` reports the phase its format
+/// belongs to — encode for video, render for frame
+/// sequences — so one progress token only ever carries one
+/// phase's counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressPhase {
+    /// ffmpeg's own output-frame count, from
+    /// [`crate::export::EncodeProgressEvent`].
+    Encode,
+    /// Frames rendered and written, from
+    /// [`crate::export::RenderProgressEvent`].
+    Render,
+}
+
+/// One progress observation in transport-neutral form: a
+/// phase's own frame count against that phase's total.
+/// Handlers translate the core progress events into reports
+/// and hand them to the sink the router parked on the core
+/// (see [`crate::editor::EditorCore::progress_sink`]); the
+/// router turns each report into one
+/// `notifications/progress` message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProgressReport {
+    pub phase: ProgressPhase,
+    /// The phase's own count so far (encoder output frames
+    /// or rendered-and-written frames — never a mixture).
+    pub progress: usize,
+    /// The phase's total for this call.
+    pub total: usize,
+    /// True on the phase's single terminal report
+    /// (`progress == total`), the last one a call sends.
+    pub finished: bool,
+}
+
+impl ProgressReport {
+    /// Translate an encode-phase core event (the mapping
+    /// IA-U11-1 fixed: `progress` = `encoded_frames`,
+    /// `total` = `total_frames`).
+    pub fn encode(event: crate::export::EncodeProgressEvent) -> Self {
+        ProgressReport {
+            phase: ProgressPhase::Encode,
+            progress: event.encoded_frames,
+            total: event.total_frames,
+            finished: event.finished,
+        }
+    }
+
+    /// Translate a render-phase core event (IA-V12-1's
+    /// mapping: `progress` = `rendered_frames`, `total` =
+    /// `total_frames`).
+    pub fn render(event: crate::export::RenderProgressEvent) -> Self {
+        ProgressReport {
+            phase: ProgressPhase::Render,
+            progress: event.rendered_frames,
+            total: event.total_frames,
+            finished: event.finished,
+        }
+    }
+}
+
+/// The report-level sink the router composes for one
+/// tokened `tools/call` and parks on the core while its
+/// handler runs. `Send + Sync`: encode-phase callbacks
+/// fire from ffmpeg's drainer thread as well as the
+/// caller's.
+pub type ProgressSink = std::sync::Arc<dyn Fn(ProgressReport) + Send + Sync>;
+
+/// The message-level sink a transport installs on the
+/// server: it receives one complete JSON-RPC message (a
+/// `notifications/progress` notification) and writes it to
+/// the client. Only a transport that can emit messages
+/// WHILE a call is still running may install one — today
+/// that is the stdio shell alone. The live HTTP bridge
+/// answers one request with one response, so it cannot
+/// deliver a mid-call notification and never installs
+/// one; a progress token sent over it is accepted and
+/// simply produces no notifications (the call itself is
+/// unchanged).
+pub type NotificationSink = std::sync::Arc<dyn Fn(serde_json::Value) + Send + Sync>;
+
+/// Build the wire form of one progress report: the MCP
+/// `notifications/progress` notification at
+/// [`PROTOCOL_VERSION`] — the client's token verbatim,
+/// the phase's own counts, nothing else. This protocol
+/// revision has no phase or message field, which is
+/// exactly why one call reports one phase only.
+fn progress_notification(token: &serde_json::Value, report: ProgressReport) -> serde_json::Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/progress",
+        "params": {
+            "progressToken": token,
+            "progress": report.progress,
+            "total": report.total,
+        },
+    })
+}
+
 /// The server's name, as served by `initialize`'s
 /// `serverInfo`, by the `server_info` tool and (mirrored)
 /// by the live bridge's health document: ONE literal for
@@ -173,6 +294,12 @@ pub fn server_info() -> Value {
 /// a caller-supplied core instead and leaves this one untouched.
 pub struct McpServer {
     pub core: crate::editor::EditorCore,
+    /// The transport's notification writer, when the
+    /// transport can stream messages mid-call (Wave W,
+    /// W3). `None` — the default, and the live bridge's
+    /// permanent state — means tokened `tools/call`s run
+    /// without a progress sink, exactly as untokened ones.
+    notify: Option<NotificationSink>,
 }
 
 impl Default for McpServer {
@@ -185,7 +312,18 @@ impl McpServer {
     pub fn new() -> Self {
         McpServer {
             core: crate::editor::EditorCore::new(),
+            notify: None,
         }
+    }
+
+    /// Install (or clear, with `None`) the transport's
+    /// notification writer — see [`NotificationSink`] for
+    /// which transports may do this. The stdio shell
+    /// installs its writer before serving; hosts routing
+    /// through [`McpServer::handle_on`] on a one-shot
+    /// transport (the live bridge) leave it unset.
+    pub fn set_notification_sink(&mut self, sink: Option<NotificationSink>) {
+        self.notify = sink;
     }
 
     /// Route one parsed JSON-RPC message against this server's
@@ -204,7 +342,7 @@ impl McpServer {
     /// `&mut self.core` as the edit target — the stdio binary's
     /// path, behaviour unchanged.
     pub fn handle(&mut self, msg: &serde_json::Value) -> Option<serde_json::Value> {
-        Self::dispatch(&mut self.core, msg)
+        Self::dispatch(&mut self.core, msg, self.notify.as_ref())
     }
 
     /// Route one parsed JSON-RPC message against an EXTERNAL
@@ -223,7 +361,7 @@ impl McpServer {
         core: &mut crate::editor::EditorCore,
         msg: &serde_json::Value,
     ) -> Option<serde_json::Value> {
-        Self::dispatch(core, msg)
+        Self::dispatch(core, msg, self.notify.as_ref())
     }
 
     /// The JSON-RPC router shared by [`McpServer::handle`] and
@@ -233,6 +371,7 @@ impl McpServer {
     fn dispatch(
         core: &mut crate::editor::EditorCore,
         msg: &serde_json::Value,
+        notify: Option<&NotificationSink>,
     ) -> Option<serde_json::Value> {
         if !msg.is_object() {
             return Some(error_response(
@@ -260,7 +399,7 @@ impl McpServer {
             "initialize" => Some(success_response(id, Self::initialize_result())),
             "ping" => Some(success_response(id, json!({}))),
             "tools/list" => Some(success_response(id, Self::tools_list_result())),
-            "tools/call" => Some(Self::tools_call_result(core, id, msg.get("params"))),
+            "tools/call" => Some(Self::tools_call_result(core, id, msg.get("params"), notify)),
             other => Some(error_response(
                 id,
                 -32601,
@@ -305,6 +444,7 @@ impl McpServer {
         core: &mut crate::editor::EditorCore,
         id: Value,
         params: Option<&Value>,
+        notify: Option<&NotificationSink>,
     ) -> Value {
         let Some(params) = params else {
             return error_response(id, -32602, "Invalid params: missing params object");
@@ -328,6 +468,39 @@ impl McpServer {
             // path forwards this message.
             return error_response(id, -32602, &format!("unknown tool: {name}"));
         };
+        // Wave W (W3): progress is strictly opt-in twice
+        // over — the client must pass
+        // `params._meta.progressToken` (the MCP convention)
+        // AND the transport must have installed a
+        // notification sink (only a streaming transport can
+        // deliver mid-call messages). With both, a report
+        // sink bound to the token is composed here and
+        // parked on the core for the handler's duration;
+        // the export handlers feed it from the phase
+        // contracts and every other handler ignores it.
+        // With either missing the call runs exactly as it
+        // always has — plain export entries, no hook, no
+        // sink — and the reply is byte-identical either way.
+        let sink: Option<ProgressSink> = match (
+            params.get("_meta").and_then(|meta| meta.get("progressToken")),
+            notify,
+        ) {
+            (Some(token), Some(notify)) => {
+                let token = token.clone();
+                let notify = notify.clone();
+                Some(std::sync::Arc::new(move |report| {
+                    notify(progress_notification(&token, report));
+                }))
+            }
+            _ => None,
+        };
+        // Scoped install: the previous value (in practice
+        // always `None` — dispatch never nests) is restored
+        // after the handler, on the panic path too: the
+        // catch_unwind below absorbs a handler panic before
+        // the restore runs, so a panicking handler cannot
+        // leave a dead call's sink parked on the core.
+        let previous = std::mem::replace(&mut core.progress_sink, sink);
         // Wave 11 (A5 I1): a panicking handler on the LIVE
         // transport would unwind into the GUI's poll loop and
         // take the editor down with it. Convert a panic into
@@ -337,6 +510,7 @@ impl McpServer {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             (tool.handler)(core, args)
         }));
+        core.progress_sink = previous;
         let outcome = match outcome {
             Ok(r) => r,
             Err(_) => Err(format!("tool panicked: {name}")),
@@ -2650,6 +2824,237 @@ mod tests {
             .handle_on(&mut external, &request(6, "resources/list", json!({})))
             .expect("unknown methods with an id must be answered");
         assert_eq!(resp["error"]["code"], -32601);
+    }
+
+    // ---- Wave W (W3): progress transport ----
+
+    /// A notification sink that records every message the
+    /// router sends it, in order — the test double for a
+    /// streaming transport's writer.
+    fn recording_sink() -> (NotificationSink, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = captured.clone();
+        (
+            std::sync::Arc::new(move |msg| {
+                log.lock().expect("capture lock").push(msg);
+            }),
+            captured,
+        )
+    }
+
+    fn progress_temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "styk-mcp-progress-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn progress_notification_wire_shape_is_exactly_the_spec_shape() {
+        // The token rides verbatim (string or number), the
+        // counts are the phase's own, and this protocol
+        // revision carries nothing else — no phase field,
+        // no message.
+        let note = progress_notification(
+            &json!("tok-1"),
+            ProgressReport::encode(crate::export::EncodeProgressEvent {
+                encoded_frames: 3,
+                total_frames: 7,
+                finished: false,
+            }),
+        );
+        assert_eq!(
+            note,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/progress",
+                "params": { "progressToken": "tok-1", "progress": 3, "total": 7 },
+            })
+        );
+        let note = progress_notification(
+            &json!(42),
+            ProgressReport::render(crate::export::RenderProgressEvent {
+                rendered_frames: 5,
+                total_frames: 5,
+                finished: true,
+            }),
+        );
+        assert_eq!(note["params"]["progressToken"], 42);
+        assert_eq!(note["params"]["progress"], 5);
+        assert_eq!(note["params"]["total"], 5);
+    }
+
+    #[test]
+    fn tokened_sequence_render_streams_render_progress_then_answers() {
+        let (sink, captured) = recording_sink();
+        let mut server = McpServer::new();
+        server.set_notification_sink(Some(sink));
+        let frames = server.core.project.frames.len();
+        assert!(frames >= 2, "demo project needs multiple frames");
+        let dir = progress_temp_dir("seq");
+        let resp = server
+            .handle(&request(
+                7,
+                "tools/call",
+                json!({
+                    "name": "render",
+                    "arguments": { "path": dir.to_string_lossy(), "format": "png_sequence" },
+                    "_meta": { "progressToken": "tok-1" },
+                }),
+            ))
+            .expect("tools/call must be answered");
+        assert_eq!(resp["result"]["isError"].as_bool(), Some(false), "{resp}");
+        let text = resp["result"]["content"][0]["text"].as_str().expect("text");
+        let reply: Value = serde_json::from_str(text).expect("reply JSON");
+        assert_eq!(reply["frames"], frames as u64, "reply counts the whole timeline");
+        // Every notification arrived during the call (the
+        // capture is complete before `handle` returned —
+        // the response is built only afterwards), one per
+        // rendered frame, strictly increasing, the
+        // terminal last at (total, total).
+        let notes = captured.lock().expect("capture lock");
+        assert_eq!(notes.len(), frames, "one notification per core event: {notes:?}");
+        for (i, note) in notes.iter().enumerate() {
+            assert_eq!(note["method"], "notifications/progress");
+            assert_eq!(note["params"]["progressToken"], "tok-1");
+            assert_eq!(note["params"]["progress"], i as u64 + 1);
+            assert_eq!(note["params"]["total"], frames as u64);
+        }
+        // The sink is scoped: nothing stays parked on the
+        // core after the call.
+        assert!(server.core.progress_sink.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn progress_needs_both_a_token_and_a_sink() {
+        let dir = progress_temp_dir("gates");
+        // Sink installed, NO token: the call runs the plain
+        // entries and sends nothing.
+        let (sink, captured) = recording_sink();
+        let mut server = McpServer::new();
+        server.set_notification_sink(Some(sink));
+        let resp = server
+            .handle(&request(
+                1,
+                "tools/call",
+                json!({
+                    "name": "render",
+                    "arguments": { "path": dir.to_string_lossy(), "format": "png_sequence" },
+                }),
+            ))
+            .expect("answered");
+        assert_eq!(resp["result"]["isError"].as_bool(), Some(false));
+        assert!(
+            captured.lock().expect("capture lock").is_empty(),
+            "no token, no notifications"
+        );
+        // Token passed, NO sink (the live bridge's shape):
+        // the call succeeds byte-identically in shape and
+        // nothing is parked afterwards.
+        let mut server = McpServer::new();
+        let resp = server
+            .handle(&request(
+                2,
+                "tools/call",
+                json!({
+                    "name": "render",
+                    "arguments": { "path": dir.to_string_lossy(), "format": "png_sequence" },
+                    "_meta": { "progressToken": "tok-2" },
+                }),
+            ))
+            .expect("answered");
+        assert_eq!(resp["result"]["isError"].as_bool(), Some(false));
+        assert!(server.core.progress_sink.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tokened_video_range_streams_encode_progress() {
+        // The encode mapping end to end (ffmpeg runs in CI,
+        // as for U11's pins): intermediates are wall-clock
+        // business and unpinned; the shape is not — counts
+        // strictly increase, the total is constant, the
+        // last notification is the terminal at (total,
+        // total), and the reply is the untokened shape.
+        let (sink, captured) = recording_sink();
+        let mut server = McpServer::new();
+        server.set_notification_sink(Some(sink));
+        server.core.project.fps = 24.0;
+        let dir = progress_temp_dir("enc");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let target = dir.join("range.mp4");
+        let resp = server
+            .handle(&request(
+                3,
+                "tools/call",
+                json!({
+                    "name": "export_file",
+                    "arguments": {
+                        "path": target.to_string_lossy(),
+                        "format": "mp4_range",
+                        "from_frame": 0,
+                        "to_frame": 1,
+                    },
+                    "_meta": { "progressToken": 9 },
+                }),
+            ))
+            .expect("answered");
+        assert_eq!(resp["result"]["isError"].as_bool(), Some(false), "{resp}");
+        let bytes = std::fs::read(&target).expect("mp4 written");
+        assert_eq!(&bytes[4..8], b"ftyp", "not an MP4 container");
+        let notes = captured.lock().expect("capture lock");
+        assert!(!notes.is_empty(), "at least the terminal event must arrive");
+        let total = notes[0]["params"]["total"].as_u64().expect("total");
+        let mut last = 0u64;
+        for note in notes.iter() {
+            assert_eq!(note["params"]["progressToken"], 9);
+            assert_eq!(note["params"]["total"].as_u64().expect("total"), total);
+            let p = note["params"]["progress"].as_u64().expect("progress");
+            assert!(p > last, "counts strictly increase: {notes:?}");
+            last = p;
+        }
+        assert_eq!(last, total, "the terminal lands at (total, total)");
+        assert!(server.core.progress_sink.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tokened_unknown_tool_and_notification_form_stay_silent() {
+        let (sink, captured) = recording_sink();
+        let mut server = McpServer::new();
+        server.set_notification_sink(Some(sink));
+        // Unknown tool: the standing -32602, and no sink
+        // activity (no handler ever ran).
+        let resp = server
+            .handle(&request(
+                4,
+                "tools/call",
+                json!({
+                    "name": "no_such_tool",
+                    "arguments": {},
+                    "_meta": { "progressToken": "tok" },
+                }),
+            ))
+            .expect("answered");
+        assert_eq!(resp["error"]["code"], -32602);
+        // A tools/call with no id is a notification: the D6
+        // rule drops it unexecuted — token or not, nothing
+        // runs and nothing is reported.
+        let note = json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "render",
+                "arguments": { "path": "/tmp/never-written", "format": "png_sequence" },
+                "_meta": { "progressToken": "tok" },
+            },
+        });
+        assert!(server.handle(&note).is_none());
+        assert!(captured.lock().expect("capture lock").is_empty());
+        assert!(server.core.progress_sink.is_none());
     }
 
     // ---- Wave-9 parity built-ins ----

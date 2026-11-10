@@ -62,6 +62,40 @@ use serde_json::{json, Value};
 use std::io::{Cursor, Write};
 use std::path::Path;
 
+/// Wave W (W3): the per-call progress adapters the export
+/// handlers build when the router parked a sink on the core
+/// for this `tools/call` (see
+/// [`crate::editor::EditorCore::progress_sink`]). Returns
+/// the encode-phase and render-phase callbacks in the core
+/// contracts' own shapes; each forwards its events to the
+/// sink under its own phase tag, so a handler can hold both
+/// and still only ever report the phase its format belongs
+/// to. When no sink is parked both closures are inert, and
+/// the handlers pass `None` to the export entries instead —
+/// an untokened call runs the plain entries exactly as
+/// before, ffmpeg invocation included.
+fn call_progress(
+    core: &EditorCore,
+) -> (
+    impl Fn(crate::export::EncodeProgressEvent) + Sync,
+    impl Fn(crate::export::RenderProgressEvent) + Sync,
+) {
+    let encode_sink = core.progress_sink.clone();
+    let render_sink = core.progress_sink.clone();
+    (
+        move |event| {
+            if let Some(sink) = &encode_sink {
+                sink(crate::mcp::ProgressReport::encode(event));
+            }
+        },
+        move |event| {
+            if let Some(sink) = &render_sink {
+                sink(crate::mcp::ProgressReport::render(event));
+            }
+        },
+    )
+}
+
 /// Palette the editor cycles through for figures added by import
 /// (mirrors editor.rs `FIGURE_COLORS`).
 const FIGURE_COLORS: [u32; 6] = [0xE8E8EC, 0xFF5D5D, 0x5DB2FF, 0x7BE495, 0xFFC65D, 0xC792FF];
@@ -440,14 +474,38 @@ fn tool_export_file(core: &mut EditorCore, args: &Value) -> Result<Value, String
         };
         let path_ref = Path::new(&path);
         ensure_parent(path_ref)?;
+        // Wave W (W3): with a progress sink parked on the
+        // core, the range entries' encode-phase twin runs
+        // and its events stream to the client; without one
+        // the plain call below is byte-identical to the
+        // historical one.
+        let (encode_cb, _render_cb) = call_progress(core);
+        let encode_progress: crate::export::EncodeProgressCallback<'_> =
+            if core.progress_sink.is_some() {
+                Some(&encode_cb)
+            } else {
+                None
+            };
         let mut missing_audio: Vec<String> = Vec::new();
         if format == "mp4_range" {
-            let outcome = crate::export::export_mp4_range(&core.project, from, to, path_ref)
-                .map_err(|e| format!("render to {path} failed: {e}"))?;
+            let outcome = crate::export::export_mp4_range_with_encode_progress(
+                &core.project,
+                from,
+                to,
+                path_ref,
+                encode_progress,
+            )
+            .map_err(|e| format!("render to {path} failed: {e}"))?;
             missing_audio = outcome.missing_audio;
         } else {
-            crate::export::export_webm_range(&core.project, from, to, path_ref)
-                .map_err(|e| format!("render to {path} failed: {e}"))?;
+            crate::export::export_webm_range_with_encode_progress(
+                &core.project,
+                from,
+                to,
+                path_ref,
+                encode_progress,
+            )
+            .map_err(|e| format!("render to {path} failed: {e}"))?;
         }
         let mut out = json!({
             "path": path,
@@ -457,9 +515,10 @@ fn tool_export_file(core: &mut EditorCore, args: &Value) -> Result<Value, String
         });
         // Wave P (P15): an MP4 range export that had to
         // leave out clips whose files are missing names
-        // them here; with every clip present (and for
-        // WebM, which carries no audio) the reply keeps
-        // the shape it always had.
+        // them here; with every clip present the reply keeps
+        // the shape it always had. (The WebM range entries
+        // mux audio too, but return no outcome type, so
+        // their replies never name missing clips.)
         if !missing_audio.is_empty() {
             out["missing_audio"] = json!(missing_audio);
         }
@@ -667,6 +726,28 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
              for video ranges use export_file with mp4_range/webm_range)"
         ));
     }
+    // Wave W (W3): the phase callbacks for this call, live
+    // only when the router parked a progress sink on the
+    // core. The mp4/webm arms report the ENCODE phase
+    // (IA-U11-1's mapping) and the jpeg/png_sequence arms
+    // the RENDER phase (IA-V12-1's) — one phase per call,
+    // never both under one token; the gif/apng/spritesheet/
+    // svg arms have no phase contract and ignore these.
+    // With no sink both are `None` and every arm runs the
+    // plain entries exactly as before.
+    let (encode_cb, render_cb) = call_progress(core);
+    let encode_progress: crate::export::EncodeProgressCallback<'_> =
+        if core.progress_sink.is_some() {
+            Some(&encode_cb)
+        } else {
+            None
+        };
+    let render_progress: crate::export::RenderProgressCallback<'_> =
+        if core.progress_sink.is_some() {
+            Some(&render_cb)
+        } else {
+            None
+        };
     let path_ref = Path::new(&path);
     // Wave P (P15): the MP4 arm fills this with the clips
     // the export had to leave out (missing files); it
@@ -713,8 +794,17 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
             // unchanged.
             let scale = args.get("scale").and_then(Value::as_f64);
             let result = match scale {
-                Some(s) => crate::export::export_mp4_scaled(project, path_ref, s as f32),
-                None => crate::export::export_mp4(project, path_ref),
+                Some(s) => crate::export::export_mp4_scaled_with_encode_progress(
+                    project,
+                    path_ref,
+                    s as f32,
+                    encode_progress,
+                ),
+                None => crate::export::export_mp4_with_encode_progress(
+                    project,
+                    path_ref,
+                    encode_progress,
+                ),
             };
             result.map(|outcome| {
                 mp4_missing_audio = outcome.missing_audio;
@@ -728,8 +818,17 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
             // unchanged.
             let scale = args.get("scale").and_then(Value::as_f64);
             match scale {
-                Some(s) => crate::export::export_webm_scaled(project, path_ref, s as f32),
-                None => crate::export::export_webm(project, path_ref),
+                Some(s) => crate::export::export_webm_scaled_with_encode_progress(
+                    project,
+                    path_ref,
+                    s as f32,
+                    encode_progress,
+                ),
+                None => crate::export::export_webm_with_encode_progress(
+                    project,
+                    path_ref,
+                    encode_progress,
+                ),
             }
         }
         "apng" => {
@@ -788,20 +887,34 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
             // unscaled calls run unchanged.
             let scale = args.get("scale").and_then(Value::as_f64);
             match (range, scale) {
-                (Some((f, t)), Some(s)) => crate::export::export_jpeg_sequence_range_scaled(
+                (Some((f, t)), Some(s)) => {
+                    crate::export::export_jpeg_sequence_range_scaled_with_render_progress(
+                        project,
+                        f,
+                        t,
+                        path_ref,
+                        s as f32,
+                        render_progress,
+                    )
+                }
+                (Some((f, t)), None) => crate::export::export_jpeg_sequence_range_with_render_progress(
                     project,
                     f,
                     t,
                     path_ref,
-                    s as f32,
+                    render_progress,
                 ),
-                (Some((f, t)), None) => {
-                    crate::export::export_jpeg_sequence_range(project, f, t, path_ref)
-                }
-                (None, Some(s)) => {
-                    crate::export::export_jpeg_sequence_scaled(project, path_ref, s as f32)
-                }
-                (None, None) => crate::export::export_jpeg_sequence(project, path_ref),
+                (None, Some(s)) => crate::export::export_jpeg_sequence_scaled_with_render_progress(
+                    project,
+                    path_ref,
+                    s as f32,
+                    render_progress,
+                ),
+                (None, None) => crate::export::export_jpeg_sequence_with_render_progress(
+                    project,
+                    path_ref,
+                    render_progress,
+                ),
             }
         }
         "png_sequence" => {
@@ -812,20 +925,34 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
             // entries; absent, the unscaled calls run unchanged.
             let scale = args.get("scale").and_then(Value::as_f64);
             match (range, scale) {
-                (Some((f, t)), Some(s)) => crate::export::export_png_sequence_range_scaled(
+                (Some((f, t)), Some(s)) => {
+                    crate::export::export_png_sequence_range_scaled_with_render_progress(
+                        project,
+                        f,
+                        t,
+                        path_ref,
+                        s as f32,
+                        render_progress,
+                    )
+                }
+                (Some((f, t)), None) => crate::export::export_png_sequence_range_with_render_progress(
                     project,
                     f,
                     t,
                     path_ref,
-                    s as f32,
+                    render_progress,
                 ),
-                (Some((f, t)), None) => {
-                    crate::export::export_png_sequence_range(project, f, t, path_ref)
-                }
-                (None, Some(s)) => {
-                    crate::export::export_png_sequence_scaled(project, path_ref, s as f32)
-                }
-                (None, None) => crate::export::export_png_sequence(project, path_ref),
+                (None, Some(s)) => crate::export::export_png_sequence_scaled_with_render_progress(
+                    project,
+                    path_ref,
+                    s as f32,
+                    render_progress,
+                ),
+                (None, None) => crate::export::export_png_sequence_with_render_progress(
+                    project,
+                    path_ref,
+                    render_progress,
+                ),
             }
         }
         _ => {
@@ -1076,6 +1203,16 @@ fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
     let stem = crate::projects::file_stem_for(&project.name)
         .unwrap_or_else(|| "project".to_string());
     let engine = |r: std::io::Result<usize>| r.map_err(|e| e.to_string());
+    // Wave W (W3): bundle members deliberately keep the
+    // plain entries even when a progress sink is parked on
+    // the core. Each member's phase counter starts at its
+    // own 1, so one progress token would carry resetting
+    // counts across members — progress that runs backwards
+    // is worse than none. Honest bundle progress needs a
+    // core-level bundle progress type (one total across
+    // members); until a slice builds that, a tokened bundle
+    // call sends no notifications rather than misleading
+    // ones.
     // Wave R (R10 via IA-R10-1): the 'scale' validated above
     // scales the bundle's PNG sequence member (a true
     // re-render at that scale); absent, it renders at 1.0.
@@ -1225,7 +1362,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "export_file",
-            description: "Export the project: 'piv2', 'piv3', 'piv4' or 'piv5' write the whole animation as .piv bytes; 'stk' writes a single figure as Pivot .stk bytes and 'nodes' writes it as a Stick Nodes .nodes figure (both take the 'figure' index, defaulting to the selected figure); 'stknds' writes the whole animation as a Stick Nodes project; 'mp4_range' and 'webm_range' render only frames 'from_frame'..='to_frame' (both required, integer frame indices; the Wave 11 spellings 'from'/'to' are still accepted for the same bounds; a bound past the end of the timeline is refused) to a video file (needs ffmpeg) with the same frame content as the render tool's raster output — composited sprite/text instances and segment media included. 'mp4_range' also muxes the range's share of the project's audio (and fails rather than writing a silent file when audio is present but unusable); 'webm_range' never carries audio — the WebM path has no audio support at any range. The .piv/.stk/.nodes/.stknds formats are data interchange: they carry only what those formats hold, not the asset table, sprites, texts or audio. Parent directories are created.",
+            description: "Export the project: 'piv2', 'piv3', 'piv4' or 'piv5' write the whole animation as .piv bytes; 'stk' writes a single figure as Pivot .stk bytes and 'nodes' writes it as a Stick Nodes .nodes figure (both take the 'figure' index, defaulting to the selected figure); 'stknds' writes the whole animation as a Stick Nodes project; 'mp4_range' and 'webm_range' render only frames 'from_frame'..='to_frame' (both required, integer frame indices; the Wave 11 spellings 'from'/'to' are still accepted for the same bounds; a bound past the end of the timeline is refused) to a video file (needs ffmpeg) with the same frame content as the render tool's raster output — composited sprite/text instances and segment media included. 'mp4_range' also muxes the range's share of the project's audio (and fails rather than writing a silent file when audio is present but unusable); 'webm_range' also muxes the range's share of the project's audio as Opus (and fails rather than writing a silent file when a clip's file is present but cannot be probed or decoded; a missing file contributes no segment). The .piv/.stk/.nodes/.stknds formats are data interchange: they carry only what those formats hold, not the asset table, sprites, texts or audio. Parent directories are created. Progress: on a streaming transport (the stdio server), passing '_meta.progressToken' in the tools/call params streams encode-phase notifications/progress during 'mp4_range'/'webm_range' calls; the reply is unchanged.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -1243,7 +1380,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "render",
-            description: "Render the animation. Formats: 'png' renders ONE frame (arg 'frame', default current; arg 'scale', default 1.0 = stage size, a true re-render at that scale) to a PNG file; 'gif', 'mp4' (needs ffmpeg), 'webm', 'apng' and 'spritesheet' render the whole timeline to the file at 'path'; 'svg', 'jpeg' and 'png_sequence' write one file per frame into the DIRECTORY at 'path' (created if needed). The sequence/animation formats 'gif', 'apng', 'spritesheet', 'svg', 'jpeg' and 'png_sequence' accept an optional frame range: args 'from_frame' and 'to_frame' (0-based, inclusive, given together; the Wave 11 spellings 'from'/'to' are still accepted for the same bounds; a bound past the end of the timeline is refused rather than clamped; echoed in the reply under the spelling used). Video ranges are export_file's mp4_range/webm_range. An optional 'scale' (default 1.0) multiplies the output size for 'png', 'png_sequence', 'gif', 'mp4', 'webm', 'apng', 'spritesheet' and 'jpeg' — a true re-render at that scale, never an upscale (the MP4 audio mux is unaffected); 'svg' does not take a scale. Parent directories are created for file targets. CONTENT — the raster formats (png, png_sequence, gif, mp4, webm, apng, spritesheet, jpeg) draw the full frame: camera (pan/zoom/rotation), figures with segment styling (cap, taper, colour gradient, segment opacity AND figure opacity) and bent segments, drawing strokes, FX/particles and weather, with sprite instances, text instances and segment media (images/text attached to segments) composited in. 'mp4' also muxes the project's audio when an unmuted clip's file exists (and fails if that mux fails); 'webm' never carries audio — the WebM path has no audio support. 'svg' is the vector writer: it draws figures (segment taper, gradients, segment opacity AND figure opacity, bent segments arced through the bend midpoint), strokes (a pressured stroke as per-segment lines at its baked widths), FX/particles and weather through the same camera, and it emits sprite instances, text instances and segment media (images embedded once per asset as PNG data with a placement matrix; an image item's figure×style opacity rides as an opacity attribute). One divergence from the raster remains: SVG text is a monospace font run where the raster stamps 3×5 bitmap glyphs (the content and centre agree; the advance width does not).",
+            description: "Render the animation. Formats: 'png' renders ONE frame (arg 'frame', default current; arg 'scale', default 1.0 = stage size, a true re-render at that scale) to a PNG file; 'gif', 'mp4' (needs ffmpeg), 'webm', 'apng' and 'spritesheet' render the whole timeline to the file at 'path'; 'svg', 'jpeg' and 'png_sequence' write one file per frame into the DIRECTORY at 'path' (created if needed). The sequence/animation formats 'gif', 'apng', 'spritesheet', 'svg', 'jpeg' and 'png_sequence' accept an optional frame range: args 'from_frame' and 'to_frame' (0-based, inclusive, given together; the Wave 11 spellings 'from'/'to' are still accepted for the same bounds; a bound past the end of the timeline is refused rather than clamped; echoed in the reply under the spelling used). Video ranges are export_file's mp4_range/webm_range. An optional 'scale' (default 1.0) multiplies the output size for 'png', 'png_sequence', 'gif', 'mp4', 'webm', 'apng', 'spritesheet' and 'jpeg' — a true re-render at that scale, never an upscale (the MP4 audio mux is unaffected); 'svg' does not take a scale. Parent directories are created for file targets. CONTENT — the raster formats (png, png_sequence, gif, mp4, webm, apng, spritesheet, jpeg) draw the full frame: camera (pan/zoom/rotation), figures with segment styling (cap, taper, colour gradient, segment opacity AND figure opacity) and bent segments, drawing strokes, FX/particles and weather, with sprite instances, text instances and segment media (images/text attached to segments) composited in. 'mp4' also muxes the project's audio when an unmuted clip's file exists (and fails if that mux fails); 'webm' never carries audio — the WebM path has no audio support. 'svg' is the vector writer: it draws figures (segment taper, gradients, segment opacity AND figure opacity, bent segments arced through the bend midpoint), strokes (a pressured stroke as per-segment lines at its baked widths), FX/particles and weather through the same camera, and it emits sprite instances, text instances and segment media (images embedded once per asset as PNG data with a placement matrix; an image item's figure×style opacity rides as an opacity attribute). One divergence from the raster remains: SVG text is a monospace font run where the raster stamps 3×5 bitmap glyphs (the content and centre agree; the advance width does not). Progress: on a streaming transport (the stdio server), passing '_meta.progressToken' in the tools/call params streams notifications/progress during the call — 'mp4'/'webm' report the encode phase, 'jpeg'/'png_sequence' the render phase; other formats report nothing and the reply is unchanged.",
             schema: json!({
                 "type": "object",
                 "properties": {

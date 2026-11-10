@@ -26,10 +26,12 @@
 //! `export::export_mp4_range`; Wave 10 extended it to
 //! any ffmpeg-readable format, and a clip whose file
 //! cannot be probed or decoded fails the export rather
-//! than being dropped silently); WebM
-//! is video-only in every mode — the WebM path has no
-//! audio support at all (`export::export_webm` never
-//! muxes) — and the notes say both.
+//! than being dropped silently); since Wave W
+//! (W6) the WebM range exports mux the same range
+//! audio as Opus (`export::export_webm_range`), while
+//! the full WebM export stays video-only
+//! (`export::export_webm` never muxes) — and the
+//! notes say both.
 //!
 //! Phase M adds one more note, deliberately conditional:
 //! when the range toggle is on and the project has a clip
@@ -40,12 +42,12 @@
 //! with the sound: a range MP4 keeps the audio of clips
 //! inside the range (WAV and, since Wave 10, any
 //! ffmpeg-readable format; an unreadable clip file fails
-//! the export rather than being dropped silently), and a
-//! range WebM is silent — so the coverage is said out
-//! loud instead of the
-//! project's sound quietly changing shape. (WebM never
-//! carries the sound, full or range; the WebM row's own
-//! note says that where the button is.)
+//! the export rather than being dropped silently), and
+//! since Wave W (W6) a range WebM keeps it too, as Opus
+//! — so the coverage is said out loud instead of the
+//! project's sound quietly changing shape. (A full WebM
+//! export still never carries the sound; the WebM row's
+//! own note says that where the button is.)
 //!
 //! Wave 12 adds one more conditional note, in the Project
 //! formats group: when the project carries media a .piv
@@ -266,9 +268,41 @@
 //! interpolate (format names, plus "sheet" / "contact
 //! sheet" riding as data), not label sites. No element
 //! key, handler or layout changed.
+//!
+//! Wave W (W1) moves the four formats with a boarded
+//! progress contract — PNG/JPEG sequences (the render
+//! phase, IA-V12-1) and MP4/WebM (the encode phase,
+//! IA-U11-1; since W2's funnel adoption the video
+//! entries report their render loop too) — onto a
+//! background job (see the "Export jobs" section
+//! below): the press spawns a worker over a cloned
+//! project, the contracts' callbacks write into two
+//! separate atomic phase slots, never one merged
+//! figure, and the shell's frame tick (`main::poll` →
+//! [`poll_export_job`]) drains the job — repainting on
+//! snapshot changes and, on completion, writing the
+//! status and recap with the exact sentences the
+//! synchronous paths produced, class-C wording
+//! included. Progress text never enters `core.status`;
+//! the readout's lines live under the recap, keyed
+//! `xc-progress*`, and every number in them is a stored
+//! contract event — a phase that has not reported
+//! shows no number. While a job runs, every export
+//! press in the panel is a no-op: one export at a
+//! time, the contract the blocking calls enforced by
+//! construction. The formats with no phase contract
+//! (SVG, GIF, APNG, sheet, contact, the project
+//! formats and the bundles) keep their synchronous
+//! paths. The readout's labels ride IA-W1-1
+//! (`export_progress_working`, `export_render_progress`,
+//! `export_encode_progress`, `export_encode_finished`);
+//! until the integrator inserts them the wire falls
+//! back to the key text, the Q7 pattern.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
 
 use rune::tok::{type_, Theme};
@@ -324,7 +358,8 @@ pub fn range_target(core: &EditorCore, use_range: bool) -> Option<(usize, usize)
 /// one toggle away, and a range MP4 keeps the audio of the
 /// clips inside the range (WAV, and since Wave 10 any
 /// ffmpeg-readable format; an unprobeable clip file fails
-/// the export) while WebM stays silent.
+/// the export) — and since Wave W (W6) a range WebM keeps
+/// it too, as Opus; only a full WebM export stays silent.
 pub fn loop_note(core: &EditorCore) -> Option<String> {
     let (a, b) = range_target(core, true)?;
     // Wave T (T1): the sentence is a catalogue template
@@ -411,16 +446,18 @@ pub fn output_text(core: &EditorCore, use_range: bool) -> String {
 /// engine probes them with ffprobe and decodes the
 /// segment through ffmpeg), and a clip whose file cannot
 /// be probed or decoded fails the export outright rather
-/// than being dropped silently. The WebM path never
-/// muxes in any mode — the wording names that limit so
-/// it cannot imply a fully sounding range export either.
+/// than being dropped silently. Since Wave W (W6) the
+/// range WebM exports mux the same range audio as Opus
+/// (`export::export_webm_range`), so the note now names
+/// both formats; only the full WebM export stays silent.
 /// Wave T (T1): the panel renders the catalogue key
 /// `export_range_audio_note` (IA-T1-1), whose English
 /// value is this constant — the constant stays as the
 /// canonical English wording, and the i18n pin holds
-/// the two equal.
+/// the two equal. Wave W (W6): the new English value
+/// reaches the catalogue through IA-W6-1.
 pub const RANGE_AUDIO_NOTE: &str =
-    "Range MP4 exports include audio from WAV and other ffmpeg-readable clips cut to the range — a clip whose file cannot be probed or decoded fails the export instead of being left out silently, and range WebM exports are silent.";
+    "Range MP4 and WebM exports include audio from WAV and other ffmpeg-readable clips cut to the range — a clip whose file cannot be probed or decoded fails the export instead of being left out silently.";
 
 /// Whether the range-mode audio note shows: the range
 /// toggle is on AND at least one clip would actually be
@@ -772,6 +809,12 @@ fn run_export_op(s: &mut State, op: ExportOp) -> bool {
 /// recap and stores the same line as the panel recap, so
 /// both show the summary rather than whichever op ran last.
 fn run_bundle(s: &mut State, kind: BundleKind) {
+    // One export at a time (Wave W, W1): a bundle press
+    // while a background job runs is a no-op — a bundle
+    // includes formats the job may be writing.
+    if export_job_active(s) {
+        return;
+    }
     let mut failed: Vec<ExportOp> = Vec::new();
     for op in plan_bundle(kind) {
         if run_export_op(s, op) {
@@ -783,6 +826,555 @@ fn run_bundle(s: &mut State, kind: BundleKind) {
     s.export_recap = recap;
 }
 
+// ---- Export jobs (Wave W, W1) -----------------------------
+// IA-U11-1(b) + IA-V12-1(b), one mechanism for both phase
+// contracts. The four contracted formats (PNG/JPEG —
+// render phase; MP4/WebM — encode phase, and since W2
+// the video funnels' render loop reports too) no longer
+// run on the UI thread: a press spawns a worker over a
+// cloned `Project`, the contracts' callbacks write ONLY
+// into the job's two atomic phase slots, the outcome
+// returns over a channel, and `main::poll` drains the
+// job through `poll_export_job` on the frame tick. The
+// phases' state is kept separate end to end — two slots,
+// two readout lines, never a merged figure — and the
+// progress text lives only in the readout: `core.status`
+// is written exactly once, at completion, with the
+// sentences the synchronous paths produced (see
+// `finish_export_job`), so the machine-read class-C text
+// never carries a progress claim.
+
+/// How long `main::poll` waits before re-waking while an
+/// export job is active, so an otherwise idle window
+/// keeps repainting the progress readout — the live-MCP
+/// heartbeat's cadence.
+pub const JOB_WAKE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// One phase's progress slot, shared between the
+/// contract callback (the only writer) and the UI
+/// thread (reader). The callback copies each event's
+/// fields verbatim — nothing is computed, estimated or
+/// interpolated — so every number the panel shows is a
+/// number the contract delivered. `seen` separates
+/// "this phase has not reported yet" (the readout shows
+/// no number for it) from a reported zero.
+#[derive(Default)]
+pub struct PhaseProgress {
+    done: AtomicUsize,
+    total: AtomicUsize,
+    finished: AtomicBool,
+    seen: AtomicBool,
+}
+
+impl PhaseProgress {
+    fn store_render(&self, ev: stykanimate_rs::export::RenderProgressEvent) {
+        self.done.store(ev.rendered_frames, Ordering::SeqCst);
+        self.total.store(ev.total_frames, Ordering::SeqCst);
+        self.finished.store(ev.finished, Ordering::SeqCst);
+        // Written last: a reader that sees `seen` also
+        // sees this event's numbers.
+        self.seen.store(true, Ordering::SeqCst);
+    }
+
+    fn store_encode(&self, ev: stykanimate_rs::export::EncodeProgressEvent) {
+        self.done.store(ev.encoded_frames, Ordering::SeqCst);
+        self.total.store(ev.total_frames, Ordering::SeqCst);
+        self.finished.store(ev.finished, Ordering::SeqCst);
+        self.seen.store(true, Ordering::SeqCst);
+    }
+
+    /// The slot's current contents, by value.
+    pub fn snapshot(&self) -> PhaseSnapshot {
+        PhaseSnapshot {
+            done: self.done.load(Ordering::SeqCst),
+            total: self.total.load(Ordering::SeqCst),
+            finished: self.finished.load(Ordering::SeqCst),
+            seen: self.seen.load(Ordering::SeqCst),
+        }
+    }
+}
+
+/// A [`PhaseProgress`] slot read by value. `PartialEq`
+/// so the tick can tell whether what is on screen
+/// changed (and only then ask for a repaint).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct PhaseSnapshot {
+    pub done: usize,
+    pub total: usize,
+    pub finished: bool,
+    pub seen: bool,
+}
+
+/// Which hooked entry a job runs. The range is baked in
+/// from the press's `range_target`, so the worker never
+/// re-reads shell state.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum JobKind {
+    PngFull,
+    PngRange(usize, usize),
+    JpegFull,
+    JpegRange(usize, usize),
+    Mp4Full,
+    Mp4Range(usize, usize),
+    WebmFull,
+    WebmRange(usize, usize),
+}
+
+impl JobKind {
+    fn op(self) -> ExportOp {
+        match self {
+            JobKind::PngFull | JobKind::PngRange(..) => ExportOp::Png,
+            JobKind::JpegFull | JobKind::JpegRange(..) => ExportOp::Jpeg,
+            JobKind::Mp4Full | JobKind::Mp4Range(..) => ExportOp::Mp4,
+            JobKind::WebmFull | JobKind::WebmRange(..) => ExportOp::Webm,
+        }
+    }
+
+    fn range(self) -> Option<(usize, usize)> {
+        match self {
+            JobKind::PngRange(a, b)
+            | JobKind::JpegRange(a, b)
+            | JobKind::Mp4Range(a, b)
+            | JobKind::WebmRange(a, b) => Some((a, b)),
+            _ => None,
+        }
+    }
+}
+
+/// A finished job's success value, mirroring the hooked
+/// entries' own return shapes: a frame count (PNG/JPEG
+/// sequences and the full WebM), the MP4 outcome (the
+/// frame count plus the missing-audio report), or the
+/// unit value of the range WebM entry.
+#[derive(Debug)]
+enum ExportJobResult {
+    Frames(usize),
+    Mp4(stykanimate_rs::export::Mp4ExportOutcome),
+    Done,
+}
+
+/// What the worker sends back: the entry's result, with
+/// the io error stringified on the worker — the finish
+/// path interpolates it into the failure sentence
+/// exactly as the synchronous paths interpolated the
+/// error itself.
+type ExportJobOutcome = Result<ExportJobResult, String>;
+
+/// A running export job, held in `State::export_job`.
+/// The worker owns the project clone and the sending
+/// end of the outcome channel; everything the UI thread
+/// touches is here: the two phase slots and the last
+/// snapshots it showed (for repaint-on-change).
+pub struct ExportJob {
+    kind: JobKind,
+    dest: PathBuf,
+    render: Arc<PhaseProgress>,
+    encode: Arc<PhaseProgress>,
+    outcome: mpsc::Receiver<ExportJobOutcome>,
+    shown_render: PhaseSnapshot,
+    shown_encode: PhaseSnapshot,
+}
+
+/// The unit of work a job's worker runs: the cloned
+/// project plus the two phase slots, returning the
+/// outcome to send back. Production passes `run_job`
+/// bound to the kind and destination; the pins pass a
+/// test worker, so no pin ever writes an export file.
+type JobWork = Box<
+    dyn FnOnce(
+            &stykanimate_rs::model::Project,
+            &PhaseProgress,
+            &PhaseProgress,
+        ) -> ExportJobOutcome
+        + Send,
+>;
+
+/// Is an export job running? While one is, every export
+/// press in the panel is a no-op (see `start_export_job`).
+pub fn export_job_active(s: &State) -> bool {
+    s.export_job.is_some()
+}
+
+/// What a press of one of the four contracted formats
+/// resolves to: the job kind (the loop range baked in
+/// when the toggle applies) and the destination —
+/// computed exactly as the synchronous action computed
+/// them: `export_dir()` for PNG, MP4 and WebM, the
+/// `out/jpeg` directory for JPEG, the file name joined
+/// for the video formats. `None` for an op with no
+/// progress contract (never jobbed). Pure: no thread,
+/// no filesystem.
+fn job_spec(s: &State, op: ExportOp) -> Option<(JobKind, PathBuf)> {
+    let range = range_target(&s.core, s.export_use_range);
+    Some(match (op, range) {
+        (ExportOp::Png, Some((a, b))) => (JobKind::PngRange(a, b), export_dir()),
+        (ExportOp::Png, None) => (JobKind::PngFull, export_dir()),
+        (ExportOp::Jpeg, Some((a, b))) => (
+            JobKind::JpegRange(a, b),
+            PathBuf::from("out").join("jpeg"),
+        ),
+        (ExportOp::Jpeg, None) => (JobKind::JpegFull, PathBuf::from("out").join("jpeg")),
+        (ExportOp::Mp4, Some((a, b))) => (
+            JobKind::Mp4Range(a, b),
+            export_dir().join("animation.mp4"),
+        ),
+        (ExportOp::Mp4, None) => (JobKind::Mp4Full, export_dir().join("animation.mp4")),
+        (ExportOp::Webm, Some((a, b))) => (
+            JobKind::WebmRange(a, b),
+            export_dir().join("animation.webm"),
+        ),
+        (ExportOp::Webm, None) => {
+            (JobKind::WebmFull, export_dir().join("animation.webm"))
+        }
+        _ => return None,
+    })
+}
+
+/// The worker body: call the one hooked entry for
+/// `kind` over the cloned project, each phase's
+/// callback writing only its own slot, and return the
+/// entry's result in the job's shape. Runs entirely
+/// off the UI thread; touches no shell state.
+fn run_job(
+    kind: JobKind,
+    project: &stykanimate_rs::model::Project,
+    dest: &Path,
+    render: &PhaseProgress,
+    encode: &PhaseProgress,
+) -> ExportJobOutcome {
+    let render_cb =
+        |ev: stykanimate_rs::export::RenderProgressEvent| render.store_render(ev);
+    let encode_cb =
+        |ev: stykanimate_rs::export::EncodeProgressEvent| encode.store_encode(ev);
+    let result = match kind {
+        JobKind::PngFull => stykanimate_rs::export::export_png_sequence_with_render_progress(
+            project,
+            dest,
+            Some(&render_cb),
+        )
+        .map(ExportJobResult::Frames),
+        JobKind::PngRange(a, b) => {
+            stykanimate_rs::export::export_png_sequence_range_with_render_progress(
+                project,
+                a,
+                b,
+                dest,
+                Some(&render_cb),
+            )
+            .map(ExportJobResult::Frames)
+        }
+        JobKind::JpegFull => {
+            stykanimate_rs::export::export_jpeg_sequence_with_render_progress(
+                project,
+                dest,
+                Some(&render_cb),
+            )
+            .map(ExportJobResult::Frames)
+        }
+        JobKind::JpegRange(a, b) => {
+            stykanimate_rs::export::export_jpeg_sequence_range_with_render_progress(
+                project,
+                a,
+                b,
+                dest,
+                Some(&render_cb),
+            )
+            .map(ExportJobResult::Frames)
+        }
+        JobKind::Mp4Full => stykanimate_rs::export::export_mp4_with_progress(
+            project,
+            dest,
+            Some(&encode_cb),
+            Some(&render_cb),
+        )
+        .map(ExportJobResult::Mp4),
+        JobKind::Mp4Range(a, b) => stykanimate_rs::export::export_mp4_range_with_progress(
+            project,
+            a,
+            b,
+            dest,
+            Some(&encode_cb),
+            Some(&render_cb),
+        )
+        .map(ExportJobResult::Mp4),
+        JobKind::WebmFull => stykanimate_rs::export::export_webm_with_progress(
+            project,
+            dest,
+            Some(&encode_cb),
+            Some(&render_cb),
+        )
+        .map(ExportJobResult::Frames),
+        JobKind::WebmRange(a, b) => {
+            stykanimate_rs::export::export_webm_range_with_progress(
+                project,
+                a,
+                b,
+                dest,
+                Some(&encode_cb),
+                Some(&render_cb),
+            )
+            .map(|_| ExportJobResult::Done)
+        }
+    };
+    result.map_err(|e| e.to_string())
+}
+
+/// Store a job in `State` and spawn its worker. The
+/// worker owns the project clone, the phase slots and
+/// the channel's sending end; it sends exactly one
+/// outcome, then exits.
+fn begin_job(
+    s: &mut State,
+    kind: JobKind,
+    dest: PathBuf,
+    project: stykanimate_rs::model::Project,
+    work: JobWork,
+) {
+    let render = Arc::new(PhaseProgress::default());
+    let encode = Arc::new(PhaseProgress::default());
+    let (tx, rx) = mpsc::channel::<ExportJobOutcome>();
+    s.export_job = Some(ExportJob {
+        kind,
+        dest,
+        render: Arc::clone(&render),
+        encode: Arc::clone(&encode),
+        outcome: rx,
+        shown_render: PhaseSnapshot::default(),
+        shown_encode: PhaseSnapshot::default(),
+    });
+    std::thread::spawn(move || {
+        let outcome = work(&project, &render, &encode);
+        let _ = tx.send(outcome);
+    });
+}
+
+/// Begin the background job for one of the four
+/// contracted formats — the whole body of their button
+/// actions now. Returns false, changing nothing, when
+/// a job is already active: one export at a time, the
+/// contract the old blocking calls enforced by
+/// construction (two live exports could write the same
+/// destinations — a bundle includes PNG and MP4), with
+/// the running readout as the visible reason a press
+/// did nothing.
+fn start_export_job(s: &mut State, op: ExportOp) -> bool {
+    if s.export_job.is_some() {
+        return false;
+    }
+    let Some((kind, dest)) = job_spec(s, op) else {
+        return false;
+    };
+    // The directory creation the MP4/WebM range actions
+    // performed before calling (the sequence entries and
+    // the encode funnels create their own parents).
+    if matches!(kind, JobKind::Mp4Range(..) | JobKind::WebmRange(..)) {
+        let _ = std::fs::create_dir_all(export_dir());
+    }
+    let work_dest = dest.clone();
+    let project = s.core.project.clone();
+    begin_job(
+        s,
+        kind,
+        dest,
+        project,
+        Box::new(move |project, render, encode| {
+            run_job(kind, project, &work_dest, render, encode)
+        }),
+    );
+    true
+}
+
+/// The frame-tick drain for the export job, called from
+/// `main::poll`. Returns `(redraw, active)`: redraw is
+/// asked only when a phase snapshot changed since the
+/// last shown one (or the job just finished and its
+/// status/recap landed); active is true while the job
+/// runs, so the caller can keep the wake cadence
+/// (`JOB_WAKE`) alive. A worker that dies without
+/// sending (a panic in the export) finishes the job as
+/// a failure in the op's voice — never as a success and
+/// never silently dropped.
+pub fn poll_export_job(s: &mut State) -> (bool, bool) {
+    let received = match s.export_job.as_ref() {
+        None => return (false, false),
+        Some(job) => job.outcome.try_recv(),
+    };
+    match received {
+        Ok(result) => {
+            let job = s.export_job.take().expect("job checked present");
+            finish_export_job(s, &job, result);
+            (true, false)
+        }
+        Err(mpsc::TryRecvError::Disconnected) => {
+            let job = s.export_job.take().expect("job checked present");
+            finish_export_job(
+                s,
+                &job,
+                Err("the export worker stopped before reporting a result".to_string()),
+            );
+            (true, false)
+        }
+        Err(mpsc::TryRecvError::Empty) => {
+            let job = s.export_job.as_mut().expect("job checked present");
+            let render = job.render.snapshot();
+            let encode = job.encode.snapshot();
+            let changed = render != job.shown_render || encode != job.shown_encode;
+            job.shown_render = render;
+            job.shown_encode = encode;
+            (changed, true)
+        }
+    }
+}
+
+/// The contracted formats' failure sentence for a
+/// reason — the `editor.rs` full ops' and the range
+/// actions' voices, which agree per format.
+fn job_failure_status(op: ExportOp, reason: &str) -> String {
+    match op {
+        ExportOp::Png => format!("Export failed: {reason}"),
+        ExportOp::Jpeg => format!("JPEG export failed: {reason}"),
+        ExportOp::Mp4 => format!("MP4 export failed: {reason}"),
+        _ => format!("WebM export failed: {reason}"),
+    }
+}
+
+/// Turn a finished job's outcome into the panel's
+/// status and recap: the exact sentences the
+/// synchronous actions (range) and the `EditorCore`
+/// full ops produced for the same result — the MP4
+/// missing-audio note composed from the outcome in
+/// both modes, the range WebM's video-only sentence
+/// kept verbatim as the class-C wording of record —
+/// then `note_single`, as the actions called it.
+fn finish_export_job(s: &mut State, job: &ExportJob, result: ExportJobOutcome) {
+    let op = job.kind.op();
+    s.core.status = match result {
+        Err(e) => job_failure_status(op, &e),
+        Ok(res) => match (job.kind, res) {
+            (JobKind::PngFull, ExportJobResult::Frames(n)) => {
+                format!("Exported {n} PNG frames to {}", job.dest.display())
+            }
+            (JobKind::PngRange(a, b), ExportJobResult::Frames(n)) => format!(
+                "Exported {n} PNG frames (frames {}–{}) to {}",
+                a + 1,
+                b + 1,
+                job.dest.display()
+            ),
+            (JobKind::JpegFull, ExportJobResult::Frames(_)) => {
+                "Exported JPEG frames to out/jpeg/.".to_string()
+            }
+            (JobKind::JpegRange(a, b), ExportJobResult::Frames(n)) => format!(
+                "Exported {n} JPEG frames (frames {}–{}) to out/jpeg/.",
+                a + 1,
+                b + 1
+            ),
+            (JobKind::Mp4Full, ExportJobResult::Mp4(outcome)) => {
+                match outcome.missing_audio_note() {
+                    Some(note) => format!(
+                        "Exported {}-frame MP4 to {}. {note}",
+                        outcome.frames,
+                        job.dest.display()
+                    ),
+                    None => format!(
+                        "Exported {}-frame MP4 to {}",
+                        outcome.frames,
+                        job.dest.display()
+                    ),
+                }
+            }
+            (JobKind::Mp4Range(a, b), ExportJobResult::Mp4(outcome)) => {
+                match outcome.missing_audio_note() {
+                    Some(note) => format!(
+                        "Exported MP4 (frames {}–{}) to {}. {note}",
+                        a + 1,
+                        b + 1,
+                        job.dest.display()
+                    ),
+                    None => format!(
+                        "Exported MP4 (frames {}–{}) to {}",
+                        a + 1,
+                        b + 1,
+                        job.dest.display()
+                    ),
+                }
+            }
+            (JobKind::WebmFull, ExportJobResult::Frames(n)) => {
+                format!("Exported {n}-frame WebM.")
+            }
+            (JobKind::WebmRange(a, b), ExportJobResult::Done) => format!(
+                "Exported WebM (frames {}–{}, video only) to {}",
+                a + 1,
+                b + 1,
+                job.dest.display()
+            ),
+            // `run_job` pairs each kind with exactly one
+            // result shape; any other pairing is a bug in
+            // this module, reported as a failure in the
+            // op's voice rather than as a success.
+            _ => job_failure_status(op, "internal result mismatch"),
+        },
+    };
+    note_single(s, op, job.kind.range());
+}
+
+/// The readout's render-phase line: the stored event's
+/// own numbers through the catalogue template. The
+/// render terminal closes the whole sequence export,
+/// so the final event's numbers (`done == total`) are
+/// the line until the same tick's outcome replaces the
+/// readout with the result — no finished wording is
+/// needed, and none is claimed.
+fn render_progress_line(core: &EditorCore, snap: PhaseSnapshot) -> String {
+    i18n_wire::tr(core, "export_render_progress")
+        .replace("{done}", &snap.done.to_string())
+        .replace("{total}", &snap.total.to_string())
+}
+
+/// The readout's encode-phase line. The encode
+/// terminal closes only the video encode — an MP4's
+/// audio mux can still run (and fail) after it — so
+/// once the stored event is the terminal, the line is
+/// the finished sentence and claims exactly that
+/// (IA-U11-1(b)): never export success, which exists
+/// only when the outcome lands in `finish_export_job`.
+fn encode_progress_line(core: &EditorCore, snap: PhaseSnapshot) -> String {
+    if snap.finished {
+        i18n_wire::tr(core, "export_encode_finished")
+    } else {
+        i18n_wire::tr(core, "export_encode_progress")
+            .replace("{done}", &snap.done.to_string())
+            .replace("{total}", &snap.total.to_string())
+    }
+}
+
+/// The progress readout's lines for the active job,
+/// each with its element key, built only from the
+/// stored phase snapshots: a seen render phase shows
+/// its line, a seen encode phase shows its line, and
+/// before either phase has reported, one working line
+/// names the format (`ExportOp::name()` is slot data,
+/// the recaps' discipline). The two phases are never
+/// combined into one figure.
+pub fn job_lines(core: &EditorCore, job: &ExportJob) -> Vec<(&'static str, String)> {
+    let mut lines = Vec::new();
+    let render = job.render.snapshot();
+    if render.seen {
+        lines.push(("xc-progress-render", render_progress_line(core, render)));
+    }
+    let encode = job.encode.snapshot();
+    if encode.seen {
+        lines.push(("xc-progress-encode", encode_progress_line(core, encode)));
+    }
+    if lines.is_empty() {
+        lines.push((
+            "xc-progress-working",
+            i18n_wire::tr(core, "export_progress_working")
+                .replace("{name}", job.kind.op().name()),
+        ));
+    }
+    lines
+}
+
 // ---- Range-capable actions --------------------------------
 // Each falls back to the full `EditorCore` op when no range
 // target applies, so the button never silently does less
@@ -790,46 +1382,20 @@ fn run_bundle(s: &mut State, kind: BundleKind) {
 // mirror the full ops in `editor.rs`.
 
 fn export_png_action(s: &mut State) {
-    let range = range_target(&s.core, s.export_use_range);
-    match range {
-        Some((a, b)) => {
-            let dir = export_dir();
-            match stykanimate_rs::export::export_png_sequence_range(&s.core.project, a, b, &dir) {
-                Ok(n) => {
-                    s.core.status = format!(
-                        "Exported {n} PNG frames (frames {}–{}) to {}",
-                        a + 1,
-                        b + 1,
-                        dir.display()
-                    )
-                }
-                Err(e) => s.core.status = format!("Export failed: {e}"),
-            }
-        }
-        None => s.core.export_png(),
-    }
-    note_single(s, ExportOp::Png, range);
+    // Wave W (W1): the press starts the background job
+    // (render phase, IA-V12-1) — the hooked entries the
+    // job's worker runs are the progress counterparts of
+    // the range/full calls that stood here, at the same
+    // destinations, and the finish writes their exact
+    // status wording (`finish_export_job`).
+    start_export_job(s, ExportOp::Png);
 }
 
 fn export_jpeg_action(s: &mut State) {
-    let range = range_target(&s.core, s.export_use_range);
-    match range {
-        Some((a, b)) => {
-            let dir = PathBuf::from("out").join("jpeg");
-            match stykanimate_rs::export::export_jpeg_sequence_range(&s.core.project, a, b, &dir) {
-                Ok(n) => {
-                    s.core.status = format!(
-                        "Exported {n} JPEG frames (frames {}–{}) to out/jpeg/.",
-                        a + 1,
-                        b + 1
-                    )
-                }
-                Err(e) => s.core.status = format!("JPEG export failed: {e}"),
-            }
-        }
-        None => s.core.export_jpeg_dir(),
-    }
-    note_single(s, ExportOp::Jpeg, range);
+    // Wave W (W1): the background job, as
+    // `export_png_action` — the JPEG entries' render
+    // phase, the `out/jpeg` destination unchanged.
+    start_export_job(s, ExportOp::Jpeg);
 }
 
 /// SVG with the range toggle (Phase J): the range variant
@@ -838,6 +1404,12 @@ fn export_jpeg_action(s: &mut State) {
 /// reports in the full op's wording with the frame range
 /// named.
 fn export_svg_action(s: &mut State) {
+    // One export at a time (Wave W, W1): while a
+    // background job runs, every export press is a
+    // no-op — see `start_export_job`.
+    if export_job_active(s) {
+        return;
+    }
     let range = range_target(&s.core, s.export_use_range);
     match range {
         Some((a, b)) => {
@@ -861,6 +1433,11 @@ fn export_svg_action(s: &mut State) {
 }
 
 fn export_gif_action(s: &mut State) {
+    // One export at a time (Wave W, W1), as
+    // `export_svg_action`.
+    if export_job_active(s) {
+        return;
+    }
     let range = range_target(&s.core, s.export_use_range);
     match range {
         Some((a, b)) => {
@@ -890,6 +1467,11 @@ fn export_gif_action(s: &mut State) {
 /// the contact-sheet action's voice — frame count, the
 /// range, the path.
 fn export_sheet_action(s: &mut State) {
+    // One export at a time (Wave W, W1), as
+    // `export_svg_action`.
+    if export_job_active(s) {
+        return;
+    }
     let range = range_target(&s.core, s.export_use_range);
     match range {
         Some((a, b)) => {
@@ -932,6 +1514,11 @@ fn run_contact_full(core: &mut EditorCore) {
 }
 
 fn export_contact_action(s: &mut State) {
+    // One export at a time (Wave W, W1), as
+    // `export_svg_action`.
+    if export_job_active(s) {
+        return;
+    }
     let range = range_target(&s.core, s.export_use_range);
     match range {
         Some((a, b)) => {
@@ -956,6 +1543,11 @@ fn export_contact_action(s: &mut State) {
 }
 
 fn export_apng_action(s: &mut State) {
+    // One export at a time (Wave W, W1), as
+    // `export_svg_action`.
+    if export_job_active(s) {
+        return;
+    }
     let range = range_target(&s.core, s.export_use_range);
     match range {
         Some((a, b)) => {
@@ -979,71 +1571,32 @@ fn export_apng_action(s: &mut State) {
 }
 
 fn export_mp4_action(s: &mut State) {
-    let range = range_target(&s.core, s.export_use_range);
-    match range {
-        Some((a, b)) => {
-            let dir = export_dir();
-            let _ = std::fs::create_dir_all(&dir);
-            let path = dir.join("animation.mp4");
-            // Since Wave 9 the range path muxes the audio
-            // of clips intersecting the range, like the
-            // full op (see `export::export_mp4_range`
-            // docs); since Wave 10 that covers any
-            // ffmpeg-readable format, and a clip whose
-            // file cannot be probed or decoded fails the
-            // export instead of being dropped silently.
-            match stykanimate_rs::export::export_mp4_range(&s.core.project, a, b, &path) {
-                Ok(outcome) => {
-                    // Wave P (P15): clips whose files are
-                    // missing are named in the status instead
-                    // of being dropped silently; with every
-                    // clip present the status is the sentence
-                    // it always was.
-                    s.core.status = match outcome.missing_audio_note() {
-                        Some(note) => format!(
-                            "Exported MP4 (frames {}–{}) to {}. {note}",
-                            a + 1,
-                            b + 1,
-                            path.display()
-                        ),
-                        None => format!(
-                            "Exported MP4 (frames {}–{}) to {}",
-                            a + 1,
-                            b + 1,
-                            path.display()
-                        ),
-                    }
-                }
-                Err(e) => s.core.status = format!("MP4 export failed: {e}"),
-            }
-        }
-        None => s.core.export_mp4(),
-    }
-    note_single(s, ExportOp::Mp4, range);
+    // Wave W (W1): the press starts the background job
+    // (encode phase, IA-U11-1; the funnel's render loop
+    // reports too since W2). The range behaviour the
+    // synchronous call had stands at the entry the
+    // worker runs: since Wave 9 the range path muxes
+    // the audio of clips intersecting the range, like
+    // the full op (see `export::export_mp4_range` docs);
+    // since Wave 10 that covers any ffmpeg-readable
+    // format, and a clip whose file cannot be probed or
+    // decoded fails the export instead of being dropped
+    // silently. The Wave P (P15) missing-audio naming
+    // happens in `finish_export_job`, from the outcome
+    // the worker returns.
+    start_export_job(s, ExportOp::Mp4);
 }
 
 fn export_webm_action(s: &mut State) {
-    let range = range_target(&s.core, s.export_use_range);
-    match range {
-        Some((a, b)) => {
-            let dir = export_dir();
-            let _ = std::fs::create_dir_all(&dir);
-            let path = dir.join("animation.webm");
-            match stykanimate_rs::export::export_webm_range(&s.core.project, a, b, &path) {
-                Ok(()) => {
-                    s.core.status = format!(
-                        "Exported WebM (frames {}–{}, video only) to {}",
-                        a + 1,
-                        b + 1,
-                                    path.display()
-                    )
-                }
-                Err(e) => s.core.status = format!("WebM export failed: {e}"),
-            }
-        }
-        None => s.core.export_webm(),
-    }
-    note_single(s, ExportOp::Webm, range);
+    // Wave W (W1): the background job, as
+    // `export_mp4_action`. The finish reproduces the
+    // synchronous wording verbatim — including the
+    // range success's video-only sentence, the class-C
+    // wording of record (W6 flagged its staleness
+    // against the range audio mux rather than editing
+    // around the exclusion; the correction is a
+    // catalogue-side decision, not this slice's).
+    start_export_job(s, ExportOp::Webm);
 }
 
 // ---- Recent exports history -------------------------------
@@ -1451,6 +2004,11 @@ fn plain_row(
     recap_dest: &'static str,
 ) -> El {
     let handler = move |s: &mut State| {
+        // One export at a time (Wave W, W1): while a
+        // background job runs, a press here is a no-op.
+        if export_job_active(s) {
+            return;
+        }
         op(&mut s.core);
         s.export_recap = if export_failed(&s.core) {
             failure_recap(&s.core.status, recap_name)
@@ -1880,6 +2438,29 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         );
     }
 
+    if let Some(job) = &s.export_job {
+        // The running export job's progress readout
+        // (Wave W, W1): one line per phase that has
+        // reported, built only from the stored contract
+        // events (`job_lines`) — a phase with no event
+        // yet shows no number, and the two phases are
+        // never combined into one figure. The block
+        // exists only while a job runs, so an idle
+        // panel's tree is unchanged.
+        let mut progress = col().key("xc-progress").gap(2.0);
+        for (key, line) in job_lines(core, job) {
+            progress = progress.child(
+                text(line)
+                    .key(key)
+                    .font(type_::LABEL)
+                    .color(t.text_secondary)
+                    .wrap()
+                    .w_full(),
+            );
+        }
+        panel = panel.child(progress);
+    }
+
     // Recent exports: what is actually on disk in the two
     // output roots, newest first — read-only rows, no
     // open/reveal buttons (the shell has no file opener).
@@ -1973,7 +2554,7 @@ mod tests {
             ("export_note_gif", "Animated GIF — ./export/animation.gif"),
             ("export_note_apng", "Animated PNG — out/animation.apng (out/, not export/)"),
             ("export_note_mp4", "MP4 video via ffmpeg — ./export/animation.mp4 (full export includes audio; range export includes audio from clips inside the range — WAV or any other ffmpeg-readable format; a clip file that cannot be probed or decoded fails the range export)"),
-            ("export_note_webm", "WebM video (VP9) — ./export/animation.webm (video-only — WebM never includes audio)"),
+            ("export_note_webm", "WebM video (VP9) — ./export/animation.webm (full export is video-only; range export includes audio from clips inside the range)"),
             ("export_note_piv2", "Pivot v2 project — ./export/animation-v2.piv"),
             ("export_note_piv3", "Pivot v3 project — ./export/animation.piv"),
             ("export_note_piv4", "Pivot v4 project — ./export/animation-v4.piv"),
@@ -1985,7 +2566,7 @@ mod tests {
             ("export_note_bundle_video", "MP4 + WebM in one press, full exports (the MP4 keeps its audio). Bundles always export in full — the range toggle above applies only to the single-format buttons."),
             ("export_effective_none", "The project has no frames to export."),
             ("export_effective_no_range", "Loop range selected, but no loop range is set — exports write all frames. Set a loop range in the timeline first."),
-            ("export_range_audio_note", "Range MP4 exports include audio from WAV and other ffmpeg-readable clips cut to the range — a clip whose file cannot be probed or decoded fails the export instead of being left out silently, and range WebM exports are silent."),
+            ("export_range_audio_note", "Range MP4 and WebM exports include audio from WAV and other ffmpeg-readable clips cut to the range — a clip whose file cannot be probed or decoded fails the export instead of being left out silently."),
             ("export_piv_note_segments", "Media note: .piv v2/v3/v4 export image and text segments as plain segments — only v5 keeps segment media."),
             ("export_piv_note_instances", "Media note: no .piv version writes sprite or text instances — they are left out of .piv exports."),
             ("export_piv_note_both", "Media note: .piv v2/v3/v4 export image and text segments as plain segments (only v5 keeps them), and no .piv version writes sprite or text instances — they are left out of .piv exports."),
@@ -2024,7 +2605,7 @@ mod tests {
         // integrator inserts the keys (the Q7 pattern).
         let mut core = EditorCore::new();
         for (key, template) in [
-            ("export_loop_note", "Loop range: frames {from}–{to} — with \"Loop range\" selected below, the PNG/JPEG/SVG/spritesheet/contact sheet/GIF/APNG/MP4/WebM exports write only those frames (a range MP4 includes audio from WAV and other ffmpeg-readable clips inside the range — a clip whose file cannot be probed or decoded fails the export; WebM is video-only in every mode)."),
+            ("export_loop_note", "Loop range: frames {from}–{to} — with \"Loop range\" selected below, the PNG/JPEG/SVG/spritesheet/contact sheet/GIF/APNG/MP4/WebM exports write only those frames (range MP4 and WebM exports include audio from WAV and other ffmpeg-readable clips inside the range — a clip whose file cannot be probed or decoded fails the export)."),
             ("export_effective_range", "Range-capable exports write frames {from}–{to} (the loop range); other formats export in full."),
             ("export_effective_all", "Exports write all {count} frames."),
             ("export_output", "Output: {frames} frames · {width}×{height} · {fps} fps"),
@@ -2051,7 +2632,7 @@ mod tests {
         core.loop_range = Some((1, 2));
         assert_eq!(
             loop_note(&core).expect("note with a loop range set"),
-            "Loop range: frames 2–3 — with \"Loop range\" selected below, the PNG/JPEG/SVG/spritesheet/contact sheet/GIF/APNG/MP4/WebM exports write only those frames (a range MP4 includes audio from WAV and other ffmpeg-readable clips inside the range — a clip whose file cannot be probed or decoded fails the export; WebM is video-only in every mode)."
+            "Loop range: frames 2–3 — with \"Loop range\" selected below, the PNG/JPEG/SVG/spritesheet/contact sheet/GIF/APNG/MP4/WebM exports write only those frames (range MP4 and WebM exports include audio from WAV and other ffmpeg-readable clips inside the range — a clip whose file cannot be probed or decoded fails the export)."
         );
         let row = ExportRow {
             name: "export/frame-*.png".into(),
@@ -2609,18 +3190,19 @@ mod tests {
 
     #[test]
     fn range_audio_note_wording_is_exact() {
-        // The wording names the Wave 10 truth exactly: a
-        // range MP4 keeps clip audio inside the range,
-        // WAV or any other ffmpeg-readable format; a clip
-        // whose file cannot be probed or decoded fails
-        // the export instead of being left out silently,
-        // and WebM is silent
-        // in every mode (`export::export_webm` never
-        // muxes) — neither "range exports are silent" nor
-        // an unqualified "includes audio" would be true.
+        // The wording names the Wave W (W6) truth
+        // exactly: range MP4 and range WebM both keep
+        // clip audio inside the range, WAV or any other
+        // ffmpeg-readable format (AAC in the MP4, Opus
+        // in the WebM); a clip whose file cannot be
+        // probed or decoded fails the export instead of
+        // being left out silently. Only a full WebM
+        // export is silent (`export::export_webm` never
+        // muxes) — the note is range-only copy, so it
+        // does not say that either way.
         assert_eq!(
             RANGE_AUDIO_NOTE,
-            "Range MP4 exports include audio from WAV and other ffmpeg-readable clips cut to the range — a clip whose file cannot be probed or decoded fails the export instead of being left out silently, and range WebM exports are silent."
+            "Range MP4 and WebM exports include audio from WAV and other ffmpeg-readable clips cut to the range — a clip whose file cannot be probed or decoded fails the export instead of being left out silently."
         );
     }
 
@@ -2838,5 +3420,336 @@ mod tests {
             "Sprite note: .stk and .nodes carry only the selected figure, so project sprite instances are left out of those two exports. .stknds carries the sprite tracks (on re-import, groups come back as plain images and text instances are not carried)."
         );
         assert!(!note.contains(".piv"), "the .piv half is the media note's: {note}");
+    }
+
+    #[test]
+    fn progress_labels_exist_in_the_catalogue_and_match_english_byte_identically() {
+        // Wave W (W1, IA-W1-1): the progress readout's
+        // keys — the working line and the two phase
+        // templates in stored form (slots included),
+        // plus the encode-finished sentence. Like the
+        // template half of the pin above, this passes
+        // only once the integrator inserts the keys
+        // (the Q7 pattern): until then `tr` falls back
+        // to the key text and `key_in_table` is false.
+        let core = EditorCore::new();
+        for (key, literal) in [
+            ("export_progress_working", "Exporting {name}…"),
+            ("export_render_progress", "Rendering {done} of {total} frames"),
+            ("export_encode_progress", "Encoding {done} of {total} frames"),
+            ("export_encode_finished", "Encode finished"),
+        ] {
+            assert!(
+                crate::rune_sec::i18n_wire::key_in_table(key),
+                "{key} must exist in the i18n table"
+            );
+            assert_eq!(
+                crate::rune_sec::i18n_wire::tr(&core, key),
+                literal,
+                "{key} must render byte-identically in English"
+            );
+        }
+    }
+
+    // ---- Export jobs (Wave W, W1) ----
+    // The job machinery's state transitions, driven by
+    // test workers through `begin_job`'s work seam: no
+    // pin runs a real export entry or writes an export
+    // file (the destinations below are inert strings the
+    // test workers never touch).
+
+    /// Poll until the job in `s` finishes — bounded, so
+    /// a broken drain fails the pin instead of hanging
+    /// the suite.
+    fn poll_until_finished(s: &mut State) -> (bool, bool) {
+        for _ in 0..2000 {
+            let drained = poll_export_job(s);
+            if !drained.1 {
+                return drained;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("export job did not finish");
+    }
+
+    /// Begin a job whose worker blocks until the
+    /// returned sender is signalled, then returns
+    /// `result` as its outcome.
+    fn blocked_job(s: &mut State, kind: JobKind, result: ExportJobOutcome) -> mpsc::Sender<()> {
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let work: JobWork = Box::new(move |_project, _render, _encode| {
+            let _ = release_rx.recv();
+            result
+        });
+        let project = s.core.project.clone();
+        begin_job(s, kind, PathBuf::from("out-test"), project, work);
+        release_tx
+    }
+
+    #[test]
+    fn job_poll_redraws_only_when_a_phase_snapshot_changes() {
+        let mut s = crate::init();
+        let (signal_tx, signal_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let work: JobWork = Box::new(move |_project, render, _encode| {
+            let _ = signal_rx.recv();
+            render.store_render(stykanimate_rs::export::RenderProgressEvent {
+                rendered_frames: 2,
+                total_frames: 5,
+                finished: false,
+            });
+            let _ = release_rx.recv();
+            Ok(ExportJobResult::Frames(5))
+        });
+        let project = s.core.project.clone();
+        begin_job(&mut s, JobKind::PngFull, PathBuf::from("out-test"), project, work);
+        // Nothing reported yet: active, no repaint — and
+        // the readout's only line is the working line
+        // (no phase shows a number it never delivered).
+        assert_eq!(poll_export_job(&mut s), (false, true));
+        let job = s.export_job.as_ref().expect("job running");
+        let lines = job_lines(&s.core, job);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].0, "xc-progress-working");
+        // A stored event is a change: repaint, still
+        // active.
+        signal_tx.send(()).expect("worker listening");
+        let mut drained = (false, true);
+        for _ in 0..2000 {
+            drained = poll_export_job(&mut s);
+            if drained.0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(drained, (true, true));
+        // No new event since: no repaint, still active.
+        assert_eq!(poll_export_job(&mut s), (false, true));
+        release_tx.send(()).expect("worker listening");
+        assert_eq!(poll_until_finished(&mut s), (true, false));
+        assert!(s.export_job.is_none());
+    }
+
+    #[test]
+    fn finished_range_png_job_writes_the_actions_status_and_recap() {
+        let mut s = crate::init();
+        let release = blocked_job(
+            &mut s,
+            JobKind::PngRange(1, 3),
+            Ok(ExportJobResult::Frames(3)),
+        );
+        release.send(()).expect("worker listening");
+        assert_eq!(poll_until_finished(&mut s), (true, false));
+        // The range action's exact sentence, the range
+        // recap — produced at finish, not by the press.
+        assert_eq!(s.core.status, "Exported 3 PNG frames (frames 2–4) to out-test");
+        assert_eq!(
+            s.export_recap,
+            single_recap_range("PNG", "./export/", (1, 3), false)
+        );
+        // A later poll is inert.
+        assert_eq!(poll_export_job(&mut s), (false, false));
+    }
+
+    #[test]
+    fn failed_job_keeps_the_failure_wording_and_reason() {
+        let mut s = crate::init();
+        let release = blocked_job(&mut s, JobKind::Mp4Full, Err("boom".to_string()));
+        release.send(()).expect("worker listening");
+        poll_until_finished(&mut s);
+        assert_eq!(s.core.status, "MP4 export failed: boom");
+        // The recap keeps the status verbatim — reason
+        // included — via `failure_recap`'s convention.
+        assert_eq!(s.export_recap, "MP4 export failed: boom");
+    }
+
+    #[test]
+    fn mp4_finish_names_missing_audio_like_the_full_op() {
+        let mut s = crate::init();
+        let outcome = stykanimate_rs::export::Mp4ExportOutcome {
+            frames: 5,
+            missing_audio: vec!["gone.wav".to_string()],
+        };
+        let note = outcome.missing_audio_note().expect("a skipped clip is named");
+        let release = blocked_job(
+            &mut s,
+            JobKind::Mp4Full,
+            Ok(ExportJobResult::Mp4(outcome)),
+        );
+        release.send(()).expect("worker listening");
+        poll_until_finished(&mut s);
+        assert_eq!(
+            s.core.status,
+            format!("Exported 5-frame MP4 to out-test. {note}")
+        );
+    }
+
+    #[test]
+    fn phases_stay_separate_in_the_slots_and_the_lines() {
+        let mut s = crate::init();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let work: JobWork = Box::new(move |_project, render, encode| {
+            render.store_render(stykanimate_rs::export::RenderProgressEvent {
+                rendered_frames: 2,
+                total_frames: 5,
+                finished: false,
+            });
+            encode.store_encode(stykanimate_rs::export::EncodeProgressEvent {
+                encoded_frames: 1,
+                total_frames: 9,
+                finished: false,
+            });
+            let _ = release_rx.recv();
+            Ok(ExportJobResult::Done)
+        });
+        let project = s.core.project.clone();
+        begin_job(
+            &mut s,
+            JobKind::WebmRange(0, 4),
+            PathBuf::from("out-test"),
+            project,
+            work,
+        );
+        // Wait until both stores are visible.
+        for _ in 0..2000 {
+            let job = s.export_job.as_ref().expect("job running");
+            if job.render.snapshot().seen && job.encode.snapshot().seen {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let job = s.export_job.as_ref().expect("job running");
+        let render = job.render.snapshot();
+        let encode = job.encode.snapshot();
+        // Each slot kept its own event's numbers — the
+        // render store did not move the encode counter
+        // or vice versa.
+        assert_eq!((render.done, render.total), (2, 5));
+        assert_eq!((encode.done, encode.total), (1, 9));
+        let lines = job_lines(&s.core, job);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].0, "xc-progress-render");
+        assert_eq!(lines[0].1, render_progress_line(&s.core, render));
+        assert_eq!(lines[1].0, "xc-progress-encode");
+        assert_eq!(lines[1].1, encode_progress_line(&s.core, encode));
+        release_tx.send(()).expect("worker listening");
+        poll_until_finished(&mut s);
+    }
+
+    #[test]
+    fn encode_terminal_reads_as_encode_finished_only() {
+        let mut s = crate::init();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let work: JobWork = Box::new(move |_project, _render, encode| {
+            encode.store_encode(stykanimate_rs::export::EncodeProgressEvent {
+                encoded_frames: 9,
+                total_frames: 9,
+                finished: true,
+            });
+            let _ = release_rx.recv();
+            Ok(ExportJobResult::Frames(9))
+        });
+        let project = s.core.project.clone();
+        begin_job(
+            &mut s,
+            JobKind::WebmFull,
+            PathBuf::from("out-test"),
+            project,
+            work,
+        );
+        for _ in 0..2000 {
+            match s.export_job.as_ref() {
+                Some(job) if job.encode.snapshot().seen => break,
+                _ => std::thread::sleep(std::time::Duration::from_millis(1)),
+            }
+        }
+        let job = s.export_job.as_ref().expect("job running");
+        let lines = job_lines(&s.core, job);
+        // The terminal encode line claims the encode
+        // finished — and while the job is still active
+        // (no outcome yet) nothing claims the export
+        // itself finished: the status is untouched.
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].0, "xc-progress-encode");
+        assert_eq!(
+            lines[0].1,
+            crate::rune_sec::i18n_wire::tr(&s.core, "export_encode_finished")
+        );
+        assert!(export_job_active(&s));
+        assert!(!s.core.status.contains("Exported"));
+        release_tx.send(()).expect("worker listening");
+        poll_until_finished(&mut s);
+        assert_eq!(s.core.status, "Exported 9-frame WebM.");
+    }
+
+    #[test]
+    fn a_second_press_is_a_no_op_while_a_job_runs() {
+        let mut s = crate::init();
+        let release = blocked_job(
+            &mut s,
+            JobKind::PngFull,
+            Ok(ExportJobResult::Frames(1)),
+        );
+        assert!(export_job_active(&s));
+        // A contracted press refuses while a job runs...
+        assert!(!start_export_job(&mut s, ExportOp::Mp4));
+        // ...and the synchronous presses are inert too:
+        // the sentinel status survives an SVG press and
+        // a bundle press untouched.
+        s.core.status = "sentinel".to_string();
+        export_svg_action(&mut s);
+        assert_eq!(s.core.status, "sentinel");
+        run_bundle(&mut s, BundleKind::Images);
+        assert_eq!(s.core.status, "sentinel");
+        release.send(()).expect("worker listening");
+        poll_until_finished(&mut s);
+        // The original job — not any refused press —
+        // wrote the finish.
+        assert_eq!(s.core.status, "Exported 1 PNG frames to out-test");
+    }
+
+    #[test]
+    fn a_worker_that_never_reports_finishes_as_a_failure() {
+        let mut s = crate::init();
+        let (tx, rx) = mpsc::channel::<ExportJobOutcome>();
+        drop(tx);
+        s.export_job = Some(ExportJob {
+            kind: JobKind::WebmFull,
+            dest: PathBuf::from("out-test"),
+            render: Arc::new(PhaseProgress::default()),
+            encode: Arc::new(PhaseProgress::default()),
+            outcome: rx,
+            shown_render: PhaseSnapshot::default(),
+            shown_encode: PhaseSnapshot::default(),
+        });
+        assert_eq!(poll_export_job(&mut s), (true, false));
+        assert!(s.export_job.is_none());
+        assert_eq!(
+            s.core.status,
+            "WebM export failed: the export worker stopped before reporting a result"
+        );
+    }
+
+    #[test]
+    fn job_spec_matches_the_actions_destinations() {
+        let mut s = crate::init();
+        s.export_use_range = false;
+        let (kind, dest) = job_spec(&s, ExportOp::Png).expect("PNG is contracted");
+        assert_eq!(kind, JobKind::PngFull);
+        assert_eq!(dest, export_dir());
+        let (kind, dest) = job_spec(&s, ExportOp::Jpeg).expect("JPEG is contracted");
+        assert_eq!(kind, JobKind::JpegFull);
+        assert_eq!(dest, PathBuf::from("out").join("jpeg"));
+        // With a loop range set and the toggle on, the
+        // range is baked into the kind and the video
+        // destination gains its file name.
+        s.export_use_range = true;
+        s.core.loop_range = Some((0, 2));
+        let (kind, dest) = job_spec(&s, ExportOp::Mp4).expect("MP4 is contracted");
+        assert_eq!(kind, JobKind::Mp4Range(0, 2));
+        assert_eq!(dest, export_dir().join("animation.mp4"));
+        // Uncontracted formats are never jobbed.
+        assert!(job_spec(&s, ExportOp::Svg).is_none());
+        assert!(job_spec(&s, ExportOp::Gif).is_none());
     }
 }

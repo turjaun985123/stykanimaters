@@ -81,6 +81,18 @@ pub struct EditorCore {
     /// not this report. It is a report, not a repair — the
     /// clips themselves are never dropped or rewritten.
     missing_audio: Vec<String>,
+    /// Wave W (W3): the MCP progress sink for the
+    /// `tools/call` currently being dispatched against
+    /// this core, installed by the MCP router for the
+    /// call's duration only and restored afterwards (see
+    /// [`crate::mcp::ProgressSink`]). Runtime only, like
+    /// `project_swaps`: undo snapshots cover the project,
+    /// not this. `None` outside MCP dispatch — and during
+    /// it too, unless the client passed a progress token
+    /// AND the transport can stream notifications — so
+    /// the GUI's own exports and direct handler calls in
+    /// tests never see a sink.
+    pub progress_sink: Option<crate::mcp::ProgressSink>,
     clipboard: Option<crate::model::Frame>,
     /// Wave 9: deep-copied frames held by `copy_range` for
     /// `paste_range`. Distinct from the single-frame `clipboard`.
@@ -208,6 +220,7 @@ impl EditorCore {
             last_autosave_count: 0,
             project_swaps: 0,
             missing_audio: Vec::new(),
+            progress_sink: None,
             clipboard: None,
             frame_clipboard: Vec::new(),
             playhead: 0.0,
@@ -5415,8 +5428,11 @@ impl EditorCore {
     /// session is already active; pose B is cleared, as it
     /// belonged to the previous figure.
     pub fn fig3_load_from_library(&mut self, name: &str) {
-        let path =
-            Self::fig3_library_dir().join(crate::fig3d::library_file_name(name));
+        // Resolve through the stored name, not the slug: the
+        // listing (`fig3_library_list`) reads names out of
+        // file contents, so a listed entry whose stem is not
+        // its name's slug must still load (Wave W, W9).
+        let path = crate::fig3d::library_entry_file(&Self::fig3_library_dir(), name);
         let msg = match crate::fig3d::load_library_figure(&path) {
             Some((figure, pose)) => {
                 let camera = self
@@ -7582,6 +7598,26 @@ mod tests {
         assert_eq!(st.figure.name, "Humanoid3");
         assert_eq!(st.figure.nodes.len(), 15);
         assert!(st.pose_b.is_none());
+        // Wave W, W9: an externally renamed library file
+        // (stem no longer the slug of its stored name) is
+        // still listed — and still loads, because load
+        // resolves through the stored name, not the slug.
+        let lib_dir = EditorCore::fig3_library_dir();
+        let placed = lib_dir.join("fig3d-renamed.json");
+        std::fs::rename(
+            lib_dir.join(crate::fig3d::library_file_name("Humanoid3")),
+            &placed,
+        )
+        .expect("rename the library file");
+        assert!(core.fig3_library_list().iter().any(|n| n == "Humanoid3"));
+        core.exit_3d();
+        core.fig3_load_from_library("Humanoid3");
+        let st = core
+            .fig3
+            .as_ref()
+            .expect("hand-placed entry loads by its stored name");
+        assert_eq!(st.figure.name, "Humanoid3");
+        let _ = std::fs::remove_file(&placed);
         // Clean up the file this test wrote into ./library3d.
         let dir = EditorCore::fig3_library_dir();
         let _ = std::fs::remove_file(

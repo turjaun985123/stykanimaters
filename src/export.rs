@@ -1428,11 +1428,16 @@ pub type EncodeProgressCallback<'a> =
 /// One progress update from the **render phase** of a frame
 /// sequence export (Wave V, V12): the loop that renders each
 /// authored frame and writes it as its own file
-/// (`frame-XXXX.png` / `frame-XXXX.jpg`). It is the
-/// render-phase counterpart of [`EncodeProgressEvent`] —
-/// and a separate type by construction, so the two phases'
-/// counts can never be conflated (the conflation U11's
-/// encode contract was written to exclude).
+/// (`frame-XXXX.png` / `frame-XXXX.jpg`). Since Wave W
+/// (W2) the same type also reports the render loop inside
+/// the MP4 / WebM funnels, which renders each sampled frame
+/// time to a temporary PNG before ffmpeg encodes it; the
+/// `*_with_progress` video entries carry it as their second
+/// hook, beside the encode hook. It is the render-phase
+/// counterpart of [`EncodeProgressEvent`] — and a separate
+/// type by construction, so the two phases' counts can
+/// never be conflated (the conflation U11's encode contract
+/// was written to exclude).
 ///
 /// `rendered_frames` is the render loop's own count of
 /// frames rendered **and written** so far. `total_frames`
@@ -1441,10 +1446,16 @@ pub type EncodeProgressCallback<'a> =
 /// for a range export, after clamping) — exactly the count
 /// the export returns on success. Sequence exports render
 /// authored frames, never sampled times, so neither count
-/// depends on the project fps.
+/// depends on the project fps. A video export's render loop
+/// renders sampled frame times instead (duration-expanded /
+/// tween-sampled): its `total_frames` is the number of
+/// sampled times handed to the funnel — the same total the
+/// encode phase reports against, and likewise exactly the
+/// frame count the export returns on success.
 ///
 /// Delivery contract for the `*_with_render_progress`
-/// entries:
+/// sequence entries and the render hook of the
+/// `*_with_progress` video entries:
 ///
 /// - Delivery is deterministic and synchronous, unlike the
 ///   encode phase (whose intermediate count is ffmpeg's
@@ -1456,13 +1467,18 @@ pub type EncodeProgressCallback<'a> =
 ///   terminal one (below) rather than an unfinished event.
 ///   A successful export of `total` frames therefore
 ///   delivers exactly `total` events, strictly increasing.
+///   In a video export the phases are sequential, so the
+///   whole render stream is delivered before the encode
+///   phase reports anything.
 /// - Exactly one terminal event fires, and only when the
-///   export is about to return `Ok`:
+///   render loop has written its final frame:
 ///   `rendered_frames == total_frames`, `finished == true`,
 ///   delivered last, after the final frame's file is
-///   written. A hooked full export of an empty project
-///   returns `Ok(0)` and fires exactly one event — that
-///   terminal, at `(0, 0)` — after creating the directory.
+///   written. For a sequence export that is when the export
+///   is about to return `Ok`. A hooked full export of an
+///   empty project returns `Ok(0)` and fires exactly one
+///   event — that terminal, at `(0, 0)` — after creating
+///   the directory.
 /// - A refused call (invalid scale, out-of-timeline range)
 ///   fires no event and writes nothing, exactly as the
 ///   plain entries behave. A frame whose render or write
@@ -1470,29 +1486,35 @@ pub type EncodeProgressCallback<'a> =
 ///   fires no terminal event; events already delivered
 ///   stay delivered (each was true when sent) and are
 ///   never retracted.
-/// - `finished` closes the **whole export** here: a
-///   sequence's frame files are final output and nothing
-///   runs after the loop — the deliberate contrast with
-///   the encode phase, whose terminal event closes only
-///   the video encode (an MP4's audio mux can still fail
-///   afterwards).
+/// - `finished` closes the **render phase**. For a
+///   sequence export that is also the whole export: the
+///   frame files are final output and nothing runs after
+///   the loop. For a video export the encode phase — and
+///   an MP4's audio mux — still runs after the render
+///   terminal, so there the terminal is not an
+///   export-success signal (the same caveat the encode
+///   phase's own terminal carries about the mux).
 /// - Passing no callback (every pre-existing entry point)
 ///   runs the export exactly as before.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RenderProgressEvent {
     /// Frames rendered and written so far.
     pub rendered_frames: usize,
-    /// Authored frames the export will write in total.
+    /// Frames the render loop will write in total:
+    /// authored frames for a sequence export, sampled
+    /// frame times for a video export.
     pub total_frames: usize,
     /// True only on the single terminal event (see above).
     pub finished: bool,
 }
 
 /// The render-progress hook accepted by the
-/// `*_with_render_progress` sequence export entries:
-/// `None`, or a shared reference to a callable invoked
-/// with each [`RenderProgressEvent`]. Every event is
-/// invoked from the caller's thread (sequence exports run
+/// `*_with_render_progress` sequence export entries and
+/// by the `*_with_progress` video export entries (as the
+/// render hook beside the encode hook): `None`, or a
+/// shared reference to a callable invoked with each
+/// [`RenderProgressEvent`]. Every event is invoked from
+/// the caller's thread (the render loops run
 /// synchronously; there is no worker or drainer thread),
 /// and a panicking callback cannot fail the export — the
 /// panic is contained at the call site and that event is
@@ -1556,6 +1578,22 @@ pub fn export_mp4_with_encode_progress(
     path: &Path,
     progress: EncodeProgressCallback<'_>,
 ) -> std::io::Result<Mp4ExportOutcome> {
+    export_mp4_with_progress(project, path, progress, None)
+}
+
+/// [`export_mp4`] with both phase progress hooks (Wave W,
+/// W2): the render hook ([`RenderProgressCallback`])
+/// observes the funnel's temporary-frame render loop, the
+/// encode hook ([`EncodeProgressCallback`]) observes the
+/// silent-video encode; the audio mux that may follow
+/// reports nothing. Each hook reports its own phase
+/// through its own event type — the two are never merged.
+pub fn export_mp4_with_progress(
+    project: &Project,
+    path: &Path,
+    encode_progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<Mp4ExportOutcome> {
     // Audible = unmuted with an existing file — the same
     // exclusion `mux_plan` applies. This check used to count
     // muted clips too, so an all-muted project took the mux
@@ -1569,14 +1607,14 @@ pub fn export_mp4_with_encode_progress(
         .any(|c| !c.muted && std::path::Path::new(&c.path).exists());
     let missing_audio = crate::audio::missing_audio_clips(&project.audio);
     if !has_audio {
-        let frames = ffmpeg_encode(project, path, &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"], progress)?;
+        let frames = ffmpeg_encode(project, path, &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"], encode_progress, render_progress)?;
         return Ok(Mp4ExportOutcome {
             frames,
             missing_audio,
         });
     }
     let silent = unique_temp("silent").with_extension("mp4");
-    let n = ffmpeg_encode(project, &silent, &["-c:v", "libx264", "-pix_fmt", "yuv420p"], progress)?;
+    let n = ffmpeg_encode(project, &silent, &["-c:v", "libx264", "-pix_fmt", "yuv420p"], encode_progress, render_progress)?;
     let muxed = mux_audio(project, &silent, path)?;
     let _ = std::fs::remove_file(&silent);
     if muxed {
@@ -1618,9 +1656,27 @@ pub fn export_mp4_scaled_with_encode_progress(
     scale: f32,
     progress: EncodeProgressCallback<'_>,
 ) -> std::io::Result<Mp4ExportOutcome> {
+    export_mp4_scaled_with_progress(project, path, scale, progress, None)
+}
+
+/// [`export_mp4_scaled`] with both phase progress hooks
+/// (Wave W, W2): the render hook
+/// ([`RenderProgressCallback`]) observes the scaled
+/// funnel's temporary-frame render loop, the encode hook
+/// ([`EncodeProgressCallback`]) observes the silent-video
+/// encode; the audio mux that may follow reports nothing.
+/// At exactly 1.0 the call routes through
+/// [`export_mp4_with_progress`], both hooks included.
+pub fn export_mp4_scaled_with_progress(
+    project: &Project,
+    path: &Path,
+    scale: f32,
+    encode_progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<Mp4ExportOutcome> {
     let scale = check_export_scale(scale)?;
     if scale == 1.0 {
-        return export_mp4_with_encode_progress(project, path, progress);
+        return export_mp4_with_progress(project, path, encode_progress, render_progress);
     }
     let has_audio = project
         .audio
@@ -1633,7 +1689,8 @@ pub fn export_mp4_scaled_with_encode_progress(
             path,
             &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
             scale,
-            progress,
+            encode_progress,
+            render_progress,
         )?;
         return Ok(Mp4ExportOutcome {
             frames,
@@ -1646,7 +1703,8 @@ pub fn export_mp4_scaled_with_encode_progress(
         &silent,
         &["-c:v", "libx264", "-pix_fmt", "yuv420p"],
         scale,
-        progress,
+        encode_progress,
+        render_progress,
     )?;
     let muxed = mux_audio(project, &silent, path)?;
     let _ = std::fs::remove_file(&silent);
@@ -1709,6 +1767,27 @@ pub fn export_mp4_range_with_encode_progress(
     path: &Path,
     progress: EncodeProgressCallback<'_>,
 ) -> std::io::Result<Mp4ExportOutcome> {
+    export_mp4_range_with_progress(project, from, to, path, progress, None)
+}
+
+/// [`export_mp4_range`] with both phase progress hooks
+/// (Wave W, W2): the render hook
+/// ([`RenderProgressCallback`]) observes the funnel's
+/// temporary-frame render loop, the encode hook
+/// ([`EncodeProgressCallback`]) observes the silent-video
+/// encode; the range audio mux that may follow reports
+/// nothing. Neither hook is invoked at all when the
+/// range's audio plan refuses the export before the
+/// encode (the unprobeable-clip error above) — a refusal
+/// happens before any frame is rendered.
+pub fn export_mp4_range_with_progress(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    encode_progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<Mp4ExportOutcome> {
     let (from, to) = clamp_frame_range(project, from, to)?;
     let times = sample_times_range(project, from, to);
     let frames = times.len();
@@ -1732,7 +1811,8 @@ pub fn export_mp4_range_with_encode_progress(
             &times,
             path,
             &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
-            progress,
+            encode_progress,
+            render_progress,
         )?;
         return Ok(Mp4ExportOutcome {
             frames,
@@ -1745,7 +1825,8 @@ pub fn export_mp4_range_with_encode_progress(
         &times,
         &silent,
         &["-c:v", "libx264", "-pix_fmt", "yuv420p"],
-        progress,
+        encode_progress,
+        render_progress,
     )?;
     let muxed = mux_audio_range(&plan, &silent, path)?;
     let _ = std::fs::remove_file(&silent);
@@ -1793,9 +1874,37 @@ pub fn export_mp4_range_scaled_with_encode_progress(
     scale: f32,
     progress: EncodeProgressCallback<'_>,
 ) -> std::io::Result<Mp4ExportOutcome> {
+    export_mp4_range_scaled_with_progress(project, from, to, path, scale, progress, None)
+}
+
+/// [`export_mp4_range_scaled`] with both phase progress
+/// hooks (Wave W, W2): the render hook
+/// ([`RenderProgressCallback`]) observes the scaled
+/// funnel's temporary-frame render loop, the encode hook
+/// ([`EncodeProgressCallback`]) observes the silent-video
+/// encode; the range audio mux that may follow reports
+/// nothing. At exactly 1.0 the call routes through
+/// [`export_mp4_range_with_progress`], both hooks
+/// included.
+pub fn export_mp4_range_scaled_with_progress(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    scale: f32,
+    encode_progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<Mp4ExportOutcome> {
     let scale = check_export_scale(scale)?;
     if scale == 1.0 {
-        return export_mp4_range_with_encode_progress(project, from, to, path, progress);
+        return export_mp4_range_with_progress(
+            project,
+            from,
+            to,
+            path,
+            encode_progress,
+            render_progress,
+        );
     }
     let (from, to) = clamp_frame_range(project, from, to)?;
     let times = sample_times_range(project, from, to);
@@ -1821,7 +1930,8 @@ pub fn export_mp4_range_scaled_with_encode_progress(
             path,
             &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
             scale,
-            progress,
+            encode_progress,
+            render_progress,
         )?;
         return Ok(Mp4ExportOutcome {
             frames,
@@ -1835,7 +1945,8 @@ pub fn export_mp4_range_scaled_with_encode_progress(
         &silent,
         &["-c:v", "libx264", "-pix_fmt", "yuv420p"],
         scale,
-        progress,
+        encode_progress,
+        render_progress,
     )?;
     let muxed = mux_audio_range(&plan, &silent, path)?;
     let _ = std::fs::remove_file(&silent);
@@ -1861,7 +1972,7 @@ fn report_encode_progress(progress: EncodeProgressCallback<'_>, event: EncodePro
 }
 
 /// Deliver one render-progress event to the hook, if any —
-/// the sequence exports' counterpart of
+/// the render phase's counterpart of
 /// [`report_encode_progress`], with the same containment:
 /// a panicking observer drops that one event and can never
 /// fail the export.
@@ -2018,33 +2129,59 @@ fn ffmpeg_encode(
     path: &Path,
     video_args: &[&str],
     progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
 ) -> std::io::Result<usize> {
     let times = sample_times(project);
-    ffmpeg_encode_times(project, &times, path, video_args, progress)
+    ffmpeg_encode_times(project, &times, path, video_args, progress, render_progress)
 }
 
 /// Encode the given frame times with ffmpeg using the given
 /// video args: render each time to a PNG in a temp dir, then run
 /// ffmpeg over the sequence at the project fps. Returns the
 /// number of frames encoded. Errors if ffmpeg is missing or
-/// exits non-zero.
+/// exits non-zero. The render loop reports through
+/// `render_progress` (see [`RenderProgressEvent`]): one
+/// event per temporary frame written, the terminal when the
+/// loop hands over to the encode — which reports separately
+/// through `progress`.
 fn ffmpeg_encode_times(
     project: &Project,
     times: &[f32],
     path: &Path,
     video_args: &[&str],
     progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
 ) -> std::io::Result<usize> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = unique_temp("enc");
     std::fs::create_dir_all(&tmp)?;
+    let total = times.len();
     for (k, t) in times.iter().enumerate() {
         render_frame_at(project, *t)
             .save(tmp.join(format!("frame-{:04}.png", k + 1)))
             .map_err(std::io::Error::other)?;
+        let done = k + 1;
+        if done < total {
+            report_render_progress(
+                render_progress,
+                RenderProgressEvent {
+                    rendered_frames: done,
+                    total_frames: total,
+                    finished: false,
+                },
+            );
+        }
     }
+    report_render_progress(
+        render_progress,
+        RenderProgressEvent {
+            rendered_frames: total,
+            total_frames: total,
+            finished: true,
+        },
+    );
     let mut args: Vec<String> = vec![
         "-y".into(),
         "-framerate".into(),
@@ -2070,12 +2207,21 @@ fn ffmpeg_encode_scaled(
     video_args: &[&str],
     scale: f32,
     progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
 ) -> std::io::Result<usize> {
     if scale == 1.0 {
-        return ffmpeg_encode(project, path, video_args, progress);
+        return ffmpeg_encode(project, path, video_args, progress, render_progress);
     }
     let times = sample_times(project);
-    ffmpeg_encode_times_scaled(project, &times, path, video_args, scale, progress)
+    ffmpeg_encode_times_scaled(
+        project,
+        &times,
+        path,
+        video_args,
+        scale,
+        progress,
+        render_progress,
+    )
 }
 
 /// Encode the given frame times with ffmpeg at `scale` times
@@ -2091,20 +2237,41 @@ fn ffmpeg_encode_times_scaled(
     video_args: &[&str],
     scale: f32,
     progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
 ) -> std::io::Result<usize> {
     if scale == 1.0 {
-        return ffmpeg_encode_times(project, times, path, video_args, progress);
+        return ffmpeg_encode_times(project, times, path, video_args, progress, render_progress);
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = unique_temp("enc");
     std::fs::create_dir_all(&tmp)?;
+    let total = times.len();
     for (k, t) in times.iter().enumerate() {
         render_frame_at_scaled(project, *t, scale)?
             .save(tmp.join(format!("frame-{:04}.png", k + 1)))
             .map_err(std::io::Error::other)?;
+        let done = k + 1;
+        if done < total {
+            report_render_progress(
+                render_progress,
+                RenderProgressEvent {
+                    rendered_frames: done,
+                    total_frames: total,
+                    finished: false,
+                },
+            );
+        }
     }
+    report_render_progress(
+        render_progress,
+        RenderProgressEvent {
+            rendered_frames: total,
+            total_frames: total,
+            finished: true,
+        },
+    );
     let mut args: Vec<String> = vec![
         "-y".into(),
         "-framerate".into(),
@@ -2133,11 +2300,27 @@ pub fn export_webm_with_encode_progress(
     path: &Path,
     progress: EncodeProgressCallback<'_>,
 ) -> std::io::Result<usize> {
+    export_webm_with_progress(project, path, progress, None)
+}
+
+/// [`export_webm`] with both phase progress hooks (Wave W,
+/// W2): the render hook ([`RenderProgressCallback`])
+/// observes the funnel's temporary-frame render loop, the
+/// encode hook ([`EncodeProgressCallback`]) observes the
+/// encode. Each hook reports its own phase through its
+/// own event type — the two are never merged.
+pub fn export_webm_with_progress(
+    project: &Project,
+    path: &Path,
+    encode_progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
     ffmpeg_encode(
         project,
         path,
         &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"],
-        progress,
+        encode_progress,
+        render_progress,
     )
 }
 
@@ -2147,8 +2330,18 @@ pub fn export_webm_with_encode_progress(
 /// exactly as in a full export). An empty or inverted range is
 /// an error; errors if ffmpeg is missing.
 ///
-/// VIDEO ONLY, like [`export_webm`] itself: no audio is muxed —
-/// the WebM export path has no audio support at any range.
+/// AUDIO: unlike the full WebM entry, the range entry muxes the
+/// segments of the project's audio that intersect the range,
+/// trimmed and offset to the range — the same
+/// [`range_mux_plan`] / [`range_plan_outcome`] decision and the
+/// same trimming/mixing rules as [`export_mp4_range`], with the
+/// audio encoded as Opus (the WebM counterpart of the MP4 path's
+/// AAC). Muted clips never sound. A clip no probe can measure
+/// fails the export before anything is written when it may
+/// intersect the range, rather than being dropped silently; a
+/// clip whose file is missing contributes no segment. When no
+/// audible clip intersects the range the export is the plain
+/// video-only encode it always was.
 pub fn export_webm_range(
     project: &Project,
     from: usize,
@@ -2159,8 +2352,11 @@ pub fn export_webm_range(
 }
 
 /// [`export_webm_range`] with an encode-phase progress hook
-/// ([`EncodeProgressCallback`]). With `None` this is
-/// `export_webm_range` itself.
+/// ([`EncodeProgressCallback`]): the callback observes the
+/// silent-video encode; the range audio mux that may follow
+/// it reports nothing. The hook is not invoked at all when
+/// the range's audio plan refuses the export before the
+/// encode (the unprobeable-clip error above).
 pub fn export_webm_range_with_encode_progress(
     project: &Project,
     from: usize,
@@ -2168,16 +2364,72 @@ pub fn export_webm_range_with_encode_progress(
     path: &Path,
     progress: EncodeProgressCallback<'_>,
 ) -> std::io::Result<()> {
+    export_webm_range_with_progress(project, from, to, path, progress, None)
+}
+
+/// [`export_webm_range`] with both phase progress hooks
+/// (Wave W, W2): the render hook
+/// ([`RenderProgressCallback`]) observes the funnel's
+/// temporary-frame render loop, the encode hook
+/// ([`EncodeProgressCallback`]) observes the silent-video
+/// encode; the range audio mux that may follow reports
+/// nothing. Neither hook is invoked at all when the
+/// range's audio plan refuses the export before the
+/// encode (the unprobeable-clip error above) — a refusal
+/// happens before any frame is rendered.
+pub fn export_webm_range_with_progress(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    encode_progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<()> {
     let (from, to) = clamp_frame_range(project, from, to)?;
     let times = sample_times_range(project, from, to);
-    ffmpeg_encode_times(
+    let (win_start, win_len) = range_window(project, from, times.len());
+    let outcome = range_plan_outcome(project, win_start, win_len, &probe_duration_secs);
+    if !outcome.unprobeable.is_empty() {
+        return Err(std::io::Error::other(format!(
+            "audio could not be included in the range export: the length of {} \
+             clip(s) could not be probed (not readable as WAV, and ffprobe \
+             failed or is not installed), so whether they intersect the range \
+             is unknown: {}",
+            outcome.unprobeable.len(),
+            outcome.unprobeable.join(", ")
+        )));
+    }
+    let plan = outcome.plan;
+    if matches!(plan, RangeMuxPlan::None) {
+        ffmpeg_encode_times(
+            project,
+            &times,
+            path,
+            &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"],
+            encode_progress,
+            render_progress,
+        )?;
+        return Ok(());
+    }
+    let silent = unique_temp("silent").with_extension("webm");
+    let encode_result = ffmpeg_encode_times(
         project,
         &times,
-        path,
+        &silent,
         &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"],
-        progress,
-    )?;
-    Ok(())
+        encode_progress,
+        render_progress,
+    );
+    let muxed = match encode_result {
+        Ok(_) => mux_audio_range_webm(&plan, &silent, path),
+        Err(e) => Err(e),
+    };
+    let _ = std::fs::remove_file(&silent);
+    if muxed? {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("audio mux failed"))
+    }
 }
 
 /// Export a WebM (VP9) at `scale` times the stage size
@@ -2205,23 +2457,42 @@ pub fn export_webm_scaled_with_encode_progress(
     scale: f32,
     progress: EncodeProgressCallback<'_>,
 ) -> std::io::Result<usize> {
+    export_webm_scaled_with_progress(project, path, scale, progress, None)
+}
+
+/// [`export_webm_scaled`] with both phase progress hooks
+/// (Wave W, W2): the render hook
+/// ([`RenderProgressCallback`]) observes the scaled
+/// funnel's temporary-frame render loop, the encode hook
+/// ([`EncodeProgressCallback`]) observes the encode. At
+/// exactly 1.0 the call routes through
+/// [`export_webm_with_progress`], both hooks included.
+pub fn export_webm_scaled_with_progress(
+    project: &Project,
+    path: &Path,
+    scale: f32,
+    encode_progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
     let scale = check_export_scale(scale)?;
     if scale == 1.0 {
-        return export_webm_with_encode_progress(project, path, progress);
+        return export_webm_with_progress(project, path, encode_progress, render_progress);
     }
     ffmpeg_encode_scaled(
         project,
         path,
         &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"],
         scale,
-        progress,
+        encode_progress,
+        render_progress,
     )
 }
 
 /// Export the authored frames `from..=to` (inclusive, clamped
 /// to the timeline) as a WebM at `scale` times the stage size
 /// (Wave S, S5) — the export-scale counterpart of
-/// [`export_webm_range`], with the same range rules. At
+/// [`export_webm_range`], with the same range rules and the
+/// same range audio plan (audio does not scale). At
 /// exactly 1.0 the call routes through `export_webm_range`
 /// itself. An invalid scale is refused before the range is
 /// even clamped, so a refused call writes nothing.
@@ -2236,7 +2507,9 @@ pub fn export_webm_range_scaled(
 }
 
 /// [`export_webm_range_scaled`] with an encode-phase progress
-/// hook ([`EncodeProgressCallback`]). At exactly 1.0 the call
+/// hook ([`EncodeProgressCallback`]): the callback observes
+/// the silent-video encode; the range audio mux that may
+/// follow it reports nothing. At exactly 1.0 the call
 /// routes through [`export_webm_range_with_encode_progress`],
 /// hook included. An invalid scale is refused before the
 /// range is even clamped, so a refused call fires no event
@@ -2249,21 +2522,87 @@ pub fn export_webm_range_scaled_with_encode_progress(
     scale: f32,
     progress: EncodeProgressCallback<'_>,
 ) -> std::io::Result<()> {
+    export_webm_range_scaled_with_progress(project, from, to, path, scale, progress, None)
+}
+
+/// [`export_webm_range_scaled`] with both phase progress
+/// hooks (Wave W, W2): the render hook
+/// ([`RenderProgressCallback`]) observes the scaled
+/// funnel's temporary-frame render loop, the encode hook
+/// ([`EncodeProgressCallback`]) observes the silent-video
+/// encode; the range audio mux that may follow reports
+/// nothing. At exactly 1.0 the call routes through
+/// [`export_webm_range_with_progress`], both hooks
+/// included. An invalid scale is refused before the
+/// range is even clamped, so a refused call fires no
+/// event on either hook and writes nothing.
+pub fn export_webm_range_scaled_with_progress(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    scale: f32,
+    encode_progress: EncodeProgressCallback<'_>,
+    render_progress: RenderProgressCallback<'_>,
+) -> std::io::Result<()> {
     let scale = check_export_scale(scale)?;
     if scale == 1.0 {
-        return export_webm_range_with_encode_progress(project, from, to, path, progress);
+        return export_webm_range_with_progress(
+            project,
+            from,
+            to,
+            path,
+            encode_progress,
+            render_progress,
+        );
     }
     let (from, to) = clamp_frame_range(project, from, to)?;
     let times = sample_times_range(project, from, to);
-    ffmpeg_encode_times_scaled(
+    let (win_start, win_len) = range_window(project, from, times.len());
+    let outcome = range_plan_outcome(project, win_start, win_len, &probe_duration_secs);
+    if !outcome.unprobeable.is_empty() {
+        return Err(std::io::Error::other(format!(
+            "audio could not be included in the range export: the length of {} \
+             clip(s) could not be probed (not readable as WAV, and ffprobe \
+             failed or is not installed), so whether they intersect the range \
+             is unknown: {}",
+            outcome.unprobeable.len(),
+            outcome.unprobeable.join(", ")
+        )));
+    }
+    let plan = outcome.plan;
+    if matches!(plan, RangeMuxPlan::None) {
+        ffmpeg_encode_times_scaled(
+            project,
+            &times,
+            path,
+            &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"],
+            scale,
+            encode_progress,
+            render_progress,
+        )?;
+        return Ok(());
+    }
+    let silent = unique_temp("silent").with_extension("webm");
+    let encode_result = ffmpeg_encode_times_scaled(
         project,
         &times,
-        path,
+        &silent,
         &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"],
         scale,
-        progress,
-    )?;
-    Ok(())
+        encode_progress,
+        render_progress,
+    );
+    let muxed = match encode_result {
+        Ok(_) => mux_audio_range_webm(&plan, &silent, path),
+        Err(e) => Err(e),
+    };
+    let _ = std::fs::remove_file(&silent);
+    if muxed? {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("audio mux failed"))
+    }
 }
 
 /// What an export should do with the project's audio, decided
@@ -2320,14 +2659,33 @@ fn mux_plan(project: &Project) -> MuxPlan {
     }
 }
 
+/// The audio codec each video container carries: MP4 takes
+/// AAC; WebM cannot carry AAC, so its range mux encodes the
+/// same plan as Opus. The video stream is copied either way.
+const MP4_AUDIO_CODEC: &str = "aac";
+const WEBM_AUDIO_CODEC: &str = "libopus";
+
 /// Write `mixed` to a temporary WAV and mux it onto the silent
-/// `video`. The mix starts at t=0 because each clip's start
-/// offset is already baked into it, so the ffmpeg call has no
-/// `-itsoffset`. The temp file is removed either way.
+/// MP4 `video` as AAC (see
+/// [`mux_mixed_wav_with_audio_codec`]).
 fn mux_mixed_wav(
     video: &Path,
     mixed: &crate::audio_edit::WavData,
     out: &Path,
+) -> std::io::Result<bool> {
+    mux_mixed_wav_with_audio_codec(video, mixed, out, MP4_AUDIO_CODEC)
+}
+
+/// Write `mixed` to a temporary WAV and mux it onto the silent
+/// `video`, encoding the audio with `audio_codec`. The mix
+/// starts at t=0 because each clip's start offset is already
+/// baked into it, so the ffmpeg call has no `-itsoffset`. The
+/// temp file is removed either way.
+fn mux_mixed_wav_with_audio_codec(
+    video: &Path,
+    mixed: &crate::audio_edit::WavData,
+    out: &Path,
+    audio_codec: &str,
 ) -> std::io::Result<bool> {
     let tmp = unique_temp("mixdown").with_extension("wav");
     std::fs::write(&tmp, crate::audio_edit::write_wav(mixed))?;
@@ -2345,7 +2703,7 @@ fn mux_mixed_wav(
             "-c:v",
             "copy",
             "-c:a",
-            "aac",
+            audio_codec,
             "-shortest",
             out.to_str().unwrap_or(""),
         ])
@@ -2749,17 +3107,37 @@ fn range_mux_plan(project: &Project, win_start_secs: f32, win_len_secs: f32) -> 
 }
 
 /// The ffmpeg argument list muxing one window segment onto
+/// the silent range MP4 `video` as AAC (see
+/// [`range_direct_args_with_audio_codec`]).
+fn range_direct_args(video: &Path, seg: &RangeSegment, out: &Path) -> Vec<String> {
+    range_direct_args_with_audio_codec(video, seg, out, MP4_AUDIO_CODEC)
+}
+
+/// The ffmpeg argument list muxing one window segment onto
+/// the silent range WebM `video` as Opus — the same argument
+/// shape as [`range_direct_args`], only the audio codec
+/// differs, because WebM cannot carry AAC.
+fn range_direct_args_webm(video: &Path, seg: &RangeSegment, out: &Path) -> Vec<String> {
+    range_direct_args_with_audio_codec(video, seg, out, WEBM_AUDIO_CODEC)
+}
+
+/// The ffmpeg argument list muxing one window segment onto
 /// the silent range `video`, in the shape of the
 /// full-timeline direct path in [`mux_audio`]: the video is
-/// stream-copied, the audio re-encoded to AAC, `-shortest`
-/// guards the tail. The segment's trim is expressed with
-/// input options on the audio input — an input `-t` bounds
-/// how much of the file is read, and the offset is either an
-/// input `-ss` seek (the clip began before the window) or an
-/// `-itsoffset` shift (the clip begins inside it);
-/// [`clip_window`] guarantees at most one of the two is
-/// non-zero, so they are never combined.
-fn range_direct_args(video: &Path, seg: &RangeSegment, out: &Path) -> Vec<String> {
+/// stream-copied, the audio re-encoded with `audio_codec`,
+/// `-shortest` guards the tail. The segment's trim is
+/// expressed with input options on the audio input — an
+/// input `-t` bounds how much of the file is read, and the
+/// offset is either an input `-ss` seek (the clip began
+/// before the window) or an `-itsoffset` shift (the clip
+/// begins inside it); [`clip_window`] guarantees at most
+/// one of the two is non-zero, so they are never combined.
+fn range_direct_args_with_audio_codec(
+    video: &Path,
+    seg: &RangeSegment,
+    out: &Path,
+    audio_codec: &str,
+) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-y".into(),
         "-i".into(),
@@ -2777,23 +3155,38 @@ fn range_direct_args(video: &Path, seg: &RangeSegment, out: &Path) -> Vec<String
     args.push("-i".into());
     args.push(seg.path.clone());
     args.extend(
-        ["-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-shortest"]
+        ["-map", "0:v", "-map", "1:a", "-c:v", "copy"]
             .iter()
             .map(|a| a.to_string()),
     );
+    args.push("-c:a".into());
+    args.push(audio_codec.into());
+    args.push("-shortest".into());
     args.push(out.to_str().unwrap_or("").into());
     args
 }
 
-/// Run the direct range mux of one segment (see
+/// Run the direct range mux of one segment onto an MP4 (see
 /// [`range_direct_args`]). The segment's gain is NOT applied
 /// here — ffmpeg's direct path cannot scale a file's volume,
 /// which is why [`mux_audio_range`] routes gained clips
 /// through the mix and uses this only as the unity-gain path
 /// and the mix-failure fallback.
 fn run_range_direct(video: &Path, seg: &RangeSegment, out: &Path) -> std::io::Result<bool> {
+    run_range_direct_with_audio_codec(video, seg, out, MP4_AUDIO_CODEC)
+}
+
+/// Run the direct range mux of one segment, encoding the
+/// audio with `audio_codec` (see
+/// [`range_direct_args_with_audio_codec`]).
+fn run_range_direct_with_audio_codec(
+    video: &Path,
+    seg: &RangeSegment,
+    out: &Path,
+    audio_codec: &str,
+) -> std::io::Result<bool> {
     let status = std::process::Command::new("ffmpeg")
-        .args(range_direct_args(video, seg, out))
+        .args(range_direct_args_with_audio_codec(video, seg, out, audio_codec))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()?;
@@ -2918,22 +3311,43 @@ fn mix_range_segments(segments: &[RangeSegment]) -> Result<crate::audio_edit::Wa
 }
 
 /// Mux a range plan's audio into an already-encoded silent
-/// range MP4, following the full-timeline [`mux_audio`]
-/// split: exactly one segment at unity gain goes to ffmpeg
-/// directly ([`run_range_direct`] — ffmpeg reads the
-/// segment's file itself, so a non-WAV source needs no
+/// range MP4 as AAC (see
+/// [`mux_audio_range_with_audio_codec`]).
+fn mux_audio_range(plan: &RangeMuxPlan, video: &Path, out: &Path) -> std::io::Result<bool> {
+    mux_audio_range_with_audio_codec(plan, video, out, MP4_AUDIO_CODEC)
+}
+
+/// Mux a range plan's audio into an already-encoded silent
+/// range WebM as Opus — the same plan, trimming, mixing and
+/// fallback rules as the MP4 range mux; only the audio
+/// codec differs, because WebM cannot carry AAC.
+fn mux_audio_range_webm(plan: &RangeMuxPlan, video: &Path, out: &Path) -> std::io::Result<bool> {
+    mux_audio_range_with_audio_codec(plan, video, out, WEBM_AUDIO_CODEC)
+}
+
+/// Mux a range plan's audio into an already-encoded silent
+/// range video, encoding the audio with `audio_codec` and
+/// following the full-timeline [`mux_audio`] split: exactly
+/// one segment at unity gain goes to ffmpeg directly
+/// ([`run_range_direct_with_audio_codec`] — ffmpeg reads
+/// the segment's file itself, so a non-WAV source needs no
 /// preparation there); two or more segments — or a single
 /// segment whose gain is not 1.0, which the direct path
 /// cannot scale — are trimmed and mixed into one WAV first
-/// and muxed with [`mux_mixed_wav`] (the mixed WAV starts
-/// at the window's zero, each segment's placement baked
-/// in; a non-WAV segment is decoded to WAV for the mix,
-/// see [`mix_range_segments`]). If the mix cannot be
-/// rendered the earliest segment is muxed directly
-/// instead, gain unapplied, mirroring the full path's
-/// mix-failure fallback. A `None` plan muxes nothing and
-/// returns `Ok(false)`.
-fn mux_audio_range(plan: &RangeMuxPlan, video: &Path, out: &Path) -> std::io::Result<bool> {
+/// and muxed with [`mux_mixed_wav_with_audio_codec`] (the
+/// mixed WAV starts at the window's zero, each segment's
+/// placement baked in; a non-WAV segment is decoded to WAV
+/// for the mix, see [`mix_range_segments`]). If the mix
+/// cannot be rendered the earliest segment is muxed
+/// directly instead, gain unapplied, mirroring the full
+/// path's mix-failure fallback. A `None` plan muxes nothing
+/// and returns `Ok(false)`.
+fn mux_audio_range_with_audio_codec(
+    plan: &RangeMuxPlan,
+    video: &Path,
+    out: &Path,
+    audio_codec: &str,
+) -> std::io::Result<bool> {
     let segments: &[RangeSegment] = match plan {
         RangeMuxPlan::None => return Ok(false),
         RangeMuxPlan::Single(seg) => std::slice::from_ref(seg),
@@ -2941,12 +3355,12 @@ fn mux_audio_range(plan: &RangeMuxPlan, video: &Path, out: &Path) -> std::io::Re
     };
     if let RangeMuxPlan::Single(seg) = plan {
         if seg.gain == 1.0 {
-            return run_range_direct(video, seg, out);
+            return run_range_direct_with_audio_codec(video, seg, out, audio_codec);
         }
     }
     match mix_range_segments(segments) {
-        Ok(mixed) => mux_mixed_wav(video, &mixed, out),
-        Err(_) => run_range_direct(video, &segments[0], out),
+        Ok(mixed) => mux_mixed_wav_with_audio_codec(video, &mixed, out, audio_codec),
+        Err(_) => run_range_direct_with_audio_codec(video, &segments[0], out, audio_codec),
     }
 }
 
@@ -3118,9 +3532,10 @@ mod mux_tests {
 #[cfg(test)]
 mod range_mux_tests {
     use super::{
-        clip_window, decode_window_args, export_mp4_range, parse_ffprobe_duration,
-        probe_duration_secs, range_direct_args, range_mux_plan, range_plan_outcome, range_window,
-        trim_wav, ClipWindow, RangeMuxPlan, RangeSegment,
+        clip_window, decode_window_args, export_mp4_range, export_webm_range,
+        export_webm_range_scaled, parse_ffprobe_duration, probe_duration_secs, range_direct_args,
+        range_direct_args_webm, range_mux_plan, range_plan_outcome, range_window, trim_wav,
+        ClipWindow, RangeMuxPlan, RangeSegment,
     };
     use crate::model::{AudioClip, Project};
     use std::path::Path;
@@ -3678,6 +4093,122 @@ mod range_mux_tests {
         let _ = std::fs::remove_file(&real);
     }
 
+    // ---- export_webm_range: range audio (Wave W, W6) ----
+
+    #[test]
+    fn webm_range_export_muxes_an_intersecting_clip_as_opus() {
+        // The WebM counterpart of the MP4 range pins above:
+        // a WAV clip intersecting the exported window is cut
+        // to the range and muxed in. WebM cannot carry the
+        // MP4 path's AAC, so the file must carry an Opus
+        // track (its `A_OPUS` CodecID in the EBML header).
+        let real = temp_tone_wav("webm-present", 1.5, 8000);
+        let mut project = project_with(vec![(real.as_str(), 0, 1.0)]);
+        project.stage = [96.0, 72.0];
+        let out = std::env::temp_dir().join(format!(
+            "styk-range-webm-present-out-{}.webm",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&out);
+        export_webm_range(&project, 0, 2, &out).unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        assert_eq!(&bytes[..4], &[0x1A, 0x45, 0xDF, 0xA3], "an EBML/WebM file");
+        assert!(webm_has_opus(&bytes), "the range audio is muxed as Opus");
+        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(&real);
+    }
+
+    #[test]
+    fn webm_range_export_mixes_a_gained_clip_like_the_mp4_path() {
+        // A lone clip at non-unity gain cannot take the
+        // direct path on either format: it is trimmed and
+        // mixed first (gain applied), then muxed — here as
+        // Opus through the shared mixed-WAV mux.
+        let real = temp_tone_wav("webm-gained", 1.5, 8000);
+        let mut project = project_with(vec![(real.as_str(), 0, 0.5)]);
+        project.stage = [96.0, 72.0];
+        let out = std::env::temp_dir().join(format!(
+            "styk-range-webm-gained-out-{}.webm",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&out);
+        export_webm_range(&project, 0, 2, &out).unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        assert!(webm_has_opus(&bytes), "the gained mix is muxed as Opus");
+        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(&real);
+    }
+
+    #[test]
+    fn webm_range_export_is_video_only_when_no_clip_intersects() {
+        // Silence where the range has no audio: the only
+        // clip starts at frame 40 (4 s in at 10 fps), far
+        // past the exported window, so the plan is empty and
+        // the export is the plain video-only encode — a
+        // valid WebM with no audio track at all.
+        let real = temp_tone_wav("webm-outside", 1.0, 8000);
+        let mut project = project_with(vec![(real.as_str(), 40, 1.0)]);
+        project.stage = [96.0, 72.0];
+        let out = std::env::temp_dir().join(format!(
+            "styk-range-webm-silent-out-{}.webm",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&out);
+        export_webm_range(&project, 0, 2, &out).unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        assert_eq!(&bytes[..4], &[0x1A, 0x45, 0xDF, 0xA3], "an EBML/WebM file");
+        assert!(!webm_has_opus(&bytes), "no audio track outside the range");
+        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(&real);
+    }
+
+    #[test]
+    fn webm_range_export_errors_rather_than_dropping_unprobeable_audio() {
+        // The MP4 range refusal, mirrored: a clip that
+        // exists but no probe can measure fails the export
+        // before anything is written, rather than shipping
+        // a silently audio-less file.
+        let junk_path = std::env::temp_dir().join(format!(
+            "styk-range-webm-junk-{}.mp3",
+            std::process::id()
+        ));
+        std::fs::write(&junk_path, b"this is not audio").unwrap();
+        let junk = junk_path.to_string_lossy().into_owned();
+        let mut project = project_with(vec![(junk.as_str(), 0, 1.0)]);
+        project.stage = [96.0, 72.0];
+        let out = std::env::temp_dir().join(format!(
+            "styk-range-webm-junk-out-{}.webm",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&out);
+        let err = export_webm_range(&project, 0, 2, &out).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("could not be probed"), "{msg}");
+        assert!(msg.contains("junk"), "{msg}");
+        assert!(!out.exists(), "no silent file is written");
+        let _ = std::fs::remove_file(&junk_path);
+    }
+
+    #[test]
+    fn webm_range_scaled_export_carries_the_range_audio_too() {
+        // The scaled range entry plans its audio exactly
+        // like the unscaled one (audio does not scale): the
+        // scaled silent encode is muxed the same way.
+        let real = temp_tone_wav("webm-scaled", 1.5, 8000);
+        let mut project = project_with(vec![(real.as_str(), 0, 1.0)]);
+        project.stage = [96.0, 72.0];
+        let out = std::env::temp_dir().join(format!(
+            "styk-range-webm-scaled-out-{}.webm",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&out);
+        export_webm_range_scaled(&project, 0, 2, &out, 2.0).unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        assert!(webm_has_opus(&bytes), "the scaled range audio is muxed");
+        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(&real);
+    }
+
     // ---- range_direct_args: the ffmpeg invocation ----
 
     fn segment(file_offset_secs: f32, placement_secs: f32, len_secs: f32) -> RangeSegment {
@@ -3725,6 +4256,26 @@ mod range_mux_tests {
         assert!(!joined.contains("-ss"), "{joined}");
         assert!(!joined.contains("-itsoffset"), "{joined}");
         assert!(joined.contains("-t 2.000"), "{joined}");
+    }
+
+    #[test]
+    fn webm_direct_args_encode_opus_with_the_same_trim_shape() {
+        // Wave W (W6): the WebM direct mux is the MP4 one
+        // with exactly one substitution — Opus for AAC,
+        // because WebM cannot carry AAC. The seek/offset
+        // trim shape is shared, pinned here on a clip cut
+        // by the window start.
+        let args = range_direct_args_webm(
+            Path::new("silent.webm"),
+            &segment(1.0, 0.0, 0.5),
+            Path::new("out.webm"),
+        );
+        let joined = args.join(" ");
+        assert!(joined.contains("-c:a libopus"), "{joined}");
+        assert!(!joined.contains("aac"), "{joined}");
+        assert!(joined.contains("-ss 1.000"), "{joined}");
+        assert!(joined.contains("-t 0.500"), "{joined}");
+        assert!(joined.contains("-c:v copy"), "{joined}");
     }
 
     // ---- trim_wav: the mix path's head/tail cut ----
@@ -6383,13 +6934,17 @@ mod range_export_tests {
         export_jpeg_sequence, export_jpeg_sequence_range,
         export_jpeg_sequence_range_scaled_with_render_progress,
         export_jpeg_sequence_scaled_with_render_progress, export_mp4, export_mp4_range,
-        export_mp4_range_scaled, export_mp4_range_with_encode_progress, export_mp4_scaled,
-        export_mp4_with_encode_progress, export_png_sequence, export_png_sequence_range,
+        export_mp4_range_scaled, export_mp4_range_scaled_with_progress,
+        export_mp4_range_with_encode_progress, export_mp4_range_with_progress,
+        export_mp4_scaled, export_mp4_scaled_with_progress, export_mp4_with_encode_progress,
+        export_mp4_with_progress, export_png_sequence, export_png_sequence_range,
         export_png_sequence_range_scaled_with_render_progress,
         export_png_sequence_range_with_render_progress,
         export_png_sequence_scaled_with_render_progress, export_png_sequence_with_render_progress,
         export_sheet_range, export_spritesheet, export_svg_range, export_webm_range,
-        export_webm_range_scaled, export_webm_scaled, export_webm_scaled_with_encode_progress,
+        export_webm_range_scaled, export_webm_range_scaled_with_progress,
+        export_webm_range_with_progress, export_webm_scaled, export_webm_scaled_with_progress,
+        export_webm_scaled_with_encode_progress, export_webm_with_progress,
         parse_ffmpeg_progress_frame, render_frame, EncodeProgressEvent, Mp4ExportOutcome,
         RenderProgressEvent,
     };
@@ -6839,6 +7394,23 @@ mod range_export_tests {
         (events, callback)
     }
 
+    /// An encode-progress sink in the same idiom as
+    /// [`render_event_sink`]: the shared event vector plus
+    /// the callback that fills it (Wave W, W2 — the
+    /// dual-hook pins record both phases at once).
+    fn encode_event_sink()
+    -> (
+        std::sync::Arc<std::sync::Mutex<Vec<EncodeProgressEvent>>>,
+        impl Fn(EncodeProgressEvent),
+    ) {
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let callback = move |event: EncodeProgressEvent| {
+            sink.lock().unwrap().push(event);
+        };
+        (events, callback)
+    }
+
     #[test]
     fn png_sequence_range_render_progress_fires_per_frame_and_terminates_once() {
         // Wave V (V12): frames 1..=3 of the 5-frame fixture —
@@ -7240,6 +7812,183 @@ progress=end
             events.lock().unwrap().iter().all(|e| !e.finished),
             "a failed encode never reports a terminal event"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mp4_range_dual_hooks_report_their_own_phases() {
+        // Wave W (W2): the range entry with both hooks —
+        // frames 1..=3 at 24 fps sample to exactly 3 frames.
+        // The render stream is synchronous, so it is pinned
+        // in full; the encode stream keeps U11's contract
+        // shape (its intermediate count is wall-clock). The
+        // two vectors fill through separate callbacks, so a
+        // count can never land in the wrong phase's stream.
+        let mut project = tiny_project();
+        project.fps = 24.0;
+        let (render_events, render_callback) = render_event_sink();
+        let (encode_events, encode_callback) = encode_event_sink();
+        let path = temp_file("mp4-dual-progress", "mp4");
+        let outcome = export_mp4_range_with_progress(
+            &project,
+            1,
+            3,
+            &path,
+            Some(&encode_callback),
+            Some(&render_callback),
+        )
+        .unwrap();
+        assert_eq!(outcome.frames, 3);
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[4..8], b"ftyp", "not an MP4 container");
+        assert_eq!(*render_events.lock().unwrap(), expected_render_events(3));
+        assert_encode_progress_contract(&encode_events.lock().unwrap(), 3);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mp4_scaled_dual_hooks_survive_the_scale_one_route_through() {
+        // At exactly 1.0 the scaled entry routes through
+        // the unscaled dual-hook entry — both hooks must
+        // reach the funnel, not be dropped at the route.
+        let mut project = tiny_project();
+        project.fps = 24.0;
+        let total = project.frames.len();
+        let (render_events, render_callback) = render_event_sink();
+        let (encode_events, encode_callback) = encode_event_sink();
+        let path = temp_file("mp4-dual-one", "mp4");
+        let outcome = export_mp4_scaled_with_progress(
+            &project,
+            &path,
+            1.0,
+            Some(&encode_callback),
+            Some(&render_callback),
+        )
+        .unwrap();
+        assert_eq!(outcome.frames, total);
+        assert_eq!(
+            *render_events.lock().unwrap(),
+            expected_render_events(total)
+        );
+        assert_encode_progress_contract(&encode_events.lock().unwrap(), total);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn webm_range_scaled_dual_hooks_report_sampled_frames() {
+        // The scaled funnel's render loop reports the
+        // sampled frame count (3 for frames 1..=3), exactly
+        // like the unscaled one — scale changes the
+        // rasters, never the stream.
+        let mut project = tiny_project();
+        project.fps = 24.0;
+        let (render_events, render_callback) = render_event_sink();
+        let (encode_events, encode_callback) = encode_event_sink();
+        let path = temp_file("webm-dual-scaled", "webm");
+        export_webm_range_scaled_with_progress(
+            &project,
+            1,
+            3,
+            &path,
+            2.0,
+            Some(&encode_callback),
+            Some(&render_callback),
+        )
+        .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            &bytes[0..4],
+            &[0x1A, 0x45, 0xDF, 0xA3],
+            "not an EBML/WebM file"
+        );
+        assert_eq!(*render_events.lock().unwrap(), expected_render_events(3));
+        assert_encode_progress_contract(&encode_events.lock().unwrap(), 3);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn failed_encode_still_reports_the_completed_render_phase() {
+        // The render terminal closes the render phase, not
+        // the export: when ffmpeg then refuses the output
+        // (an extension it has no format for), the export
+        // fails in the usual voice, the render stream
+        // stands complete, and no encode event claims
+        // `finished`. The mirror image of U11's
+        // failed-encode pin, on the phase boundary.
+        let mut project = tiny_project();
+        project.fps = 24.0;
+        let total = project.frames.len();
+        let (render_events, render_callback) = render_event_sink();
+        let (encode_events, encode_callback) = encode_event_sink();
+        let path = temp_file("mp4-dual-bad", "xyz");
+        let _ = std::fs::remove_file(&path);
+        let err = export_mp4_with_progress(
+            &project,
+            &path,
+            Some(&encode_callback),
+            Some(&render_callback),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("ffmpeg exited"),
+            "the failure is ffmpeg's exit, in the usual voice: {err}"
+        );
+        assert_eq!(
+            *render_events.lock().unwrap(),
+            expected_render_events(total),
+            "the render phase completed and terminated before the encode ran"
+        );
+        assert!(
+            encode_events.lock().unwrap().iter().all(|e| !e.finished),
+            "a failed encode never reports a terminal event"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn refused_video_range_fires_no_event_on_either_hook() {
+        // An inverted range is refused by the clamp before
+        // any frame is rendered: both hooks stay silent,
+        // exactly as the plain entries behave.
+        let mut project = tiny_project();
+        project.fps = 24.0;
+        let (render_events, render_callback) = render_event_sink();
+        let (encode_events, encode_callback) = encode_event_sink();
+        let path = temp_file("mp4-dual-refused", "mp4");
+        let refused = export_mp4_range_with_progress(
+            &project,
+            3,
+            1,
+            &path,
+            Some(&encode_callback),
+            Some(&render_callback),
+        );
+        assert!(refused.is_err(), "inverted range");
+        assert!(render_events.lock().unwrap().is_empty());
+        assert!(encode_events.lock().unwrap().is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn panicking_render_observer_cannot_fail_the_video_export() {
+        // The containment is the shared `report_render_progress`
+        // one: every event is attempted, every panic is
+        // dropped at the call site, and the export completes
+        // in full.
+        let mut project = tiny_project();
+        project.fps = 24.0;
+        let total = project.frames.len();
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = attempts.clone();
+        let callback = move |_event: RenderProgressEvent| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            panic!("observer exploded");
+        };
+        let path = temp_file("webm-dual-panic", "webm");
+        let frames = export_webm_with_progress(&project, &path, None, Some(&callback))
+            .unwrap();
+        assert_eq!(frames, total);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), total);
         let _ = std::fs::remove_file(&path);
     }
 

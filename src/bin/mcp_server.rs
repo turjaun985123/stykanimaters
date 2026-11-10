@@ -36,6 +36,16 @@
 //!   before exiting (the previous `lines()` semantics), and a
 //!   client that connects and sends nothing gets silence until
 //!   EOF: the server never speaks first.
+//!
+//! Progress (Wave W, W3): this is the one streaming
+//! transport. Before serving, `run` installs a notification
+//! sink on the server that writes through the same locked
+//! writer as the responses, so a `tools/call` carrying
+//! `_meta.progressToken` streams `notifications/progress`
+//! lines while its export runs — each line whole, in order,
+//! ahead of the call's response. The live bridge installs
+//! no sink (one POST, one response), so tokened calls there
+//! simply run without notifications.
 
 use std::io::{BufRead, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -139,10 +149,52 @@ fn write_response<W: Write>(out: &mut W, response: &serde_json::Value) -> bool {
     writeln!(out, "{response}").is_ok() && out.flush().is_ok()
 }
 
-/// Serve requests from `input` until EOF, writing responses to
-/// `out`. Split from `main` so the framing is testable on
-/// in-memory streams.
-fn run<R: BufRead, W: Write>(server: &mut McpServer, input: &mut R, out: &mut W, cap: usize) {
+/// [`write_response`] through the shared writer lock (Wave
+/// W, W3): the lock is held for exactly this one line, so a
+/// progress notification written from another thread (the
+/// encode drainer) can never interleave with a response
+/// line — and no lock is ever held across a call, which is
+/// what keeps the drainer's writes from deadlocking against
+/// the response path.
+fn write_response_locked<W: Write>(
+    out: &std::sync::Mutex<W>,
+    response: &serde_json::Value,
+) -> bool {
+    match out.lock() {
+        Ok(mut guard) => write_response(&mut *guard, response),
+        Err(_) => false,
+    }
+}
+
+/// Serve requests from `input` until EOF, writing responses
+/// to `out` — the writer SHARED with the progress sink under
+/// one mutex (Wave W, W3), so response and notification
+/// lines serialise line-by-line. Split from `main` so the
+/// framing is testable on in-memory streams.
+fn run<R: BufRead, W: Write + Send + 'static>(
+    server: &mut McpServer,
+    input: &mut R,
+    out: &std::sync::Arc<std::sync::Mutex<W>>,
+    cap: usize,
+) {
+    // This transport can stream — stdout is written line by
+    // line while a call runs — so it installs the
+    // notification sink the router needs before it will
+    // honour a progress token. The sink writes through the
+    // same locked writer as the responses, one lock per
+    // line; main hands over the Stdout HANDLE (never a lock
+    // held across the run), so the encode drainer thread's
+    // notifications can never deadlock against a response
+    // write. A failed sink write means the client went
+    // away — the notification is dropped and the response
+    // write after the call ends the loop, as always.
+    let notify_out = out.clone();
+    server.set_notification_sink(Some(std::sync::Arc::new(move |msg| {
+        if let Ok(mut guard) = notify_out.lock() {
+            let _ = writeln!(guard, "{msg}");
+            let _ = guard.flush();
+        }
+    })));
     loop {
         let bytes = match read_line_capped(input, cap) {
             Ok(LineRead::Line(bytes)) => bytes,
@@ -155,7 +207,7 @@ fn run<R: BufRead, W: Write>(server: &mut McpServer, input: &mut R, out: &mut W,
                         "message": format!("Invalid Request: line exceeds the {cap}-byte limit"),
                     },
                 });
-                if !write_response(out, &response) {
+                if !write_response_locked(out, &response) {
                     break;
                 }
                 continue;
@@ -189,7 +241,7 @@ fn run<R: BufRead, W: Write>(server: &mut McpServer, input: &mut R, out: &mut W,
             })),
         };
         if let Some(response) = response {
-            if !write_response(out, &response) {
+            if !write_response_locked(out, &response) {
                 // Client went away; nothing more to serve.
                 break;
             }
@@ -199,11 +251,15 @@ fn run<R: BufRead, W: Write>(server: &mut McpServer, input: &mut R, out: &mut W,
 
 fn main() {
     let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
     let mut input = stdin.lock();
-    let mut out = stdout.lock();
+    // The Stdout HANDLE behind the shared mutex — never
+    // `stdout.lock()` held across the run: progress
+    // notifications are written from the encode drainer
+    // thread mid-call and must only ever wait for one
+    // line's lock, never for the call itself (Wave W, W3).
+    let out = std::sync::Arc::new(std::sync::Mutex::new(std::io::stdout()));
     let mut server = McpServer::new();
-    run(&mut server, &mut input, &mut out, MAX_LINE_BYTES);
+    run(&mut server, &mut input, &out, MAX_LINE_BYTES);
 }
 
 // ---------------------------------------------------------------------
@@ -216,14 +272,16 @@ mod tests {
     use std::io::Cursor;
 
     /// Drive `run` over an in-memory stream and return the
-    /// response lines it produced.
+    /// output lines it produced (notifications included —
+    /// they share the wire with responses).
     fn serve(input: &[u8], cap: usize) -> Vec<String> {
         let mut server = McpServer::new();
         let mut reader = Cursor::new(input.to_vec());
-        let mut out: Vec<u8> = Vec::new();
-        run(&mut server, &mut reader, &mut out, cap);
-        String::from_utf8(out)
-            .expect("responses are valid UTF-8")
+        let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        run(&mut server, &mut reader, &out, cap);
+        let bytes = out.lock().expect("output lock").clone();
+        String::from_utf8(bytes)
+            .expect("output is valid UTF-8")
             .lines()
             .map(str::to_string)
             .collect()
@@ -329,6 +387,65 @@ mod tests {
         let pong: serde_json::Value = serde_json::from_str(&responses[1]).unwrap();
         assert_eq!(pong["id"], 2, "ping after the handshake still answers");
         assert_eq!(pong["result"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn tokened_render_streams_progress_lines_before_its_response() {
+        // Wave W (W3): over the real stdio framing, a
+        // tokened png_sequence render emits one
+        // notifications/progress line per frame — whole
+        // lines, in order — BEFORE the tools/call response
+        // line, and an untokened render emits nothing extra.
+        let dir = std::env::temp_dir().join(format!(
+            "styk-mcp-server-progress-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let call = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "tools/call",
+            "params": {
+                "name": "render",
+                "arguments": { "path": dir.to_string_lossy(), "format": "png_sequence" },
+                "_meta": { "progressToken": "stdio-tok" },
+            },
+        });
+        let lines = serve(format!("{call}\n").as_bytes(), MAX_LINE_BYTES);
+        let reply: serde_json::Value =
+            serde_json::from_str(lines.last().expect("a response line")).unwrap();
+        assert_eq!(reply["id"], 21);
+        assert_eq!(reply["result"]["isError"], false);
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        let payload: serde_json::Value = serde_json::from_str(text).unwrap();
+        let frames = payload["frames"].as_u64().expect("frames count");
+        assert!(frames >= 2, "the demo project renders several frames");
+        assert_eq!(
+            lines.len() as u64,
+            frames + 1,
+            "one notification per frame, then the reply: {lines:?}"
+        );
+        for (i, line) in lines[..lines.len() - 1].iter().enumerate() {
+            let note: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(note["method"], "notifications/progress");
+            assert_eq!(note["params"]["progressToken"], "stdio-tok");
+            assert_eq!(note["params"]["progress"], i as u64 + 1);
+            assert_eq!(note["params"]["total"], frames);
+        }
+        // The same call without a token: exactly one line —
+        // the response — and no sink traffic at all.
+        let plain = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "tools/call",
+            "params": {
+                "name": "render",
+                "arguments": { "path": dir.to_string_lossy(), "format": "png_sequence" },
+            },
+        });
+        let lines = serve(format!("{plain}\n").as_bytes(), MAX_LINE_BYTES);
+        assert_eq!(lines.len(), 1, "untokened calls stay silent: {lines:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

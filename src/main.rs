@@ -252,6 +252,12 @@ pub struct State {
     pub key_clipboard: Option<Vec<stykanimate_rs::graph::Key>>,
     /// Last export recap line (export_panel section).
     pub export_recap: String,
+    /// The export panel's running background export job,
+    /// if any (export_panel section, Wave W W1): the job's
+    /// worker thread reports the two phases' progress into
+    /// shared slots and its outcome over a channel; `poll`
+    /// drains it (see `export_panel::poll_export_job`).
+    pub export_job: Option<rune_sec::export_panel::ExportJob>,
     /// Figure rename field (inspector_figure section, Phase F).
     pub inspector_figure: rune_sec::inspector_figure::InspectorFigureEditState,
     /// Movieclip rename session (clips_panel section, Phase F).
@@ -329,8 +335,9 @@ fn init() -> State {
     core.light_theme = !layout.dark;
     // Live MCP control starts with the editor when the
     // persisted preference says so (LayoutPrefs::live_mcp,
-    // which defaults to on for prefs files written before
-    // the field existed). A failed start — in practice
+    // which defaults to off — live control starts at launch
+    // only when the user has enabled it in Settings and the
+    // choice persisted). A failed start — in practice
     // another editor instance already holding the port —
     // is not fatal and needs no message here: the bridge
     // simply stays off, and the Settings card's Live MCP
@@ -400,6 +407,7 @@ fn init() -> State {
         show_right: true,
         key_clipboard: None,
         export_recap: String::new(),
+        export_job: None,
         inspector_figure: rune_sec::inspector_figure::InspectorFigureEditState::new(),
         clips_rename: rune_sec::clips_panel::ClipRenameState::new(),
         fx_browser: Default::default(),
@@ -583,6 +591,24 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
     let now = t as f32;
     s.toast_now = now;
     let mut redraw = false;
+    // Export job (Wave W, W1): poll the export panel's
+    // background job on this same tick. A job that finished
+    // writes its status/recap here — before the live-MCP
+    // drain below, so the drain's status-attribution
+    // snapshot never mistakes a job's completion line for
+    // a client's (it reads as a status written earlier in
+    // the tick, the autosave case) — and the status check
+    // further down toasts it in the tick it lands. A job
+    // still running re-wakes the loop at the job cadence
+    // so its progress readout keeps repainting while the
+    // window is otherwise idle.
+    let (job_redraw, job_active) = rune_sec::export_panel::poll_export_job(s);
+    if job_redraw {
+        redraw = true;
+    }
+    if job_active {
+        tx.wake_after(rune_sec::export_panel::JOB_WAKE);
+    }
     // Live MCP control: requests queued by the bridge's
     // listener thread run HERE, on the UI thread, against
     // the live core — so the stage, timeline and panels

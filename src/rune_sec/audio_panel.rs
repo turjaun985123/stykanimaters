@@ -287,10 +287,13 @@
 //! effects caption (`effects_settings_line`) is
 //! class-C sentence copy (T1's category), and
 //! `health_word` keeps its pure signature as the
-//! canonical-English vocabulary — its other consumer
-//! (`waveform_view::clip_health_caption`) has no core
-//! in scope; the panel's suffix/segment resolve the
-//! same words through the table, and the readout pin
+//! canonical-English vocabulary; the panel's
+//! suffix/segment resolve the same words through the
+//! table, and its other consumer
+//! (`waveform_view::clip_health_caption`, Wave W W5)
+//! composes from this panel's shared `health_segment`,
+//! so the strip's caption resolves through the table
+//! too. The readout pin
 //! (`audio_readout_i18n_keys_exist_and_match_the_english`)
 //! asserts the two agree. Status sentences stay
 //! English throughout.
@@ -887,11 +890,11 @@ pub fn health_word(health: ClipHealth) -> Option<&'static str> {
 /// `audio_health_unsupported` / `audio_health_unreadable`
 /// — IA-U5-1) for the PANEL's suffix/segment below.
 /// `health_word` itself keeps its pure signature and
-/// stays the canonical-English vocabulary: its other
+/// stays the canonical-English vocabulary. Its other
 /// consumer, `waveform_view::clip_health_caption`,
-/// composes its caption with no core in scope, so it
-/// cannot resolve through the table from there. The
-/// panel pin asserts the catalogue's English and
+/// composes its caption from `health_segment` below
+/// (Wave W, W5), so it resolves through the table from
+/// there too. The panel pin asserts the catalogue's English and
 /// `health_word` agree word for word, so the two
 /// vocabularies cannot drift apart silently.
 fn health_word_tr(core: &EditorCore, health: ClipHealth) -> Option<String> {
@@ -2963,6 +2966,7 @@ mod tests {
             show_right: true,
             key_clipboard: None,
             export_recap: String::new(),
+            export_job: None,
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
             clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
             fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),

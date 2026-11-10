@@ -3249,6 +3249,7 @@ mod tests {
             show_right: true,
             key_clipboard: None,
             export_recap: String::new(),
+            export_job: None,
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
             clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
             fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
