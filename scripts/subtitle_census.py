@@ -25,13 +25,22 @@ WHAT THIS PROVES
                                    position is Top.
     snap-default.png               scene `default`: the demo
                                    project as shipped, no cue.
+    snap-subtitles-speaker.png     scene `subtitles-speaker`
+                                   (Wave S, S2): ONE CREDITED
+                                   cue — speaker "NOVA", text
+                                   "The light is still on." —
+                                   spanning the whole timeline,
+                                   playhead parked on frame 2,
+                                   DEFAULT style (Bottom). The
+                                   speaker leg's input; required
+                                   alongside either input set.
 
   If a full-window snap is missing, the stage crop of the same
   scene is accepted instead (snap-subtitles-populated-crop.png,
-  snap-subtitles-top-crop.png, and the workflow's existing
-  snap-stage.png for `default`); all three inputs must then be
-  crops. Mixed full/crop input sets are refused — the pixels
-  would not be comparable.
+  snap-subtitles-top-crop.png, snap-subtitles-speaker-crop.png,
+  and the workflow's existing snap-stage.png for `default`);
+  all four inputs must then be crops. Mixed full/crop input
+  sets are refused — the pixels would not be comparable.
 
 THE DISCIPLINE (the Wave L subtitle census, carried over)
   * The subtitle band is located from the FRAME'S OWN stage
@@ -60,6 +69,53 @@ THE DISCIPLINE (the Wave L subtitle census, carried over)
     by design and is gated only on "clearly nonzero" — a
     zero would mean the seeded snap IS the default snap,
     i.e. the scene never took.
+  * The speaker leg (speaker vs populated, Wave S S2): both
+    scenes park frame 2 under the default Bottom style and
+    differ only in the planted cue — the speaker scene's
+    cue is credited (speaker NOVA) with its own text. The
+    stage draws a credited cue's first line through
+    `subtitles::subtitle_display_lines`, which prefixes
+    `NOVA: ` onto it; every line is centred as a whole
+    string, so the prefix widens the painted line by
+    exactly its own advance (6 chars x 16 units = 96 stage
+    units) over the same text uncredited. The leg measures
+    the near-white face EXTENT (leftmost to rightmost
+    speaker-only face pixel, XOR against the default snap
+    so any figure paint cancels) inside the bottom band
+    and gates it between the two analytic spans: a line
+    drawn WITHOUT the prefix cannot exceed the bare
+    text's run, so a span past the gate proves the prefix
+    painted. Anti-vacuity, mirroring the anchor pair: the
+    two snaps must be pixel-identical in the top band and
+    mid-stage (same park, same anchor — cue content is
+    the only difference) and must differ in the bottom
+    band.
+  * The lane leg (speaker vs populated, Wave T T11): the
+    subtitle LANE's block for the credited cue, pixel-side.
+    S3 pinned the lane's label composition (`block_label`:
+    `Name: ` prefixed on a credited cue) at unit level and
+    S2 proved the prefix on the stage; what neither proves
+    is that the lane block in the credited scene actually
+    PAINTS its composed label. Fact 34 (scenes.rs): the
+    speaker tree's inventory is identical to the populated
+    tree's, lane included — no view branches on cue
+    content for structure, and a block's rect comes from
+    the cue's frames alone (`cue_rect`), never its text.
+    The leg reads the `subtitle-cue-0` block rect from BOTH
+    scenes' tree dumps and asserts they agree (the block
+    did not move or resize for the credited cue), then,
+    inside that one rect in the full-window snaps, asserts
+    the two labels' pixels DIFFER (the credited scene's
+    block does not show the uncredited scene's label) and
+    that the credited block carries label ink of its own
+    (near-white text pixels — the block's fill is the dark
+    `control_off`, the label is drawn in the theme's text
+    colour, and nothing else near-white lives inside a cue
+    block). Full-window inputs only: the `--crop stage`
+    snaps are crops of the stage element, and the lane
+    sits in the timeline strip below it, so in crop mode
+    the leg is reported as not run rather than gated on
+    pixels that cannot contain it.
   * Floors are sized from the measured quantity's analytic
     census (below), at the same ~1/3 ratio the Wave L census
     used to turn a measurement into a floor. This script
@@ -88,6 +144,53 @@ FLOOR DERIVATION (analytic ink census)
   At the harness's default 1440x900 window the drawn stage
   is far larger (fit ~0.7), so real measurements should land
   several times above both floors.
+
+SPEAKER SPAN GATE (Wave S, S2)
+  A line of n chars runs (4n - 1) cells at 4 units per cell
+  (stage_text.rs's CHAR_ADVANCE layout: 3-wide glyphs, 4
+  cells per char). The speaker scene's bare text (22
+  chars) runs (88 - 1) * 4 = 348 units; its credited line
+  (28 chars incl. the 6-char `NOVA: ` prefix) runs
+  (112 - 1) * 4 = 444. A glyph's edge columns can be
+  unlit (the text's last glyph `.` lights only its centre
+  column), shaving a few units off the measured face
+  extent under either accounting — at most ~8 units
+  across both ends for these strings. The gate takes
+  half the prefix widening as its margin, the same
+  conservative fraction as the floors above:
+    SPEAKER_SPAN_GATE = 348 + 48 = 396 units
+                        (bare run + 1/2 the widening;
+                        the expected measurement is
+                        ~440, the bare ceiling 348)
+
+LANE FLOORS (Wave T, T11 — analytic, same discipline)
+  The seeded cue spans the whole timeline, so its lane
+  block is the timeline's full width at the demo's frame
+  count: 166 pt wide, 18 pt tall (tree-subtitles-
+  populated.json in the harness artifacts), with the
+  label inset 4 pt each side (subtitle_lane.rs's
+  `px(4.0)`) — a 158 pt text run. At the lane's LABEL
+  font the harness's populated snap measures ~6.3 pt of
+  advance per char, so the uncredited 25-char label
+  already spans ~158 pt: it saturates the text run, and
+  the credited 28-char string (6-char `NOVA: ` prefix +
+  22-char text) is LONGER than the run and truncates
+  (the text element's `.truncate()`). Ink extent
+  therefore cannot isolate the prefix in the lane — both
+  labels end at the run's right edge — so the lane leg
+  gates content difference and ink presence, and only
+  REPORTS the two extents (the stage leg above owns the
+  prefix-span proof, on a stage wide enough to hold the
+  line). Ink census at 1x: the populated label paints
+  ~400 near-white px inside its block (measured on the
+  harness snap); two different strings of 25/28 chars
+  disagree at nearly every glyph column, so the pair's
+  differing pixels inside the block run several hundred.
+    LANE_DIFF_FLOOR = 200   (the DIFF_FLOOR class)
+    LANE_INK_FLOOR  = 100   (the FACE_FLOOR class,
+                             ~1/4 of the measured ink)
+  Block-rect agreement takes the stage rect's own
+  tolerance: max drift <= 1.0 pt across the pair.
 
 BAND GEOMETRY (stage units, src/subtitles.rs constants)
   SUBTITLE_EDGE_MARGIN = 16, SUBTITLE_BASE_LINE_HEIGHT = 24:
@@ -144,8 +247,29 @@ BASELINE_FULL = "snap-default.png"
 SEEDED_BOTTOM_CROP = "snap-subtitles-populated-crop.png"
 SEEDED_TOP_CROP = "snap-subtitles-top-crop.png"
 BASELINE_CROP = "snap-stage.png"
+SEEDED_SPEAKER_FULL = "snap-subtitles-speaker.png"
+SEEDED_SPEAKER_CROP = "snap-subtitles-speaker-crop.png"
 TREE_SEEDED = "tree-subtitles-populated.json"
 TREE_BASELINE = "tree-default.json"
+TREE_SPEAKER = "tree-subtitles-speaker.json"
+
+# Lane leg (Wave T, T11): the cue block's element key
+# (subtitle_lane.rs's `block_key`, stored index 0 — both
+# seeded scenes plant exactly one cue) and its floors
+# (derivations in the module docstring).
+LANE_BLOCK_KEY = "subtitle-cue-0"
+LANE_RECT_DRIFT_MAX = 1.0
+LANE_DIFF_FLOOR = 200
+LANE_INK_FLOOR = 100
+
+# Speaker leg (Wave S, S2): the credited cue's text runs
+# (4*22 - 1) * 4 = 348 stage units bare; the `NOVA: `
+# prefix (6 chars) widens the drawn line by 6 * 16 = 96
+# units to 444. The gate sits halfway through the
+# widening (derivation in the module docstring).
+SPEAKER_BARE_RUN_UNITS = 348.0
+SPEAKER_CREDITED_RUN_UNITS = 444.0
+SPEAKER_SPAN_GATE_UNITS = 396.0
 
 
 # ----------------------------------------------------------------
@@ -295,8 +419,8 @@ def read_png(path):
 # Tree dumps: the stage element's rect
 # ----------------------------------------------------------------
 
-def stage_rect_from_tree(path):
-    """(x, y, w, h) of the element keyed `stage` in a --tree
+def element_rect_from_tree(path, key):
+    """(x, y, w, h) of the element keyed `key` in a --tree
     dump ({"elements": [{"key": ..., "rect": [x, y, w, h]}]}),
     or None if the dump or the element is absent."""
     try:
@@ -305,11 +429,17 @@ def stage_rect_from_tree(path):
     except Exception:
         return None
     for el in tree.get("elements", []):
-        if el.get("key") == "stage":
+        if el.get("key") == key:
             rect = el.get("rect") or []
             if len(rect) >= 4 and rect[2] > 0 and rect[3] > 0:
                 return tuple(float(v) for v in rect[:4])
     return None
+
+
+def stage_rect_from_tree(path):
+    """(x, y, w, h) of the element keyed `stage` in a --tree
+    dump — `element_rect_from_tree` at the stage's key."""
+    return element_rect_from_tree(path, "stage")
 
 
 # ----------------------------------------------------------------
@@ -356,6 +486,55 @@ def face_xor_count(rows_face, rows_other, x0, x1, y0, y1):
             if _near_white(a[i:i + 3]) and not _near_white(b[i:i + 3]):
                 total += 1
     return total
+
+
+def face_xor_extent(rows_face, rows_other, x0, x1, y0, y1):
+    """(count, min_x, max_x) of the face-XOR pixel set inside
+    the rectangle — the same set `face_xor_count` counts,
+    with its column extent (min_x/max_x are None when the
+    set is empty). The extent is the speaker leg's ruler:
+    a centred line's face spans its run width, so the
+    prefix's widening shows up as extent, not just ink."""
+    total = 0
+    min_x = None
+    max_x = None
+    for y in range(y0, y1):
+        a = _row_slice(rows_face[y], x0, x1)
+        b = _row_slice(rows_other[y], x0, x1)
+        if a == b:
+            continue
+        for i in range(0, len(a), 3):
+            if _near_white(a[i:i + 3]) and not _near_white(b[i:i + 3]):
+                total += 1
+                x = x0 + i // 3
+                if min_x is None or x < min_x:
+                    min_x = x
+                if max_x is None or x > max_x:
+                    max_x = x
+    return total, min_x, max_x
+
+
+def near_white_extent(rows_img, x0, x1, y0, y1):
+    """(count, min_x, max_x) of the near-white pixels of ONE
+    image inside the rectangle (min_x/max_x are None when
+    the set is empty). The lane leg's ink census: inside a
+    cue block the only near-white paint is the label text
+    (the fill is the theme's dark control colour), so the
+    count is the label's presence and the extent its run."""
+    total = 0
+    min_x = None
+    max_x = None
+    for y in range(y0, y1):
+        a = _row_slice(rows_img[y], x0, x1)
+        for i in range(0, len(a), 3):
+            if _near_white(a[i:i + 3]):
+                total += 1
+                x = x0 + i // 3
+                if min_x is None or x < min_x:
+                    min_x = x
+                if max_x is None or x > max_x:
+                    max_x = x
+    return total, min_x, max_x
 
 
 # ----------------------------------------------------------------
@@ -441,7 +620,18 @@ def run_census(directory):
               "+ snap-default.png, or the three --crop stage equivalents; "
               f"dir={directory}")
         return lines, failures
-    report(f"input mode: {mode} ({names['bottom']}, {names['top']}, {names['base']})")
+    # The speaker leg's input belongs to the same mode's
+    # set (never mixed, like the rest); its absence is a
+    # failed proof, named — Wave S (S2).
+    speaker_name = SEEDED_SPEAKER_FULL if mode == "full" else SEEDED_SPEAKER_CROP
+    if not present(speaker_name):
+        check(False, "speaker snap input present",
+              f"need {speaker_name} (scene subtitles-speaker) alongside "
+              f"the {mode} set; dir={directory}")
+        return lines, failures
+    names["speaker"] = speaker_name
+    report(f"input mode: {mode} ({names['bottom']}, {names['top']}, "
+           f"{names['base']}, {names['speaker']})")
 
     images = {}
     for tag, name in names.items():
@@ -453,9 +643,10 @@ def run_census(directory):
     (wb, hb, rows_bottom) = images["bottom"]
     (wt, ht, rows_top) = images["top"]
     (wd, hd, rows_base) = images["base"]
-    check((wb, hb) == (wt, ht) == (wd, hd),
-          "all three snaps share one image size",
-          f"bottom={wb}x{hb} top={wt}x{ht} base={wd}x{hd}")
+    (ws, hs, rows_speaker) = images["speaker"]
+    check((wb, hb) == (wt, ht) == (wd, hd) == (ws, hs),
+          "all four snaps share one image size",
+          f"bottom={wb}x{hb} top={wt}x{ht} base={wd}x{hd} speaker={ws}x{hs}")
     if failures:
         return lines, failures
     img_w, img_h = wb, hb
@@ -531,6 +722,103 @@ def run_census(directory):
     check(d_base_bottom >= DIFF_FLOOR,
           f"seeded bottom band differs from the no-cue default (>= {DIFF_FLOOR})",
           f"diff={d_base_bottom}")
+
+    # ---- the speaker leg (Wave S, S2): the credited cue's
+    # prefix, proven as line widening against the
+    # uncredited control scene (same park, same anchor,
+    # only the cue differs).
+    d_sp_bottom = diff_count(rows_speaker, rows_bottom, *bottom_r)
+    d_sp_top = diff_count(rows_speaker, rows_bottom, *top_r)
+    d_sp_mid = diff_count(rows_speaker, rows_bottom, *mid_r)
+    f_speaker = face_xor_count(rows_speaker, rows_base, *bottom_r)
+    face_n, face_min, face_max = face_xor_extent(
+        rows_speaker, rows_base, *bottom_r)
+    span_units = ((face_max - face_min + 1) / fit) if face_n else 0.0
+    report(f"speaker pair speaker-vs-populated: diff bottom band "
+           f"{d_sp_bottom}, diff top band {d_sp_top}, diff mid-stage "
+           f"{d_sp_mid}")
+    report(f"speaker face: bottom-band near-white {f_speaker} "
+           f"(vs default); face extent {face_n} px over columns "
+           f"{face_min}..{face_max} = {span_units:.0f} stage units "
+           f"(bare text runs {SPEAKER_BARE_RUN_UNITS:.0f}, credited "
+           f"line {SPEAKER_CREDITED_RUN_UNITS:.0f})")
+    check(f_speaker >= FACE_FLOOR,
+          f"credited cue's text face present in the bottom band "
+          f"(>= {FACE_FLOOR})",
+          f"face={f_speaker}")
+    check(span_units >= SPEAKER_SPAN_GATE_UNITS,
+          f"speaker prefix widens the credited line past the bare-text "
+          f"span (>= {SPEAKER_SPAN_GATE_UNITS:.0f} units; bare run "
+          f"{SPEAKER_BARE_RUN_UNITS:.0f})",
+          f"span={span_units:.0f} units")
+    check(d_sp_bottom >= DIFF_FLOOR,
+          f"credited bottom band differs from the uncredited control "
+          f"(>= {DIFF_FLOOR})",
+          f"diff={d_sp_bottom}")
+    check(d_sp_top == 0,
+          "top band is pixel-identical across the speaker pair",
+          f"diff={d_sp_top}")
+    check(d_sp_mid == 0,
+          "stage between the bands is pixel-identical across the speaker pair",
+          f"diff={d_sp_mid}")
+
+    # ---- the lane leg (Wave T, T11): the credited cue's
+    # lane block paints its prefixed label, in the same
+    # block at the same place as the uncredited control's.
+    # Full-window inputs only — the stage crops do not
+    # contain the timeline strip (see the module docstring).
+    if mode == "crop":
+        report("lane speaker leg: not run in crop mode — the "
+               "stage crops do not contain the subtitle lane; "
+               "the full-window set carries this leg")
+    else:
+        block_pop = element_rect_from_tree(
+            os.path.join(directory, TREE_SEEDED), LANE_BLOCK_KEY)
+        block_spk = element_rect_from_tree(
+            os.path.join(directory, TREE_SPEAKER), LANE_BLOCK_KEY)
+        check(block_pop is not None and block_spk is not None,
+              "lane block rect located in both subtitle tree dumps",
+              f"need an element keyed '{LANE_BLOCK_KEY}' with a rect "
+              f"in {TREE_SEEDED} and {TREE_SPEAKER}; "
+              f"populated={'missing' if block_pop is None else 'found'}, "
+              f"speaker={'missing' if block_spk is None else 'found'}")
+        if block_pop is not None and block_spk is not None:
+            drift = max(abs(a - b) for a, b in zip(block_pop, block_spk))
+            report(f"lane block rect (populated tree) {block_pop}; "
+                   f"(speaker tree) {block_spk}; max drift {drift:.1f} px")
+            check(drift <= LANE_RECT_DRIFT_MAX,
+                  "lane block geometry is identical across the speaker pair",
+                  f"drift={drift:.1f}")
+            # The populated dump's rect is the canonical
+            # region (the drift check above bounds how far
+            # the speaker block can sit from it); rounded
+            # outward and clamped to the image, the band
+            # idiom.
+            bx0 = max(0, int(math.floor(block_pop[0])))
+            by0 = max(0, int(math.floor(block_pop[1])))
+            bx1 = min(img_w, int(math.ceil(block_pop[0] + block_pop[2])))
+            by1 = min(img_h, int(math.ceil(block_pop[1] + block_pop[3])))
+            lane_diff = diff_count(rows_speaker, rows_bottom,
+                                   bx0, bx1, by0, by1)
+            ink_spk, ink_spk_min, ink_spk_max = near_white_extent(
+                rows_speaker, bx0, bx1, by0, by1)
+            ink_pop, ink_pop_min, ink_pop_max = near_white_extent(
+                rows_bottom, bx0, bx1, by0, by1)
+            report(f"lane pair speaker-vs-populated: diff inside the "
+                   f"block {lane_diff}; label ink speaker {ink_spk} px "
+                   f"over columns {ink_spk_min}..{ink_spk_max}, "
+                   f"populated {ink_pop} px over columns "
+                   f"{ink_pop_min}..{ink_pop_max} (extents reported, "
+                   f"not gated: both labels saturate the block's "
+                   f"text run — see LANE FLOORS in the docstring)")
+            check(lane_diff >= LANE_DIFF_FLOOR,
+                  f"lane label differs from the uncredited block's "
+                  f"label (>= {LANE_DIFF_FLOOR})",
+                  f"diff={lane_diff}")
+            check(ink_spk >= LANE_INK_FLOOR,
+                  f"credited lane block carries its label ink "
+                  f"(>= {LANE_INK_FLOOR})",
+                  f"ink={ink_spk}")
 
     return lines, failures
 
@@ -647,18 +935,42 @@ def _self_test():
             out.append(bytes(ba))
         return out
 
+    # The lane block's fixture rect: below the drawn stage
+    # (which ends at y=405 in this fixture), inside the
+    # window — where the timeline strip sits in the real
+    # snaps. Both subtitle trees carry it at the same
+    # rect (fact 34); the default tree has no lane.
+    LANE_BLOCK = [120, 416, 166, 18]
+
+    def paint_lane_label(rows, x1):
+        # Label ink inside the block: a white bar inset
+        # 4 px from the block's left edge (the lane's
+        # px(4.0)), vertically centred in the 18-tall
+        # block. The block's fill is not modelled — the
+        # leg reads only the rect, the near-white ink and
+        # the pair diff, and the fixture models exactly
+        # those.
+        paint(rows, 124, x1, 420, 430, WHITE)
+
     with tempfile.TemporaryDirectory() as td:
         tree = {"elements": [
             {"path": "/root", "key": "root", "rect": [0, 0, W, H]},
             {"path": "/root/stage", "key": "stage",
              "rect": [RECT[0], RECT[1], RECT[2], RECT[3]]},
         ]}
+        lane_tree = {"elements": tree["elements"] + [
+            {"path": "/root/timeline/subtitle-lane/subtitle-cue-0",
+             "key": "subtitle-cue-0", "rect": list(LANE_BLOCK)},
+        ]}
         with open(os.path.join(td, TREE_SEEDED), "w") as fh:
-            json.dump(tree, fh)
+            json.dump(lane_tree, fh)
+        with open(os.path.join(td, TREE_SPEAKER), "w") as fh:
+            json.dump(lane_tree, fh)
         with open(os.path.join(td, TREE_BASELINE), "w") as fh:
             json.dump(tree, fh)
 
         bottom = build(True, False)
+        paint_lane_label(bottom, 240)  # the uncredited label's run
         top = build(False, True)
         base = build(False, False)
         # Seeded images as RGBA with Sub/Up filters mixed in;
@@ -670,6 +982,26 @@ def _self_test():
                    to_rgba(top), color=6, filters={3: 2})
         _write_png(os.path.join(td, BASELINE_FULL), W, H,
                    base, color=2)
+
+        # The speaker scene's snap: a bottom-band face bar
+        # centred on the drawn stage's centre column (360),
+        # spanning the CREDITED extent (444 units at fit
+        # 0.5 = 222 px, less the last glyph's unlit edge
+        # column: 220 px painted). The bare text alone
+        # would span 172 px (274..446) — the negative below.
+        def speaker_rows(bar_x0, bar_x1):
+            rows = build(False, False)
+            paint(rows, bar_x0, bar_x1,
+                  int(dy1 - band) + 6, int(dy1) - 2, WHITE)
+            return rows
+
+        def honest_speaker():
+            rows = speaker_rows(250, 470)
+            paint_lane_label(rows, 282)  # the credited label's run
+            return rows
+
+        _write_png(os.path.join(td, SEEDED_SPEAKER_FULL), W, H,
+                   to_rgba(honest_speaker()), color=6)
 
         # Decoder round-trip.
         w2, h2, dec = read_png(os.path.join(td, SEEDED_BOTTOM_FULL))
@@ -683,6 +1015,58 @@ def _self_test():
         _lines, fails = run_census(td)
         expect(not fails, f"census passes on the synthetic honest set "
                           f"(failures: {fails})")
+
+        # A speaker snap whose band face spans only the
+        # BARE text's width (the prefix never painted)
+        # must fail the widening gate, and only that gate.
+        _write_png(os.path.join(td, SEEDED_SPEAKER_FULL), W, H,
+                   to_rgba(speaker_rows(274, 446)), color=6)
+        _lines, fails = run_census(td)
+        expect(any("speaker prefix" in f for f in fails),
+               "census fails when the credited line spans only the bare text")
+
+        # A missing speaker snap is a failed proof, named.
+        os.remove(os.path.join(td, SEEDED_SPEAKER_FULL))
+        _lines, fails = run_census(td)
+        expect(any("speaker snap input" in f for f in fails),
+               "census fails when the speaker snap is missing")
+
+        # Restore the honest speaker snap for the
+        # remaining negatives.
+        _write_png(os.path.join(td, SEEDED_SPEAKER_FULL), W, H,
+                   to_rgba(honest_speaker()), color=6)
+
+        # A speaker snap whose lane block shows the
+        # UNCREDITED label (same ink run as the control —
+        # the lane never composed the credit) must fail
+        # the lane label gate, while the block geometry
+        # gate stays green: the block is right, the label
+        # is wrong.
+        spk = speaker_rows(250, 470)
+        paint_lane_label(spk, 240)
+        _write_png(os.path.join(td, SEEDED_SPEAKER_FULL), W, H,
+                   to_rgba(spk), color=6)
+        _lines, fails = run_census(td)
+        expect(any("lane label differs" in f for f in fails),
+               "census fails when the credited lane label matches "
+               "the uncredited one")
+        expect(not any("lane block geometry" in f for f in fails),
+               "lane geometry gate stays green when only the label is wrong")
+
+        # A missing speaker tree dump is a failed lane
+        # proof, named.
+        os.remove(os.path.join(td, TREE_SPEAKER))
+        _lines, fails = run_census(td)
+        expect(any("lane block rect" in f for f in fails),
+               "census fails when the speaker tree dump is missing")
+
+        # Restore the tree and the honest speaker snap
+        # for the remaining negatives (they rewrite the
+        # Top snap).
+        with open(os.path.join(td, TREE_SPEAKER), "w") as fh:
+            json.dump(lane_tree, fh)
+        _write_png(os.path.join(td, SEEDED_SPEAKER_FULL), W, H,
+                   to_rgba(honest_speaker()), color=6)
 
         # The anchor flip missing its top cue must fail.
         _write_png(os.path.join(td, SEEDED_TOP_FULL), W, H,

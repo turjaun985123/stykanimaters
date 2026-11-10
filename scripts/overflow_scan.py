@@ -189,7 +189,7 @@ content and card rules.
 
 Wave P audit -- the changed surfaces of Squads 1-2
 against the full tree census. The headless harness
-produces 34 trees: the 31 registered scenes at the
+produces 36 trees: the 33 registered scenes at the
 default 1440x900 plus default / default-light /
 three-d at 1280x720 (headless.yml tree steps). This
 wave changed no scene and no panel mount; its
@@ -296,7 +296,12 @@ are the lane's only carriers, since the lane renders
 only when a cue exists. They were PENDING until the
 integrator applied IA-Q12-1 (Wave Q integration,
 2026-11-10): headless.yml's tree loops now dump both,
-so a CI artifact missing them fails the pass.
+so a CI artifact missing them fails the pass. Wave S
+added a third lane tree on the same terms:
+`subtitles-speaker` (S2's credited-cue scene) entered
+the set as REQUIRED from the start, because IA-S2-1's
+workflow dumps landed in the same integration -- the
+Q12 precedent applied in one step instead of two.
 
 Which rules judge the subtitle surfaces, for the
 debrief: the stage draw is centre-column canvas paint
@@ -319,6 +324,30 @@ parsed 34 produced tree dumps (the 31 default-size
 scene trees plus the three 1280x720 variants named
 above). No SCAN_SET addition or Integrator Action was
 therefore owed by this maintenance pass.
+
+Wave S maintenance (S16): S2 registered one new scene,
+`subtitles-speaker`, so the counts the R17 note above
+recorded have moved: the scan set now has 14 entries,
+all required and still no pending entries; `scenes()`
+lists 32 names, and the harness produces 35 tree dumps
+(the 32 default-size scene trees plus the same three
+1280x720 variants). IA-S2-1 was applied in full: both
+headless.yml tree loops dump the new tree, the snap
+step paints its full and stage-crop snaps for S2's
+census leg, and the SCAN_SET entry is "required".
+
+Wave T maintenance (T16): T12 registered one new
+scene, `home-missing-audio`, so the counts the S16
+note above recorded have moved again: the scan set
+now has 15 entries, all required and still no
+pending entries; `scenes()` lists 33 names, and the
+harness produces 36 tree dumps (the 33 default-size
+scene trees plus the same three 1280x720 variants).
+IA-T12-1 was applied in full: both headless.yml tree
+loops dump the new tree, the SCAN_SET entry is
+"required", and headless.yml carries the marker-text
+grep step this scan cannot make (the marker is
+element text; the scan reads only path/rect/key).
 
 Checks considered and NOT added (they would
 false-positive or judge what rects cannot show):
@@ -411,8 +440,13 @@ SCROLL_SEGMENTS = {"timeline"}
 # them; a --dir pass reports them PENDING without
 # failing, and notes it when one shows up so the entry
 # can be promoted. There are currently no pending
-# entries: both subtitle trees were promoted after
-# IA-Q12-1 landed in the workflow at Wave Q integration.
+# entries: both Wave P subtitle trees were promoted after
+# IA-Q12-1 landed in the workflow at Wave Q integration,
+# and the speaker tree (Wave S) was added as required
+# from the start -- IA-S2-1 landed its workflow dumps in
+# the same integration. The Home missing-audio tree
+# (Wave T) joined on the same terms -- IA-T12-1 landed
+# its workflow dumps in the same integration.
 SCAN_SET = [
     ("tree-default.json", "required",
      "O-5 keyframe rows + O-6 wx-kind segments (P2); O-8 playback "
@@ -447,6 +481,12 @@ SCAN_SET = [
      "(Wave Q integration)"),
     ("tree-subtitles-top.json", "required",
      "same lane carrier under the Top style position (IA-Q12-1)"),
+    ("tree-subtitles-speaker.json", "required",
+     "same lane carrier with a credited cue (Wave S, IA-S2-1)"),
+    ("tree-home-missing-audio.json", "required",
+     "Home library open over a saved project whose audio file "
+     "is missing — the row's meta line carries the missing-audio "
+     "marker (Wave T, IA-T12-1)"),
 ]
 
 

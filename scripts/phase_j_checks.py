@@ -548,6 +548,29 @@ the constant (ledger there). MCP_SURFACE_FLOOR stays
 as Wave R slices land and ratchets only to verified
 recounts; R15's findings carry the per-slice deltas.
 
+Wave S note (S15, 2026-11-10): baseline recount on the
+clean base (HEAD 85898b4, detached worktree) reads 980
+total keys (864 static + 116 dynamic, 61 files), 381
+MCP tools, 48 State fields / 22 full literals, 31
+headless scenes, 134 palette commands, 163 icons —
+gate PASS 10/10, census 16/16 PASS. The 980 is R15's
+979 plus subtitle-speaker-field, added by Wave R's
+integration after R15's recount; KEY_TOTAL_FLOOR
+ratcheted 979 -> 980 at the constant (ledger there).
+Final recount on the settled Wave S tree reads the
+same 980 (no slice added or lost an element key), 381
+tools, 32 headless scenes (S2's subtitles-speaker,
+covered once S16's headless.yml IA landed), 134
+palette commands — gate PASS 10/10, census 16/16 PASS.
+The i18n catalogue (counted directly from i18n.rs,
+not by this gate) reads 28 tables x 168 keys after
+S1's export block (152 + 16, one contiguous block,
+sequences identical, zero loss); IA-S14-1's 34
+threed_* keys are integrator-side and not in the tree
+— if applied, the catalogue becomes 202 and the
+i18n.rs / i18n_wire.rs count lines must move with it
+(IA-S15-1 in S15's findings).
+
 Approximations are deliberate and documented inline:
 block capture is brace counting over comment/string-
 blanked source (the repo's established scan idiom), and
@@ -757,7 +780,20 @@ def entry_field(chunk: str) -> str | None:
 # landed and were integrated. Floor raised 949 -> 979
 # so Wave R starts from the integrated truth; any key
 # loss in Wave R now fails check 1.
-KEY_TOTAL_FLOOR = 979
+#
+# Wave S ratchet (S15's recount, 2026-11-10): on the
+# clean Wave R base (HEAD 85898b4) this counter reads
+# 980 total (864 static + 116 dynamic, 61 files) —
+# R15's 979 plus the one static key Wave R's
+# integration itself added after R15's recount
+# (subtitle-speaker-field, IA-R21-5). Floor raised
+# 979 -> 980 so Wave S starts from the integrated
+# truth. S15's final recount on the settled Wave S
+# tree (HEAD 14bd9b3 + siblings' landings) reads the
+# same 980: no Wave S slice added or lost an element
+# key (each findings file says so, and check 2 proves
+# zero loss per key), so the floor stands at 980.
+KEY_TOTAL_FLOOR = 980
 
 
 def inventory_counts() -> tuple[int, int, int, int]:
