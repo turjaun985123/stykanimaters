@@ -9652,6 +9652,20 @@ mod alpha_export_tests {
     fn tiny_project() -> Project {
         let mut project = Project::new_demo();
         project.stage = [96.0, 72.0];
+        // The demo figure stands at the 960x720 stage's
+        // centre (root 480, 470); on a 96x72 stage it is
+        // hundreds of units off-canvas and NOTHING renders
+        // — the range fixtures never notice (their pins are
+        // self-consistency), but these pins assert absolute
+        // coverage, so re-root every pose at the tiny
+        // centre, the move the weather/trail fixtures make.
+        // (Wave X CI round 2 caught the empty renders:
+        // max alpha was 0.)
+        for frame in &mut project.frames {
+            for pose in &mut frame.poses {
+                pose.root = [48.0, 36.0];
+            }
+        }
         project
     }
 

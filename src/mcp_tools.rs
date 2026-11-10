@@ -6943,11 +6943,18 @@ mod tests {
         // stubs); +2 in Wave P (sprite_move_key and
         // sprite_delete_key_at, spliced from the TOOL
         // ENTRY SPECs in src/mcp_sprite_tools.rs).
-        assert_eq!(tools.len(), 319);
+        // +9 in Wave X: +7 state tools (X3:
+        // figure_list_states, figure_set_state,
+        // figure_clear_state, figure_assign_clip,
+        // figure_unlink_clip, clip_compatible,
+        // clip_create_range) and +2 sprite tools (X5:
+        // sprite_set_asset, sprite_reorder, spliced from
+        // the TOOL ENTRY SPECs in src/mcp_sprite_tools.rs).
+        assert_eq!(tools.len(), 328);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 319, "tool names must be unique");
+        assert_eq!(names.len(), 328, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }

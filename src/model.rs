@@ -2986,9 +2986,13 @@ mod wave13_c6_sprite_text_pins {
         // Field names, field order and f32 rendering are the
         // saved-file format for every sprite/text key.
         let json = serde_json::to_string(&key(2.5, -12.75, 8.0, 0.5, -45.0)).unwrap();
+        // Wave X (X9, P-6): the key gained six serde-defaulted
+        // enrichment fields (opacity, flips, scale_y, pivot),
+        // serialised in declaration order after `angle`; old
+        // five-field files still load (X9's legacy pin).
         assert_eq!(
             json,
-            r#"{"frame":2.5,"x":-12.75,"y":8.0,"scale":0.5,"angle":-45.0}"#
+            r#"{"frame":2.5,"x":-12.75,"y":8.0,"scale":0.5,"angle":-45.0,"opacity":1.0,"flip_x":false,"flip_y":false,"scale_y":0.0,"pivot_x":0.5,"pivot_y":0.5}"#
         );
         let back: InstanceKey = serde_json::from_str(&json).unwrap();
         assert_key(&back, 2.5, -12.75, 8.0, 0.5, -45.0);
@@ -3003,7 +3007,7 @@ mod wave13_c6_sprite_text_pins {
         let json = serde_json::to_string(&sprite).unwrap();
         assert_eq!(
             json,
-            r#"{"asset":2,"keys":[{"frame":0.0,"x":10.0,"y":20.0,"scale":1.5,"angle":30.0}]}"#
+            r#"{"asset":2,"keys":[{"frame":0.0,"x":10.0,"y":20.0,"scale":1.5,"angle":30.0,"opacity":1.0,"flip_x":false,"flip_y":false,"scale_y":0.0,"pivot_x":0.5,"pivot_y":0.5}]}"#
         );
         let back: SpriteInstance = serde_json::from_str(&json).unwrap();
         assert_eq!(back.asset, 2);
@@ -3024,7 +3028,7 @@ mod wave13_c6_sprite_text_pins {
         let json = serde_json::to_string(&text).unwrap();
         assert_eq!(
             json,
-            r#"{"content":"Title","size":28.0,"color":16777215,"keys":[{"frame":0.0,"x":100.0,"y":80.0,"scale":1.0,"angle":0.0}]}"#
+            r#"{"content":"Title","size":28.0,"color":16777215,"keys":[{"frame":0.0,"x":100.0,"y":80.0,"scale":1.0,"angle":0.0,"opacity":1.0,"flip_x":false,"flip_y":false,"scale_y":0.0,"pivot_x":0.5,"pivot_y":0.5}]}"#
         );
         let back: TextInstance = serde_json::from_str(&json).unwrap();
         assert_eq!(back.content, "Title");
