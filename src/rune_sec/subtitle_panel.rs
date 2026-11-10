@@ -138,7 +138,7 @@ use rune::{col, row, text, El, TextEdit};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::subtitles::{
     sort_subtitle_cues, subtitles_from_srt, subtitles_from_vtt, subtitles_to_srt,
-    subtitles_to_vtt, SubtitleCue, SubtitlePosition, SubtitleStyle,
+    subtitles_to_srt_counted, subtitles_to_vtt, SubtitleCue, SubtitlePosition, SubtitleStyle,
     SUBTITLE_FONT_SCALE_MAX, SUBTITLE_FONT_SCALE_MIN,
 };
 
@@ -740,7 +740,8 @@ fn file_path(s: &State) -> Option<String> {
 /// — no undo step; the parent directory is created
 /// the way `mcp_subtitle_io` creates it). Success and
 /// refusal both land on the status line, in the
-/// panel's voice.
+/// panel's voice; an SRT success that dropped speaker
+/// credits says so on the same line (Wave S, S9).
 pub fn export_file(s: &mut State, format: SubtitleFileFormat) {
     let Some(path) = file_path(s) else {
         s.core.status = "Subtitle export failed: no file path.".to_string();
@@ -758,13 +759,28 @@ pub fn export_file(s: &mut State, format: SubtitleFileFormat) {
             }
         }
     }
-    let document = format.to_document(&s.core.project);
+    // An SRT export goes through the counted converter
+    // (Wave S, S9): SRT cannot write cue speakers, and
+    // the success line below says so when it dropped
+    // any. WebVTT keeps speakers, so its document comes
+    // from `to_document` with nothing to report.
+    let (document, speakers_dropped) = match format {
+        SubtitleFileFormat::Srt => {
+            let export = subtitles_to_srt_counted(&s.core.project);
+            (export.text, export.speakers_dropped)
+        }
+        SubtitleFileFormat::Vtt => (format.to_document(&s.core.project), 0),
+    };
     match std::fs::write(path_ref, &document) {
         Ok(()) => {
-            s.core.status = format!(
-                "Exported {} subtitle cue(s) to {path}.",
-                s.core.subtitle_count()
-            );
+            let count = s.core.subtitle_count();
+            s.core.status = if speakers_dropped > 0 {
+                format!(
+                    "Exported {count} subtitle cue(s) to {path} — {speakers_dropped} speaker credit(s) not written (SRT has no speaker syntax)."
+                )
+            } else {
+                format!("Exported {count} subtitle cue(s) to {path}.")
+            };
         }
         Err(e) => {
             s.core.status = format!("Subtitle export failed: could not write {path}: {e}");
@@ -1641,6 +1657,56 @@ mod tests {
         assert_eq!(s.core.subtitle_count(), 1);
         assert_eq!(s.core.project.subtitles[0].text, "Only cue");
         assert_eq!(s.subtitle_selected, None);
+    }
+
+    #[test]
+    fn srt_export_status_reports_dropped_speaker_credits() {
+        // Wave S (S9): the SRT success line names the
+        // speaker credits the document could not write;
+        // an uncredited export's line is the established
+        // sentence, byte for byte, and WebVTT — which
+        // keeps speakers — never grows the clause.
+        let dir = temp_dir("srt-speakers");
+        let path = dir.join("cues.srt");
+        let mut credited = cue(0, 24, "First line");
+        credited.speaker = Some("Mary Jane".to_string());
+        let mut s = cue_state(vec![credited, cue(24, 48, "Second line")]);
+        s.subtitle_panel.path = TextEdit::new(path.to_string_lossy().into_owned());
+        export_file(&mut s, SubtitleFileFormat::Srt);
+        assert_eq!(
+            s.core.status,
+            format!(
+                "Exported 2 subtitle cue(s) to {} — 1 speaker credit(s) not written (SRT has no speaker syntax).",
+                path.to_string_lossy()
+            )
+        );
+        // The document itself carries no name.
+        let written = std::fs::read_to_string(&path).expect("the file was written");
+        assert!(!written.contains("Mary"), "no name in the SRT: {written}");
+
+        // Uncredited: the established sentence, unchanged.
+        let mut s = cue_state(vec![cue(0, 24, "First line"), cue(24, 48, "Second line")]);
+        s.subtitle_panel.path = TextEdit::new(path.to_string_lossy().into_owned());
+        export_file(&mut s, SubtitleFileFormat::Srt);
+        assert_eq!(
+            s.core.status,
+            format!("Exported 2 subtitle cue(s) to {}.", path.to_string_lossy())
+        );
+
+        // WebVTT keeps the speaker: established sentence
+        // even for a credited project, name on the wire.
+        let vtt_path = dir.join("cues.vtt");
+        let mut credited = cue(0, 24, "First line");
+        credited.speaker = Some("Mary Jane".to_string());
+        let mut s = cue_state(vec![credited]);
+        s.subtitle_panel.path = TextEdit::new(vtt_path.to_string_lossy().into_owned());
+        export_file(&mut s, SubtitleFileFormat::Vtt);
+        assert_eq!(
+            s.core.status,
+            format!("Exported 1 subtitle cue(s) to {}.", vtt_path.to_string_lossy())
+        );
+        let written = std::fs::read_to_string(&vtt_path).expect("the file was written");
+        assert!(written.contains("<v Mary Jane>"), "the voice tag is written: {written}");
     }
 
     #[test]

@@ -119,6 +119,15 @@
 //! and "Insert" rows already read as single-purpose
 //! labelled groups in the charter stepper order and are
 //! unchanged.
+//!
+//! Wave T (T3): every label in the section resolves
+//! through `i18n_wire::tr` under the `frame_*` keys
+//! (IA-T3-1) — the buttons, the group headings, the
+//! panel title and the "This frame" / "Insert" row
+//! labels, English byte-identical. Status sentences,
+//! the Sel/Loop and duration readouts, and pure
+//! notation (×0.5 / ×2, the − / + steppers) stay
+//! literal, as in the subtitle/camera/3D panels.
 
 use rune::tok::{type_, Theme};
 use rune::{row, text, El};
@@ -127,6 +136,7 @@ use stykanimate_rs::model::Frame;
 
 use crate::chrome_view::{btn, btn_muted_live};
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
 use crate::State;
 
 /// Duration clamp the core applies in
@@ -624,9 +634,9 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
                 s.core.insert_inbetween();
             };
             if can_inbetween(core) {
-                btn("inbetween", "Inbetween", false, t, press)
+                btn("inbetween", &i18n_wire::tr(core, "frame_inbetween"), false, t, press)
             } else {
-                btn_muted_live("inbetween", "Inbetween", false, t, press)
+                btn_muted_live("inbetween", &i18n_wire::tr(core, "frame_inbetween"), false, t, press)
             }
         })
         .child({
@@ -637,9 +647,9 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
                 }
             };
             if can_shift_back(core) {
-                btn("shift-back", "< Shift", false, t, press)
+                btn("shift-back", &i18n_wire::tr(core, "frame_shift_back"), false, t, press)
             } else {
-                btn_muted_live("shift-back", "< Shift", false, t, press)
+                btn_muted_live("shift-back", &i18n_wire::tr(core, "frame_shift_back"), false, t, press)
             }
         })
         .child({
@@ -650,9 +660,9 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
                 }
             };
             if can_shift_fwd(core) {
-                btn("shift-fwd", "Shift >", false, t, press)
+                btn("shift-fwd", &i18n_wire::tr(core, "frame_shift_fwd"), false, t, press)
             } else {
-                btn_muted_live("shift-fwd", "Shift >", false, t, press)
+                btn_muted_live("shift-fwd", &i18n_wire::tr(core, "frame_shift_fwd"), false, t, press)
             }
         })
         .child({
@@ -661,16 +671,16 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
                 s.core.reverse_range(from, count);
             };
             if can_reverse(core) {
-                btn("reverse-range", "Reverse", false, t, press)
+                btn("reverse-range", &i18n_wire::tr(core, "frame_reverse"), false, t, press)
             } else {
-                btn_muted_live("reverse-range", "Reverse", false, t, press)
+                btn_muted_live("reverse-range", &i18n_wire::tr(core, "frame_reverse"), false, t, press)
             }
         })
         .child(if reverse_all_enabled(core) {
             crate::rune_sec::icon_btn::icon_btn(
                 "frames-reverse-all",
                 "arrow-right-arrow-left",
-                "Reverse all",
+                &i18n_wire::tr(core, "frame_reverse_all"),
                 false,
                 t,
                 |s| reverse_all(&mut s.core),
@@ -679,7 +689,7 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
             crate::rune_sec::icon_btn::icon_btn_inert(
                 "frames-reverse-all",
                 "arrow-right-arrow-left",
-                "Reverse all",
+                &i18n_wire::tr(core, "frame_reverse_all"),
                 t,
             )
         })
@@ -687,7 +697,7 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
             crate::rune_sec::icon_btn::icon_btn(
                 "fop-swap-prev",
                 "chevron-left",
-                "Swap with previous",
+                &i18n_wire::tr(core, "frame_swap_prev"),
                 false,
                 t,
                 |s| {
@@ -698,7 +708,7 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
             crate::rune_sec::icon_btn::icon_btn_inert(
                 "fop-swap-prev",
                 "chevron-left",
-                "Swap with previous",
+                &i18n_wire::tr(core, "frame_swap_prev"),
                 t,
             )
         })
@@ -706,7 +716,7 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
             crate::rune_sec::icon_btn::icon_btn(
                 "fop-swap-next",
                 "chevron-right",
-                "Swap with next",
+                &i18n_wire::tr(core, "frame_swap_next"),
                 false,
                 t,
                 |s| {
@@ -717,7 +727,7 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
             crate::rune_sec::icon_btn::icon_btn_inert(
                 "fop-swap-next",
                 "chevron-right",
-                "Swap with next",
+                &i18n_wire::tr(core, "frame_swap_next"),
                 t,
             )
         });
@@ -734,9 +744,9 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
                 s.core.smooth_path_roots(fi);
             };
             if can_smooth(core) {
-                btn("smooth-path", "Smooth path", false, t, press)
+                btn("smooth-path", &i18n_wire::tr(core, "frame_smooth_path"), false, t, press)
             } else {
-                btn_muted_live("smooth-path", "Smooth path", false, t, press)
+                btn_muted_live("smooth-path", &i18n_wire::tr(core, "frame_smooth_path"), false, t, press)
             }
         });
 
@@ -747,34 +757,34 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
         .center_y()
         .flex_wrap()
         .child(if copy_frame_enabled(core) {
-            crate::rune_sec::icon_btn::icon_btn("copy-frame", "copy", "Copy frame", false, t, |s| {
+            crate::rune_sec::icon_btn::icon_btn("copy-frame", "copy", &i18n_wire::tr(core, "frame_copy_frame"), false, t, |s| {
                 if s.core.frame_count() > 0 {
                     s.core.copy_frame();
                     s.frame_ops.frame_copied = true;
                 }
             })
         } else {
-            crate::rune_sec::icon_btn::icon_btn_inert("copy-frame", "copy", "Copy frame", t)
+            crate::rune_sec::icon_btn::icon_btn_inert("copy-frame", "copy", &i18n_wire::tr(core, "frame_copy_frame"), t)
         })
         .child(if paste_frame_enabled(ops) {
-            crate::rune_sec::icon_btn::icon_btn("paste-frame", "clipboard", "Paste frame", false, t, |s| {
+            crate::rune_sec::icon_btn::icon_btn("paste-frame", "clipboard", &i18n_wire::tr(core, "frame_paste_frame"), false, t, |s| {
                 s.core.paste_frame();
             })
         } else {
-            crate::rune_sec::icon_btn::icon_btn_inert("paste-frame", "clipboard", "Paste frame", t)
+            crate::rune_sec::icon_btn::icon_btn_inert("paste-frame", "clipboard", &i18n_wire::tr(core, "frame_paste_frame"), t)
         })
         .child(if copy_range_enabled(core) {
-            crate::rune_sec::icon_btn::icon_btn("range-copy", "list", "Copy range", false, t, |s| {
+            crate::rune_sec::icon_btn::icon_btn("range-copy", "list", &i18n_wire::tr(core, "frame_copy_range"), false, t, |s| {
                 let (from, count) = copy_range_args(&s.core, &s.frame_ops);
                 if s.core.copy_range(from, count) {
                     s.frame_ops.range_copied = true;
                 }
             })
         } else {
-            crate::rune_sec::icon_btn::icon_btn_inert("range-copy", "list", "Copy range", t)
+            crate::rune_sec::icon_btn::icon_btn_inert("range-copy", "list", &i18n_wire::tr(core, "frame_copy_range"), t)
         })
         .child(if paste_range_enabled(ops) {
-            crate::rune_sec::icon_btn::icon_btn("range-paste", "list", "Paste range", false, t, |s| {
+            crate::rune_sec::icon_btn::icon_btn("range-paste", "list", &i18n_wire::tr(core, "frame_paste_range"), false, t, |s| {
                 let at = s.core.current;
                 let before = s.core.status.clone();
                 if !s.core.paste_range(at) && s.core.status == before {
@@ -782,13 +792,13 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
                 }
             })
         } else {
-            crate::rune_sec::icon_btn::icon_btn_inert("range-paste", "list", "Paste range", t)
+            crate::rune_sec::icon_btn::icon_btn_inert("range-paste", "list", &i18n_wire::tr(core, "frame_paste_range"), t)
         })
         .child(if delete_range_enabled(core, ops) {
             crate::rune_sec::icon_btn::icon_btn(
                 "range-del",
                 "trash-can",
-                "Delete range",
+                &i18n_wire::tr(core, "frame_delete_range"),
                 false,
                 t,
                 |s| {
@@ -800,7 +810,7 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
                 },
             )
         } else {
-            crate::rune_sec::icon_btn::icon_btn_inert("range-del", "trash-can", "Delete range", t)
+            crate::rune_sec::icon_btn::icon_btn_inert("range-del", "trash-can", &i18n_wire::tr(core, "frame_delete_range"), t)
         });
 
     // The duration steppers keep their charter order
@@ -820,9 +830,9 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
                 s.core.adjust_frame_duration(DUR_DOWN_FACTOR);
             };
             if can_duration_down(core) {
-                btn("dur-dn", "Dur -", false, t, press)
+                btn("dur-dn", &i18n_wire::tr(core, "frame_dur_down"), false, t, press)
             } else {
-                btn_muted_live("dur-dn", "Dur -", false, t, press)
+                btn_muted_live("dur-dn", &i18n_wire::tr(core, "frame_dur_down"), false, t, press)
             }
         })
         .child(design::stepper_value(&duration_label(core), t))
@@ -831,9 +841,9 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
                 s.core.adjust_frame_duration(DUR_UP_FACTOR);
             };
             if can_duration_up(core) {
-                btn("dur-up", "Dur +", false, t, press)
+                btn("dur-up", &i18n_wire::tr(core, "frame_dur_up"), false, t, press)
             } else {
-                btn_muted_live("dur-up", "Dur +", false, t, press)
+                btn_muted_live("dur-up", &i18n_wire::tr(core, "frame_dur_up"), false, t, press)
             }
         });
 
@@ -848,7 +858,7 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
         .gap(8.0)
         .center_y()
         .child(crate::rune_sec::icons::icon_el("clock", 12.0, t.text_secondary))
-        .child(design::section_label("This frame", t).grow(1.0))
+        .child(design::section_label(&i18n_wire::tr(core, "frame_this_frame"), t).grow(1.0))
         .child(design::stepper_value(&duration_label(core), t))
         .child({
             let press = |s: &mut State| {
@@ -875,9 +885,9 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
                 set_duration_here(&mut s.core, 1.0);
             };
             if can_duration_reset(core) {
-                btn("fop-dur-reset", "Reset 1.0", false, t, press)
+                btn("fop-dur-reset", &i18n_wire::tr(core, "frame_dur_reset"), false, t, press)
             } else {
-                btn_muted_live("fop-dur-reset", "Reset 1.0", false, t, press)
+                btn_muted_live("fop-dur-reset", &i18n_wire::tr(core, "frame_dur_reset"), false, t, press)
             }
         });
 
@@ -890,7 +900,7 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
         .w_full()
         .gap(8.0)
         .center_y()
-        .child(design::section_label("Insert", t).grow(1.0))
+        .child(design::section_label(&i18n_wire::tr(core, "frame_insert"), t).grow(1.0))
         .child({
             // Muted-live, as everywhere fbtn was muted:
             // the handler stays (a press at the bound runs
@@ -923,7 +933,7 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
             crate::rune_sec::icon_btn::icon_btn(
                 "fop-ins-n",
                 "plus",
-                "Insert frames",
+                &i18n_wire::tr(core, "frame_insert_frames"),
                 false,
                 t,
                 |s| {
@@ -932,7 +942,7 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
                 },
             )
         } else {
-            crate::rune_sec::icon_btn::icon_btn_inert("fop-ins-n", "plus", "Insert frames", t)
+            crate::rune_sec::icon_btn::icon_btn_inert("fop-ins-n", "plus", &i18n_wire::tr(core, "frame_insert_frames"), t)
         });
 
     let mut panel = design::panel_col("frames", t)
@@ -941,14 +951,14 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
                 .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(design::panel_title(None, "Frames", None, t)),
+                .child(design::panel_title(None, &i18n_wire::tr(core, "frame_title"), None, t)),
         )
         .child(design::divider(t))
-        .child(design::section_label("Arrange", t))
+        .child(design::section_label(&i18n_wire::tr(core, "frame_arrange"), t))
         .child(arrange)
-        .child(design::section_label("Path", t))
+        .child(design::section_label(&i18n_wire::tr(core, "frame_path"), t))
         .child(path)
-        .child(design::section_label("Clipboard", t))
+        .child(design::section_label(&i18n_wire::tr(core, "frame_clipboard"), t))
         .child(clipboard);
     // The Sel/Loop readout names the range the Clipboard
     // group's range ops act on, so it seats directly
@@ -959,7 +969,7 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
         panel = panel.child(text(label).font(type_::LABEL).color(t.text_secondary));
     }
     panel
-        .child(design::section_label("Dur", t))
+        .child(design::section_label(&i18n_wire::tr(core, "frame_dur"), t))
         .child(dur)
         .child(this_frame)
         .child(insert_row)
@@ -1582,5 +1592,45 @@ mod tests {
         s.core.loop_range = Some((0, 0));
         assert!(range_label(&s.core, &s.frame_ops).is_some());
         let _ = frames_section(&s, &rune::tok::theme(true));
+    }
+
+    #[test]
+    fn frame_ops_i18n_keys_exist_and_match_the_english_labels() {
+        // Wave T (T3): every label in the section resolves
+        // through i18n_wire::tr under a `frame_*` key. This
+        // pin passes only once IA-T3-1's keys land in
+        // src/i18n.rs at integration — until then tr falls
+        // back to the key itself (the Q7 pattern) and both
+        // asserts fail by design.
+        let core = EditorCore::new();
+        for (key, english) in [
+            ("frame_inbetween", "Inbetween"),
+            ("frame_shift_back", "< Shift"),
+            ("frame_shift_fwd", "Shift >"),
+            ("frame_reverse", "Reverse"),
+            ("frame_reverse_all", "Reverse all"),
+            ("frame_swap_prev", "Swap with previous"),
+            ("frame_swap_next", "Swap with next"),
+            ("frame_smooth_path", "Smooth path"),
+            ("frame_copy_frame", "Copy frame"),
+            ("frame_paste_frame", "Paste frame"),
+            ("frame_copy_range", "Copy range"),
+            ("frame_paste_range", "Paste range"),
+            ("frame_delete_range", "Delete range"),
+            ("frame_dur_down", "Dur -"),
+            ("frame_dur_up", "Dur +"),
+            ("frame_this_frame", "This frame"),
+            ("frame_dur_reset", "Reset 1.0"),
+            ("frame_insert", "Insert"),
+            ("frame_insert_frames", "Insert frames"),
+            ("frame_title", "Frames"),
+            ("frame_arrange", "Arrange"),
+            ("frame_path", "Path"),
+            ("frame_clipboard", "Clipboard"),
+            ("frame_dur", "Dur"),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
     }
 }

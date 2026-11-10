@@ -211,19 +211,61 @@
 //! buttons (`export_svg`, `spritesheet`, `export_webm`).
 //! English rendering is therefore unchanged (pinned in
 //! the tests); other languages now localise those five
-//! labels. Every other label stays hardcoded English
-//! for now: some have no catalogue key at all (JPEG,
-//! APNG, the section headings, the bundle buttons) and
-//! some sit next to a key whose value is a different
-//! string (`export_png` is "Export PNG", the button is
-//! "PNG") — wiring those would change the English
-//! label, so they are recorded as gaps in the Wave R
-//! findings (r5.md) for R4 / the integrator instead.
-//! The guidance notes and the composed prose lines
-//! (loop note, effective / output lines, recaps,
-//! history rows) are sentence-length copy with no
-//! catalogue keys; they stay English, the Q14 blurb
-//! precedent. No key, handler or layout changed.
+//! labels.
+//!
+//! Wave S (S1) closes R5's no-key gaps: the catalogue
+//! gained one block of panel-shaped keys (the section
+//! headings `export_sec_*`, `export_jpeg`,
+//! `export_apng`, `export_contact_sheet`,
+//! `export_nodes`, `export_stknds`,
+//! `export_all_frames`, the bundle buttons
+//! `export_bundle_images` / `export_bundle_video`, the
+//! history empty state `export_no_exports_yet` and the
+//! header subtitle `export_subtitle`), and every one
+//! of those labels now renders through `tr` with
+//! English byte-identical. The labels that sit next to
+//! a key whose value is a DIFFERENT string stay
+//! hardcoded by the same rule (`export_png` is
+//! "Export PNG", the button is "PNG"; likewise the
+//! GIF / MP4 / .stk buttons and "Loop range" beside
+//! `export_gif` / `export_mp4` / `export_stk` /
+//! `hud_loop`) — the discrepancies are filed in the
+//! Wave S findings (s1.md) for a catalogue decision,
+//! neither side changed here. The guidance notes and
+//! the composed prose lines (loop note, effective /
+//! output lines, recaps, history rows) are
+//! sentence-length copy with no catalogue keys; they
+//! stay English, the Q14 blurb precedent. No element
+//! key, handler or layout changed.
+//!
+//! Wave T (T1) wires the class-C remainder the R5/S1
+//! passes filed: every row guidance note, the composed
+//! prose lines (loop note, effective / output lines,
+//! the range audio note, the .piv media note, the
+//! sprite note) and the Recent exports row text (age
+//! buckets and the row templates) now render through
+//! `tr` — the prose lines with `{slot}` templates in
+//! the camera `follow_label` idiom, replaced at the
+//! call site — with English byte-identical (the new
+//! keys are IA-T1-1, inserted by the integrator after
+//! the `threed_*` block; until they land the wire falls
+//! back to the key text, the Q7 pattern, and the i18n
+//! pin says so). Two classes stay English by design,
+//! filed in the Wave T findings: the range actions'
+//! `core.status` sentences and the recap builders'
+//! lines are machine-read records, not display copy —
+//! `export_failed` detects failure by the status's
+//! "failed" substring, `recap_severity` classifies the
+//! stored recap by `classify_status`'s English shapes
+//! ("Exported " prefix, " failed"), and the status
+//! sentences mirror the `editor.rs` full ops' wording,
+//! which stays English; translating this panel's half
+//! would break failure detection and severity in every
+//! other language. `ExportOp::name()` likewise stays:
+//! its values are the `{name}` slot data the recaps
+//! interpolate (format names, plus "sheet" / "contact
+//! sheet" riding as data), not label sites. No element
+//! key, handler or layout changed.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -285,11 +327,16 @@ pub fn range_target(core: &EditorCore, use_range: bool) -> Option<(usize, usize)
 /// the export) while WebM stays silent.
 pub fn loop_note(core: &EditorCore) -> Option<String> {
     let (a, b) = range_target(core, true)?;
-    Some(format!(
-        "Loop range: frames {}–{} — with \"Loop range\" selected below, the PNG/JPEG/SVG/spritesheet/contact sheet/GIF/APNG/MP4/WebM exports write only those frames (a range MP4 includes audio from WAV and other ffmpeg-readable clips inside the range — a clip whose file cannot be probed or decoded fails the export; WebM is video-only in every mode).",
-        a + 1,
-        b + 1
-    ))
+    // Wave T (T1): the sentence is a catalogue template
+    // (`export_loop_note`, IA-T1-1) with `{from}` / `{to}`
+    // slots, the camera `follow_label` idiom; in English
+    // the composed line is byte-identical to the pre-wire
+    // literal.
+    Some(
+        i18n_wire::tr(core, "export_loop_note")
+            .replace("{from}", &(a + 1).to_string())
+            .replace("{to}", &(b + 1).to_string()),
+    )
 }
 
 /// The line under the range toggle stating what the next
@@ -299,18 +346,21 @@ pub fn loop_note(core: &EditorCore) -> Option<String> {
 pub fn effective_text(core: &EditorCore, use_range: bool) -> String {
     let n = core.project.frames.len();
     if n == 0 {
-        return "The project has no frames to export.".into();
+        return i18n_wire::tr(core, "export_effective_none");
     }
+    // Wave T (T1): each branch is a catalogue string
+    // (IA-T1-1) — the two range branches are `{from}` /
+    // `{to}` / `{count}` templates composed here, the
+    // camera `follow_label` idiom; English output is
+    // byte-identical to the pre-wire literals.
     match (use_range, range_target(core, true)) {
-        (true, Some((a, b))) => format!(
-            "Range-capable exports write frames {}–{} (the loop range); other formats export in full.",
-            a + 1,
-            b + 1
-        ),
-        (true, None) => {
-            "Loop range selected, but no loop range is set — exports write all frames. Set a loop range in the timeline first.".into()
+        (true, Some((a, b))) => i18n_wire::tr(core, "export_effective_range")
+            .replace("{from}", &(a + 1).to_string())
+            .replace("{to}", &(b + 1).to_string()),
+        (true, None) => i18n_wire::tr(core, "export_effective_no_range"),
+        (false, _) => {
+            i18n_wire::tr(core, "export_effective_all").replace("{count}", &n.to_string())
         }
-        (false, _) => format!("Exports write all {n} frames."),
     }
 }
 
@@ -341,12 +391,16 @@ pub fn output_text(core: &EditorCore, use_range: bool) -> String {
         None => core.project.frames.len(),
     };
     let [w, h] = core.project.stage;
-    format!(
-        "Output: {frames} frames · {}×{} · {} fps",
-        fmt_measure(w),
-        fmt_measure(h),
-        fmt_measure(core.project.fps)
-    )
+    // Wave T (T1): a catalogue template (`export_output`,
+    // IA-T1-1) with `{frames}` / `{width}` / `{height}` /
+    // `{fps}` slots; the measures keep this panel's
+    // `fmt_measure` formatting, and the English line is
+    // byte-identical to the pre-wire format.
+    i18n_wire::tr(core, "export_output")
+        .replace("{frames}", &frames.to_string())
+        .replace("{width}", &fmt_measure(w))
+        .replace("{height}", &fmt_measure(h))
+        .replace("{fps}", &fmt_measure(core.project.fps))
 }
 
 /// The exact wording of the range-mode audio note
@@ -360,6 +414,11 @@ pub fn output_text(core: &EditorCore, use_range: bool) -> String {
 /// than being dropped silently. The WebM path never
 /// muxes in any mode — the wording names that limit so
 /// it cannot imply a fully sounding range export either.
+/// Wave T (T1): the panel renders the catalogue key
+/// `export_range_audio_note` (IA-T1-1), whose English
+/// value is this constant — the constant stays as the
+/// canonical English wording, and the i18n pin holds
+/// the two equal.
 pub const RANGE_AUDIO_NOTE: &str =
     "Range MP4 exports include audio from WAV and other ffmpeg-readable clips cut to the range — a clip whose file cannot be probed or decoded fails the export instead of being left out silently, and range WebM exports are silent.";
 
@@ -416,20 +475,14 @@ pub fn project_has_segment_media(core: &EditorCore) -> bool {
 pub fn piv_media_note(core: &EditorCore) -> Option<String> {
     let segment_media = project_has_segment_media(core);
     let instances = !core.project.sprites.is_empty() || !core.project.texts.is_empty();
+    // Wave T (T1): each variant is a catalogue string
+    // (IA-T1-1) whose English value is the pre-wire
+    // literal, byte for byte.
     match (segment_media, instances) {
         (false, false) => None,
-        (true, false) => Some(
-            "Media note: .piv v2/v3/v4 export image and text segments as plain segments — only v5 keeps segment media."
-                .into(),
-        ),
-        (false, true) => Some(
-            "Media note: no .piv version writes sprite or text instances — they are left out of .piv exports."
-                .into(),
-        ),
-        (true, true) => Some(
-            "Media note: .piv v2/v3/v4 export image and text segments as plain segments (only v5 keeps them), and no .piv version writes sprite or text instances — they are left out of .piv exports."
-                .into(),
-        ),
+        (true, false) => Some(i18n_wire::tr(core, "export_piv_note_segments")),
+        (false, true) => Some(i18n_wire::tr(core, "export_piv_note_instances")),
+        (true, true) => Some(i18n_wire::tr(core, "export_piv_note_both")),
     }
 }
 
@@ -466,10 +519,10 @@ pub fn project_has_sprites(core: &EditorCore) -> bool {
 /// project shows nothing, so its panel is unchanged.
 pub fn sprite_note(core: &EditorCore) -> Option<String> {
     if project_has_sprites(core) {
-        Some(
-            "Sprite note: .stk and .nodes carry only the selected figure, so project sprite instances are left out of those two exports. .stknds carries the sprite tracks (on re-import, groups come back as plain images and text instances are not carried)."
-                .into(),
-        )
+        // Wave T (T1): a catalogue string
+        // (`export_sprite_note`, IA-T1-1) whose English
+        // value is the pre-wire literal, byte for byte.
+        Some(i18n_wire::tr(core, "export_sprite_note"))
     } else {
         None
     }
@@ -1156,16 +1209,23 @@ pub fn format_size(bytes: u64) -> String {
 /// coarsest bucket that fits: "just now" under a minute
 /// (and for future mtimes — clock skew is not the user's
 /// problem to read), then whole minutes, hours, days.
-pub fn age_label(now: SystemTime, mtime: SystemTime) -> String {
+/// Wave T (T1): the buckets render through the
+/// catalogue (`export_age_*`, IA-T1-1 — the counted
+/// buckets are `{count}` templates), so the function
+/// takes the core the way `follow_label` does; English
+/// output is byte-identical to the pre-wire literals.
+pub fn age_label(core: &EditorCore, now: SystemTime, mtime: SystemTime) -> String {
     let secs = now.duration_since(mtime).map(|d| d.as_secs()).unwrap_or(0);
     if secs < 60 {
-        "just now".into()
+        i18n_wire::tr(core, "export_age_now")
     } else if secs < 60 * 60 {
-        format!("{} min ago", secs / 60)
+        i18n_wire::tr(core, "export_age_min").replace("{count}", &(secs / 60).to_string())
     } else if secs < 24 * 60 * 60 {
-        format!("{} h ago", secs / (60 * 60))
+        i18n_wire::tr(core, "export_age_hour")
+            .replace("{count}", &(secs / (60 * 60)).to_string())
     } else {
-        format!("{} d ago", secs / (24 * 60 * 60))
+        i18n_wire::tr(core, "export_age_day")
+            .replace("{count}", &(secs / (24 * 60 * 60)).to_string())
     }
 }
 
@@ -1173,23 +1233,25 @@ pub fn age_label(now: SystemTime, mtime: SystemTime) -> String {
 /// file count named after the name for a collapsed
 /// sequence row ("export/frame-*.png · 30 files · …"),
 /// so the row says it stands for a sequence, not a file
-/// literally named with an asterisk.
-pub fn row_line(row: &ExportRow, now: SystemTime) -> String {
+/// literally named with an asterisk. Wave T (T1): the
+/// two shapes are catalogue templates
+/// (`export_history_row*`, IA-T1-1) with `{name}` /
+/// `{count}` / `{size}` / `{age}` slots — the name,
+/// size and age ride as slot data (a path, a byte
+/// count, the `age_label` line), the frame words are
+/// the template's; English output is byte-identical.
+pub fn row_line(core: &EditorCore, row: &ExportRow, now: SystemTime) -> String {
     if row.count > 1 {
-        format!(
-            "{} · {} files · {} · {}",
-            row.name,
-            row.count,
-            format_size(row.size),
-            age_label(now, row.mtime)
-        )
+        i18n_wire::tr(core, "export_history_row_files")
+            .replace("{name}", &row.name)
+            .replace("{count}", &row.count.to_string())
+            .replace("{size}", &format_size(row.size))
+            .replace("{age}", &age_label(core, now, row.mtime))
     } else {
-        format!(
-            "{} · {} · {}",
-            row.name,
-            format_size(row.size),
-            age_label(now, row.mtime)
-        )
+        i18n_wire::tr(core, "export_history_row")
+            .replace("{name}", &row.name)
+            .replace("{size}", &format_size(row.size))
+            .replace("{age}", &age_label(core, now, row.mtime))
     }
 }
 
@@ -1381,8 +1443,8 @@ pub fn recent_exports_cached() -> Vec<ExportRow> {
 fn plain_row(
     key: &'static str,
     icon: Option<&str>,
-    label: &'static str,
-    note: &'static str,
+    label: &str,
+    note: &str,
     t: &Theme,
     op: fn(&mut EditorCore),
     recap_name: &'static str,
@@ -1427,7 +1489,7 @@ fn range_row(
     key: &'static str,
     icon: &str,
     label: &str,
-    note: &'static str,
+    note: &str,
     t: &Theme,
     action: fn(&mut State),
 ) -> El {
@@ -1453,8 +1515,8 @@ fn range_row(
 fn bundle_row(
     key: &'static str,
     icon: &str,
-    label: &'static str,
-    note: &'static str,
+    label: &str,
+    note: &str,
     t: &Theme,
     kind: BundleKind,
 ) -> El {
@@ -1508,7 +1570,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
     );
     panel = panel.child(design::divider(t));
     panel = panel.child(
-        text("Export centre — every format in one place")
+        text(i18n_wire::tr(core, "export_subtitle"))
             .font(type_::LABEL)
             .color(t.text_secondary),
     );
@@ -1530,7 +1592,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
                 .font(type_::LABEL)
                 .color(t.text),
         )
-        .child(btn("xc-range-all", "All frames", !use_range, t, |s| {
+        .child(btn("xc-range-all", &i18n_wire::tr(core, "export_all_frames"), !use_range, t, |s| {
             s.export_use_range = false;
         }))
         .child(btn("xc-range-loop", "Loop range", use_range, t, |s| {
@@ -1539,7 +1601,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
     panel = panel.child(toggle);
     if range_audio_note_shown(core, use_range) {
         panel = panel.child(
-            text(RANGE_AUDIO_NOTE)
+            text(i18n_wire::tr(core, "export_range_audio_note"))
                 .key("xc-range-audio-note")
                 .font(type_::LABEL)
                 .color(t.text_secondary)
@@ -1568,21 +1630,21 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
                 .gap(6.0)
                 .center_y()
                 .child(icon_el("image", 12.0, t.text_secondary))
-                .child(design::section_label("Images", t)),
+                .child(design::section_label(&i18n_wire::tr(core, "export_sec_images"), t)),
         )
         .child(range_row(
             "xc-png",
             "image",
             "PNG",
-            "PNG image sequence — one file per frame in ./export/",
+            &i18n_wire::tr(core, "export_note_png"),
             t,
             export_png_action,
         ))
         .child(range_row(
             "xc-jpeg",
             "image",
-            "JPEG",
-            "JPEG image sequence in out/jpeg/ (out/, not export/)",
+            &i18n_wire::tr(core, "export_jpeg"),
+            &i18n_wire::tr(core, "export_note_jpeg"),
             t,
             export_jpeg_action,
         ))
@@ -1590,7 +1652,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "xc-svg",
             "image",
             &i18n_wire::tr(core, "export_svg"),
-            "One SVG per frame in ./export/svg/",
+            &i18n_wire::tr(core, "export_note_svg"),
             t,
             export_svg_action,
         ))
@@ -1598,15 +1660,15 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "xc-sheet",
             "table-cells-large",
             &i18n_wire::tr(core, "spritesheet"),
-            "Frames on one sheet — ./export/spritesheet.png",
+            &i18n_wire::tr(core, "export_note_sheet"),
             t,
             export_sheet_action,
         ))
         .child(range_row(
             "xc-contact",
             "table-cells-large",
-            "Contact sheet",
-            "Frames as one tile sheet — ./export/contact-sheet.png",
+            &i18n_wire::tr(core, "export_contact_sheet"),
+            &i18n_wire::tr(core, "export_note_contact"),
             t,
             export_contact_action,
         ));
@@ -1619,21 +1681,21 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
                 .gap(6.0)
                 .center_y()
                 .child(icon_el("film", 12.0, t.text_secondary))
-                .child(design::section_label("Animation", t)),
+                .child(design::section_label(&i18n_wire::tr(core, "export_sec_animation"), t)),
         )
         .child(range_row(
             "xc-gif",
             "film",
             "GIF",
-            "Animated GIF — ./export/animation.gif",
+            &i18n_wire::tr(core, "export_note_gif"),
             t,
             export_gif_action,
         ))
         .child(range_row(
             "xc-apng",
             "film",
-            "APNG",
-            "Animated PNG — out/animation.apng (out/, not export/)",
+            &i18n_wire::tr(core, "export_apng"),
+            &i18n_wire::tr(core, "export_note_apng"),
             t,
             export_apng_action,
         ));
@@ -1646,13 +1708,13 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
                 .gap(6.0)
                 .center_y()
                 .child(icon_el("video", 12.0, t.text_secondary))
-                .child(design::section_label("Video", t)),
+                .child(design::section_label(&i18n_wire::tr(core, "export_sec_video"), t)),
         )
         .child(range_row(
             "xc-mp4",
             "video",
             "MP4",
-            "MP4 video via ffmpeg — ./export/animation.mp4 (full export includes audio; range export includes audio from clips inside the range — WAV or any other ffmpeg-readable format; a clip file that cannot be probed or decoded fails the range export)",
+            &i18n_wire::tr(core, "export_note_mp4"),
             t,
             export_mp4_action,
         ))
@@ -1660,7 +1722,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "xc-webm",
             "video",
             &i18n_wire::tr(core, "export_webm"),
-            "WebM video (VP9) — ./export/animation.webm (video-only — WebM never includes audio)",
+            &i18n_wire::tr(core, "export_note_webm"),
             t,
             export_webm_action,
         ));
@@ -1668,12 +1730,12 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
 
     let mut formats = col()
         .gap(6.0)
-        .child(design::section_label("Project formats", t))
+        .child(design::section_label(&i18n_wire::tr(core, "export_sec_project_formats"), t))
         .child(plain_row(
             "xc-v2",
             None,
             ".piv v2",
-            "Pivot v2 project — ./export/animation-v2.piv",
+            &i18n_wire::tr(core, "export_note_piv2"),
             t,
             EditorCore::export_piv2,
             ".piv v2",
@@ -1683,7 +1745,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "xc-v3",
             None,
             ".piv v3",
-            "Pivot v3 project — ./export/animation.piv",
+            &i18n_wire::tr(core, "export_note_piv3"),
             t,
             EditorCore::export_piv,
             ".piv v3",
@@ -1693,7 +1755,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "xc-v4",
             None,
             ".piv v4",
-            "Pivot v4 project — ./export/animation-v4.piv",
+            &i18n_wire::tr(core, "export_note_piv4"),
             t,
             EditorCore::export_piv4,
             ".piv v4",
@@ -1703,7 +1765,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "xc-v5",
             None,
             ".piv v5",
-            "Pivot v5 project — out/animation-v5.piv (out/, not export/)",
+            &i18n_wire::tr(core, "export_note_piv5"),
             t,
             EditorCore::export_v5_file,
             ".piv v5",
@@ -1729,7 +1791,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "xc-stk",
             None,
             ".stk",
-            "Selected figure only — ./export/<figure>.stk",
+            &i18n_wire::tr(core, "export_note_stk"),
             t,
             EditorCore::export_stk,
             ".stk",
@@ -1738,8 +1800,8 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         .child(plain_row(
             "xc-nodes",
             None,
-            ".nodes",
-            "Selected figure for Stick Nodes — ./export/<figure>.nodes",
+            &i18n_wire::tr(core, "export_nodes"),
+            &i18n_wire::tr(core, "export_note_nodes"),
             t,
             EditorCore::export_nodes,
             ".nodes",
@@ -1748,8 +1810,8 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         .child(plain_row(
             "xc-stknds",
             None,
-            ".stknds",
-            "Whole project for Stick Nodes — ./export/animation.stknds",
+            &i18n_wire::tr(core, "export_stknds"),
+            &i18n_wire::tr(core, "export_note_stknds"),
             t,
             EditorCore::export_stknds,
             ".stknds",
@@ -1774,20 +1836,20 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
 
     let bundles = col()
         .gap(6.0)
-        .child(design::section_label("Bundles", t))
+        .child(design::section_label(&i18n_wire::tr(core, "export_sec_bundles"), t))
         .child(bundle_row(
             "xc-bundle-images",
             "image",
-            "Export all images",
-            "PNG + JPEG + SVG + spritesheet in one press. Bundles always export in full — the range toggle above applies only to the single-format buttons.",
+            &i18n_wire::tr(core, "export_bundle_images"),
+            &i18n_wire::tr(core, "export_note_bundle_images"),
             t,
             BundleKind::Images,
         ))
         .child(bundle_row(
             "xc-bundle-video",
             "video",
-            "Export all video",
-            "MP4 + WebM in one press, full exports (the MP4 keeps its audio). Bundles always export in full — the range toggle above applies only to the single-format buttons.",
+            &i18n_wire::tr(core, "export_bundle_video"),
+            &i18n_wire::tr(core, "export_note_bundle_video"),
             t,
             BundleKind::Video,
         ));
@@ -1828,21 +1890,21 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
                 .gap(6.0)
                 .center_y()
                 .child(icon_el("clock", 12.0, t.text_secondary))
-                .child(design::section_label("Recent exports", t)),
+                .child(design::section_label(&i18n_wire::tr(core, "export_sec_recent"), t)),
         )
         .key("xc-history");
     let history = recent_exports_cached();
     if history.is_empty() {
         recent = recent.child(design::empty_state(
             "clock",
-            "No exports yet",
+            &i18n_wire::tr(core, "export_no_exports_yet"),
             t,
         ));
     } else {
         let now = SystemTime::now();
         for r in &history {
             recent = recent.child(
-                text(row_line(r, now))
+                text(row_line(core, r, now))
                     .font(type_::LABEL)
                     .color(t.text_secondary)
                     .wrap()
@@ -1877,6 +1939,58 @@ mod tests {
             ("export_svg", "SVG"),
             ("spritesheet", "Spritesheet"),
             ("export_webm", "WebM"),
+            // Wave S (S1): the block added for R5's filed
+            // gaps — each new key's English value is the
+            // pre-wire literal at its call site.
+            ("export_sec_images", "Images"),
+            ("export_sec_animation", "Animation"),
+            ("export_sec_video", "Video"),
+            ("export_sec_project_formats", "Project formats"),
+            ("export_sec_bundles", "Bundles"),
+            ("export_sec_recent", "Recent exports"),
+            ("export_jpeg", "JPEG"),
+            ("export_apng", "APNG"),
+            ("export_contact_sheet", "Contact sheet"),
+            ("export_nodes", ".nodes"),
+            ("export_stknds", ".stknds"),
+            ("export_all_frames", "All frames"),
+            ("export_bundle_images", "Export all images"),
+            ("export_bundle_video", "Export all video"),
+            ("export_no_exports_yet", "No exports yet"),
+            ("export_subtitle", "Export centre — every format in one place"),
+            // Wave T (T1, IA-T1-1): the class-C plain
+            // strings — every row guidance note, the
+            // static prose lines, the age bucket word.
+            // This half of the pin passes only once the
+            // integrator inserts the keys (the Q7
+            // pattern): until then `tr` falls back to
+            // the key text and `key_in_table` is false.
+            ("export_note_png", "PNG image sequence — one file per frame in ./export/"),
+            ("export_note_jpeg", "JPEG image sequence in out/jpeg/ (out/, not export/)"),
+            ("export_note_svg", "One SVG per frame in ./export/svg/"),
+            ("export_note_sheet", "Frames on one sheet — ./export/spritesheet.png"),
+            ("export_note_contact", "Frames as one tile sheet — ./export/contact-sheet.png"),
+            ("export_note_gif", "Animated GIF — ./export/animation.gif"),
+            ("export_note_apng", "Animated PNG — out/animation.apng (out/, not export/)"),
+            ("export_note_mp4", "MP4 video via ffmpeg — ./export/animation.mp4 (full export includes audio; range export includes audio from clips inside the range — WAV or any other ffmpeg-readable format; a clip file that cannot be probed or decoded fails the range export)"),
+            ("export_note_webm", "WebM video (VP9) — ./export/animation.webm (video-only — WebM never includes audio)"),
+            ("export_note_piv2", "Pivot v2 project — ./export/animation-v2.piv"),
+            ("export_note_piv3", "Pivot v3 project — ./export/animation.piv"),
+            ("export_note_piv4", "Pivot v4 project — ./export/animation-v4.piv"),
+            ("export_note_piv5", "Pivot v5 project — out/animation-v5.piv (out/, not export/)"),
+            ("export_note_stk", "Selected figure only — ./export/<figure>.stk"),
+            ("export_note_nodes", "Selected figure for Stick Nodes — ./export/<figure>.nodes"),
+            ("export_note_stknds", "Whole project for Stick Nodes — ./export/animation.stknds"),
+            ("export_note_bundle_images", "PNG + JPEG + SVG + spritesheet in one press. Bundles always export in full — the range toggle above applies only to the single-format buttons."),
+            ("export_note_bundle_video", "MP4 + WebM in one press, full exports (the MP4 keeps its audio). Bundles always export in full — the range toggle above applies only to the single-format buttons."),
+            ("export_effective_none", "The project has no frames to export."),
+            ("export_effective_no_range", "Loop range selected, but no loop range is set — exports write all frames. Set a loop range in the timeline first."),
+            ("export_range_audio_note", "Range MP4 exports include audio from WAV and other ffmpeg-readable clips cut to the range — a clip whose file cannot be probed or decoded fails the export instead of being left out silently, and range WebM exports are silent."),
+            ("export_piv_note_segments", "Media note: .piv v2/v3/v4 export image and text segments as plain segments — only v5 keeps segment media."),
+            ("export_piv_note_instances", "Media note: no .piv version writes sprite or text instances — they are left out of .piv exports."),
+            ("export_piv_note_both", "Media note: .piv v2/v3/v4 export image and text segments as plain segments (only v5 keeps them), and no .piv version writes sprite or text instances — they are left out of .piv exports."),
+            ("export_sprite_note", "Sprite note: .stk and .nodes carry only the selected figure, so project sprite instances are left out of those two exports. .stknds carries the sprite tracks (on re-import, groups come back as plain images and text instances are not carried)."),
+            ("export_age_now", "just now"),
         ] {
             assert!(
                 crate::rune_sec::i18n_wire::key_in_table(key),
@@ -1898,6 +2012,60 @@ mod tests {
     }
 
     #[test]
+    fn class_c_templates_exist_and_compose_byte_identically() {
+        // Wave T (T1, IA-T1-1): the class-C template
+        // keys — the English value of each is the
+        // template itself, slots included, and the
+        // composing helpers replace the slots with the
+        // same values the pre-wire `format!` calls
+        // interpolated, so the composed English lines
+        // are byte-identical. Like the plain half of
+        // the pin above, this passes only once the
+        // integrator inserts the keys (the Q7 pattern).
+        let mut core = EditorCore::new();
+        for (key, template) in [
+            ("export_loop_note", "Loop range: frames {from}–{to} — with \"Loop range\" selected below, the PNG/JPEG/SVG/spritesheet/contact sheet/GIF/APNG/MP4/WebM exports write only those frames (a range MP4 includes audio from WAV and other ffmpeg-readable clips inside the range — a clip whose file cannot be probed or decoded fails the export; WebM is video-only in every mode)."),
+            ("export_effective_range", "Range-capable exports write frames {from}–{to} (the loop range); other formats export in full."),
+            ("export_effective_all", "Exports write all {count} frames."),
+            ("export_output", "Output: {frames} frames · {width}×{height} · {fps} fps"),
+            ("export_age_min", "{count} min ago"),
+            ("export_age_hour", "{count} h ago"),
+            ("export_age_day", "{count} d ago"),
+            ("export_history_row", "{name} · {size} · {age}"),
+            ("export_history_row_files", "{name} · {count} files · {size} · {age}"),
+        ] {
+            assert!(
+                crate::rune_sec::i18n_wire::key_in_table(key),
+                "{key} must exist in the i18n table"
+            );
+            assert_eq!(
+                crate::rune_sec::i18n_wire::tr(&core, key),
+                template,
+                "{key} must carry its slots in English"
+            );
+        }
+        // Composed spot checks through the public
+        // helpers: the loop note with a set range, and
+        // a counted history row — the exact pre-wire
+        // sentences.
+        core.loop_range = Some((1, 2));
+        assert_eq!(
+            loop_note(&core).expect("note with a loop range set"),
+            "Loop range: frames 2–3 — with \"Loop range\" selected below, the PNG/JPEG/SVG/spritesheet/contact sheet/GIF/APNG/MP4/WebM exports write only those frames (a range MP4 includes audio from WAV and other ffmpeg-readable clips inside the range — a clip whose file cannot be probed or decoded fails the export; WebM is video-only in every mode)."
+        );
+        let row = ExportRow {
+            name: "export/frame-*.png".into(),
+            size: 600,
+            mtime: at(300),
+            count: 3,
+        };
+        assert_eq!(
+            row_line(&core, &row, at(300)),
+            "export/frame-*.png · 3 files · 600 B · just now"
+        );
+    }
+
+    #[test]
     fn wired_labels_follow_the_core_language() {
         // The wire is live, not a fallback coincidence: in
         // Bengali the translated keys resolve from the real
@@ -1911,6 +2079,15 @@ mod tests {
         assert_eq!(crate::rune_sec::i18n_wire::tr(&core, "spritesheet"), "স্প্রাইটশিট");
         assert_eq!(crate::rune_sec::i18n_wire::tr(&core, "export_svg"), "SVG");
         assert_eq!(crate::rune_sec::i18n_wire::tr(&core, "export_webm"), "WebM");
+        // Wave S (S1) keys: the BN table carries genuine
+        // translations for the new block (values read from
+        // src/i18n.rs); the format names and extensions
+        // stay in Latin script there too.
+        assert_eq!(crate::rune_sec::i18n_wire::tr(&core, "export_sec_images"), "ছবি");
+        assert_eq!(crate::rune_sec::i18n_wire::tr(&core, "export_all_frames"), "সব ফ্রেম");
+        assert_eq!(crate::rune_sec::i18n_wire::tr(&core, "export_no_exports_yet"), "এখনও কোনো এক্সপোর্ট নেই");
+        assert_eq!(crate::rune_sec::i18n_wire::tr(&core, "export_jpeg"), "JPEG");
+        assert_eq!(crate::rune_sec::i18n_wire::tr(&core, "export_nodes"), ".nodes");
     }
 
     #[test]
@@ -2207,18 +2384,24 @@ mod tests {
 
     #[test]
     fn age_label_buckets_by_coarsest_unit() {
+        // Wave T (T1): the buckets render through the
+        // catalogue now, so the test drives them with an
+        // English core — the strings asserted are the
+        // pre-wire literals, byte for byte (they hold
+        // once IA-T1-1 lands the keys; the Q7 pattern).
+        let core = EditorCore::new();
         let now = at(10 * 24 * 60 * 60);
-        assert_eq!(age_label(now, now), "just now");
-        assert_eq!(age_label(now, at(10 * 24 * 60 * 60 - 59)), "just now");
-        assert_eq!(age_label(now, at(10 * 24 * 60 * 60 - 60)), "1 min ago");
-        assert_eq!(age_label(now, at(10 * 24 * 60 * 60 - 45 * 60)), "45 min ago");
-        assert_eq!(age_label(now, at(10 * 24 * 60 * 60 - 60 * 60)), "1 h ago");
-        assert_eq!(age_label(now, at(10 * 24 * 60 * 60 - 23 * 60 * 60)), "23 h ago");
-        assert_eq!(age_label(now, at(10 * 24 * 60 * 60 - 24 * 60 * 60)), "1 d ago");
-        assert_eq!(age_label(now, at(10 * 24 * 60 * 60 - 3 * 24 * 60 * 60)), "3 d ago");
+        assert_eq!(age_label(&core, now, now), "just now");
+        assert_eq!(age_label(&core, now, at(10 * 24 * 60 * 60 - 59)), "just now");
+        assert_eq!(age_label(&core, now, at(10 * 24 * 60 * 60 - 60)), "1 min ago");
+        assert_eq!(age_label(&core, now, at(10 * 24 * 60 * 60 - 45 * 60)), "45 min ago");
+        assert_eq!(age_label(&core, now, at(10 * 24 * 60 * 60 - 60 * 60)), "1 h ago");
+        assert_eq!(age_label(&core, now, at(10 * 24 * 60 * 60 - 23 * 60 * 60)), "23 h ago");
+        assert_eq!(age_label(&core, now, at(10 * 24 * 60 * 60 - 24 * 60 * 60)), "1 d ago");
+        assert_eq!(age_label(&core, now, at(10 * 24 * 60 * 60 - 3 * 24 * 60 * 60)), "3 d ago");
         // A future mtime (clock skew) reads as "just now",
         // never as a negative age.
-        assert_eq!(age_label(now, at(10 * 24 * 60 * 60 + 3600)), "just now");
+        assert_eq!(age_label(&core, now, at(10 * 24 * 60 * 60 + 3600)), "just now");
     }
 
     #[test]
@@ -2313,7 +2496,7 @@ mod tests {
         // The row line names the count, so the asterisk
         // name cannot be mistaken for a literal file.
         assert_eq!(
-            row_line(&rows[1], at(300)),
+            row_line(&EditorCore::new(), &rows[1], at(300)),
             "export/frame-*.png · 3 files · 600 B · just now"
         );
     }
@@ -2347,7 +2530,7 @@ mod tests {
         assert_eq!(rows[1].name, "out/jpeg");
         assert_eq!(rows[1].count, 24);
         assert_eq!(
-            row_line(&rows[1], at(500 + 60)),
+            row_line(&EditorCore::new(), &rows[1], at(500 + 60)),
             "out/jpeg · 24 files · 4.0 KB · 1 min ago"
         );
     }
@@ -2361,7 +2544,7 @@ mod tests {
             count: 1,
         };
         assert_eq!(
-            row_line(&row, at(1000 + 2 * 60 * 60)),
+            row_line(&EditorCore::new(), &row, at(1000 + 2 * 60 * 60)),
             "export/animation.mp4 · 1.5 KB · 2 h ago"
         );
     }

@@ -203,6 +203,26 @@
 //! at realistic values and every marker stays inside
 //! the card. Keys and handlers are unchanged
 //! throughout.
+//!
+//! Wave T (T5): the panel's labels resolve through
+//! `i18n_wire::tr` (the subtitle/camera/3D idiom) —
+//! the lane title and empty state, the nudge row, and
+//! the inspector's captions, steppers, icon buttons,
+//! colour sections and anchor row — English
+//! byte-identical, element keys untouched, pinned by
+//! `fx_i18n_keys_exist_and_match_the_english_labels`.
+//! The keys land via IA-T5-1. Locale-invariant
+//! notation stays literal by design (the R6
+//! precedent): the `-10` / `+10` / `-0.1s` / `+0.1s`
+//! step magnitudes and the `-` / `+` steppers. The
+//! composed readouts (`window_text`, `clip_readout`,
+//! `lane_count_text`, the inspector's title/summary
+//! lines) are dynamic text, not labels, and stay
+//! English this wave; so do the kind names — the
+//! snake-case name is the engine's serialised/MCP
+//! vocabulary (`fx_edit::kind_name`), and its display
+//! form is `fx_browser::kind_label`'s, another
+//! module's surface.
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, el, row, text, Color, Drag, El, LineCap, Phase, ScrollSpec, Shape, Tx};
@@ -215,6 +235,7 @@ use stykanimate_rs::vfx::ClipKind;
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
 use crate::rune_sec::fx_browser::kind_label;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn, icon_only_btn_inert};
 use crate::rune_sec::icons::{icon_el, icon_width};
 use crate::stage_view::hex_color;
@@ -1338,7 +1359,7 @@ pub fn fx_lane(s: &State, t: &Theme) -> El {
     if rows.is_empty() {
         list = list.child(design::empty_state(
             "wand-magic-sparkles",
-            "No FX clips in this project.",
+            &i18n_wire::tr(&s.core, "fx_no_clips"),
             t,
         ));
     }
@@ -1458,7 +1479,7 @@ pub fn fx_lane(s: &State, t: &Theme) -> El {
                 .center_y()
                 .child(design::panel_title(
                     Some("wand-magic-sparkles"),
-                    "FX clips",
+                    &i18n_wire::tr(&s.core, "fx_title"),
                     Some(&count),
                     t,
                 )),
@@ -1487,7 +1508,7 @@ pub fn fx_lane(s: &State, t: &Theme) -> El {
 pub fn nudge_row(s: &State, t: &Theme) -> El {
     let Some(sel) = valid_selection(s.fx_selected, s.core.project.fx_clips.len()) else {
         return row().key("fx-nudge").w_full().child(
-            text("Select an FX clip to edit it.")
+            text(i18n_wire::tr(&s.core, "fx_select_clip_to_edit"))
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         );
@@ -1510,7 +1531,7 @@ pub fn nudge_row(s: &State, t: &Theme) -> El {
                 .gap(8.0)
                 .center_y()
                 .child(
-                    text("Nudge")
+                    text(i18n_wire::tr(&s.core, "fx_nudge"))
                         .font(type_::LABEL)
                         .color(t.text_secondary),
                 )
@@ -1526,18 +1547,18 @@ pub fn nudge_row(s: &State, t: &Theme) -> El {
                     |s| nudge_start(s, -10),
                 ))
                 .child(if start_step_live(start, frames, -1) {
-                    icon_only_btn("fx-nudge-l", "chevron-left", "Nudge earlier", 26.0, false, t, |s| {
+                    icon_only_btn("fx-nudge-l", "chevron-left", &i18n_wire::tr(&s.core, "fx_nudge_earlier"), 26.0, false, t, |s| {
                         nudge_start(s, -1)
                     })
                 } else {
-                    icon_only_btn_inert("fx-nudge-l", "chevron-left", "Nudge earlier", 26.0, t)
+                    icon_only_btn_inert("fx-nudge-l", "chevron-left", &i18n_wire::tr(&s.core, "fx_nudge_earlier"), 26.0, t)
                 })
                 .child(if start_step_live(start, frames, 1) {
-                    icon_only_btn("fx-nudge-r", "chevron-right", "Nudge later", 26.0, false, t, |s| {
+                    icon_only_btn("fx-nudge-r", "chevron-right", &i18n_wire::tr(&s.core, "fx_nudge_later"), 26.0, false, t, |s| {
                         nudge_start(s, 1)
                     })
                 } else {
-                    icon_only_btn_inert("fx-nudge-r", "chevron-right", "Nudge later", 26.0, t)
+                    icon_only_btn_inert("fx-nudge-r", "chevron-right", &i18n_wire::tr(&s.core, "fx_nudge_later"), 26.0, t)
                 })
                 .child(design::step_btn(
                     "fx-nudge-r10",
@@ -1556,7 +1577,7 @@ pub fn nudge_row(s: &State, t: &Theme) -> El {
                 .gap(8.0)
                 .center_y()
                 .child(
-                    text("Dur")
+                    text(i18n_wire::tr(&s.core, "fx_duration_short"))
                         .font(type_::LABEL)
                         .color(t.text_secondary),
                 )
@@ -1646,11 +1667,11 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                 .gap(8.0)
                 .center_y()
                 .child(
-                    text("Kind")
+                    text(i18n_wire::tr(&s.core, "fx_kind"))
                         .font(type_::LABEL)
                         .color(t.text_secondary),
                 )
-                .child(icon_only_btn("fx-kind-prev", "chevron-left", "Previous kind", 26.0, false, t, |s| {
+                .child(icon_only_btn("fx-kind-prev", "chevron-left", &i18n_wire::tr(&s.core, "fx_previous_kind"), 26.0, false, t, |s| {
                     cycle_selected_kind(s, -1)
                 }))
                 .child(
@@ -1658,7 +1679,7 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                         .font(type_::BODY)
                         .color(t.text),
                 )
-                .child(icon_only_btn("fx-kind-next", "chevron-right", "Next kind", 26.0, false, t, |s| {
+                .child(icon_only_btn("fx-kind-next", "chevron-right", &i18n_wire::tr(&s.core, "fx_next_kind"), 26.0, false, t, |s| {
                     cycle_selected_kind(s, 1)
                 })),
         )
@@ -1669,7 +1690,7 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                 .gap(8.0)
                 .center_y()
                 .child(
-                    text("Start")
+                    text(i18n_wire::tr(&s.core, "fx_start"))
                         .font(type_::LABEL)
                         .color(t.text_secondary),
                 )
@@ -1711,7 +1732,7 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                 .gap(8.0)
                 .center_y()
                 .child(
-                    text("Duration")
+                    text(i18n_wire::tr(&s.core, "fx_duration"))
                         .font(type_::LABEL)
                         .color(t.text_secondary),
                 )
@@ -1751,7 +1772,7 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                 .center_y()
                 .child(design::step_btn(
                     &format!("fx-earlier-{i}"),
-                    "Earlier",
+                    &i18n_wire::tr(&s.core, "fx_earlier"),
                     // Wave Q: the same start guards as
                     // the stepper above — these are the
                     // same op in a labelled form.
@@ -1765,7 +1786,7 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                 ))
                 .child(design::step_btn(
                     &format!("fx-later-{i}"),
-                    "Later",
+                    &i18n_wire::tr(&s.core, "fx_later"),
                     if start_step_live(data.start, s.core.frame_count(), 1) {
                         design::StepForm::Live
                     } else {
@@ -1775,10 +1796,10 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                     |s| nudge_start(s, 1),
                 ))
                 .child(el().grow(1.0))
-                .child(icon_only_btn(&format!("fx-dup-{i}"), "copy", "Duplicate clip", 26.0, false, t, |s| {
+                .child(icon_only_btn(&format!("fx-dup-{i}"), "copy", &i18n_wire::tr(&s.core, "fx_duplicate_clip"), 26.0, false, t, |s| {
                     duplicate_selected(s)
                 }))
-                .child(icon_only_btn(&format!("fx-del-{i}"), "trash-can", "Delete clip", 26.0, false, t, |s| {
+                .child(icon_only_btn(&format!("fx-del-{i}"), "trash-can", &i18n_wire::tr(&s.core, "fx_delete_clip"), 26.0, false, t, |s| {
                     delete_selected(s)
                 })),
         )
@@ -1792,7 +1813,7 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                 .key("fx-split-row")
                 .gap(8.0)
                 .center_y()
-                .child(icon_btn("fx-split", "scissors", "Split at playhead", false, t, |s| {
+                .child(icon_btn("fx-split", "scissors", &i18n_wire::tr(&s.core, "fx_split_at_playhead"), false, t, |s| {
                     split_selected(s)
                 })),
         )
@@ -1808,10 +1829,10 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                 .key("fx-playhead-row")
                 .gap(8.0)
                 .center_y()
-                .child(icon_btn("fx-to-playhead", "crosshairs", "To playhead", false, t, |s| {
+                .child(icon_btn("fx-to-playhead", "crosshairs", &i18n_wire::tr(&s.core, "fx_to_playhead"), false, t, |s| {
                     move_selected_to_playhead(s)
                 }))
-                .child(icon_btn("fx-end-playhead", "crosshairs", "End at playhead", false, t, |s| {
+                .child(icon_btn("fx-end-playhead", "crosshairs", &i18n_wire::tr(&s.core, "fx_end_at_playhead"), false, t, |s| {
                     end_selected_at_playhead(s)
                 })),
         )
@@ -1828,11 +1849,11 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                 .gap(8.0)
                 .center_y()
                 .child(if s.core.project.fx_clips[i].hidden {
-                    icon_btn("fx-hide", "eye", "Show", false, t, |s| {
+                    icon_btn("fx-hide", "eye", &i18n_wire::tr(&s.core, "fx_show"), false, t, |s| {
                         toggle_selected_hidden(s)
                     })
                 } else {
-                    icon_btn("fx-hide", "eye-slash", "Hide", false, t, |s| {
+                    icon_btn("fx-hide", "eye-slash", &i18n_wire::tr(&s.core, "fx_hide"), false, t, |s| {
                         toggle_selected_hidden(s)
                     })
                 }),
@@ -1848,7 +1869,7 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
         // its direct children, so the layout is
         // unchanged — the key just gives the row a name
         // of its own.
-        .child(design::section_label("Colour", t))
+        .child(design::section_label(&i18n_wire::tr(&s.core, "fx_colour"), t))
         .child(swatch_rows(i, "fx-color", Some(data.color), t, |hex| {
             Box::new(move |s: &mut State| set_color(s, hex))
         }))
@@ -1856,24 +1877,27 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
             col()
                 .key("fx-color2-row")
                 .gap(8.0)
-                .child(design::section_label("End colour", t))
+                .child(design::section_label(&i18n_wire::tr(&s.core, "fx_end_colour"), t))
                 .child(
                     row()
                         .gap(8.0)
                         .center_y()
                         .child(btn(
                             &format!("fx-color2-none-{i}"),
-                            "Solid",
+                            &i18n_wire::tr(&s.core, "fx_solid"),
                             data.color2.is_none(),
                             t,
                             |s| set_color2(s, None),
                         ))
                         .child(
-                            text(if data.color2.is_none() {
-                                "no gradient"
-                            } else {
-                                "gradient end"
-                            })
+                            text(i18n_wire::tr(
+                                &s.core,
+                                if data.color2.is_none() {
+                                    "fx_no_gradient"
+                                } else {
+                                    "fx_gradient_end"
+                                },
+                            ))
                             .font(type_::LABEL)
                             .color(t.text_secondary),
                         ),
@@ -1889,13 +1913,13 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                 .center_y()
                 .child(btn(
                     &format!("fx-anchor-{i}"),
-                    "Anchor to joint",
+                    &i18n_wire::tr(&s.core, "fx_anchor_to_joint"),
                     false,
                     t,
                     |s| reanchor_selected(s),
                 ))
                 .child(
-                    text("uses the selected figure joint")
+                    text(i18n_wire::tr(&s.core, "fx_anchor_hint"))
                         .font(type_::LABEL)
                         .color(t.text_secondary),
                 ),
@@ -3200,5 +3224,53 @@ mod tests {
         hidden.hidden = true;
         let state = state_with(core_with(vec![hidden]), Some(0));
         let _ = fx_inspector(&state, &t);
+    }
+
+    #[test]
+    fn fx_i18n_keys_exist_and_match_the_english_labels() {
+        // Wave T (T5): every label the panel wires
+        // through `i18n_wire::tr` must resolve to exactly
+        // the English string the panel rendered before
+        // the wiring. The keys land via IA-T5-1 (the
+        // integrator appends them to all 28 tables after
+        // the threed block), so this pin passes only
+        // once that IA lands — until then `tr` falls back
+        // to the key itself and `key_in_table` is false
+        // (the Q7 pattern: wiring and keys land together
+        // at integration).
+        let core = EditorCore::new();
+        for (key, english) in [
+            ("fx_title", "FX clips"),
+            ("fx_no_clips", "No FX clips in this project."),
+            ("fx_select_clip_to_edit", "Select an FX clip to edit it."),
+            ("fx_nudge", "Nudge"),
+            ("fx_nudge_earlier", "Nudge earlier"),
+            ("fx_nudge_later", "Nudge later"),
+            ("fx_duration_short", "Dur"),
+            ("fx_kind", "Kind"),
+            ("fx_previous_kind", "Previous kind"),
+            ("fx_next_kind", "Next kind"),
+            ("fx_start", "Start"),
+            ("fx_duration", "Duration"),
+            ("fx_earlier", "Earlier"),
+            ("fx_later", "Later"),
+            ("fx_duplicate_clip", "Duplicate clip"),
+            ("fx_delete_clip", "Delete clip"),
+            ("fx_split_at_playhead", "Split at playhead"),
+            ("fx_to_playhead", "To playhead"),
+            ("fx_end_at_playhead", "End at playhead"),
+            ("fx_show", "Show"),
+            ("fx_hide", "Hide"),
+            ("fx_colour", "Colour"),
+            ("fx_end_colour", "End colour"),
+            ("fx_solid", "Solid"),
+            ("fx_no_gradient", "no gradient"),
+            ("fx_gradient_end", "gradient end"),
+            ("fx_anchor_to_joint", "Anchor to joint"),
+            ("fx_anchor_hint", "uses the selected figure joint"),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
     }
 }

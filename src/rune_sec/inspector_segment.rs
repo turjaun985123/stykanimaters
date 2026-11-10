@@ -221,6 +221,29 @@
 //! budget, because the model's name is unbounded while
 //! the header row is not; `InspectorSegmentState` still
 //! carries the full name.
+//!
+//! Localisation (Wave T, T4): every user-visible label
+//! in the panel — the header titles, the empty state,
+//! the joint-navigation buttons, the readout and
+//! stepper row labels, the section headings and the
+//! media controls — resolves through `i18n_wire::tr`
+//! under the `segment_*` keys (IA-T4-1; the keys land
+//! in `i18n.rs` at integration, until then `tr` falls
+//! back to the key itself). English output is
+//! byte-identical to the pre-wiring literals, pinned by
+//! `segment_i18n_keys_exist_and_match_the_english_labels`.
+//! The populated header title is the one template
+//! (`segment_title_node`, "Segment {index}", the camera
+//! `follow_label` precedent). Locale-invariant notation
+//! stays literal by design (the R6 precedent): the
+//! degree steppers (−5°/−1°/+1°/+5°) and the −/+
+//! stepper glyphs. Readout VALUES and composed readout
+//! lines stay English by the same standing remainder
+//! as the 3D panel's composed readouts: the shape
+//! names (`shape_label`), the media readout
+//! (`media_label`), the Index line (`format_topology`)
+//! and the Bend readout line (`format_bend_readout`)
+//! are dynamic content, not label arguments.
 
 use rune::tok::{type_, Theme};
 use rune::{row, text, Color, El};
@@ -229,6 +252,7 @@ use stykanimate_rs::model::{angle_of, ImageAsset, NodeDef, SegmentMedia, Shape};
 
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::{danger_icon_btn, icon_btn};
 use crate::stage_view::hex_color;
 use crate::State;
@@ -1036,12 +1060,17 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                     .w_full()
                     .gap(8.0)
                     .center_y()
-                    .child(design::panel_title(Some("shapes"), "Segment", None, t)),
+                    .child(design::panel_title(
+                        Some("shapes"),
+                        &i18n_wire::tr(&s.core, "segment_title"),
+                        None,
+                        t,
+                    )),
             )
             .child(design::divider(t))
             .child(design::empty_state(
                 "bezier-curve",
-                "Select a segment on the stage to edit its geometry.",
+                &i18n_wire::tr(&s.core, "segment_select_a_segment"),
                 t,
             ));
     };
@@ -1054,6 +1083,15 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
     // is the fitted display copy (`fit_segment_header_name`);
     // the model's full name is untouched.
     let header_name = fit_segment_header_name(&st.name);
+    // The header title is the panel's one i18n template
+    // (`segment_title_node`, "Segment {index}" — the
+    // camera `follow_label` precedent): the word
+    // resolves through the table and the node index is
+    // substituted here, so the English title is
+    // byte-identical to the composed literal it
+    // replaces.
+    let header_title = i18n_wire::tr(&s.core, "segment_title_node")
+        .replace("{index}", &st.node.to_string());
     let mut panel = panel
         .child(
             row()
@@ -1062,7 +1100,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                 .center_y()
                 .child(design::panel_title(
                     Some("shapes"),
-                    &format!("Segment {}", st.node),
+                    &header_title,
                     Some(&header_name),
                     t,
                 )),
@@ -1104,28 +1142,52 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
             .w_full()
             .gap(8.0)
             .center_y()
-            .child(btn("seg-nav-parent", "Parent joint", false, t, |s| {
-                select_parent(&mut s.core)
-            }))
-            .child(btn("seg-nav-child", "Child joint", false, t, |s| {
-                select_first_child(&mut s.core)
-            })),
+            .child(btn(
+                "seg-nav-parent",
+                &i18n_wire::tr(&s.core, "segment_parent_joint"),
+                false,
+                t,
+                |s| select_parent(&mut s.core),
+            ))
+            .child(btn(
+                "seg-nav-child",
+                &i18n_wire::tr(&s.core, "segment_child_joint"),
+                false,
+                t,
+                |s| select_first_child(&mut s.core),
+            )),
     );
     panel = panel
-        .child(readout_row("Length", format_whole_number(st.length), t))
         .child(readout_row(
-            "Thickness",
+            &i18n_wire::tr(&s.core, "segment_length"),
+            format_whole_number(st.length),
+            t,
+        ))
+        .child(readout_row(
+            &i18n_wire::tr(&s.core, "segment_thickness"),
             format_whole_number(st.thickness),
             t,
         ))
-        .child(readout_row("Angle", format_deg(st.angle_deg), t))
-        .child(readout_row("Bend", format_deg_display(st.bend_deg), t))
-        .child(prose_readout_row("Shape", st.shape_label.clone(), t));
+        .child(readout_row(
+            &i18n_wire::tr(&s.core, "segment_angle"),
+            format_deg(st.angle_deg),
+            t,
+        ))
+        .child(readout_row(
+            &i18n_wire::tr(&s.core, "segment_bend"),
+            format_deg_display(st.bend_deg),
+            t,
+        ))
+        .child(prose_readout_row(
+            &i18n_wire::tr(&s.core, "segment_shape"),
+            st.shape_label.clone(),
+            t,
+        ));
     // The origin has no segment to lengthen (the op no-ops);
     // the GPUI inspector omitted the row there too.
     if !st.is_root {
         panel = panel.child(stepper_row(
-            "Length",
+            &i18n_wire::tr(&s.core, "segment_length"),
             format_whole_number(st.length),
             "insp-len-dn",
             "insp-len-up",
@@ -1146,7 +1208,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
     }
     panel = panel
         .child(stepper_row(
-            "Thickness",
+            &i18n_wire::tr(&s.core, "segment_thickness"),
             format_whole_number(st.thickness),
             "insp-th-dn",
             "insp-th-up",
@@ -1170,7 +1232,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                 .center_y()
                 .gap(8.0)
                 .child(
-                    text("Rotate")
+                    text(i18n_wire::tr(&s.core, "segment_rotate"))
                         .font(type_::LABEL)
                         .color(t.text_secondary)
                         .grow(1.0),
@@ -1212,7 +1274,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                     .center_y()
                     .gap(8.0)
                     .child(
-                        text("Bend")
+                        text(i18n_wire::tr(&s.core, "segment_bend"))
                             .font(type_::LABEL)
                             .color(t.text_secondary)
                             .grow(1.0),
@@ -1236,9 +1298,13 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                     .w_full()
                     .center_y()
                     .gap(8.0)
-                    .child(btn("seg-bend-zero", "Straighten", false, t, |s| {
-                        straighten_selected(&mut s.core)
-                    })),
+                    .child(btn(
+                        "seg-bend-zero",
+                        &i18n_wire::tr(&s.core, "segment_straighten"),
+                        false,
+                        t,
+                        |s| straighten_selected(&mut s.core),
+                    )),
             );
     }
     panel = panel
@@ -1247,21 +1313,37 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                 .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(icon_btn("cycle-bend", "repeat", "Cycle bend", false, t, |s| {
-                    s.core.cycle_bend()
-                }))
-                .child(btn("node-shape", "Cycle shape", false, t, |s| {
-                    s.core.cycle_shape()
-                })),
+                .child(icon_btn(
+                    "cycle-bend",
+                    "repeat",
+                    &i18n_wire::tr(&s.core, "segment_cycle_bend"),
+                    false,
+                    t,
+                    |s| s.core.cycle_bend(),
+                ))
+                .child(btn(
+                    "node-shape",
+                    &i18n_wire::tr(&s.core, "segment_cycle_shape"),
+                    false,
+                    t,
+                    |s| s.core.cycle_shape(),
+                )),
         )
-        .child(design::section_label("Colour", t));
+        .child(design::section_label(
+            &i18n_wire::tr(&s.core, "segment_colour"),
+            t,
+        ));
     let mut swatches = row().gap(6.0).center_y();
     for rgb in PALETTE {
         swatches = swatches.child(swatch(rgb, st.color == Some(rgb), t));
     }
-    swatches = swatches.child(btn("node-color", "Cycle", false, t, |s| {
-        s.core.cycle_node_color()
-    }));
+    swatches = swatches.child(btn(
+        "node-color",
+        &i18n_wire::tr(&s.core, "segment_cycle_colour"),
+        false,
+        t,
+        |s| s.core.cycle_node_color(),
+    ));
     panel = panel.child(swatches);
     // The Media section (Wave 12): what the segment
     // carries, and the means to change it — see the
@@ -1271,7 +1353,10 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
     // button active; past the cap the cycle button
     // reaches the rest.
     panel = panel
-        .child(design::section_label("Media", t))
+        .child(design::section_label(
+            &i18n_wire::tr(&s.core, "segment_media"),
+            t,
+        ))
         .child(
             text(st.media_label.clone())
                 .key("seg-media-readout")
@@ -1298,7 +1383,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
         if st.asset_names.len() > ASSET_BUTTON_CAP {
             picker = picker.child(btn(
                 "seg-media-cycle",
-                "Next sprite",
+                &i18n_wire::tr(&s.core, "segment_next_sprite"),
                 false,
                 t,
                 |s: &mut State| {
@@ -1322,13 +1407,17 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
         .w_full()
         .gap(8.0)
         .center_y()
-        .child(btn("seg-media-import", "Attach from import", false, t, |s| {
-            s.core.attach_image_to_node()
-        }));
+        .child(btn(
+            "seg-media-import",
+            &i18n_wire::tr(&s.core, "segment_attach_from_import"),
+            false,
+            t,
+            |s| s.core.attach_image_to_node(),
+        ));
     if st.media.is_some() {
         media_row = media_row.child(btn(
             "seg-media-clear",
-            "Clear media",
+            &i18n_wire::tr(&s.core, "segment_clear_media"),
             false,
             t,
             |s| s.core.clear_node_media(),
@@ -1340,11 +1429,17 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
             .w_full()
             .gap(8.0)
             .center_y()
-            .child(btn("add-seg", "+ Segment", false, t, |s| s.core.add_segment()))
+            .child(btn(
+                "add-seg",
+                &i18n_wire::tr(&s.core, "segment_add"),
+                false,
+                t,
+                |s| s.core.add_segment(),
+            ))
             .child(danger_icon_btn(
                 "del-seg",
                 "trash-can",
-                "Delete segment",
+                &i18n_wire::tr(&s.core, "segment_delete"),
                 false,
                 t,
                 |s| s.core.delete_segment(),
@@ -2444,5 +2539,53 @@ playback_speed: 1.0,
             None,
             "stale selection"
         );
+    }
+
+    #[test]
+    fn segment_i18n_keys_exist_and_match_the_english_labels() {
+        // Wave T (T4): every label the panel wires
+        // through `i18n_wire::tr` must resolve to exactly
+        // the English string the panel rendered before
+        // the wiring. The keys land via IA-T4-1 (the
+        // integrator appends them to all 28 tables after
+        // the threed block), so this pin passes only
+        // once that IA lands — until then `tr` falls back
+        // to the key itself and `key_in_table` is false
+        // (the Q7 pattern: wiring and keys land together
+        // at integration). `segment_title_node` is the
+        // one template: the pin holds its stored form,
+        // placeholders intact (the camera
+        // `camera_following_figure` precedent).
+        let core = EditorCore::new();
+        for (key, english) in [
+            ("segment_title", "Segment"),
+            ("segment_title_node", "Segment {index}"),
+            (
+                "segment_select_a_segment",
+                "Select a segment on the stage to edit its geometry.",
+            ),
+            ("segment_parent_joint", "Parent joint"),
+            ("segment_child_joint", "Child joint"),
+            ("segment_length", "Length"),
+            ("segment_thickness", "Thickness"),
+            ("segment_angle", "Angle"),
+            ("segment_bend", "Bend"),
+            ("segment_shape", "Shape"),
+            ("segment_rotate", "Rotate"),
+            ("segment_straighten", "Straighten"),
+            ("segment_cycle_bend", "Cycle bend"),
+            ("segment_cycle_shape", "Cycle shape"),
+            ("segment_colour", "Colour"),
+            ("segment_cycle_colour", "Cycle"),
+            ("segment_media", "Media"),
+            ("segment_next_sprite", "Next sprite"),
+            ("segment_attach_from_import", "Attach from import"),
+            ("segment_clear_media", "Clear media"),
+            ("segment_add", "+ Segment"),
+            ("segment_delete", "Delete segment"),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
     }
 }

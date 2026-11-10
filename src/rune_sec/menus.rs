@@ -797,8 +797,8 @@ fn toggle_targeted_clip_muted(s: &mut State) {
 /// depends on state the map cannot see, so the EDIT
 /// branch hands the icon to [`item_icon`] directly —
 /// see [`menu_dropdown`].)
-fn mute_item_parts(muted: bool) -> (&'static str, &'static str) {
-    let (icon, _) = crate::rune_sec::audio_panel::mute_toggle_parts(muted);
+fn mute_item_parts(core: &stykanimate_rs::editor::EditorCore, muted: bool) -> (&'static str, &'static str) {
+    let (icon, _) = crate::rune_sec::audio_panel::mute_toggle_parts(core, muted);
     let label = if muted {
         "Unmute audio clip"
     } else {
@@ -1081,7 +1081,7 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
                 // hint is `shortcut_hint`'s None and the
                 // handler is wrapped in `closing`, exactly
                 // as `item` would build it.
-                let (label, icon) = mute_item_parts(s.core.project.audio[target].muted);
+                let (label, icon) = mute_item_parts(&s.core, s.core.project.audio[target].muted);
                 list = list.child(item_icon(
                     "edit-mute-clip",
                     icon,
@@ -1825,8 +1825,8 @@ mod tests {
         }
         // The parts name the action, not the state —
         // and reuse the Audio panel's glyph choice.
-        assert_eq!(mute_item_parts(false), ("Mute audio clip", "volume-xmark"));
-        assert_eq!(mute_item_parts(true), ("Unmute audio clip", "volume-high"));
+        assert_eq!(mute_item_parts(&stykanimate_rs::editor::EditorCore::new(), false), ("Mute audio clip", "volume-xmark"));
+        assert_eq!(mute_item_parts(&stykanimate_rs::editor::EditorCore::new(), true), ("Unmute audio clip", "volume-high"));
 
         let t = rune::tok::theme(true);
         let mut s = crate::init();
@@ -1890,7 +1890,7 @@ mod tests {
         assert!(s.core.project.audio[1].muted);
         // The targeted clip now names the way back.
         assert_eq!(
-            mute_item_parts(s.core.project.audio[1].muted),
+            mute_item_parts(&s.core, s.core.project.audio[1].muted),
             ("Unmute audio clip", "volume-high")
         );
 

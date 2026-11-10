@@ -259,6 +259,18 @@
 //! than reading the core's cached report, so a path
 //! typed or repointed in this panel is classified on
 //! the same render that shows it.
+//!
+//! Wave T (T2) wires the panel's labels through the
+//! i18n tables (`i18n_wire::tr`, the subtitle/camera/
+//! 3D idiom): the title, section captions, button
+//! labels, empty state, placeholder and the Mute
+//! toggle's action label resolve from `audio_*` keys
+//! (IA-T2-1), English byte-identical. Labels only —
+//! the composed readouts (summary, target line,
+//! readout, row labels, gain stepper value), the
+//! effects caption sentence and every status line
+//! stay as they are. The pin is
+//! `audio_i18n_keys_exist_and_match_the_english_labels`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -274,6 +286,7 @@ use stykanimate_rs::model::AudioClip;
 use crate::chrome_view::btn;
 use crate::rune_sec::app_theme;
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
 use crate::rune_sec::icons::icon_el;
 use crate::State;
@@ -406,11 +419,18 @@ pub fn target_muted(clips: &[AudioClip], selected: Option<usize>) -> bool {
 /// `volume-high` glyph — sound restored). Both glyphs
 /// are in the icon table; `icon_btn` would degrade to a
 /// plain button if one ever went missing.
-pub fn mute_toggle_parts(muted: bool) -> (&'static str, &'static str) {
+///
+/// Wave T (T2): the label resolves through the i18n
+/// table (`audio_mute` / `audio_unmute`, IA-T2-1), so
+/// the helper takes the core — the `toggle_label`
+/// precedent in `three_d_panel`. The glyph half is
+/// unchanged, and `menus.rs`'s call site (which reads
+/// only the glyph) is adjusted by IA-T2-2.
+pub fn mute_toggle_parts(core: &EditorCore, muted: bool) -> (&'static str, String) {
     if muted {
-        ("volume-high", "Unmute")
+        ("volume-high", i18n_wire::tr(core, "audio_unmute"))
     } else {
-        ("volume-xmark", "Mute")
+        ("volume-xmark", i18n_wire::tr(core, "audio_mute"))
     }
 }
 
@@ -1247,8 +1267,11 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                 .center_y()
                 .child(design::panel_title(
                     Some("music"),
-                    "Audio",
-                    Some(&format!("{} clip(s)", clips.len())),
+                    &i18n_wire::tr(core, "audio_title"),
+                    Some(
+                        &i18n_wire::tr(core, "audio_clip_count")
+                            .replace("{count}", &clips.len().to_string()),
+                    ),
                     t,
                 )),
         )
@@ -1257,7 +1280,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
     if clips.is_empty() {
         panel = panel.child(design::empty_state(
             "music",
-            "No audio clips in this project.",
+            &i18n_wire::tr(core, "audio_no_clips"),
             t,
         ));
     } else {
@@ -1292,7 +1315,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                 .wrap()
                 .w_full(),
         );
-        panel = panel.child(design::section_label("Clips", t));
+        panel = panel.child(design::section_label(&i18n_wire::tr(core, "audio_clips"), t));
         for (i, clip) in clips.iter().enumerate() {
             // Phase G: a row press selects the clip for the
             // operations toolbar (the `fx_clips` lane
@@ -1354,7 +1377,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                 .child(icon_btn(
                     &format!("audio-norm-{i}"),
                     "volume-high",
-                    "Norm",
+                    &i18n_wire::tr(core, "audio_norm"),
                     false,
                     t,
                     move |s| s.core.audio_normalize(i),
@@ -1362,7 +1385,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                 .child(icon_btn(
                     &format!("audio-split-{i}"),
                     "scissors",
-                    "Split@cur",
+                    &i18n_wire::tr(core, "audio_split_at_cur"),
                     false,
                     t,
                     move |s| {
@@ -1374,7 +1397,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                 clip_row = clip_row.child(icon_btn(
                     &format!("audio-xfade-{i}"),
                     "shuffle",
-                    "Xfade",
+                    &i18n_wire::tr(core, "audio_xfade"),
                     false,
                     t,
                     move |s| s.core.audio_crossfade(i),
@@ -1383,7 +1406,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             clip_row = clip_row.child(icon_only_btn(
                 &format!("audio-del-{i}"),
                 "trash-can",
-                "Delete clip",
+                &i18n_wire::tr(core, "audio_delete_clip"),
                 26.0, false,
                 t,
                 move |s| delete_row_clip(s, i),
@@ -1429,7 +1452,10 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
     // under it (Effects / Mute & duplicate / Position &
     // gain) all act on this one clip, in contrast to
     // the Whole project row below.
-    panel = panel.child(design::section_label("Operations — target clip", t));
+    panel = panel.child(design::section_label(
+        &i18n_wire::tr(core, "audio_operations_target_clip"),
+        t,
+    ));
     panel = panel.child(
         // Wave 9: the line embeds the target's
         // (unbounded) file name — kit prose treatment,
@@ -1446,7 +1472,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
     // clips there is no target and the button shows its
     // audible "Mute" form; it renders live regardless,
     // like every toolbar button here.
-    let (mute_icon, mute_label) = mute_toggle_parts(target_muted(clips, selected));
+    let (mute_icon, mute_label) = mute_toggle_parts(core, target_muted(clips, selected));
     // Wave 4 (audit D1): the toolbar's groups. The
     // pre-Wave-4 form was ONE `.scroll_x()` row of 17
     // controls in a 316 pt column — most of it hidden
@@ -1460,7 +1486,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
     // changed (`audio-ops` stays on the Effects row;
     // `audio-ops-clip` / `audio-ops-position` are new
     // additive container keys).
-    panel = panel.child(design::section_label("Effects", t));
+    panel = panel.child(design::section_label(&i18n_wire::tr(core, "audio_effects"), t));
     panel = panel.child(
         row()
             .key("audio-ops")
@@ -1471,18 +1497,18 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             // Phase N: the DSP buttons carry the glyphs
             // P13 assigns them (Tier A + Tier B tables) —
             // keys, labels and handlers verbatim.
-            .child(icon_btn("audio-norm-last", "volume-high", "Normalise", false, t, normalize_target))
-            .child(icon_btn("audio-echo", "repeat", "Echo", false, t, echo_target))
-            .child(icon_btn("audio-lowpass", "filter", "Lowpass", false, t, lowpass_target))
-            .child(icon_btn("audio-trimsil", "scissors", "Trim silence", false, t, trim_silence_target))
-            .child(icon_btn("audio-split-sil", "wave-square", "Split silences", false, t, split_silences_target))
-            .child(icon_btn("audio-pitch", "arrow-trend-up", "Pitch +2", false, t, pitch_target))
-            .child(icon_btn("audio-comp", "compress", "Compress", false, t, compress_target))
+            .child(icon_btn("audio-norm-last", "volume-high", &i18n_wire::tr(core, "audio_normalise"), false, t, normalize_target))
+            .child(icon_btn("audio-echo", "repeat", &i18n_wire::tr(core, "audio_echo"), false, t, echo_target))
+            .child(icon_btn("audio-lowpass", "filter", &i18n_wire::tr(core, "audio_lowpass"), false, t, lowpass_target))
+            .child(icon_btn("audio-trimsil", "scissors", &i18n_wire::tr(core, "audio_trim_silence"), false, t, trim_silence_target))
+            .child(icon_btn("audio-split-sil", "wave-square", &i18n_wire::tr(core, "audio_split_silences"), false, t, split_silences_target))
+            .child(icon_btn("audio-pitch", "arrow-trend-up", &i18n_wire::tr(core, "audio_pitch"), false, t, pitch_target))
+            .child(icon_btn("audio-comp", "compress", &i18n_wire::tr(core, "audio_compress"), false, t, compress_target))
             // Fade is an amplitude ramp (in and out), so
             // its glyph is the rising `chart-line`, not a
             // loudness mark (Phase H).
-            .child(icon_btn("audio-fade", "chart-line", "Fade", false, t, fade_target))
-            .child(icon_btn("audio-reverse", "left-right", "Reverse", false, t, reverse_target)),
+            .child(icon_btn("audio-fade", "chart-line", &i18n_wire::tr(core, "audio_fade"), false, t, fade_target))
+            .child(icon_btn("audio-reverse", "left-right", &i18n_wire::tr(core, "audio_reverse"), false, t, reverse_target)),
     );
     // Wave 4 (audit D3): the effects' fixed parameters,
     // stated before the fact — the values were previously
@@ -1503,7 +1529,10 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
     // Wave 9: the group is named for its contents (the
     // "Position & gain" compound style) — bare "Clip"
     // said nothing the other two group headers don't.
-    panel = panel.child(design::section_label("Mute & duplicate", t));
+    panel = panel.child(design::section_label(
+        &i18n_wire::tr(core, "audio_mute_duplicate"),
+        t,
+    ));
     panel = panel.child(
         row()
             .key("audio-ops-clip")
@@ -1511,17 +1540,20 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             .center_y()
             .flex_wrap()
             .w_full()
-            .child(icon_btn("audio-mute", mute_icon, mute_label, false, t, mute_target))
+            .child(icon_btn("audio-mute", mute_icon, &mute_label, false, t, mute_target))
             .child(icon_btn(
                 "audio-duplicate",
                 "copy",
-                "Duplicate",
+                &i18n_wire::tr(core, "audio_duplicate"),
                 false,
                 t,
                 duplicate_target,
             )),
     );
-    panel = panel.child(design::section_label("Position & gain", t));
+    panel = panel.child(design::section_label(
+        &i18n_wire::tr(core, "audio_position_gain"),
+        t,
+    ));
     panel = panel.child(
         row()
             .key("audio-ops-position")
@@ -1529,7 +1561,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             .center_y()
             .flex_wrap()
             .w_full()
-            .child(btn("audio-gain-dn", "Gain -", false, t, |s| {
+            .child(btn("audio-gain-dn", &i18n_wire::tr(core, "audio_gain_down"), false, t, |s| {
                 gain_step_target(s, -0.1);
             }))
             // Phase N: the gain readout is the kit
@@ -1541,13 +1573,13 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                 &target_gain_readout(clips, selected),
                 t,
             ))
-            .child(btn("audio-gain-up", "Gain +", false, t, |s| {
+            .child(btn("audio-gain-up", &i18n_wire::tr(core, "audio_gain_up"), false, t, |s| {
                 gain_step_target(s, 0.1);
             }))
-            .child(icon_btn("audio-move-earlier", "chevron-left", "Earlier", false, t, |s| {
+            .child(icon_btn("audio-move-earlier", "chevron-left", &i18n_wire::tr(core, "audio_earlier"), false, t, |s| {
                 move_target(s, -1);
             }))
-            .child(icon_btn("audio-move-later", "chevron-right", "Later", false, t, |s| {
+            .child(icon_btn("audio-move-later", "chevron-right", &i18n_wire::tr(core, "audio_later"), false, t, |s| {
                 move_target(s, 1);
             })),
     );
@@ -1568,7 +1600,10 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
         // broke the parallel structure (and spent
         // ≈91 pt of the row's 316 pt budget on the
         // label; the two buttons alone measure ≈205 pt).
-        panel = panel.child(design::section_label("Whole project", t));
+        panel = panel.child(design::section_label(
+            &i18n_wire::tr(core, "audio_whole_project"),
+            t,
+        ));
         panel = panel.child(
             row()
                 .key("audio-project-ops")
@@ -1577,7 +1612,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                 .child(icon_btn(
                     "audio-normalise",
                     "volume-high",
-                    "Normalise all",
+                    &i18n_wire::tr(core, "audio_normalise_all"),
                     false,
                     t,
                     normalise_all,
@@ -1592,7 +1627,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                 // Normalise all it now renders only while
                 // clips exist — a mixdown with no clips
                 // has nothing to render.
-                .child(icon_btn("mixdown", "layer-group", "Mixdown", false, t, |s| {
+                .child(icon_btn("mixdown", "layer-group", &i18n_wire::tr(core, "audio_mixdown"), false, t, |s| {
                     s.core.mixdown_audio()
                 })),
         );
@@ -1613,13 +1648,13 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                     .grow(1.0)
                     .color(t.text)
                     .placeholder(
-                        "Audio file name — blank adds the first file in ./audio/",
+                        &i18n_wire::tr(core, "audio_name_placeholder"),
                         t.text_secondary,
                     )
                     .on_edit(|s: &mut State| &mut s.audio_panel.name)
                     .on_submit(submit_audio_name),
             )
-            .child(icon_btn("add-audio", "music", "Add clip", false, t, |s| add_clip(s))),
+            .child(icon_btn("add-audio", "music", &i18n_wire::tr(core, "audio_add_clip"), false, t, |s| add_clip(s))),
     );
 
     // Wave Q (Q7, the P31 slice): the Subtitles section
@@ -1927,11 +1962,82 @@ mod tests {
 
     #[test]
     fn mute_toggle_parts_name_the_action_not_the_state() {
+        // Wave T (T2): the label resolves through the
+        // i18n table now (`audio_mute` / `audio_unmute`),
+        // so this asserts the English values via a core
+        // and, like the pin below, passes once IA-T2-1
+        // lands the keys (until then `tr` falls back to
+        // the key itself — the Q7 pattern).
+        let core = EditorCore::new();
         // Audible: the press MUTES, so the button says so
         // and shows the crossed-out speaker.
-        assert_eq!(mute_toggle_parts(false), ("volume-xmark", "Mute"));
+        assert_eq!(
+            mute_toggle_parts(&core, false),
+            ("volume-xmark", "Mute".to_string())
+        );
         // Muted: the press restores the sound.
-        assert_eq!(mute_toggle_parts(true), ("volume-high", "Unmute"));
+        assert_eq!(
+            mute_toggle_parts(&core, true),
+            ("volume-high", "Unmute".to_string())
+        );
+    }
+
+    #[test]
+    fn audio_i18n_keys_exist_and_match_the_english_labels() {
+        // Wave T (T2): every label the panel renders
+        // resolves from an `audio_*` key (IA-T2-1) whose
+        // English value is byte-identical to the pre-wire
+        // literal. Passes only after the integrator
+        // inserts the keys into `src/i18n.rs` — until
+        // then `tr` falls back to the key itself (the
+        // Q7 pattern) and `key_in_table` reports them
+        // missing. `audio_clip_count` is the one
+        // template: its `{count}` placeholder is
+        // substituted at the call site (the camera
+        // `camera_following_figure` precedent), so the
+        // pin asserts the raw template.
+        let core = EditorCore::new();
+        for (key, english) in [
+            ("audio_title", "Audio"),
+            ("audio_clip_count", "{count} clip(s)"),
+            ("audio_no_clips", "No audio clips in this project."),
+            ("audio_clips", "Clips"),
+            ("audio_norm", "Norm"),
+            ("audio_split_at_cur", "Split@cur"),
+            ("audio_xfade", "Xfade"),
+            ("audio_delete_clip", "Delete clip"),
+            ("audio_operations_target_clip", "Operations — target clip"),
+            ("audio_effects", "Effects"),
+            ("audio_normalise", "Normalise"),
+            ("audio_echo", "Echo"),
+            ("audio_lowpass", "Lowpass"),
+            ("audio_trim_silence", "Trim silence"),
+            ("audio_split_silences", "Split silences"),
+            ("audio_pitch", "Pitch +2"),
+            ("audio_compress", "Compress"),
+            ("audio_fade", "Fade"),
+            ("audio_reverse", "Reverse"),
+            ("audio_mute_duplicate", "Mute & duplicate"),
+            ("audio_mute", "Mute"),
+            ("audio_unmute", "Unmute"),
+            ("audio_duplicate", "Duplicate"),
+            ("audio_position_gain", "Position & gain"),
+            ("audio_gain_down", "Gain -"),
+            ("audio_gain_up", "Gain +"),
+            ("audio_earlier", "Earlier"),
+            ("audio_later", "Later"),
+            ("audio_whole_project", "Whole project"),
+            ("audio_normalise_all", "Normalise all"),
+            ("audio_mixdown", "Mixdown"),
+            (
+                "audio_name_placeholder",
+                "Audio file name — blank adds the first file in ./audio/",
+            ),
+            ("audio_add_clip", "Add clip"),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
     }
 
     #[test]

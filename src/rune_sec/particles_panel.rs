@@ -90,6 +90,27 @@
 //! already carried the same point fused with the anchor
 //! text ("{anchor} · at {x}, {y}", unkeyed); the keyed
 //! readout is the pad's feedback, not a replacement.
+//!
+//! Wave T (T20) wires the panel's labels through
+//! `i18n_wire::tr` (the subtitle/camera/3D idiom): the
+//! panel title, the add button, both empty states, the
+//! Kind/Colour/Frame/Seed section captions, the kind
+//! stepper's help labels and every action button —
+//! English byte-identical, element keys untouched. The
+//! keys land via IA-T20-1 (the integrator appends them
+//! to all 28 tables after the `threed_` block); the pin
+//! is `particles_i18n_keys_exist_and_match_the_english_labels`.
+//! Locale-invariant notation stays literal by design
+//! (the R6 precedent): the `−` / `+` steppers and the
+//! nudge pad's arrow glyphs. The kind names
+//! (`kind_name`'s burst/sparkle/smoke) are the
+//! export/MCP serialised vocabulary, not labels, and
+//! are never translated. The composed readouts
+//! (`row_label`, `anchor_summary`, `anchor_detail`, the
+//! detail title and position lines, the header's event
+//! count) are dynamic text, not labels, and stay
+//! English this wave, as do the handlers' status
+//! sentences.
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, El};
@@ -98,6 +119,7 @@ use stykanimate_rs::model::{ParticleEvent, ParticleKind};
 
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
 use crate::rune_sec::icons::icon_el;
 use crate::State;
@@ -568,7 +590,7 @@ fn detail_block(s: &State, t: &Theme) -> El {
             .w_full()
             .child(design::empty_state(
                 "star",
-                "Select a particle event to edit it.",
+                &i18n_wire::tr(&s.core, "particles_select_event"),
                 t,
             ));
     };
@@ -598,7 +620,7 @@ fn detail_block(s: &State, t: &Theme) -> El {
     let mut place_row = row().gap(8.0).center_y().child(icon_btn(
         "particles-to-playhead",
         "crosshairs",
-        "To playhead",
+        &i18n_wire::tr(&s.core, "particles_to_playhead"),
         false,
         t,
         |s| move_to_playhead(s),
@@ -607,7 +629,7 @@ fn detail_block(s: &State, t: &Theme) -> El {
         place_row = place_row.child(icon_btn(
             "particles-anchor-node",
             "crosshairs",
-            "Anchor to joint",
+            &i18n_wire::tr(&s.core, "particles_anchor_joint"),
             false,
             t,
             |s| anchor_to_joint(s),
@@ -638,11 +660,14 @@ fn detail_block(s: &State, t: &Theme) -> El {
             row()
                 .gap(8.0)
                 .center_y()
-                .child(design::section_label("Kind", t).grow(1.0))
+                .child(
+                    design::section_label(&i18n_wire::tr(&s.core, "particles_kind"), t)
+                        .grow(1.0),
+                )
                 .child(icon_only_btn(
                     "particles-kind-prev",
                     "chevron-left",
-                    "Previous kind",
+                    &i18n_wire::tr(&s.core, "particles_kind_prev"),
                     26.0,
                     false,
                     t,
@@ -652,7 +677,7 @@ fn detail_block(s: &State, t: &Theme) -> El {
                 .child(icon_only_btn(
                     "particles-kind-next",
                     "chevron-right",
-                    "Next kind",
+                    &i18n_wire::tr(&s.core, "particles_kind_next"),
                     26.0,
                     false,
                     t,
@@ -665,7 +690,10 @@ fn detail_block(s: &State, t: &Theme) -> El {
             row()
                 .gap(8.0)
                 .center_y()
-                .child(design::section_label("Colour", t))
+                .child(design::section_label(
+                    &i18n_wire::tr(&s.core, "particles_colour"),
+                    t,
+                ))
                 .child(colors),
         )
         // Frame stepper: -/+ move the event by one frame
@@ -674,7 +702,10 @@ fn detail_block(s: &State, t: &Theme) -> El {
             row()
                 .gap(8.0)
                 .center_y()
-                .child(design::section_label("Frame", t).grow(1.0))
+                .child(
+                    design::section_label(&i18n_wire::tr(&s.core, "particles_frame"), t)
+                        .grow(1.0),
+                )
                 .child(design::step_btn(
                     "particles-frame-dn",
                     "−",
@@ -714,7 +745,10 @@ fn detail_block(s: &State, t: &Theme) -> El {
             row()
                 .gap(8.0)
                 .center_y()
-                .child(design::section_label("Seed", t).grow(1.0))
+                .child(
+                    design::section_label(&i18n_wire::tr(&s.core, "particles_seed"), t)
+                        .grow(1.0),
+                )
                 .child(btn("particles-seed-dn", "−", false, t, |s| {
                     step_seed(s, -1)
                 }))
@@ -732,7 +766,7 @@ fn detail_block(s: &State, t: &Theme) -> El {
                 .child(icon_btn(
                     "particles-anchor-fig",
                     "crosshairs",
-                    "Anchor to figure",
+                    &i18n_wire::tr(&s.core, "particles_anchor_figure"),
                     false,
                     t,
                     |s| anchor_to_figure(s),
@@ -740,7 +774,7 @@ fn detail_block(s: &State, t: &Theme) -> El {
                 .child(icon_btn(
                     "particles-anchor-clear",
                     "xmark",
-                    "Clear anchor",
+                    &i18n_wire::tr(&s.core, "particles_anchor_clear"),
                     false,
                     t,
                     |s| anchor_clear(s),
@@ -757,7 +791,7 @@ fn detail_block(s: &State, t: &Theme) -> El {
                 .child(icon_btn(
                     "particles-duplicate",
                     "copy",
-                    "Duplicate",
+                    &i18n_wire::tr(&s.core, "particles_duplicate"),
                     false,
                     t,
                     |s| duplicate_selected(s),
@@ -765,7 +799,7 @@ fn detail_block(s: &State, t: &Theme) -> El {
                 .child(icon_btn(
                     "particles-delete",
                     "trash-can",
-                    "Delete event",
+                    &i18n_wire::tr(&s.core, "particles_delete_event"),
                     false,
                     t,
                     |s| delete_selected(s),
@@ -833,7 +867,7 @@ pub fn particles_panel(s: &State, t: &Theme) -> El {
         // inside the card.
         list = list.child(design::empty_state(
             "star",
-            "No particle events yet — they arrive with imports, or add one.",
+            &i18n_wire::tr(&s.core, "particles_none_yet"),
             t,
         ));
     }
@@ -881,7 +915,7 @@ pub fn particles_panel(s: &State, t: &Theme) -> El {
                 .center_y()
                 .child(design::panel_title(
                     None,
-                    "Particles",
+                    &i18n_wire::tr(&s.core, "particles_title"),
                     Some(&format!(
                         "{} event(s)",
                         s.core.project.particles.len()
@@ -894,7 +928,7 @@ pub fn particles_panel(s: &State, t: &Theme) -> El {
             row().gap(8.0).center_y().child(icon_btn(
                 "particles-add",
                 "star",
-                "+ Event",
+                &i18n_wire::tr(&s.core, "particles_add_event"),
                 false,
                 t,
                 |s| add_event(s),
@@ -1577,5 +1611,47 @@ mod tests {
         nudge_selected(&mut state, 0.0, NUDGE_STEP);
         assert_eq!(state.core.project.particles[0].y, 50.0);
         assert_eq!(state.core.undo_depth(), depth, "no snapshot");
+    }
+
+    #[test]
+    fn particles_i18n_keys_exist_and_match_the_english_labels() {
+        // Wave T (T20): every label the panel wires
+        // through `i18n_wire::tr` must resolve to exactly
+        // the English string the panel rendered before
+        // the wiring. The keys land via IA-T20-1 (the
+        // integrator appends them to all 28 tables after
+        // the `threed_` block), so this pin passes only
+        // once that IA lands — until then `tr` falls back
+        // to the key itself and `key_in_table` is false
+        // (the Q7 pattern: wiring and keys land together
+        // at integration).
+        let core = EditorCore::new();
+        for (key, english) in [
+            ("particles_title", "Particles"),
+            ("particles_add_event", "+ Event"),
+            (
+                "particles_none_yet",
+                "No particle events yet — they arrive with imports, or add one.",
+            ),
+            (
+                "particles_select_event",
+                "Select a particle event to edit it.",
+            ),
+            ("particles_kind", "Kind"),
+            ("particles_kind_prev", "Previous kind"),
+            ("particles_kind_next", "Next kind"),
+            ("particles_colour", "Colour"),
+            ("particles_frame", "Frame"),
+            ("particles_seed", "Seed"),
+            ("particles_anchor_figure", "Anchor to figure"),
+            ("particles_anchor_clear", "Clear anchor"),
+            ("particles_duplicate", "Duplicate"),
+            ("particles_delete_event", "Delete event"),
+            ("particles_to_playhead", "To playhead"),
+            ("particles_anchor_joint", "Anchor to joint"),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
     }
 }

@@ -155,6 +155,23 @@
 //! Element keys reuse the old GPUI control ids where one
 //! existed (`mode-3d`, `bake-3d`, …) so headless `--tree`
 //! checks keep finding them.
+//!
+//! - Localisation (Wave S, S14): every user-visible label
+//!   in the panel — the section captions, the button and
+//!   icon-button labels, the Enter/Exit toggle and the
+//!   empty states — resolves through `i18n_wire::tr`
+//!   under the `threed_*` keys (IA-S14-1; the keys land in
+//!   `i18n.rs` at integration, until then `tr` falls back
+//!   to the key itself). English output is byte-identical
+//!   to the pre-wiring literals, pinned by
+//!   `threed_i18n_keys_exist_and_match_the_english_labels`.
+//!   Locale-invariant notation stays literal by design
+//!   (the R6 precedent): the `3D` title, `3/4`, the
+//!   `RotX/RotY/RotZ/Orbit +15` step labels and the
+//!   `−` / `+` distance steppers. The composed readouts
+//!   (`session_summary`, `joint_position_text`,
+//!   `camera_readout_text`) are dynamic text, not labels,
+//!   and stay English this wave.
 
 use rune::tok::{type_, Theme};
 use rune::{canvas, row, text, Drag, El, LineCap, Phase, Shape, Tx};
@@ -163,6 +180,7 @@ use stykanimate_rs::fig3d;
 
 use crate::rune_sec::design;
 use crate::rune_sec::fig3_preview;
+use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::{icon_btn, icon_btn_inert};
 use crate::rune_sec::icons::icon_el;
 use crate::stage_view::hex_color;
@@ -566,12 +584,15 @@ pub fn apply_mirror_pose(core: &mut EditorCore) -> bool {
     ok
 }
 
-/// The Enter/Exit toggle's label, from real session state.
-pub fn toggle_label(in_session: bool) -> &'static str {
+/// The Enter/Exit toggle's label, from real session state
+/// (Wave S, S14: resolved through the i18n table like the
+/// shell's other panel labels — `threed_enter` /
+/// `threed_exit`, IA-S14-1).
+pub fn toggle_label(core: &EditorCore, in_session: bool) -> String {
     if in_session {
-        "Exit 3D"
+        i18n_wire::tr(core, "threed_exit")
     } else {
-        "Enter 3D"
+        i18n_wire::tr(core, "threed_enter")
     }
 }
 
@@ -821,7 +842,7 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                 .child(design::panel_title(Some("cube"), "3D", None, t))
                 .child(crate::chrome_view::btn(
                     "mode-3d",
-                    toggle_label(in_session),
+                    &toggle_label(core, in_session),
                     in_session,
                     t,
                     |s| {
@@ -846,11 +867,11 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
-                .child(design::section_label("Preview", t))
+                .child(design::section_label(&i18n_wire::tr(core, "threed_preview"), t))
                 .child(icon_btn(
                     "d3-grid-toggle",
                     "border-all",
-                    "Grid",
+                    &i18n_wire::tr(core, "threed_grid"),
                     fig3_preview::grid_visible(),
                     t,
                     |_s| {
@@ -866,9 +887,9 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                 // dimmed-but-wired form, like the camera
                 // preset row).
                 .child(if dim {
-                    icon_btn_inert("d3-frame", FRAME_ICON, "Frame", t)
+                    icon_btn_inert("d3-frame", FRAME_ICON, &i18n_wire::tr(core, "threed_frame"), t)
                 } else {
-                    icon_btn("d3-frame", FRAME_ICON, "Frame", false, t, |s| {
+                    icon_btn("d3-frame", FRAME_ICON, &i18n_wire::tr(core, "threed_frame"), false, t, |s| {
                         apply_frame_preview(&mut s.core);
                     })
                 })
@@ -916,11 +937,11 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                 // packs them onto two lines inside budget.
                 .flex_wrap()
                 .child(if dim {
-                    crate::chrome_view::btn_muted_live("joint-3d", "Joint>", false, t, |s| {
+                    crate::chrome_view::btn_muted_live("joint-3d", &i18n_wire::tr(core, "threed_joint_next"), false, t, |s| {
                         s.core.fig3_select_next()
                     })
                 } else {
-                    crate::chrome_view::btn("joint-3d", "Joint>", false, t, |s| {
+                    crate::chrome_view::btn("joint-3d", &i18n_wire::tr(core, "threed_joint_next"), false, t, |s| {
                         s.core.fig3_select_next()
                     })
                 })
@@ -972,16 +993,19 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
     // validating the node count — gets the same kit
     // treatment with its own message, so the section never
     // renders as a bare label.
-    panel = panel.child(design::section_label("Joints", t));
+    panel = panel.child(design::section_label(&i18n_wire::tr(core, "threed_joints"), t));
     let rows = joint_rows(core);
     if rows.is_empty() {
         panel = panel.child(design::empty_state(
             "cube",
-            if in_session {
-                "This figure has no joints."
-            } else {
-                "Enter 3D to list the figure's joints."
-            },
+            &i18n_wire::tr(
+                core,
+                if in_session {
+                    "threed_no_joints"
+                } else {
+                    "threed_enter_to_list_joints"
+                },
+            ),
             t,
         ));
     } else {
@@ -1016,7 +1040,7 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                 row()
                     .gap(6.0)
                     .center_y()
-                    .child(design::section_label("Position", t))
+                    .child(design::section_label(&i18n_wire::tr(core, "threed_position"), t))
                     .child(text(line).font(type_::LABEL).color(t.text).truncate()),
             );
         }
@@ -1034,22 +1058,22 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                 // Frame camera past the card edge. Wrapping
                 // packs them onto two lines inside budget.
                 .flex_wrap()
-                .child(design::section_label("Camera", t))
+                .child(design::section_label(&i18n_wire::tr(core, "threed_camera"), t))
                 .child(if dim {
-                    crate::chrome_view::btn_muted_live("cam-front-3d", "Front", false, t, |s| {
+                    crate::chrome_view::btn_muted_live("cam-front-3d", &i18n_wire::tr(core, "threed_front"), false, t, |s| {
                         apply_camera_preset(&mut s.core, "front");
                     })
                 } else {
-                    crate::chrome_view::btn("cam-front-3d", "Front", false, t, |s| {
+                    crate::chrome_view::btn("cam-front-3d", &i18n_wire::tr(core, "threed_front"), false, t, |s| {
                         apply_camera_preset(&mut s.core, "front");
                     })
                 })
                 .child(if dim {
-                    crate::chrome_view::btn_muted_live("cam-side-3d", "Side", false, t, |s| {
+                    crate::chrome_view::btn_muted_live("cam-side-3d", &i18n_wire::tr(core, "threed_side"), false, t, |s| {
                         apply_camera_preset(&mut s.core, "side");
                     })
                 } else {
-                    crate::chrome_view::btn("cam-side-3d", "Side", false, t, |s| {
+                    crate::chrome_view::btn("cam-side-3d", &i18n_wire::tr(core, "threed_side"), false, t, |s| {
                         apply_camera_preset(&mut s.core, "side");
                     })
                 })
@@ -1069,18 +1093,18 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                     })
                 })
                 .child(if dim {
-                    crate::chrome_view::btn_muted_live("cam-top-3d", "Top", false, t, |s| {
+                    crate::chrome_view::btn_muted_live("cam-top-3d", &i18n_wire::tr(core, "threed_top"), false, t, |s| {
                         apply_camera_preset(&mut s.core, "top");
                     })
                 } else {
-                    crate::chrome_view::btn("cam-top-3d", "Top", false, t, |s| {
+                    crate::chrome_view::btn("cam-top-3d", &i18n_wire::tr(core, "threed_top"), false, t, |s| {
                         apply_camera_preset(&mut s.core, "top");
                     })
                 })
                 .child(if dim {
                     crate::chrome_view::btn_muted_live(
                         "cam-frame-3d",
-                        "Frame camera",
+                        &i18n_wire::tr(core, "threed_frame_camera"),
                         false,
                         t,
                         |s| {
@@ -1088,7 +1112,7 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                         },
                     )
                 } else {
-                    crate::chrome_view::btn("cam-frame-3d", "Frame camera", false, t, |s| {
+                    crate::chrome_view::btn("cam-frame-3d", &i18n_wire::tr(core, "threed_frame_camera"), false, t, |s| {
                         apply_frame_camera(&mut s.core);
                     })
                 }),
@@ -1110,7 +1134,7 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                 row()
                     .gap(6.0)
                     .center_y()
-                    .child(design::section_label("Orbit", t))
+                    .child(design::section_label(&i18n_wire::tr(core, "threed_orbit"), t))
                     .child(text(line).font(type_::LABEL).color(t.text).truncate()),
             );
         }
@@ -1122,40 +1146,40 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
-                .child(design::section_label("IK", t))
+                .child(design::section_label(&i18n_wire::tr(core, "threed_ik"), t))
                 .child(if dim {
-                    crate::chrome_view::btn_muted_live("ik-arm-l-3d", "Arm L", false, t, |s| {
+                    crate::chrome_view::btn_muted_live("ik-arm-l-3d", &i18n_wire::tr(core, "threed_arm_l"), false, t, |s| {
                         apply_ik(&mut s.core, Limb::ArmL);
                     })
                 } else {
-                    crate::chrome_view::btn("ik-arm-l-3d", "Arm L", false, t, |s| {
+                    crate::chrome_view::btn("ik-arm-l-3d", &i18n_wire::tr(core, "threed_arm_l"), false, t, |s| {
                         apply_ik(&mut s.core, Limb::ArmL);
                     })
                 })
                 .child(if dim {
-                    crate::chrome_view::btn_muted_live("ik-arm-r-3d", "Arm R", false, t, |s| {
+                    crate::chrome_view::btn_muted_live("ik-arm-r-3d", &i18n_wire::tr(core, "threed_arm_r"), false, t, |s| {
                         apply_ik(&mut s.core, Limb::ArmR);
                     })
                 } else {
-                    crate::chrome_view::btn("ik-arm-r-3d", "Arm R", false, t, |s| {
+                    crate::chrome_view::btn("ik-arm-r-3d", &i18n_wire::tr(core, "threed_arm_r"), false, t, |s| {
                         apply_ik(&mut s.core, Limb::ArmR);
                     })
                 })
                 .child(if dim {
-                    crate::chrome_view::btn_muted_live("ik-leg-l-3d", "Leg L", false, t, |s| {
+                    crate::chrome_view::btn_muted_live("ik-leg-l-3d", &i18n_wire::tr(core, "threed_leg_l"), false, t, |s| {
                         apply_ik(&mut s.core, Limb::LegL);
                     })
                 } else {
-                    crate::chrome_view::btn("ik-leg-l-3d", "Leg L", false, t, |s| {
+                    crate::chrome_view::btn("ik-leg-l-3d", &i18n_wire::tr(core, "threed_leg_l"), false, t, |s| {
                         apply_ik(&mut s.core, Limb::LegL);
                     })
                 })
                 .child(if dim {
-                    crate::chrome_view::btn_muted_live("ik-leg-r-3d", "Leg R", false, t, |s| {
+                    crate::chrome_view::btn_muted_live("ik-leg-r-3d", &i18n_wire::tr(core, "threed_leg_r"), false, t, |s| {
                         apply_ik(&mut s.core, Limb::LegR);
                     })
                 } else {
-                    crate::chrome_view::btn("ik-leg-r-3d", "Leg R", false, t, |s| {
+                    crate::chrome_view::btn("ik-leg-r-3d", &i18n_wire::tr(core, "threed_leg_r"), false, t, |s| {
                         apply_ik(&mut s.core, Limb::LegR);
                     })
                 }),
@@ -1173,11 +1197,11 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                 // card edge. Wrapping packs them onto two
                 // lines inside budget.
                 .flex_wrap()
-                .child(design::section_label("Bake", t))
+                .child(design::section_label(&i18n_wire::tr(core, "threed_bake"), t))
                 .child(if dim {
                     crate::chrome_view::btn_muted_live(
                         "mark-b-3d",
-                        "Mark pose B",
+                        &i18n_wire::tr(core, "threed_mark_pose_b"),
                         pose_b_marked,
                         t,
                         |s| {
@@ -1185,14 +1209,14 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                         },
                     )
                 } else {
-                    crate::chrome_view::btn("mark-b-3d", "Mark pose B", pose_b_marked, t, |s| {
+                    crate::chrome_view::btn("mark-b-3d", &i18n_wire::tr(core, "threed_mark_pose_b"), pose_b_marked, t, |s| {
                         s.core.fig3_mark_pose_b()
                     })
                 })
                 .child(if dim {
                     crate::chrome_view::btn_muted_live(
                         "bake-anim-3d",
-                        "Bake to frames",
+                        &i18n_wire::tr(core, "threed_bake_frames"),
                         false,
                         t,
                         |s| {
@@ -1200,16 +1224,16 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                         },
                     )
                 } else {
-                    crate::chrome_view::btn("bake-anim-3d", "Bake to frames", false, t, |s| {
+                    crate::chrome_view::btn("bake-anim-3d", &i18n_wire::tr(core, "threed_bake_frames"), false, t, |s| {
                         s.core.fig3_bake_animation(8)
                     })
                 })
                 .child(if dim {
-                    crate::chrome_view::btn_muted_live("bake-3d", "Bake to 2D", false, t, |s| {
+                    crate::chrome_view::btn_muted_live("bake-3d", &i18n_wire::tr(core, "threed_bake_2d"), false, t, |s| {
                         s.core.fig3_bake()
                     })
                 } else {
-                    crate::chrome_view::btn("bake-3d", "Bake to 2D", false, t, |s| {
+                    crate::chrome_view::btn("bake-3d", &i18n_wire::tr(core, "threed_bake_2d"), false, t, |s| {
                         s.core.fig3_bake()
                     })
                 }),
@@ -1224,11 +1248,11 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
             .gap(6.0)
             .center_y()
             .child(icon_el("cube", 12.0, t.text_secondary))
-            .child(design::section_label("Figure library", t).grow(1.0))
+            .child(design::section_label(&i18n_wire::tr(core, "threed_figure_library"), t).grow(1.0))
             .child(if dim {
-                icon_btn_inert("save-3d", "floppy-disk", "Save current", t)
+                icon_btn_inert("save-3d", "floppy-disk", &i18n_wire::tr(core, "threed_save_current"), t)
             } else {
-                icon_btn("save-3d", "floppy-disk", "Save current", false, t, |s| {
+                icon_btn("save-3d", "floppy-disk", &i18n_wire::tr(core, "threed_save_current"), false, t, |s| {
                     s.core.fig3_save_to_library()
                 })
             }),
@@ -1237,7 +1261,7 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
     if figures.is_empty() {
         panel = panel.child(design::empty_state(
             "cube",
-            "No saved 3D figures.",
+            &i18n_wire::tr(core, "threed_no_figures"),
             t,
         ));
     }
@@ -1267,7 +1291,7 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                 .child(icon_btn(
                     &format!("fig3-lib-{i}"),
                     "folder-open",
-                    "Load",
+                    &i18n_wire::tr(core, "threed_load"),
                     false,
                     t,
                     move |s| s.core.fig3_load_from_library(&load_name),
@@ -1285,18 +1309,18 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
             .gap(6.0)
             .center_y()
             .child(icon_el("cube", 12.0, t.text_secondary))
-            .child(design::section_label("Pose library", t).grow(1.0))
+            .child(design::section_label(&i18n_wire::tr(core, "threed_pose_library"), t).grow(1.0))
             .child(if dim {
-                icon_btn_inert("save-pose-3d", "floppy-disk", "Save pose", t)
+                icon_btn_inert("save-pose-3d", "floppy-disk", &i18n_wire::tr(core, "threed_save_pose"), t)
             } else {
-                icon_btn("save-pose-3d", "floppy-disk", "Save pose", false, t, |s| {
+                icon_btn("save-pose-3d", "floppy-disk", &i18n_wire::tr(core, "threed_save_pose"), false, t, |s| {
                     save_current_pose(&mut s.core);
                 })
             })
             .child(if dim {
-                icon_btn_inert("mirror-pose-3d", MIRROR_ICON, "Mirror pose", t)
+                icon_btn_inert("mirror-pose-3d", MIRROR_ICON, &i18n_wire::tr(core, "threed_mirror_pose"), t)
             } else {
-                icon_btn("mirror-pose-3d", MIRROR_ICON, "Mirror pose", false, t, |s| {
+                icon_btn("mirror-pose-3d", MIRROR_ICON, &i18n_wire::tr(core, "threed_mirror_pose"), false, t, |s| {
                     apply_mirror_pose(&mut s.core);
                 })
             }),
@@ -1305,7 +1329,7 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
     if poses.is_empty() {
         panel = panel.child(design::empty_state(
             "cube",
-            "No saved 3D poses.",
+            &i18n_wire::tr(core, "threed_no_poses"),
             t,
         ));
     }
@@ -1327,12 +1351,12 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                         .truncate(),
                 )
                 .child(if dim {
-                    icon_btn_inert(&format!("pose3d-lib-{i}"), "check", "Apply", t)
+                    icon_btn_inert(&format!("pose3d-lib-{i}"), "check", &i18n_wire::tr(core, "threed_apply"), t)
                 } else {
                     icon_btn(
                         &format!("pose3d-lib-{i}"),
                         "check",
-                        "Apply",
+                        &i18n_wire::tr(core, "threed_apply"),
                         false,
                         t,
                         move |s| {
@@ -1391,8 +1415,72 @@ mod tests {
 
     #[test]
     fn toggle_label_follows_session_state() {
-        assert_eq!(toggle_label(false), "Enter 3D");
-        assert_eq!(toggle_label(true), "Exit 3D");
+        // Wave S (S14): the label resolves through the
+        // i18n table now, so this asserts the English
+        // values of `threed_enter` / `threed_exit` and,
+        // like the pin below, passes once IA-S14-1 lands
+        // the keys (until then `tr` falls back to the key
+        // itself — the Q7 pattern).
+        let core = EditorCore::new();
+        assert_eq!(toggle_label(&core, false), "Enter 3D");
+        assert_eq!(toggle_label(&core, true), "Exit 3D");
+    }
+
+    #[test]
+    fn threed_i18n_keys_exist_and_match_the_english_labels() {
+        // Wave S (S14): every label the panel wires
+        // through `i18n_wire::tr` must resolve to exactly
+        // the English string the panel rendered before
+        // the wiring. The keys land via IA-S14-1 (the
+        // integrator appends them to all 28 tables after
+        // S1 settles i18n.rs), so this pin passes only
+        // once that IA lands — until then `tr` falls back
+        // to the key itself and `key_in_table` is false
+        // (the Q7 pattern: wiring and keys land together
+        // at integration).
+        let core = EditorCore::new();
+        for (key, english) in [
+            ("threed_preview", "Preview"),
+            ("threed_joints", "Joints"),
+            ("threed_position", "Position"),
+            ("threed_camera", "Camera"),
+            ("threed_orbit", "Orbit"),
+            ("threed_ik", "IK"),
+            ("threed_bake", "Bake"),
+            ("threed_figure_library", "Figure library"),
+            ("threed_pose_library", "Pose library"),
+            ("threed_enter", "Enter 3D"),
+            ("threed_exit", "Exit 3D"),
+            ("threed_grid", "Grid"),
+            ("threed_frame", "Frame"),
+            ("threed_joint_next", "Joint>"),
+            ("threed_front", "Front"),
+            ("threed_side", "Side"),
+            ("threed_top", "Top"),
+            ("threed_frame_camera", "Frame camera"),
+            ("threed_arm_l", "Arm L"),
+            ("threed_arm_r", "Arm R"),
+            ("threed_leg_l", "Leg L"),
+            ("threed_leg_r", "Leg R"),
+            ("threed_mark_pose_b", "Mark pose B"),
+            ("threed_bake_frames", "Bake to frames"),
+            ("threed_bake_2d", "Bake to 2D"),
+            ("threed_save_current", "Save current"),
+            ("threed_load", "Load"),
+            ("threed_save_pose", "Save pose"),
+            ("threed_mirror_pose", "Mirror pose"),
+            ("threed_apply", "Apply"),
+            ("threed_no_joints", "This figure has no joints."),
+            (
+                "threed_enter_to_list_joints",
+                "Enter 3D to list the figure's joints.",
+            ),
+            ("threed_no_figures", "No saved 3D figures."),
+            ("threed_no_poses", "No saved 3D poses."),
+        ] {
+            assert!(i18n_wire::key_in_table(key), "missing i18n key: {key}");
+            assert_eq!(i18n_wire::tr(&core, key), english);
+        }
     }
 
     #[test]

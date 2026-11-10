@@ -128,7 +128,10 @@
 //! right. Since Wave R the word itself goes through the
 //! catalogue like the dopesheet's header:
 //! `i18n_wire::tr(core, "subtitles")` (the `subtitles`
-//! key is R4's, landed in the same wave).
+//! key is R4's, landed in the same wave). A block's label
+//! is [`block_label`]: the cue's text, with the speaker
+//! prefixed as `Name: ` for a credited cue (Wave S, S3)
+//! — the panel rows' composition, display only.
 //!
 //! ## Integrator wiring (landed in Wave Q)
 //!
@@ -217,6 +220,29 @@ pub fn cue_rect(cue: &SubtitleCue, frame_count: usize) -> [f32; 2] {
 /// text (see [`SUB_TEXT_MIN_W`]).
 pub fn block_shows_text(width: f32) -> bool {
     width >= SUB_TEXT_MIN_W
+}
+
+/// A cue block's display label: the cue's text with its
+/// speaker prefixed as `Name: ` when the cue is credited
+/// (Wave S, S3 — the lane half of the follow-up IA-R21-5
+/// filed; the panel's cue rows settled this composition
+/// in Wave R, and the renderers draw the same prefix via
+/// `subtitles::subtitle_display_lines`). Display only:
+/// a block's geometry comes from the cue's frames
+/// ([`cue_rect`]), never from its text, and the drag
+/// identity guard keeps comparing the RAW text — this
+/// string is composed fresh at render and stored
+/// nowhere. The lane has never flattened in the string
+/// layer (its single-line discipline is the text
+/// element's `.truncate()`), so the prefix rides the
+/// raw text and an uncredited cue's label is the raw
+/// text byte for byte, exactly what the lane has
+/// always shown.
+pub fn block_label(cue: &SubtitleCue) -> String {
+    match &cue.speaker {
+        Some(name) => format!("{name}: {}", cue.text),
+        None => cue.text.clone(),
+    }
 }
 
 /// Which sub-row each cue paints on: first-fit in stored
@@ -658,7 +684,7 @@ fn block_row(s: &State, t: &Theme, rows: &[Option<usize>], r: usize) -> El {
             .on_drag(move |s: &mut State, d: &mut Drag, _tx: &mut Tx| block_drag(s, d, i));
         if block_shows_text(w) && !cue.text.is_empty() {
             block = block.child(
-                text(cue.text.clone())
+                text(block_label(cue))
                     .font(type_::LABEL)
                     .color(t.text)
                     .truncate(),
@@ -765,6 +791,56 @@ mod tests {
         assert!(block_shows_text(200.0));
         // The threshold is exactly two frames' extent.
         assert_eq!(SUB_TEXT_MIN_W, cue_rect(&cue(0, 2, ""), 9)[1]);
+    }
+
+    /// A cue carrying a speaker credit (Wave R's field,
+    /// Wave S's lane label).
+    fn credited_cue(start: usize, end: usize, text: &str, name: &str) -> SubtitleCue {
+        SubtitleCue {
+            start_frame: start,
+            end_frame: end,
+            text: text.to_string(),
+            speaker: Some(name.to_string()),
+        }
+    }
+
+    #[test]
+    fn block_label_prefixes_a_credited_cue() {
+        // The panel rows' composition: `Name: ` on the
+        // front of the cue's text.
+        assert_eq!(
+            block_label(&credited_cue(0, 10, "The long road home.", "Adult Son")),
+            "Adult Son: The long road home."
+        );
+        // The label is display only: the block's rect is
+        // the cue's frames, with or without the credit —
+        // the prefixed string is longer, the width is not.
+        let plain = cue(2, 9, "The long road home.");
+        let credited = credited_cue(2, 9, "The long road home.", "Adult Son");
+        assert_eq!(cue_rect(&credited, 12), cue_rect(&plain, 12));
+    }
+
+    #[test]
+    fn block_label_uncredited_is_the_raw_text_byte_identical() {
+        // No speaker: the label IS the stored text, byte
+        // for byte what the lane has always shown —
+        // including a multi-line cue's raw newlines, which
+        // the string layer has never rewritten.
+        assert_eq!(block_label(&cue(0, 10, "The gate is open.")), "The gate is open.");
+        assert_eq!(block_label(&cue(0, 10, "one\ntwo")), "one\ntwo");
+        assert_eq!(block_label(&cue(0, 10, "")), "");
+    }
+
+    #[test]
+    fn block_label_newline_text_flattens_as_today_with_the_prefix_on_the_front() {
+        // A multi-line credited cue: the body reaches the
+        // label exactly as it does uncredited today (the
+        // text element's truncate owns single-line
+        // discipline); the prefix rides the front.
+        assert_eq!(
+            block_label(&credited_cue(0, 10, "one\ntwo", "Narrator")),
+            "Narrator: one\ntwo"
+        );
     }
 
     #[test]
