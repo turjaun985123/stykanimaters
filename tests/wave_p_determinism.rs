@@ -152,6 +152,7 @@ fn aba_one_word_cue_change_is_sensitive_and_leaves_no_residue() {
         start_frame: 0,
         end_frame: 3,
         text: "Hello world".to_string(),
+        speaker: None,
     });
     assert_eq!(base.subtitles.len(), 1, "fixture premise: one cue");
 

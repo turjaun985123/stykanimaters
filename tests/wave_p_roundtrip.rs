@@ -413,11 +413,13 @@ fn full_fixture() -> Project {
             start_frame: 0,
             end_frame: 12,
             text: "First line\nsecond line".into(),
+            speaker: None,
         },
         SubtitleCue {
             start_frame: 12,
             end_frame: 30,
             text: "Ünïcode cue — ♪".into(),
+            speaker: None,
         },
     ];
     p.subtitle_style = SubtitleStyle {
@@ -939,11 +941,13 @@ fn subsystem_fixtures_round_trip_losslessly() {
                         start_frame: 0,
                         end_frame: 12,
                         text: "First line\nsecond line".into(),
+                        speaker: None,
                     },
                     SubtitleCue {
                         start_frame: 12,
                         end_frame: 30,
                         text: "Ünïcode cue — ♪".into(),
+                        speaker: None,
                     },
                 ];
                 p.subtitle_style = SubtitleStyle {

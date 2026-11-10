@@ -65,6 +65,7 @@ fn cue(start_frame: usize, end_frame: usize, text: &str) -> SubtitleCue {
         start_frame,
         end_frame,
         text: text.to_string(),
+        speaker: None,
     }
 }
 
@@ -191,17 +192,17 @@ fn core_authored_cues_and_style_survive_save_and_fresh_load() {
     // each new cue's index in that sorted list. Exactly
     // one undo step per accepted add (contract 1).
     assert_eq!(
-        core.subtitle_add(48, 96, "And the long road home."),
+        core.subtitle_add(48, 96, "And the long road home.", None),
         Some(0),
         "the first add lands at index 0"
     );
     assert_eq!(
-        core.subtitle_add(0, 24, "The gate is open."),
+        core.subtitle_add(0, 24, "The gate is open.", None),
         Some(0),
         "an earlier cue inserts at the head of the sorted list"
     );
     assert_eq!(
-        core.subtitle_add(24, 48, "Now the yard."),
+        core.subtitle_add(24, 48, "Now the yard.", None),
         Some(1),
         "a middle cue inserts between its neighbours"
     );

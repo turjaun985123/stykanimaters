@@ -151,11 +151,13 @@ generalising, and none was weakened:
   A3's shipped source (`sprites_panel.rs`, which
   landed during this audit); only the panel's mount
   (column, y) is modelled, on the stroke inspector's
-  card geometry, because the workspace gating and
-  the `sprites-populated` scene are still in flight
-  -- when the real tree lands, the debrief scan
-  validates the shape against it and the fixture's
-  placement is corrected to the dump if they differ.
+  card geometry. That modelling choice dates from
+  when the workspace gating and the `sprites-populated`
+  scene were still in flight; the scene has since
+  landed and headless.yml dumps its tree, so the
+  debrief scan validates the shape against the real
+  dump and the fixture's placement is corrected to
+  the dump if they differ.
 - The library rows' width anatomy is unchanged by
   the 44 pt thumbnails (Wave 12 D5): the thumb and
   the seg count are the first line's only fixed
@@ -187,7 +189,7 @@ content and card rules.
 
 Wave P audit -- the changed surfaces of Squads 1-2
 against the full tree census. The headless harness
-produces 32 trees: the 29 registered scenes at the
+produces 34 trees: the 31 registered scenes at the
 default 1440x900 plus default / default-light /
 three-d at 1280x720 (headless.yml tree steps). This
 wave changed no scene and no panel mount; its
@@ -308,6 +310,16 @@ Subtitles panel is an ordinary right-column card in
 the Audio workspace, judged by rules 1-2 in
 audio-open.
 
+Wave R maintenance (R17): the scan set still has 13
+entries, all required and no pending entries. At the
+R17 audit, R16 had registered no new headless scene
+or tree in the shared tree: `scenes()` still listed
+the same 31 names, and the harness cross-check still
+parsed 34 produced tree dumps (the 31 default-size
+scene trees plus the three 1280x720 variants named
+above). No SCAN_SET addition or Integrator Action was
+therefore owed by this maintenance pass.
+
 Checks considered and NOT added (they would
 false-positive or judge what rects cannot show):
 
@@ -396,10 +408,11 @@ SCROLL_SEGMENTS = {"timeline"}
 # "required" trees are produced by headless.yml today --
 # a --dir pass that lacks one is INCOMPLETE, not clean.
 # "pending" trees are named before the harness produces
-# them (the subtitle scenes are registered but the
-# workflow does not dump them yet -- IA-Q12-1); a --dir
-# pass reports them PENDING without failing, and notes
-# it when one shows up so the entry can be promoted.
+# them; a --dir pass reports them PENDING without
+# failing, and notes it when one shows up so the entry
+# can be promoted. There are currently no pending
+# entries: both subtitle trees were promoted after
+# IA-Q12-1 landed in the workflow at Wave Q integration.
 SCAN_SET = [
     ("tree-default.json", "required",
      "O-5 keyframe rows + O-6 wx-kind segments (P2); O-8 playback "
@@ -700,11 +713,12 @@ def scan_file(path):
 # two-line nudge anatomy, the kit empty state) do the same
 # for the surfaces Squads 1-2 changed, and (g) the Wave Q
 # scan set: names unique and well-formed, the pending
-# entries exactly the two subtitle trees, the gap
-# computation separating missing-required from
-# absent-pending, and -- when the checkout's headless.yml
-# is readable -- every required tree harness-produced and
-# no pending tree produced yet.
+# entries exactly none (both subtitle trees were promoted
+# to required when IA-Q12-1 landed), the gap computation
+# separating missing-required from absent-pending, and --
+# when the checkout's headless.yml is readable -- every
+# required tree harness-produced and no pending tree
+# produced yet.
 # ------------------------------------------------------------------
 
 def _el(path, rect, key=None):

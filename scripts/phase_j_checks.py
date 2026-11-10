@@ -537,6 +537,17 @@ Wave Q additions (same gate, checks 1/5/9/10 widened):
   panel had not landed at recount time; its keys can
   only raise the total above the floor.
 
+Wave R note (R15, 2026-11-10): baseline recount on the
+settled tree (HEAD 911cf77, clean) reads 979 total
+keys (863 static + 116 dynamic, 61 files), 381 MCP
+tools, 48 State fields / 22 full literals, 31 headless
+scenes, 134 palette commands — gate PASS 10/10, census
+16/16 PASS. KEY_TOTAL_FLOOR ratcheted 949 -> 979 at
+the constant (ledger there). MCP_SURFACE_FLOOR stays
+381 (== the recounted total). R15 re-runs both scripts
+as Wave R slices land and ratchets only to verified
+recounts; R15's findings carry the per-slice deltas.
+
 Approximations are deliberate and documented inline:
 block capture is brace counting over comment/string-
 blanked source (the repo's established scan idiom), and
@@ -737,7 +748,16 @@ def entry_field(chunk: str) -> str | None:
 # had not landed at recount time; its keys can only
 # raise the total. Ratchet UP with a new ledger line
 # when a wave's recount rises; never lower silently.
-KEY_TOTAL_FLOOR = 949
+#
+# Wave R ratchet (R15's baseline recount, 2026-11-10):
+# on the settled Wave P+Q tree (HEAD 911cf77, clean)
+# this counter reads 979 total (863 static + 116
+# dynamic, 61 files) — Q5's predicted rise, realised
+# once Q7's subtitle panel and the rest of the wave
+# landed and were integrated. Floor raised 949 -> 979
+# so Wave R starts from the integrated truth; any key
+# loss in Wave R now fails check 1.
+KEY_TOTAL_FLOOR = 979
 
 
 def inventory_counts() -> tuple[int, int, int, int]:

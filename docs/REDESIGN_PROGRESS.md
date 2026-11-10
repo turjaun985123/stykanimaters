@@ -2127,3 +2127,421 @@ recommended recovery content-comparison
 gate, which would end the spurious
 byte-identical recovery offers. And sound
 remains user-verified only.
+
+### 6.12 Wave R — parity + completeness burn-down: subtitles made whole, i18n wiring spreads (2026-11-10)
+
+Ordered 2026-11-10 (10:29 +06) as a
+re-issue of the standing continuous order:
+"assign 20 agents continuous write code if
+ci gets error then fix that". Twenty agents
+on base `911cf77` (Wave P+Q plus its CI fix
+round 1), one owner per file, integrator
+surfaces via filed actions (board:
+`~/workspace/wave-r/BOARD.md`; findings:
+`~/workspace/wave-r/findings/`). Mid-wave
+(10:36 +06) the user settled two standing
+decisions with "Build both", and the wave
+grew by two assignments: **R21** (the
+subtitle `speaker` field) and **R22** (the
+recovery content-comparison gate P42
+recommended) — both formerly exclusions,
+now approved work. Two honesty notes govern
+everything below. First, this section was
+written from the 18 findings filed at write
+time (r1, r2, r3, r4, r5, r6, r8, r9, r10,
+r11, r12, r13, r15, r16, r17, r18, r19,
+r20); **r7, r21 and r22 were not yet filed**
+and are named as such where their topics
+arise — nothing is claimed for them beyond
+what the tree itself shows. Second, every
+status below is IMPLEMENTED (in tree,
+uncommitted at write time), and **Wave R
+has no CI verdict**: the base's own round-2
+runs are the latest observed — headless
+42755921970 **GREEN** on `911cf77`, build
+42755902602 failed in the Test step on a
+lib test-target compile error in Wave P's
+missing-audio tests (imports in
+`editor.rs`'s `wave11_tests`); the
+integrator's fix for that rides with this
+wave's integration push, not a separate
+round.
+
+**Subtitle surface parity (R1, R2, R3,
+R20).** **R1 — the raster burn-in now lays
+out through the shared helpers.** Q6's flag
+is retired: the 6%-of-stage-height stamp
+sizing is gone; the burn-in takes its font
+size from `subtitle_font_size` and its line
+centres from `subtitle_line_center_y`,
+exactly as stage and SVG do, so all three
+surfaces anchor a line's glyphs at the same
+centre at the same size. The pin module's
+bands were re-derived from the stamp maths
+at the new size (centres 372/348/324 bottom,
+28/52/76 top at H=400) — no assertion
+weakened; the old values are kept in the
+header as the pre-R1 record. **R2 — ONE
+validation rule set, documented as a block
+in `src/subtitles.rs`.** The audit's one
+true inconsistency: the importers silently
+*repaired* an inverted cue (end before
+start) by clamping it into a fabricated
+one-frame cue the file never contained,
+where every other boundary refuses or
+skips. Now an inverted block is a bad
+block — skipped, and a file of only such
+blocks refuses as zero yield — while a
+non-inverted range that merely rounds onto
+one frame keeps P23's one-frame clamp
+(rounding is monotonic; collapse can only
+mean equality). Overlaps are valid
+everywhere; queries follow stored order
+verbatim, and an invalid stored cue
+(reachable only from a hand-edited file)
+can never be live; eight pins cover the
+settlement on both surfaces. **R3 —
+P32's lane drag-to-move is built.** A cue
+block drags in time (body preserves
+duration; either edge resizes under the
+timeline's own 8 pt edge rule) under
+exactly one undo step per completed drag,
+staged lazily at the first effective move,
+cancelled drags rolling back through one
+`undo()`; no re-sort mid-gesture, rows
+pinned to the grab so the element path the
+runtime captured cannot flip, an identity
+guard abandoning the gesture if another
+surface rewrites the cue mid-drag. No
+`main.rs` action was needed — the gesture
+record rides a `thread_local` (the
+timeline chips' own precedent), so no
+State field and no literal sweep. The lane
+header now resolves through
+`tr(s, "subtitles")` on R4's key. Fourteen
+pins. **R20 — the shell↔MCP map, three
+gaps closed.** The style was write-only
+over MCP (no tool reported it, so a
+faithful one-field change was impossible);
+`subtitle_list` now carries the style, and
+both replace tools (`subtitle_set_style`,
+`subtitle_update`) now mirror the panel's
+caller-side guard: a no-change call spends
+no undo step and reports `changed: false`.
+Census unchanged (no new tools); the io
+module needed no behaviour change.
+
+**i18n wiring spreads (R4, R5, R6).**
+**R4 — the catalogue grows 99 → 151 keys
+× 28 tables** (verified programmatically:
+identical sequences, zero value==key, zero
+loss): a 30-key subtitle block appended to
+every table, plus IA-R6-1's 22 camera keys
+applied at R6's own anchor (below).
+Genuine translations in the eight
+translated tables, English placeholders in
+the other nineteen — the tables' own
+convention. The Subtitles panel is wired
+through `tr()` end to end with English
+rendering byte-identical (pinned per
+label); its status sentences stay English
+by design — the shell localises no status
+sentence anywhere, and several are pinned
+verbatim. **R5 — the export panel wired
+where the catalogue's English is
+byte-identical to the label shown** (five
+sites; three of Q14's dead keys —
+`export_svg`, `spritesheet`, `export_webm`
+— live again). The rest is named gaps, not
+wired at the cost of changing English: six
+section headings and eight buttons have no
+key at all, and six keys exist whose values
+are different strings from the panel's
+labels (`export_png` = "Export PNG" vs the
+button "PNG", and its siblings) — fixing
+those is a catalogue decision, recorded in
+r5.md. **R6 — the camera panel wired at
+its two exact matches** (`camera_delete_key`,
+`clear_key_no_undo`), and its IA-R6-1
+proposed the 22 keys the panel actually
+needs; R4 applied them (above). Wiring the
+camera panel to those new keys is a later
+pass — R6 did not pre-wire keys that did
+not yet exist.
+
+**Media and export completeness (R8, R9,
+R10, R13).** **R8 — segment-text alpha,
+P17's last remainder, settled WITHOUT a
+model change.** The board's wording placed
+a stored field on the model; R8's audit
+found `MediaItem` lives in `src/media.rs`
+(it has never lived in `model.rs`) and
+that the alpha is an *evaluated* value —
+the carrier node's already-stored
+`style.opacity` — exactly like the image
+variant's alpha beside it. A stored field
+would have been unauthorable dead state
+(no panel control or MCP argument writes
+it): the fake-field pattern contract 5
+exists to prevent. The settlement pins the
+parity value as style opacity alone, NOT
+the figure × style product images carry
+(the stage's figure fade is a colour
+blend; a product would manufacture a new
+divergence). SVG emission landed in
+`src/svg.rs` under the image arm's exact
+rule; the stage needed no code (it is the
+reference surface; its docs now state the
+settlement instead of the closed
+divergence); the raster threading is
+IA-R8-1 (below) — **the tree does not
+compile until the integrator applies it**,
+stated plainly in r8.md. The legacy
+guarantee rides the existing serde default
+on `NodeDef.style`: a pre-style file loads
+its carriers at opacity 1.0 and renders
+byte-identically. **R9 — JPEG import.**
+The `image` crate's jpeg feature was
+already on; the only refusal was the MCP
+funnel's PNG-magic gate. The gate now
+accepts PNG signature or JPEG SOI by
+content (a JPEG named `.png` imports; the
+pin proves it), the stored-bytes model is
+unchanged, and GIF stays refused
+deliberately — widening the accepted set
+is a scope decision, not a parity fix.
+**R10 — export scale is a true re-render.**
+The PNG-sequence and still-frame funnels
+gained scale entries (0.5 / 1.0 / 2.0 and
+any positive finite value): geometry is
+re-rendered at `ss × scale`, never
+resampled; at 1.0 the output is
+byte-identical (the dimension rule reduces
+to the historical truncation for every
+stage). The audit also exposed that the
+MCP single-PNG arm's existing `scale`
+argument post-resized a 1.0 render — a
+resample wearing a re-render's clothes;
+IA-R10-1 rewires it onto the new funnel.
+**R13 — frame ranges over MCP, unified
+vocabulary, strict layer.** `render` and
+`export_file` now accept `from_frame` /
+`to_frame` alongside the Wave 11 `from` /
+`to` (both spellings for a bound must
+agree; a lone bound refuses), and a bound
+past the timeline end is REFUSED at the
+MCP layer before any file is written —
+where the core exporters still clamp,
+because their caller is the panel's
+pre-clamped range state; the layer
+settlement is documented in `mcp_io.rs`.
+`export_bundle` ranges were NOT wired:
+the panel deliberately ignores ranges for
+bundles (its "Export all" label depends on
+it) and the MCP tool mirrors that on
+purpose — a disagreement reported per
+contract 5, not silently settled.
+
+**The verification ring (R11, R12,
+R15–R19).** **R11 discharges P12's IA-1**:
+`docs/PHASE_O.md` (new) and
+`docs/QA_RUNE.md` §17 are written, every
+anchor grep-verified against the tree —
+except the IA's one CI-dependent half, the
+p05 §2 scan table over a real headless
+dispatch, which both documents record as
+**open, owed to the first headless
+debrief**, rather than fabricating it.
+**R12 extends determinism to the two drawn
+surfaces P47 did not cover**: SVG A-B-A
+byte-identity including a live subtitle
+cue and graph channels. The stage leg pins
+the lib-side evaluated stream — everything
+`stage_shape` is a pure function of —
+because `stage_shape` itself is a
+bin-crate item and Wave P+Q's CI round 1
+proved that boundary in an error message;
+the bin-side assembly order remains
+pixel-proven by the headless census, and a
+true in-bin pin is named as a remainder,
+not faked. **R15** took the settled
+baseline recounts (381 tools; 979 element
+keys by the gate counter — 863 static +
+116 dynamic; 48 State fields over 22 full
+literals) and ratcheted `KEY_TOTAL_FLOOR`
+949 → 979 with a ledger line (raise-only
+discipline); `MCP_SURFACE_FLOOR` already
+equalled the recount at 381. **R16**
+needed no new scenes — layout facts assert
+keys and counts, which label text cannot
+move — but its audit found **facts 32/33
+already false**: since Wave Q wired the
+lane into the timeline, the
+`subtitles-populated` tree carries the lane
+over the default tree, contradicting fact
+32's "identical inventory" text (the
+overflow scan set had treated that tree as
+the lane's carrier all along). Both facts
+are corrected in `scenes.rs`; this is the
+wave's one pre-existing-defect fix in a
+document of record. **R17** confirms the
+scan set stands at **13 required trees, 0
+pending** (R16 added no tree) and corrects
+four stale prose statements in
+`scripts/overflow_scan.py`; self-test 84
+PASS. **R18** wrote the wave's e2e suite
+(14 tests): R1/R2/R9/R10 legs against the
+landed shapes. **R19** extended P22's
+round-trip discipline (7 tests), including
+the load-verbatim leg: state the write
+paths refuse (zero-length, inverted,
+blank-text cues; an over-clamp stored
+style) still loads byte-identically —
+validation is edit-time and import-time
+only, which matches R2's settlement
+exactly.
+
+**One contract collision, recorded for the
+integrator.** R18's R8 leg and R19's tests
+1–3 were written against the board's
+literal R8 wording (a stored `alpha` field
+on `SegmentMedia::Text` with a serde
+default). R8 landed the evaluated-alpha
+settlement above instead, with the
+discrepancy reported in r8.md §2. Those
+legs cannot compile against the landed
+shape; the reconciliation is mechanical
+and one-directional — rewrite them against
+r8.md §5's contract (the item stream
+carries the alpha; R19's test 4 and R8's
+own pins already cover the evaluated path,
+and legacy identity rides the
+`NodeDef.style` default). No defect is
+alleged in any of the three slices; it is
+a board-wording casualty, named here so it
+is fixed at integration rather than
+discovered in a CI log.
+
+**Integration ledger — every Integrator
+Action filed across the findings.**
+(1) **IA-R8-1** (`src/media.rs`, six parts,
+exact code in r8.md): the `MediaItem::Text`
+alpha field, both construction sites,
+`composite_media` / `composite_text`
+threading, two test patterns — REQUIRED
+before the tree compiles. (2) The R18/R19
+reconciliation to R8's contract, above.
+(3) **IA-R9-1**: `attach_image_to_node`
+accepts `jpg` / `jpeg` beside `png` in
+`src/editor.rs`, with its status sentence,
+plus one comment line in `media.rs`.
+(4) **IA-R9-2**: the `asset_import`
+description in `src/mcp_tools.rs` and its
+`docs/MCP.md` row move together (exact text
+in r9.md). (5) **IA-R9-3**: SVG export
+embeds every asset as `data:image/png` —
+a JPEG asset is mislabelled there; the
+MIME must follow the bytes (exact fix in
+r9.md; sequence against R8's `svg.rs`
+work). (6) **IA-R10-1** (`src/mcp_io.rs`,
+after R13's edits to the same file): the
+single-PNG arm renders truly at scale, the
+sequence arms accept `scale`, the
+registry's render wording follows.
+(7) **IA-R10-3**: on a non-1.0 scaled
+frame, the subtitle burn-in still lays out
+in stage space — feed R1's layout the
+output dimensions so the burn-in scales
+with the frame; until then R10's pins are
+deliberately cue-free. (8) **IA-R13-1**:
+`docs/MCP.md`'s `render` and `export_file`
+Purpose rows (exact replacement rows in
+r13.md). (9) **IA-R20-1**: `docs/MCP.md`
+subtitle-tool prose for R20's three fixes
+— as filed, r20.md ends mid-sentence at
+its line 156, so the exact replacement
+text must be recovered from the module
+descriptions (or a completed r20.md)
+before applying; the gate does not block
+on it (its doc sync is name-set based).
+(10) **IA-R1-1**: one comment-tense line in
+`stage_text.rs` ("joins them via
+IA-P26-1" is now past) — check against
+R8's doc edits in the same file first.
+(11) The integrator's own `editor.rs`
+test-import fix from the base's CI round 2
+rides this integration. (12) `i18n_wire.rs`'s
+header still reads "99 keys" (stale since
+Q14; now 151) — a header-truth tidy for
+the integrator. Closed inside the wave:
+**IA-R6-1**, applied by R4. No actions
+were filed by R2, R3, R11, R12, R16 or R17.
+
+**Verification — awaiting CI.** Counts in
+this section were verified from the tree
+at write time, not from findings' claims:
+the census script re-run reads **381
+tools** (44 + 319 + 9 + 4 + 5) — Wave R
+added no tools, so README's count line
+does not move and README is unchanged by
+this pass; R4's programmatic audit reads
+**151 i18n keys × 28**; the gate counter
+reads **979 element keys** (zero lost;
+no Wave R slice added any), with the floor
+ratcheted to match by R15. R5, R6, R13,
+R15 and R16 each report the gate at PASS
+10/10 on the in-flight tree at their check
+times; the integrator re-runs gate +
+census on the settled tree before
+committing, and CI (Build, Test & Binary +
+a headless dispatch) is the proof of
+everything above — including the first
+measurement of the revised fact 32 and of
+R1's re-derived burn-in bands.
+
+**Honest remainders.** (1) Three findings
+were outstanding at write time: **r7**
+(the undo-contract census — its suite
+`tests/wave_r_undo_census.rs` IS in the
+tree; nothing beyond the file's presence
+is claimed), and **r21 / r22** (the two
+assignments the user's "Build both"
+decision added mid-wave; `src/shell.rs`
+carries an in-flight modification whose
+attribution their findings will settle).
+This section should be amended when they
+file. (2) R5's export-panel gaps (headings
+and buttons with no key; six keys whose
+values differ from the labels) and R6's
+camera-panel wiring pass await catalogue
+decisions in a later wave; subtitle and
+camera status sentences likewise stay
+English by the shell's standing rule.
+(3) An export-scale control in the panel:
+the core is ready (R10) and no control was
+invented — a product decision
+(IA-R10-2). (4) Ranged `export_bundle`:
+a reported disagreement between what the
+core could do and what both surfaces
+deliberately do; a user decision, panel
+first. (5) The p05 §2 scan table remains
+owed to the first headless debrief (R11).
+(6) A bin-side `stage_shape` determinism
+pin has no owner this wave (R12). (7) A
+tall subtitle stack still walks off the
+far edge on all three surfaces — the
+stack guard is a cross-surface decision
+(R1). (8) Two §6.11 remainders close
+here: segment-text alpha (settled by R8,
+without the media-model change §6.11
+expected) and P12's IA-1 (discharged by
+R11, scan table excepted). The standing
+user decisions otherwise stand as §6.11
+left them — project-swap undo,
+white-on-accent contrast, the two
+"New project" results, the waveform call;
+the speaker field and the recovery
+content-comparison gate left that list on
+2026-11-10 by the user's own word and are
+R21/R22 above. And sound remains
+user-verified only.

@@ -40,6 +40,7 @@ fn cue(start_frame: usize, end_frame: usize, text: &str) -> SubtitleCue {
         start_frame,
         end_frame,
         text: text.to_string(),
+        speaker: None,
     }
 }
 
