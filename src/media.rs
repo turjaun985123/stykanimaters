@@ -13,6 +13,19 @@
 //! width / height, so sprites are never stretched. Text sits at the
 //! segment midpoint, rotated along the segment direction.
 //!
+//! Bent segments (Wave X, X4 — GAP proposal P-2): the segment
+//! LINES have always arced through `model::bend_mid` as two
+//! pieces; segment images now follow the same arc. When the
+//! node's bend at the frame is nonzero, [`media_items`] emits
+//! TWO image items for the segment: the quad is split at the
+//! arc midpoint (the u = 0.5 edge displaced by exactly the
+//! bend offset, so the two half-quads share that edge and
+//! their centreline runs parent -> bend_mid -> node, verbatim
+//! the line pieces' path), and each item's `src_rect` samples
+//! its own half of the source image. Text deliberately does
+//! NOT follow: it stays on the straight chord as one rigid
+//! label (stage_text's documented rule, pinned there).
+//!
 //! Free-standing instances (`Project.sprites` / `Project.texts`,
 //! keyframed with `InstanceKey`s — e.g. imported from Stick Nodes
 //! animation files) are placed by the same [`media_items`] pass,
@@ -85,7 +98,19 @@ pub enum MediaItem {
     /// ignored both and drew every image at full strength;
     /// free-standing sprite instances carry 1.0 (an instance
     /// key has no opacity channel).
-    Image { corners: [V2; 4], asset: usize, alpha: f32 },
+    ///
+    /// `src_rect` is the normalised source rectangle
+    /// `[u0, v0, u1, v1]` this quad samples (Wave X, X4): the
+    /// whole image is `[0, 0, 1, 1]`, which is what unbent
+    /// segment media and every sprite instance carry. A bent
+    /// segment's image arrives as two items whose rects are
+    /// the u-halves `[0, 0, 0.5, 1]` and `[0.5, 0, 1, 1]`.
+    Image {
+        corners: [V2; 4],
+        asset: usize,
+        alpha: f32,
+        src_rect: [f32; 4],
+    },
     /// A text label centred at `pos`, running along `angle_deg`
     /// (stage-space degrees, y-down like the rest of the model).
     /// `size` is the glyph height in stage units. `alpha` is
@@ -176,6 +201,13 @@ pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
             continue;
         }
         let Some(pose) = poses.get(fi) else { continue };
+        // Per-node bends at this frame (Wave X, X4): the same
+        // `bends_at` fetch every segment-line surface makes.
+        // Bends have no graph channel (the stored bend is
+        // always the rendered bend), so this is correct with
+        // or without channels; an empty vec means no bend
+        // data — every node reads as straight.
+        let bends = project.bends_at(frame_f, fi);
         // Positions from the channelled def when channels
         // exist; the media payload and carrier stay on the
         // figure's own def nodes in the loop below.
@@ -236,17 +268,51 @@ pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
                     let n = [-d[1], d[0]];
                     let hl = scale(d, len / 2.0);
                     let hh = scale(n, len / aspect / 2.0);
-                    out.push(MediaItem::Image {
-                        corners: [
-                            sub(sub(mid, hl), hh),
-                            sub(add(mid, hl), hh),
-                            add(add(mid, hl), hh),
-                            add(sub(mid, hl), hh),
-                        ],
-                        asset: *asset,
-                        alpha: fig.opacity.clamp(0.0, 1.0)
-                            * carrier.style.opacity.clamp(0.0, 1.0),
-                    });
+                    let corners = [
+                        sub(sub(mid, hl), hh),
+                        sub(add(mid, hl), hh),
+                        add(add(mid, hl), hh),
+                        add(sub(mid, hl), hh),
+                    ];
+                    let alpha = fig.opacity.clamp(0.0, 1.0)
+                        * carrier.style.opacity.clamp(0.0, 1.0);
+                    // Wave X (X4, GAP P-2): a bent segment's
+                    // image follows the arc, exactly as the
+                    // segment line does — the quad splits at
+                    // `bend_mid(a, b, bend)`: the u = 0.5 edge
+                    // (the chord midpoint ± hh) is displaced
+                    // by the bend offset `bend_mid - mid`, so
+                    // the two half-quads share that edge, each
+                    // samples its own half of the source, and
+                    // their union is the chord quad sheared at
+                    // the middle. A straight segment keeps the
+                    // single full-source item it has always
+                    // emitted.
+                    let bend = bends.get(ni).copied().unwrap_or(0.0);
+                    if bend != 0.0 {
+                        let arc_mid = crate::model::bend_mid(a, b, bend);
+                        let edge_lo = sub(arc_mid, hh);
+                        let edge_hi = add(arc_mid, hh);
+                        out.push(MediaItem::Image {
+                            corners: [corners[0], edge_lo, edge_hi, corners[3]],
+                            asset: *asset,
+                            alpha,
+                            src_rect: [0.0, 0.0, 0.5, 1.0],
+                        });
+                        out.push(MediaItem::Image {
+                            corners: [edge_lo, corners[1], corners[2], edge_hi],
+                            asset: *asset,
+                            alpha,
+                            src_rect: [0.5, 0.0, 1.0, 1.0],
+                        });
+                    } else {
+                        out.push(MediaItem::Image {
+                            corners,
+                            asset: *asset,
+                            alpha,
+                            src_rect: [0.0, 0.0, 1.0, 1.0],
+                        });
+                    }
                 }
                 SegmentMedia::Text { content, size } => {
                     out.push(MediaItem::Text {
@@ -262,8 +328,15 @@ pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
         }
     }
     // Free-standing sprite instances: the image's pixel size times
-    // the sampled key scale, centred at the key position, rotated
-    // by the key angle (y-down rotation, as for text).
+    // the sampled key's scales, rotated by the key angle (y-down
+    // rotation, as for text). The key's pivot is the anchor: the
+    // image point at (pivot_x, pivot_y) sits at the key position,
+    // and each flip mirrors the image around that anchor (the
+    // offset along the axis is negated, so the pivot point itself
+    // never moves). At the pre-enrichment defaults — centre
+    // pivot, no flips, scale_y following scale, opacity 1 — the
+    // quad is exactly the centred ±half-extent form this loop
+    // has always emitted (Wave X, P-6).
     for inst in &project.sprites {
         let Some(key) = InstanceKey::sample(&inst.keys, frame_f) else {
             continue;
@@ -278,17 +351,25 @@ pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
         let rad = key.angle.to_radians();
         let u = [rad.cos(), rad.sin()];
         let v = [-rad.sin(), rad.cos()];
-        let hu = scale(u, w as f32 * key.scale / 2.0);
-        let hv = scale(v, h as f32 * key.scale / 2.0);
+        let wu = w as f32 * key.scale;
+        let hv_len = h as f32 * key.eff_scale_y();
+        let fx = if key.flip_x { -1.0 } else { 1.0 };
+        let fy = if key.flip_y { -1.0 } else { 1.0 };
+        // Image corner (i, j), i/j in {0, 1}: its offset from
+        // the anchor along u/v, in stage units.
+        let corner = |i: f32, j: f32| {
+            add(
+                add(c, scale(u, fx * (i - key.pivot_x) * wu)),
+                scale(v, fy * (j - key.pivot_y) * hv_len),
+            )
+        };
         out.push(MediaItem::Image {
-            corners: [
-                sub(sub(c, hu), hv),
-                sub(add(c, hu), hv),
-                add(add(c, hu), hv),
-                add(sub(c, hu), hv),
-            ],
+            corners: [corner(0.0, 0.0), corner(1.0, 0.0), corner(1.0, 1.0), corner(0.0, 1.0)],
             asset: inst.asset,
-            alpha: 1.0,
+            alpha: key.opacity.clamp(0.0, 1.0),
+            // Free-standing instances are never bent: the
+            // whole source, always (Wave X, X4).
+            src_rect: [0.0, 0.0, 1.0, 1.0],
         });
     }
     // Free-standing text instances: `size` is the unscaled glyph
@@ -341,8 +422,13 @@ pub fn composite_media(
 
     for item in media_items(project, frame_f) {
         match item {
-            MediaItem::Image { corners, asset, alpha } => {
-                composite_image(project, asset, corners, alpha, img, view);
+            MediaItem::Image {
+                corners,
+                asset,
+                alpha,
+                src_rect,
+            } => {
+                composite_image(project, asset, corners, src_rect, alpha, img, view);
             }
             MediaItem::Text {
                 pos,
@@ -843,6 +929,18 @@ fn ast_opt_f32(args: &Value, key: &str) -> Result<Option<f32>, String> {
     }
 }
 
+/// An optional boolean argument (Wave X, P-6 — the sprite
+/// key flips); a non-boolean value is refused.
+fn ast_opt_bool(args: &Value, key: &str) -> Result<Option<bool>, String> {
+    match ast_get(args, key) {
+        Some(v) => v
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| format!("argument '{key}' must be a boolean")),
+        None => Ok(None),
+    }
+}
+
 fn ast_as_f32(v: &Value, key: &str) -> Result<f32, String> {
     let n = v
         .as_f64()
@@ -861,6 +959,16 @@ fn key_json(key: &InstanceKey) -> Value {
         "y": key.y,
         "scale": key.scale,
         "angle": key.angle,
+        // The P-6 enrichment (Wave X), stored values as they
+        // sit on the key — `scale_y` 0.0 is the follow-`scale`
+        // form; read it through `eff_scale_y` for the axis the
+        // passes draw.
+        "opacity": key.opacity,
+        "flip_x": key.flip_x,
+        "flip_y": key.flip_y,
+        "scale_y": key.scale_y,
+        "pivot_x": key.pivot_x,
+        "pivot_y": key.pivot_y,
     })
 }
 
@@ -946,6 +1054,14 @@ pub fn tool_sprite_remove(core: &mut EditorCore, args: &Value) -> Result<Value, 
 /// (or, for a sprite with no keys, x 0, y 0, rotation 0,
 /// scale 1). `scale` must be greater than 0 — a key at scale
 /// 0 or less never draws. One undo step (inside the op).
+///
+/// Wave X (P-6): the enrichment fields are writable here too —
+/// `opacity` (0 to 1), `flip_x`, `flip_y`, `scale_y` (greater
+/// than 0; the key's second-axis scale) and `pivot_x` /
+/// `pivot_y` (the anchor, image-relative) — each optional with
+/// the same sampled-base fallback, and the write goes through
+/// `set_sprite_key_full`, so all eleven fields land in the one
+/// undo step.
 pub fn tool_sprite_set_key(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let index = ast_req_usize(args, "sprite")?;
     ast_check_sprite(core, index)?;
@@ -974,6 +1090,23 @@ pub fn tool_sprite_set_key(core: &mut EditorCore, args: &Value) -> Result<Value,
             ));
         }
     }
+    let opacity = ast_opt_f32(args, "opacity")?;
+    if let Some(o) = opacity {
+        if !(0.0..=1.0).contains(&o) {
+            return Err(format!(
+                "argument 'opacity' must be between 0 and 1 (got {o})"
+            ));
+        }
+    }
+    let scale_y = ast_opt_f32(args, "scale_y")?;
+    if let Some(s) = scale_y {
+        if s <= 0.0 {
+            return Err(format!(
+                "argument 'scale_y' must be greater than 0 (got {s}); \
+                 a sprite key at scale 0 or less never draws"
+            ));
+        }
+    }
     let inst = &core.project.sprites[index];
     let base = InstanceKey::sample(&inst.keys, frame).unwrap_or(InstanceKey {
         frame,
@@ -981,6 +1114,12 @@ pub fn tool_sprite_set_key(core: &mut EditorCore, args: &Value) -> Result<Value,
         y: 0.0,
         scale: 1.0,
         angle: 0.0,
+        opacity: 1.0,
+        flip_x: false,
+        flip_y: false,
+        scale_y: 0.0,
+        pivot_x: 0.5,
+        pivot_y: 0.5,
     });
     let key = InstanceKey {
         frame,
@@ -988,16 +1127,31 @@ pub fn tool_sprite_set_key(core: &mut EditorCore, args: &Value) -> Result<Value,
         y: ast_opt_f32(args, "y")?.unwrap_or(base.y),
         scale: scale.unwrap_or(base.scale),
         angle: ast_opt_f32(args, "rotation")?.unwrap_or(base.angle),
+        opacity: opacity.unwrap_or(base.opacity),
+        flip_x: ast_opt_bool(args, "flip_x")?.unwrap_or(base.flip_x),
+        flip_y: ast_opt_bool(args, "flip_y")?.unwrap_or(base.flip_y),
+        scale_y: scale_y.unwrap_or(base.scale_y),
+        pivot_x: ast_opt_f32(args, "pivot_x")?.unwrap_or(base.pivot_x),
+        pivot_y: ast_opt_f32(args, "pivot_y")?.unwrap_or(base.pivot_y),
     };
     let created = !inst.keys.iter().any(|k| k.frame == frame);
-    let _ = core.set_sprite_key(index, frame as usize, key.x, key.y, key.scale, key.angle);
+    let _ = core.set_sprite_key_full(index, frame as usize, key);
     let stored = core.project.sprites[index]
         .keys
         .iter()
         .find(|k| k.frame == frame);
     match stored {
         Some(k)
-            if k.x == key.x && k.y == key.y && k.scale == key.scale && k.angle == key.angle =>
+            if k.x == key.x
+                && k.y == key.y
+                && k.scale == key.scale
+                && k.angle == key.angle
+                && k.opacity == key.opacity
+                && k.flip_x == key.flip_x
+                && k.flip_y == key.flip_y
+                && k.scale_y == key.scale_y
+                && k.pivot_x == key.pivot_x
+                && k.pivot_y == key.pivot_y =>
         {
             Ok(json!({
                 "ok": true,
@@ -1326,10 +1480,12 @@ pub fn tool_clip_get_node_media(core: &mut EditorCore, args: &Value) -> Result<V
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn composite_image(
     project: &Project,
     asset: usize,
     corners: [V2; 4],
+    src_rect: [f32; 4],
     alpha: f32,
     img: &mut RgbaImage,
     view: &dyn Fn(V2) -> [f32; 2],
@@ -1374,8 +1530,15 @@ fn composite_image(
             if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
                 continue;
             }
-            let sx = ((u * sw) as u32).min(src.width() - 1);
-            let sy = ((v * sh) as u32).min(src.height() - 1);
+            // The quad's (u, v) map into the item's source
+            // rect (Wave X, X4): at the full rect this is the
+            // historical `u * sw` / `v * sh` verbatim; a bent
+            // segment's half-quad samples only its half of
+            // the source.
+            let su = src_rect[0] + u * (src_rect[2] - src_rect[0]);
+            let sv = src_rect[1] + v * (src_rect[3] - src_rect[1]);
+            let sx = ((su * sw) as u32).min(src.width() - 1);
+            let sy = ((sv * sh) as u32).min(src.height() - 1);
             let sp = *src.get_pixel(sx, sy);
             let sa = sp[3] as f32 / 255.0 * alpha;
             if sa <= 0.0 {
@@ -1597,6 +1760,8 @@ mod tests {
         media: Option<SegmentMedia>,
     ) -> NodeDef {
         NodeDef {
+            min_angle: None,
+            max_angle: None,
             name: name.into(),
             parent,
             length,
@@ -1644,6 +1809,7 @@ mod tests {
             },
             hidden: false,
             clip: None,
+            states: Vec::new(),
         };
         Project {
             name: "media-test".into(),
@@ -1773,6 +1939,140 @@ mod tests {
         assert!(close(top_mid, [150.0, 75.0]));
     }
 
+    /// Wave X (X4, GAP P-2): the image-side chord contract is
+    /// REVERSED BY CHOICE, on the record. Before this wave a
+    /// bent segment's image sat on the straight chord while
+    /// its segment line arced through `bend_mid` — visibly
+    /// wrong in exported output. The image now follows the
+    /// arc: two half-quad items split at bend_mid, each
+    /// sampling its own half of the source. The TEXT half of
+    /// the old contract stands — a label stays one rigid item
+    /// on the chord even on a bent segment (stage_text pins
+    /// the same rule on its side).
+    #[test]
+    fn bent_segment_image_splits_into_two_half_quads_at_bend_mid() {
+        let mut project = demo_project();
+        // Both media nodes bend by 0.9 rad (root, image,
+        // label): the image splits, the label must not.
+        project.frames[0].bends = vec![vec![0.0, 0.9, 0.9]];
+        let items = media_items(&project, 0.0);
+        let images: Vec<&MediaItem> = items
+            .iter()
+            .filter(|i| matches!(i, MediaItem::Image { .. }))
+            .collect();
+        assert_eq!(images.len(), 2, "a bent segment image is two half-quads");
+        let (c1, r1) = match images[0] {
+            MediaItem::Image {
+                corners, src_rect, ..
+            } => (*corners, *src_rect),
+            _ => unreachable!(),
+        };
+        let (c2, r2) = match images[1] {
+            MediaItem::Image {
+                corners, src_rect, ..
+            } => (*corners, *src_rect),
+            _ => unreachable!(),
+        };
+        assert_eq!(r1, [0.0, 0.0, 0.5, 1.0], "first half samples the left source half");
+        assert_eq!(r2, [0.5, 0.0, 1.0, 1.0], "second half samples the right source half");
+        // The outer corners are the straight quad's own
+        // (segment (100,100)->(200,100), aspect 2 -> height 50).
+        assert!(close(c1[0], [100.0, 75.0]), "c1[0] {:?}", c1[0]);
+        assert!(close(c1[3], [100.0, 125.0]), "c1[3] {:?}", c1[3]);
+        assert!(close(c2[1], [200.0, 75.0]), "c2[1] {:?}", c2[1]);
+        assert!(close(c2[2], [200.0, 125.0]), "c2[2] {:?}", c2[2]);
+        // The shared edge is exactly the bend arc midpoint
+        // displaced by the quad's half-height — the same
+        // bend_mid the segment line splits at.
+        let arc_mid = crate::model::bend_mid([100.0, 100.0], [200.0, 100.0], 0.9);
+        assert!(
+            (arc_mid[1] - 100.0).abs() > 1.0,
+            "the fixture bend must displace the midpoint off the chord: {arc_mid:?}"
+        );
+        assert!(close(c1[1], [arc_mid[0], arc_mid[1] - 25.0]), "edge lo {:?}", c1[1]);
+        assert!(close(c1[2], [arc_mid[0], arc_mid[1] + 25.0]), "edge hi {:?}", c1[2]);
+        assert_eq!(c1[1], c2[0], "the halves share the split edge exactly");
+        assert_eq!(c1[2], c2[3], "the halves share the split edge exactly");
+        // The bent label segment still yields ONE text item,
+        // on the chord (midpoint (100, 140), angle 90).
+        let texts: Vec<&MediaItem> = items
+            .iter()
+            .filter(|i| matches!(i, MediaItem::Text { .. }))
+            .collect();
+        assert_eq!(texts.len(), 1, "text never splits");
+        match texts[0] {
+            MediaItem::Text { pos, angle_deg, .. } => {
+                assert!(close(*pos, [100.0, 140.0]), "label stays on the chord: {pos:?}");
+                assert!((*angle_deg - 90.0).abs() < 0.01, "label angle {angle_deg}");
+            }
+            _ => unreachable!(),
+        }
+        // Control: the same project unbent emits ONE image
+        // item with the full source rect.
+        let straight = demo_project();
+        let items = media_items(&straight, 0.0);
+        let images: Vec<&MediaItem> = items
+            .iter()
+            .filter(|i| matches!(i, MediaItem::Image { .. }))
+            .collect();
+        assert_eq!(images.len(), 1, "an unbent segment image stays one item");
+        match images[0] {
+            MediaItem::Image { src_rect, .. } => {
+                assert_eq!(*src_rect, [0.0, 0.0, 1.0, 1.0]);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Wave X (X4): the compositor honours the split — each
+    /// half-quad samples its own half of the source, and the
+    /// painted region follows the arc off the old chord quad.
+    #[test]
+    fn bent_segment_image_composites_along_the_arc() {
+        // Two-tone asset: left half red, right half blue.
+        let mut project = demo_project();
+        let mut img = RgbaImage::new(4, 2);
+        for x in 0..4 {
+            for y in 0..2 {
+                img.put_pixel(
+                    x,
+                    y,
+                    if x < 2 {
+                        Rgba([255, 0, 0, 255])
+                    } else {
+                        Rgba([0, 0, 255, 255])
+                    },
+                );
+            }
+        }
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        project.assets[0].png = buf;
+        project.frames[0].bends = vec![vec![0.0, 1.0, 0.0]];
+        let mut out = RgbaImage::from_pixel(400, 300, Rgba([255, 255, 255, 255]));
+        composite_media(&project, 0.0, &mut out, &|p| p);
+        // Half-quad centres sample their own source halves.
+        assert_eq!(*out.get_pixel(125, 106), Rgba([255, 0, 0, 255]), "half 1 is red");
+        assert_eq!(*out.get_pixel(175, 106), Rgba([0, 0, 255, 255]), "half 2 is blue");
+        // (140, 130) lay BELOW the old chord quad (which
+        // ended at y=125 on this segment): the bent quad
+        // paints it now, from half 1's source (red).
+        assert_eq!(
+            *out.get_pixel(140, 130),
+            Rgba([255, 0, 0, 255]),
+            "the arc paints below the old chord"
+        );
+        // (140, 80) lay INSIDE the old chord quad: the arc
+        // has moved off it, so it stays background.
+        assert_eq!(
+            *out.get_pixel(140, 80),
+            Rgba([255, 255, 255, 255]),
+            "the image left the chord"
+        );
+    }
+
     #[test]
     fn image_item_alpha_is_figure_opacity_times_style_opacity() {
         // Wave 12 (A6 §3a): segment media used to composite at
@@ -1887,6 +2187,12 @@ mod tests {
                     y: 200.0,
                     scale: 10.0,
                     angle: 0.0,
+                    opacity: 1.0,
+                    flip_x: false,
+                    flip_y: false,
+                    scale_y: 0.0,
+                    pivot_x: 0.5,
+                    pivot_y: 0.5,
                 },
                 InstanceKey {
                     frame: 2.0,
@@ -1894,6 +2200,12 @@ mod tests {
                     y: 200.0,
                     scale: 10.0,
                     angle: 90.0,
+                    opacity: 1.0,
+                    flip_x: false,
+                    flip_y: false,
+                    scale_y: 0.0,
+                    pivot_x: 0.5,
+                    pivot_y: 0.5,
                 },
             ],
         });
@@ -1933,6 +2245,12 @@ mod tests {
                 y: 400.0,
                 scale: 2.0,
                 angle: 0.0,
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
             }],
         });
         let items = media_items(&project, 0.0);
@@ -1971,6 +2289,12 @@ mod tests {
                 y: 100.0,
                 scale: 10.0,
                 angle: 0.0,
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
             }],
         });
         project.texts.push(TextInstance {
@@ -1983,6 +2307,12 @@ mod tests {
                 y: 250.0,
                 scale: 1.0,
                 angle: 0.0,
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
             }],
         });
         let mut img = RgbaImage::from_pixel(400, 300, Rgba([255, 255, 255, 255]));
@@ -2145,6 +2475,12 @@ mod tests {
                 y: 0.0,
                 scale: 1.0,
                 angle: 0.0,
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
             }],
         });
         let err = tool_asset_remove(&mut core, &json!({ "index": 0 }))
@@ -2194,6 +2530,12 @@ mod tests {
                 y: 0.0,
                 scale: 1.0,
                 angle: 0.0,
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
             }],
         });
         let undo_before = core.undo_depth();
@@ -2505,6 +2847,119 @@ mod tests {
     }
 
     #[test]
+    fn sprite_set_key_writes_enrichment_and_reports_it() {
+        // Wave X (P-6): the optional enrichment args land
+        // on the stored key in the same single undo step,
+        // and the reply + list read them back verbatim.
+        let mut core = sprite_core();
+        tool_sprite_add(&mut core, &json!({ "asset": 0 })).expect("add succeeds");
+        let undo_before = core.undo_depth();
+        let out = tool_sprite_set_key(
+            &mut core,
+            &json!({
+                "sprite": 0, "frame": 0,
+                "opacity": 0.5, "flip_x": true, "scale_y": 3.0,
+                "pivot_x": 0.25, "pivot_y": 0.75,
+            }),
+        )
+        .expect("enriched set_key succeeds");
+        assert_eq!(core.undo_depth(), undo_before + 1, "still one undo step");
+        assert_eq!(out["key"]["opacity"].as_f64(), Some(0.5));
+        assert_eq!(out["key"]["flip_x"].as_bool(), Some(true));
+        assert_eq!(out["key"]["flip_y"].as_bool(), Some(false));
+        assert_eq!(out["key"]["scale_y"].as_f64(), Some(3.0));
+        assert_eq!(out["key"]["pivot_x"].as_f64(), Some(0.25));
+        assert_eq!(out["key"]["pivot_y"].as_f64(), Some(0.75));
+        let stored = core.project.sprites[0].keys[0];
+        assert_eq!(stored.opacity, 0.5);
+        assert!(stored.flip_x && !stored.flip_y);
+        assert_eq!(stored.scale_y, 3.0);
+        assert_eq!((stored.pivot_x, stored.pivot_y), (0.25, 0.75));
+        let list = tool_sprite_list(&mut core, &json!({})).expect("list succeeds");
+        assert_eq!(list["sprites"][0]["keys"][0]["opacity"].as_f64(), Some(0.5));
+        assert_eq!(list["sprites"][0]["keys"][0]["pivot_y"].as_f64(), Some(0.75));
+        // The sample read reports the enrichment too (the
+        // only key clamps, so frame 0 samples verbatim).
+        let sample = tool_sprite_sample(&mut core, &json!({ "sprite": 0, "frame": 0 }))
+            .expect("sample succeeds");
+        assert_eq!(sample["key"]["flip_x"].as_bool(), Some(true));
+        assert_eq!(sample["key"]["scale_y"].as_f64(), Some(3.0));
+    }
+
+    #[test]
+    fn sprite_set_key_refuses_bad_enrichment_and_spends_nothing() {
+        let mut core = sprite_core();
+        tool_sprite_add(&mut core, &json!({ "asset": 0 })).expect("add succeeds");
+        let undo_before = core.undo_depth();
+        for (args, needle) in [
+            (json!({ "sprite": 0, "frame": 0, "opacity": 1.5 }), "between 0 and 1"),
+            (json!({ "sprite": 0, "frame": 0, "opacity": -0.1 }), "between 0 and 1"),
+            (json!({ "sprite": 0, "frame": 0, "scale_y": 0 }), "greater than 0"),
+            (json!({ "sprite": 0, "frame": 0, "scale_y": -1 }), "greater than 0"),
+            (json!({ "sprite": 0, "frame": 0, "flip_x": "yes" }), "must be a boolean"),
+            (json!({ "sprite": 0, "frame": 0, "flip_y": 1 }), "must be a boolean"),
+            (json!({ "sprite": 0, "frame": 0, "pivot_x": "wide" }), "must be a number"),
+        ] {
+            let err = tool_sprite_set_key(&mut core, &args)
+                .expect_err("bad enrichment args must be refused");
+            assert!(err.contains(needle), "err: {err} (want '{needle}')");
+        }
+        let stored = core.project.sprites[0].keys[0];
+        assert_eq!(stored.opacity, 1.0, "no refusal wrote anything");
+        assert_eq!(stored.scale_y, 0.0);
+        assert_eq!(core.undo_depth(), undo_before, "refusals spend no undo step");
+    }
+
+    #[test]
+    fn sprite_pass_applies_pivot_flips_scale_y_and_opacity() {
+        // Wave X (P-6): the sprite pass anchors the quad
+        // on the key's pivot, mirrors around it under the
+        // flips, stretches the second axis by the explicit
+        // scale_y and reports the key opacity as alpha.
+        // Asset 0 is 4x2 px; key: centre (300, 200), scale
+        // 10 (width 40), scale_y 5 (height 10), pivot
+        // (0.25, 0.75), flip_x only, opacity 0.5.
+        let mut project = demo_project();
+        project.sprites.push(SpriteInstance {
+            asset: 0,
+            keys: vec![InstanceKey {
+                frame: 0.0,
+                x: 300.0,
+                y: 200.0,
+                scale: 10.0,
+                angle: 0.0,
+                opacity: 0.5,
+                flip_x: true,
+                flip_y: false,
+                scale_y: 5.0,
+                pivot_x: 0.25,
+                pivot_y: 0.75,
+            }],
+        });
+        let items = media_items(&project, 0.0);
+        let (corners, alpha) = items
+            .iter()
+            .rev()
+            .find_map(|i| match i {
+                MediaItem::Image {
+                    corners, alpha, ..
+                } => Some((*corners, *alpha)),
+                _ => None,
+            })
+            .expect("sprite instance item");
+        assert_eq!(alpha, 0.5, "key opacity is the item alpha");
+        // Mirrored around the pivot: corner (0,0) sits a
+        // quarter-width RIGHT of centre (the flip negates
+        // the -0.25 offset), corner (1,0) three-quarters
+        // LEFT; vertically the pivot at 0.75 puts the top
+        // edge 7.5 above centre, the bottom 2.5 below.
+        assert!(close(corners[0], [310.0, 192.5]), "c0 {corners:?}");
+        assert!(close(corners[1], [270.0, 192.5]), "c1 {corners:?}");
+        assert!(close(corners[2], [270.0, 202.5]), "c2 {corners:?}");
+        assert!(close(corners[3], [310.0, 202.5]), "c3 {corners:?}");
+    }
+
+    #[test]
     fn sprite_delete_key_removes_it_and_refuses_a_missing_frame() {
         let mut core = sprite_core();
         // Wave 13 (integrator): as the set_key test above —
@@ -2672,11 +3127,15 @@ mod tests {
                 corners,
                 asset,
                 alpha,
+                src_rect,
             } => {
                 assert_eq!(*asset, 0);
                 assert_eq!(*alpha, 0.25, "0.5 figure × 0.5 clip-node style");
                 assert!(close(corners[0], [100.0, 75.0]), "c0 {:?}", corners[0]);
                 assert!(close(corners[2], [200.0, 125.0]), "c2 {:?}", corners[2]);
+                // Unbent: one item sampling the whole source
+                // (Wave X, X4).
+                assert_eq!(*src_rect, [0.0, 0.0, 1.0, 1.0]);
             }
             other => panic!("expected an image item, got {other:?}"),
         }
@@ -2863,6 +3322,12 @@ mod tests {
                 y: 300.0,
                 scale: 1.0,
                 angle: 0.0,
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
             }],
         });
         project.texts.push(TextInstance {
@@ -2875,6 +3340,12 @@ mod tests {
                 y: 500.0,
                 scale: 1.0,
                 angle: 0.0,
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
             }],
         });
         let items = media_items(&project, 0.0);
@@ -2905,6 +3376,12 @@ mod tests {
                 y: 300.0,
                 scale: 1.0,
                 angle: 0.0,
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
             }],
         });
         project.texts.push(TextInstance {
@@ -2917,6 +3394,12 @@ mod tests {
                 y: 500.0,
                 scale: 1.0,
                 angle: 0.0,
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
             }],
         });
         let items = media_items(&project, 0.0);

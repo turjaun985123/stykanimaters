@@ -795,7 +795,20 @@ fn matrix_num(v: f32) -> String {
 /// height, e/f the first corner itself. Asset NAMES are
 /// never emitted — bytes and generated ids only. An item
 /// alpha below 1 (A6 §3a's figure × style product) rides as
-/// an `opacity` attribute on the `<use>`. Honest divergences
+/// an `opacity` attribute on the `<use>`.
+///
+/// Bent segment images (Wave X, X4): an item whose
+/// `src_rect` is not the whole image is one half of a bent
+/// segment's split quad. Its matrix is the same affine with
+/// the source rect folded in (the image's pixel space is
+/// first mapped so the rect spans the unit square the quad
+/// edges then carry), and the `<use>` is wrapped in a
+/// `<g clip-path>` whose defs-side `<clipPath>` polygon is
+/// the item's own view-space quad — the affine alone would
+/// paint the rest of the image outside the quad. Each half
+/// emits its own `<use>`, so a bent image is two uses over
+/// one shared asset def. Full-rect items keep the bare
+/// `<use>` emission byte for byte. Honest divergences
 /// from the raster, by construction: the raster stamps text
 /// as 3×5 bitmap glyphs while SVG emits a real `<text>` in a
 /// monospace font (the original content is preserved
@@ -841,9 +854,15 @@ fn append_media(
     zoom: f32,
 ) {
     let mut asset_ids: Vec<usize> = Vec::new();
+    let mut clip_count = 0usize;
     for item in crate::media::media_items(project, frame as f32) {
         match item {
-            crate::media::MediaItem::Image { corners, asset, alpha } => {
+            crate::media::MediaItem::Image {
+                corners,
+                asset,
+                alpha,
+                src_rect,
+            } => {
                 let Some((w, h)) = crate::media::png_dims(project, asset) else {
                     continue;
                 };
@@ -877,16 +896,48 @@ fn append_media(
                 } else {
                     String::new()
                 };
-                *svg += &format!(
-                    "<use href=\"#asset{k}\" transform=\"matrix({} {} {} {} {:.1} {:.1})\"{}/>\n",
-                    matrix_num((v[1][0] - v[0][0]) / w as f32),
-                    matrix_num((v[1][1] - v[0][1]) / w as f32),
-                    matrix_num((v[3][0] - v[0][0]) / h as f32),
-                    matrix_num((v[3][1] - v[0][1]) / h as f32),
-                    v[0][0],
-                    v[0][1],
-                    opacity
-                );
+                if src_rect == [0.0, 0.0, 1.0, 1.0] {
+                    *svg += &format!(
+                        "<use href=\"#asset{k}\" transform=\"matrix({} {} {} {} {:.1} {:.1})\"{}/>\n",
+                        matrix_num((v[1][0] - v[0][0]) / w as f32),
+                        matrix_num((v[1][1] - v[0][1]) / w as f32),
+                        matrix_num((v[3][0] - v[0][0]) / h as f32),
+                        matrix_num((v[3][1] - v[0][1]) / h as f32),
+                        v[0][0],
+                        v[0][1],
+                        opacity
+                    );
+                } else {
+                    // Wave X (X4): one half of a bent
+                    // segment's split quad. The matrix folds
+                    // the source rect in: an image point p
+                    // lands at v0 + ((p.x/w - u0)/du) * e1 +
+                    // ((p.y/h - v0)/dv) * e2, so the rect —
+                    // and only the rect — covers the quad;
+                    // the clip polygon (the quad itself, in
+                    // view space) cuts the rest of the image
+                    // away.
+                    let e1 = [v[1][0] - v[0][0], v[1][1] - v[0][1]];
+                    let e2 = [v[3][0] - v[0][0], v[3][1] - v[0][1]];
+                    let du = src_rect[2] - src_rect[0];
+                    let dv = src_rect[3] - src_rect[1];
+                    let n = clip_count;
+                    clip_count += 1;
+                    defs.push_str(&format!(
+                        "<clipPath id=\"mclip{n}\"><polygon points=\"{:.1},{:.1} {:.1},{:.1} {:.1},{:.1} {:.1},{:.1}\"/></clipPath>\n",
+                        v[0][0], v[0][1], v[1][0], v[1][1], v[2][0], v[2][1], v[3][0], v[3][1],
+                    ));
+                    *svg += &format!(
+                        "<g clip-path=\"url(#mclip{n})\"><use href=\"#asset{k}\" transform=\"matrix({} {} {} {} {:.1} {:.1})\"{}/></g>\n",
+                        matrix_num(e1[0] / (du * w as f32)),
+                        matrix_num(e1[1] / (du * w as f32)),
+                        matrix_num(e2[0] / (dv * h as f32)),
+                        matrix_num(e2[1] / (dv * h as f32)),
+                        v[0][0] - (src_rect[0] / du) * e1[0] - (src_rect[1] / dv) * e2[0],
+                        v[0][1] - (src_rect[0] / du) * e1[1] - (src_rect[1] / dv) * e2[1],
+                        opacity
+                    );
+                }
             }
             crate::media::MediaItem::Text { pos, angle_deg, content, size, color, alpha } => {
                 let q = view(pos);
@@ -1560,6 +1611,12 @@ mod tests {
                 y: 400.0,
                 scale: 1.0,
                 angle: 0.0,
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
             }],
         });
         project.texts.push(crate::model::TextInstance {
@@ -1572,6 +1629,12 @@ mod tests {
                 y: 360.0,
                 scale: 1.0,
                 angle: 0.0,
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
             }],
         });
         let dir_a = std::path::Path::new("/tmp/styk-svg-rich-det-a");
@@ -1872,6 +1935,12 @@ mod tests {
                 y: 400.0,
                 scale: 1.0,
                 angle: 0.0,
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
             }],
         });
         project
@@ -1914,6 +1983,12 @@ mod tests {
                 y: 200.0,
                 scale: 2.0,
                 angle: 0.0,
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
             }],
         });
         let dir = std::path::Path::new("/tmp/styk-svg-media-dedupe-test");
@@ -1942,6 +2017,12 @@ mod tests {
                 y: 360.0,
                 scale: 1.0,
                 angle: 0.0,
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
             }],
         });
         let dir = std::path::Path::new("/tmp/styk-svg-media-text-test");
@@ -1966,6 +2047,12 @@ mod tests {
                 y: 360.0,
                 scale: 1.0,
                 angle: 30.0,
+                opacity: 1.0,
+                flip_x: false,
+                flip_y: false,
+                scale_y: 0.0,
+                pivot_x: 0.5,
+                pivot_y: 0.5,
             }],
         });
         // Camera +90 about its own centre: the centre point
@@ -1996,6 +2083,75 @@ mod tests {
             text.matches(" opacity=\"0.50\"").count(),
             1,
             "segment media opacity product missing or leaked:\n{text}"
+        );
+    }
+
+    #[test]
+    fn svg_bent_segment_image_emits_two_clipped_uses() {
+        // Wave X (X4, GAP P-2): the instance's arm segment
+        // (100,100)->(200,100) carries the image and bends
+        // by 0.9, so the funnel yields two half-quad items
+        // and this writer emits one clipped <use> per half
+        // over a single shared asset def — the unbent
+        // single-use form is gone for this segment.
+        let mut project = clip_media_project(
+            (Some(crate::model::SegmentMedia::Image { asset: 0 }), None),
+            (None, None),
+        );
+        project.frames[0].bends = vec![vec![0.0, 0.9, 0.0]];
+        let dir = std::path::Path::new("/tmp/styk-svg-bent-media-test");
+        export_svg(&project, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        assert_eq!(
+            text.matches("<image id=").count(),
+            1,
+            "the two halves share one asset def:\n{text}"
+        );
+        assert_eq!(
+            text.matches("<use href=\"#asset0\"").count(),
+            2,
+            "expected two half uses:\n{text}"
+        );
+        assert_eq!(
+            text.matches("<g clip-path=\"url(#mclip").count(),
+            2,
+            "each half use is clipped to its quad:\n{text}"
+        );
+        // The clip polygons are the two half-quads: outer
+        // corners are the straight quad's own (height 50
+        // about the segment), the shared edge is bend_mid
+        // displaced by the half-height.
+        let arc_mid = crate::model::bend_mid([100.0, 100.0], [200.0, 100.0], 0.9);
+        let lo = format!("{:.1},{:.1}", arc_mid[0], arc_mid[1] - 25.0);
+        let hi = format!("{:.1},{:.1}", arc_mid[0], arc_mid[1] + 25.0);
+        assert!(
+            text.contains(&format!(
+                "<clipPath id=\"mclip0\"><polygon points=\"100.0,75.0 {lo} {hi} 100.0,125.0\"/></clipPath>"
+            )),
+            "first half clip wrong:\n{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "<clipPath id=\"mclip1\"><polygon points=\"{lo} 200.0,75.0 200.0,125.0 {hi}\"/></clipPath>"
+            )),
+            "second half clip wrong:\n{text}"
+        );
+        // Half 1's matrix: the a-component is still the
+        // quad-edge over the source-half width (50 / (0.5*4)
+        // = 25), the b-component carries the bend slope, and
+        // the translation is the first corner (the source
+        // rect's origin folds to zero for the left half).
+        let slope = matrix_num((arc_mid[1] - 100.0) / 2.0);
+        assert!(
+            text.contains(&format!(
+                "<use href=\"#asset0\" transform=\"matrix(25 {slope} 0 25 100.0 75.0)\"/>"
+            )),
+            "first half matrix wrong:\n{text}"
+        );
+        // The straight full-quad use must NOT appear.
+        assert!(
+            !text.contains("<use href=\"#asset0\" transform=\"matrix(25 0 0 25 100.0 75.0)\"/>"),
+            "bent segment still emitted as one straight use:\n{text}"
         );
     }
 
@@ -2351,6 +2507,8 @@ mod tests {
         media: Option<crate::model::SegmentMedia>,
     ) -> crate::model::NodeDef {
         crate::model::NodeDef {
+            min_angle: None,
+            max_angle: None,
             name: name.into(),
             parent,
             length,

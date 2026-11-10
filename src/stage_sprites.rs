@@ -95,7 +95,10 @@
 //! of the drawing transform), then hit-tests against
 //! [`sprite_quads`]' output. Topmost wins: the LAST quad
 //! in the list containing the point, matching painter's
-//! order.
+//! order. Since Wave X (X5) the pointer path exists:
+//! `main.rs::stage_drag` calls [`sprite_pick_at`] on a
+//! joint miss and writes the hit into the Sprites panel's
+//! selection.
 
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::media::{self, MediaItem};
@@ -293,6 +296,9 @@ pub fn sprite_quads(project: &Project, frame_f: f32) -> Vec<SpriteQuad> {
             corners,
             asset,
             alpha,
+            // Sprite items always carry the full source rect
+            // (Wave X, X4); the field is not this pass's concern.
+            ..
         } = item
         else {
             unreachable!("filtered to Image items above");
@@ -469,6 +475,20 @@ pub fn sprite_at_point(quads: &[SpriteQuad], p: V2) -> Option<usize> {
         .map(|q| q.sprite)
 }
 
+/// [`sprite_at_point`] over the core's own quads at its
+/// display frame — the stage pointer path's pick (Wave X,
+/// X5, SpriteLoop GAP P-3): `main.rs::stage_drag` converts
+/// the press to stage coordinates and calls this on a
+/// joint miss, so the sprite the user sees on top is the
+/// sprite the click selects (the result feeds the Sprites
+/// panel's selection, which the stage's own prim pass
+/// already draws corner marks for). Read-only: picking
+/// never snapshots and never sets the status — selection
+/// is panel state, as everywhere else in the shell.
+pub fn sprite_pick_at(core: &EditorCore, p: V2) -> Option<usize> {
+    sprite_at_point(&sprite_quads_at(core), p)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,6 +518,12 @@ mod tests {
             y,
             scale: scale_,
             angle,
+            opacity: 1.0,
+            flip_x: false,
+            flip_y: false,
+            scale_y: 0.0,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
         }
     }
 
@@ -913,6 +939,28 @@ mod tests {
         let mut reversed = quads.clone();
         reversed.reverse();
         assert_eq!(sprite_at_point(&reversed, [300.0, 200.0]), Some(0));
+    }
+
+    #[test]
+    fn sprite_pick_at_reads_the_core_display_frame() {
+        // The pointer path's pick (Wave X, X5): sprite 0
+        // sits at (300,200) at frame 0 and rotates away to
+        // (340,200) by frame 2; sprite 1 sits at (100,100).
+        let mut core = EditorCore::new();
+        core.project = project_with_sprites();
+        assert_eq!(sprite_pick_at(&core, [300.0, 200.0]), Some(0));
+        assert_eq!(sprite_pick_at(&core, [100.0, 100.0]), Some(1));
+        assert_eq!(sprite_pick_at(&core, [10.0, 10.0]), None);
+        // Picking is a read: no snapshot, no status change.
+        let status = core.status.clone();
+        let _ = sprite_pick_at(&core, [300.0, 200.0]);
+        assert_eq!(core.status, status);
+        assert_eq!(core.undo_depth(), 0);
+        // At frame 2 sprite 0's quad has moved/rotated:
+        // its old centre now misses, its new centre hits.
+        core.goto(2);
+        assert_eq!(sprite_pick_at(&core, [300.0, 200.0]), None);
+        assert_eq!(sprite_pick_at(&core, [340.0, 200.0]), Some(0));
     }
 
     #[test]

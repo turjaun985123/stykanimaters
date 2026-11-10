@@ -331,6 +331,55 @@ pub fn render_frame_at_scaled(
     Ok(render_frame_at_scaled_inner(project, frame_f, scale))
 }
 
+/// Render one frame index to an RGBA buffer at the project
+/// stage size (Wave X, X8 — SpriteLoop GAP P-5): the
+/// transparent-background counterpart of [`render_frame`].
+/// The background fill is skipped and every drawable's
+/// coverage is carried out as per-pixel alpha, so a pixel
+/// nothing covers is fully transparent and antialiased edges
+/// carry partial alpha. Media, stage texts and the subtitle
+/// burn-in composite exactly as in the RGB funnel — the only
+/// difference is what lies under them.
+pub fn render_frame_alpha(
+    project: &Project,
+    frame_idx: usize,
+) -> image::RgbaImage {
+    render_frame_at_alpha(project, frame_idx as f32)
+}
+
+/// The fractional-time half of [`render_frame_alpha`].
+pub fn render_frame_at_alpha(
+    project: &Project,
+    frame_f: f32,
+) -> image::RgbaImage {
+    render_frame_at_scaled_inner_alpha(project, frame_f, 1.0)
+}
+
+/// Render one frame index at `scale` times the stage size
+/// with coverage alpha (Wave X, X8): the scaled counterpart
+/// of [`render_frame_alpha`], riding the same true re-render
+/// scale rule as [`render_frame_scaled`] — the scale is
+/// validated and refused with an `InvalidInput` error
+/// otherwise. At 1.0 the result equals
+/// [`render_frame_alpha`].
+pub fn render_frame_alpha_scaled(
+    project: &Project,
+    frame_idx: usize,
+    scale: f32,
+) -> std::io::Result<image::RgbaImage> {
+    render_frame_at_alpha_scaled(project, frame_idx as f32, scale)
+}
+
+/// The fractional-time half of [`render_frame_alpha_scaled`].
+pub fn render_frame_at_alpha_scaled(
+    project: &Project,
+    frame_f: f32,
+    scale: f32,
+) -> std::io::Result<image::RgbaImage> {
+    let scale = check_export_scale(scale)?;
+    Ok(render_frame_at_scaled_inner_alpha(project, frame_f, scale))
+}
+
 /// Validate an export scale (Wave R, R10): the raster
 /// funnel's rule, mirroring the MCP render tool's argument
 /// rule — the scale must be a positive finite number.
@@ -376,28 +425,41 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
     render_frame_at_scaled_inner(project, frame_f, 1.0)
 }
 
-/// The shared raster funnel behind [`render_frame_at`] and
-/// its scaled variants (Wave R, R10). `scale` arrives
-/// pre-validated by the public entries (exactly 1.0 from
-/// `render_frame_at` itself). The supersample factor `ss`
-/// anti-aliases as always; `scale` multiplies the OUTPUT
-/// size, and `px` — stage units to supersampled buffer
-/// pixels — is `ss * scale`, so the buffer, the transform
-/// and every derived size stay in step. At scale 1.0 `px`
-/// is exactly the historical `ss as f32` and the output
-/// size is exactly the stage size, so the render is
-/// byte-identical to the pre-scale funnel.
-fn render_frame_at_scaled_inner(
+/// One frame's drawables, collected once and shared by
+/// the raster funnels (Wave X, X8): everything the pixel
+/// pass consumes, in the pass's own shapes — styled
+/// segments, head rings (centre, colour, half-width,
+/// alpha), shape rings (centre, radius, colour,
+/// half-width, alpha), polygon outlines, filled-stroke
+/// regions and the unified particle/disc list (FX,
+/// weather, spray and scatter all land here).
+struct FrameArt {
+    segments: Vec<StyledSeg>,
+    heads: Vec<([f32; 2], [u8; 3], f32, f32)>,
+    rings: Vec<([f32; 2], f32, [u8; 3], f32, f32)>,
+    polys: Vec<(Vec<[f32; 2]>, [u8; 3], f32, f32)>,
+    fills: Vec<(Vec<[f32; 2]>, [u8; 3], f32)>,
+    particles: Vec<([f32; 2], f32, [u8; 3], f32)>,
+}
+
+/// Collect one frame's drawables (extracted verbatim
+/// from the raster funnel in Wave X, X8) so the RGB and
+/// RGBA funnels share ONE collection: the evaluated
+/// (channelled) poses, the figure loop, brush strokes,
+/// FX clips and weather all resolve here, and the two
+/// pixel passes below consume the identical art — the
+/// alpha funnel can therefore never drift from the RGB
+/// frame it parallels. `view` maps stage points to
+/// supersampled buffer pixels; `px` is the same scale
+/// factor the funnel derived, `zoom` the camera zoom
+/// (widths scale by both).
+fn collect_frame_art(
     project: &Project,
     frame_f: f32,
-    scale: f32,
-) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
-    let ss = 2u32; // supersample factor
-    let px = ss as f32 * scale;
-    let (ow, oh) = scaled_output_size(project, scale);
-    let (w, h) = (ow * ss, oh * ss);
-    let bg = rgb(project.background);
-    let mut buf = ImageBuffer::from_pixel(w, h, Rgb(bg));
+    view: &impl Fn([f32; 2]) -> [f32; 2],
+    px: f32,
+    zoom: f32,
+) -> FrameArt {
     // Wave P (P17): the evaluated frame. The stage draws figures
     // through `EditorCore::positions_f`, which substitutes
     // graph-channelled poses AND defs whenever the project
@@ -421,34 +483,6 @@ fn render_frame_at_scaled_inner(
         Some(r) => &r.poses,
         None => &raw_poses,
     };
-    let (cam_x, cam_y, zoom) = project.camera_at(frame_f);
-    let angle = project.camera_angle_at(frame_f);
-    let view = |p: [f32; 2]| -> [f32; 2] {
-        let (dx, dy) = (p[0] - cam_x, p[1] - cam_y);
-        // Camera rotation (wave 6): rotate the offset around the
-        // camera centre before the pan/zoom mapping (see
-        // `camera_rotate_offset` for the sign convention). At
-        // angle 0 the offset is used verbatim, so the transform
-        // is exactly the pre-rotation one.
-        let (ox, oy) = if angle == 0.0 {
-            (dx, dy)
-        } else {
-            let r = camera_rotate_offset(dx, dy, angle);
-            (r[0], r[1])
-        };
-        [
-            (ox * zoom + project.stage[0] / 2.0) * px,
-            (oy * zoom + project.stage[1] / 2.0) * px,
-        ]
-    };
-    // The head ring's radius is the project's own
-    // `head_ring_radius()` (Phase L): the model's single
-    // `HEAD_RING_RADIUS` constant scaled by the project's
-    // `head_ring_scale` — the same value the stage and the
-    // figure thumbnails use, so exports can never drift
-    // from the editor's ring.
-    let head_r = project.head_ring_radius() * zoom * px;
-
     // Collect drawables: segments (a, b, color, half-width), head
     // rings (centre, color, half-width, alpha), shape circles and
     // polygons — heads/rings/polys carry the node's effective
@@ -820,6 +854,257 @@ fn render_frame_at_scaled_inner(
         }
     }
 
+    FrameArt {
+        segments,
+        heads,
+        rings,
+        polys,
+        fills,
+        particles,
+    }
+}
+
+/// Whether a frame carries any media the composite
+/// tail must run for (the gate the raster funnel's tail
+/// applies — its Wave 11 / Wave 14 rationale lives at
+/// the call site): node media on figure or clip defs,
+/// or any free-standing sprite or stage text. Shared
+/// by the RGB and RGBA funnels (Wave X, X8).
+fn frame_has_media(project: &Project) -> bool {
+    !project.sprites.is_empty()
+        || !project.texts.is_empty()
+        || project
+            .figures
+            .iter()
+            .any(|f| f.def.nodes.iter().any(|n| n.media.is_some()))
+        || project
+            .clips
+            .iter()
+            .any(|c| c.def.nodes.iter().any(|n| n.media.is_some()))
+}
+
+/// Build the subtitle burn-in overlay for one frame
+/// (extracted from the raster funnel in Wave X, X8, so
+/// the RGB and RGBA funnels stamp identical subtitles):
+/// a clone of the project with every other media source
+/// cleared, its texts replaced by the live cues' stamp
+/// items. `None` when no cue is live at the frame.
+fn subtitle_overlay(
+    project: &Project,
+    frame_f: f32,
+    scale: f32,
+) -> Option<crate::model::Project> {
+    let cue_frame = frame_f.round().max(0.0) as usize;
+    let live_cues = crate::subtitles::live_subtitle_cues(project, cue_frame);
+    if live_cues.is_empty() {
+        return None;
+    }
+    // Placement: centred horizontally, stacked from the
+    // style's anchor edge in cue order — the FIRST cue
+    // closest to the edge. Glyph height and line centres
+    // come from the core's shared layout helpers
+    // (`subtitle_font_size`, `subtitle_line_center_y`):
+    // the base 20-unit font at the style's sanitised
+    // scale, each stacked line's centre one 24-unit line
+    // height further from the edge, the edge line's
+    // centre one edge margin (16) plus half a line
+    // height in — the stage draw's and the SVG writer's
+    // layout exactly, so all three surfaces put a line's
+    // glyphs at the same size on the same centre (the
+    // stamp's +0.5-cell glyph-block offset about its
+    // anchor is the bitmap font's own, shared with the
+    // stage's `label_boxes` placement). Wave R (R1)
+    // retired this block's former proportional sizing —
+    // glyph height 6% of the stage height, a 1.35x line
+    // step and a 1.1x-size anchor — under which the
+    // raster was the last surface off the shared layout.
+    // Legibility on any background comes from the stamp
+    // itself: each line is stamped in the backing colour
+    // at the eight one-cell offsets first (an outline),
+    // then in the text colour centred — all nine stamps
+    // are ordinary text items through the one funnel, in
+    // list order.
+    //
+    // The block is drawn in STAGE space, NOT through the
+    // camera `view`: a subtitle is frame furniture pinned
+    // to the picture, so camera pan, zoom and rotation
+    // must not move it — the settlement the SVG writer
+    // took on this tree (see `append_subtitles` in
+    // svg.rs), kept here so the two exporters' bands
+    // agree at any camera. The stamps are computed in
+    // output space (the stage-space layout × the render
+    // scale, IA-R10-3), so the composite view is the
+    // identity at any scale.
+    //
+    // The style is sanitised at read via the core's
+    // `SubtitleStyle::sanitised()` — the read-path rule
+    // the SVG writer applies the same way: a non-finite
+    // font scale falls back to 1.0, a finite one is
+    // clamped into [0.5, 3.0]; position and colours pass
+    // through verbatim. The placement arithmetic below
+    // is the core's shared layout throughout (first cue
+    // closest to the edge; at the bottom anchor a cue's
+    // LAST line sits closest): the stack offset was
+    // IA-P26-1 in the Wave P findings, executed by Q17
+    // in Wave Q; the font size and line centre joined
+    // the same helpers in Wave R (R1).
+    let style = project.subtitle_style.sanitised();
+    // IA-R10-3: on a scaled frame the burn-in layout is
+    // the shared stage-space layout multiplied by the
+    // render scale — font size, centre x and every line
+    // centre scale together, so the burn-in scales with
+    // the picture around it. At scale 1.0 every factor
+    // is 1.0 and the stamps are byte-identical.
+    let size = crate::subtitles::subtitle_font_size(style) * scale;
+    let cell = size / 5.0;
+    // The funnel draws only what `media_items` derives
+    // from a project, so the cues ride a text-only
+    // overlay: a clone of the project with every other
+    // media source cleared (sprites, stage texts, and
+    // segment media on figure and clip defs), leaving
+    // exactly the subtitles' text items. Paid only on
+    // frames where any cue is live.
+    let mut overlay = project.clone();
+    overlay.sprites.clear();
+    overlay.texts.clear();
+    for fig in &mut overlay.figures {
+        for node in &mut fig.def.nodes {
+            node.media = None;
+        }
+    }
+    for clip in &mut overlay.clips {
+        for node in &mut clip.def.nodes {
+            node.media = None;
+        }
+    }
+    let cx = project.stage[0] / 2.0 * scale;
+    let mut lines_before = 0usize;
+    for cue in &live_cues {
+        let lines: Vec<String> = crate::subtitles::subtitle_display_lines(cue);
+        for (i, line) in lines.iter().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+            // Distance of this line from the anchored
+            // edge, in lines — the shared layout
+            // contract, computed by the core's
+            // `subtitle_stack_line_offset`: at the
+            // bottom anchor the cue's lines count DOWN
+            // toward the edge — its last line is offset
+            // 0 — while at the top they count away in
+            // their own order. The line's centre is the
+            // shared `subtitle_line_center_y` for that
+            // offset — the same centre the stage's band
+            // and the SVG writer's `<text>` use.
+            let from_edge = crate::subtitles::subtitle_stack_line_offset(
+                lines_before,
+                lines.len(),
+                i,
+                style.position,
+            );
+            let y = crate::subtitles::subtitle_line_center_y(
+                style,
+                project.stage[1],
+                from_edge,
+            ) * scale;
+            let stamp = |x: f32, y: f32, color: u32| -> crate::model::TextInstance {
+                crate::model::TextInstance {
+                    content: (*line).to_string(),
+                    size,
+                    color,
+                    keys: vec![crate::model::InstanceKey {
+                        frame: 0.0,
+                        x,
+                        y,
+                        scale: 1.0,
+                        angle: 0.0,
+                        opacity: 1.0,
+                        flip_x: false,
+                        flip_y: false,
+                        scale_y: 0.0,
+                        pivot_x: 0.5,
+                        pivot_y: 0.5,
+                    }],
+                }
+            };
+            for (dx, dy) in [
+                (-cell, 0.0),
+                (cell, 0.0),
+                (0.0, -cell),
+                (0.0, cell),
+                (-cell, -cell),
+                (cell, -cell),
+                (-cell, cell),
+                (cell, cell),
+            ] {
+                overlay.texts.push(stamp(cx + dx, y + dy, style.box_color));
+            }
+            overlay.texts.push(stamp(cx, y, style.text_color));
+        }
+        lines_before += lines.len();
+    }
+    Some(overlay)
+}
+
+/// The shared raster funnel behind [`render_frame_at`] and
+/// its scaled variants (Wave R, R10). `scale` arrives
+/// pre-validated by the public entries (exactly 1.0 from
+/// `render_frame_at` itself). The supersample factor `ss`
+/// anti-aliases as always; `scale` multiplies the OUTPUT
+/// size, and `px` — stage units to supersampled buffer
+/// pixels — is `ss * scale`, so the buffer, the transform
+/// and every derived size stay in step. At scale 1.0 `px`
+/// is exactly the historical `ss as f32` and the output
+/// size is exactly the stage size, so the render is
+/// byte-identical to the pre-scale funnel.
+fn render_frame_at_scaled_inner(
+    project: &Project,
+    frame_f: f32,
+    scale: f32,
+) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+    let ss = 2u32; // supersample factor
+    let px = ss as f32 * scale;
+    let (ow, oh) = scaled_output_size(project, scale);
+    let (w, h) = (ow * ss, oh * ss);
+    let bg = rgb(project.background);
+    let mut buf = ImageBuffer::from_pixel(w, h, Rgb(bg));
+    let (cam_x, cam_y, zoom) = project.camera_at(frame_f);
+    let angle = project.camera_angle_at(frame_f);
+    let view = |p: [f32; 2]| -> [f32; 2] {
+        let (dx, dy) = (p[0] - cam_x, p[1] - cam_y);
+        // Camera rotation (wave 6): rotate the offset around the
+        // camera centre before the pan/zoom mapping (see
+        // `camera_rotate_offset` for the sign convention). At
+        // angle 0 the offset is used verbatim, so the transform
+        // is exactly the pre-rotation one.
+        let (ox, oy) = if angle == 0.0 {
+            (dx, dy)
+        } else {
+            let r = camera_rotate_offset(dx, dy, angle);
+            (r[0], r[1])
+        };
+        [
+            (ox * zoom + project.stage[0] / 2.0) * px,
+            (oy * zoom + project.stage[1] / 2.0) * px,
+        ]
+    };
+    // The head ring's radius is the project's own
+    // `head_ring_radius()` (Phase L): the model's single
+    // `HEAD_RING_RADIUS` constant scaled by the project's
+    // `head_ring_scale` — the same value the stage and the
+    // figure thumbnails use, so exports can never drift
+    // from the editor's ring.
+    let head_r = project.head_ring_radius() * zoom * px;
+
+    let FrameArt {
+        segments,
+        heads,
+        rings,
+        polys,
+        fills,
+        particles,
+    } = collect_frame_art(project, frame_f, &view, px, zoom);
+
     for y in 0..h {
         for x in 0..w {
             let p = [x as f32, y as f32];
@@ -905,16 +1190,7 @@ fn render_frame_at_scaled_inner(
     // a clip def would still skip the composite entirely without
     // it. SVG and the stage have no equivalent gate; they call
     // the funnel unconditionally.
-    let has_media = !project.sprites.is_empty()
-        || !project.texts.is_empty()
-        || project
-            .figures
-            .iter()
-            .any(|f| f.def.nodes.iter().any(|n| n.media.is_some()))
-        || project
-            .clips
-            .iter()
-            .any(|c| c.def.nodes.iter().any(|n| n.media.is_some()));
+    let has_media = frame_has_media(project);
     if has_media {
         let mut rgba = image::DynamicImage::ImageRgb8(out).to_rgba8();
         // `view` returns supersampled buffer coordinates;
@@ -941,150 +1217,174 @@ fn render_frame_at_scaled_inner(
     // `Project::subtitles` under the half-open liveness
     // rule: EVERY cue live at the nearest authored frame,
     // in stored order.
-    let cue_frame = frame_f.round().max(0.0) as usize;
-    let live_cues = crate::subtitles::live_subtitle_cues(project, cue_frame);
-    if !live_cues.is_empty() {
-        // Placement: centred horizontally, stacked from the
-        // style's anchor edge in cue order — the FIRST cue
-        // closest to the edge. Glyph height and line centres
-        // come from the core's shared layout helpers
-        // (`subtitle_font_size`, `subtitle_line_center_y`):
-        // the base 20-unit font at the style's sanitised
-        // scale, each stacked line's centre one 24-unit line
-        // height further from the edge, the edge line's
-        // centre one edge margin (16) plus half a line
-        // height in — the stage draw's and the SVG writer's
-        // layout exactly, so all three surfaces put a line's
-        // glyphs at the same size on the same centre (the
-        // stamp's +0.5-cell glyph-block offset about its
-        // anchor is the bitmap font's own, shared with the
-        // stage's `label_boxes` placement). Wave R (R1)
-        // retired this block's former proportional sizing —
-        // glyph height 6% of the stage height, a 1.35x line
-        // step and a 1.1x-size anchor — under which the
-        // raster was the last surface off the shared layout.
-        // Legibility on any background comes from the stamp
-        // itself: each line is stamped in the backing colour
-        // at the eight one-cell offsets first (an outline),
-        // then in the text colour centred — all nine stamps
-        // are ordinary text items through the one funnel, in
-        // list order.
-        //
-        // The block is drawn in STAGE space, NOT through the
-        // camera `view`: a subtitle is frame furniture pinned
-        // to the picture, so camera pan, zoom and rotation
-        // must not move it — the settlement the SVG writer
-        // took on this tree (see `append_subtitles` in
-        // svg.rs), kept here so the two exporters' bands
-        // agree at any camera. The stamps are computed in
-        // output space (the stage-space layout × the render
-        // scale, IA-R10-3), so the composite view is the
-        // identity at any scale.
-        //
-        // The style is sanitised at read via the core's
-        // `SubtitleStyle::sanitised()` — the read-path rule
-        // the SVG writer applies the same way: a non-finite
-        // font scale falls back to 1.0, a finite one is
-        // clamped into [0.5, 3.0]; position and colours pass
-        // through verbatim. The placement arithmetic below
-        // is the core's shared layout throughout (first cue
-        // closest to the edge; at the bottom anchor a cue's
-        // LAST line sits closest): the stack offset was
-        // IA-P26-1 in the Wave P findings, executed by Q17
-        // in Wave Q; the font size and line centre joined
-        // the same helpers in Wave R (R1).
-        let style = project.subtitle_style.sanitised();
-        // IA-R10-3: on a scaled frame the burn-in layout is
-        // the shared stage-space layout multiplied by the
-        // render scale — font size, centre x and every line
-        // centre scale together, so the burn-in scales with
-        // the picture around it. At scale 1.0 every factor
-        // is 1.0 and the stamps are byte-identical.
-        let size = crate::subtitles::subtitle_font_size(style) * scale;
-        let cell = size / 5.0;
-        // The funnel draws only what `media_items` derives
-        // from a project, so the cues ride a text-only
-        // overlay: a clone of the project with every other
-        // media source cleared (sprites, stage texts, and
-        // segment media on figure and clip defs), leaving
-        // exactly the subtitles' text items. Paid only on
-        // frames where any cue is live.
-        let mut overlay = project.clone();
-        overlay.sprites.clear();
-        overlay.texts.clear();
-        for fig in &mut overlay.figures {
-            for node in &mut fig.def.nodes {
-                node.media = None;
-            }
-        }
-        for clip in &mut overlay.clips {
-            for node in &mut clip.def.nodes {
-                node.media = None;
-            }
-        }
-        let cx = project.stage[0] / 2.0 * scale;
-        let mut lines_before = 0usize;
-        for cue in &live_cues {
-            let lines: Vec<String> = crate::subtitles::subtitle_display_lines(cue);
-            for (i, line) in lines.iter().enumerate() {
-                if line.is_empty() {
-                    continue;
-                }
-                // Distance of this line from the anchored
-                // edge, in lines — the shared layout
-                // contract, computed by the core's
-                // `subtitle_stack_line_offset`: at the
-                // bottom anchor the cue's lines count DOWN
-                // toward the edge — its last line is offset
-                // 0 — while at the top they count away in
-                // their own order. The line's centre is the
-                // shared `subtitle_line_center_y` for that
-                // offset — the same centre the stage's band
-                // and the SVG writer's `<text>` use.
-                let from_edge = crate::subtitles::subtitle_stack_line_offset(
-                    lines_before,
-                    lines.len(),
-                    i,
-                    style.position,
-                );
-                let y = crate::subtitles::subtitle_line_center_y(
-                    style,
-                    project.stage[1],
-                    from_edge,
-                ) * scale;
-                let stamp = |x: f32, y: f32, color: u32| -> crate::model::TextInstance {
-                    crate::model::TextInstance {
-                        content: (*line).to_string(),
-                        size,
-                        color,
-                        keys: vec![crate::model::InstanceKey {
-                            frame: 0.0,
-                            x,
-                            y,
-                            scale: 1.0,
-                            angle: 0.0,
-                        }],
-                    }
-                };
-                for (dx, dy) in [
-                    (-cell, 0.0),
-                    (cell, 0.0),
-                    (0.0, -cell),
-                    (0.0, cell),
-                    (-cell, -cell),
-                    (cell, -cell),
-                    (-cell, cell),
-                    (cell, cell),
-                ] {
-                    overlay.texts.push(stamp(cx + dx, y + dy, style.box_color));
-                }
-                overlay.texts.push(stamp(cx, y, style.text_color));
-            }
-            lines_before += lines.len();
-        }
+    if let Some(overlay) = subtitle_overlay(project, frame_f, scale) {
         let mut rgba = image::DynamicImage::ImageRgb8(out).to_rgba8();
         crate::media::composite_media(&overlay, frame_f, &mut rgba, &|p| p);
         out = image::DynamicImage::ImageRgba8(rgba).to_rgb8();
+    }
+    out
+}
+
+/// Porter-Duff `over` for one source colour at coverage
+/// `a` onto a premultiplied f32 accumulator `[r, g, b, a]`
+/// (colour channels in 0..=255 space, premultiplied by the
+/// accumulated alpha). The alpha funnel's one blend: every
+/// drawable the RGB pass composites with
+/// `style::blend_over` or its inline particle lerp goes
+/// through here instead, against a transparent destination.
+/// `a` is clamped to [0, 1], `blend_over`'s own discipline.
+fn over_premult(acc: &mut [f32; 4], color: [u8; 3], a: f32) {
+    let a = a.clamp(0.0, 1.0);
+    let inv = 1.0 - a;
+    acc[0] = color[0] as f32 * a + acc[0] * inv;
+    acc[1] = color[1] as f32 * a + acc[1] * inv;
+    acc[2] = color[2] as f32 * a + acc[2] * inv;
+    acc[3] = a + acc[3] * inv;
+}
+
+/// The RGBA counterpart of [`render_frame_at_scaled_inner`]
+/// (Wave X, X8 — SpriteLoop GAP P-5): the same collection
+/// ([`collect_frame_art`]), the same coverage tests in the
+/// same order, the same media and subtitle tails — but the
+/// pixel pass composites over TRANSPARENT instead of the
+/// project's background colour and carries coverage alpha
+/// out. Accumulation is premultiplied f32, so the
+/// supersample box downsample averages premultiplied
+/// subpixels and un-premultiplies once at the end: a
+/// half-covered edge pixel carries alpha ≈ 0.5 with the
+/// covered part's true colour, never a background-tinted
+/// fringe. Final quantisation rounds; unlike the RGB
+/// funnel there is no historical byte stream to preserve.
+fn render_frame_at_scaled_inner_alpha(
+    project: &Project,
+    frame_f: f32,
+    scale: f32,
+) -> image::RgbaImage {
+    let ss = 2u32; // supersample factor, as in the RGB funnel
+    let px = ss as f32 * scale;
+    let (ow, oh) = scaled_output_size(project, scale);
+    let (w, h) = (ow * ss, oh * ss);
+    let (cam_x, cam_y, zoom) = project.camera_at(frame_f);
+    let angle = project.camera_angle_at(frame_f);
+    let view = |p: [f32; 2]| -> [f32; 2] {
+        let (dx, dy) = (p[0] - cam_x, p[1] - cam_y);
+        let (ox, oy) = if angle == 0.0 {
+            (dx, dy)
+        } else {
+            let r = camera_rotate_offset(dx, dy, angle);
+            (r[0], r[1])
+        };
+        [
+            (ox * zoom + project.stage[0] / 2.0) * px,
+            (oy * zoom + project.stage[1] / 2.0) * px,
+        ]
+    };
+    let head_r = project.head_ring_radius() * zoom * px;
+
+    let FrameArt {
+        segments,
+        heads,
+        rings,
+        polys,
+        fills,
+        particles,
+    } = collect_frame_art(project, frame_f, &view, px, zoom);
+
+    // The pixel pass: the RGB pass's coverage tests in the
+    // RGB pass's order, every hit composited premultiplied
+    // over transparent via `over_premult`.
+    let mut acc: Vec<[f32; 4]> = vec![[0.0; 4]; (w * h) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let p = [x as f32, y as f32];
+            let mut pxa = [0.0f32; 4];
+            for (verts, color, opacity) in &fills {
+                if point_in_polygon(p, verts) {
+                    over_premult(&mut pxa, *color, *opacity);
+                }
+            }
+            for seg in &segments {
+                if let Some(c) = styled_seg_color(p, seg) {
+                    over_premult(&mut pxa, rgb(c), seg.opacity);
+                }
+            }
+            for (c, color, half, alpha) in &heads {
+                let d = dist(p, *c);
+                if (d - head_r).abs() <= *half {
+                    over_premult(&mut pxa, *color, *alpha);
+                }
+            }
+            for (c, r, color, half, alpha) in &rings {
+                let d = dist(p, *c);
+                if (d - r).abs() <= *half {
+                    over_premult(&mut pxa, *color, *alpha);
+                }
+            }
+            for (verts, color, half, alpha) in &polys {
+                for k in 0..verts.len() {
+                    if seg_dist(p, verts[k], verts[(k + 1) % verts.len()]) <= *half {
+                        over_premult(&mut pxa, *color, *alpha);
+                    }
+                }
+            }
+            for (c, r, color, alpha) in &particles {
+                if dist(p, *c) <= *r {
+                    over_premult(&mut pxa, *color, *alpha);
+                }
+            }
+            acc[(y * w + x) as usize] = pxa;
+        }
+    }
+    // Downsample by the supersample factor: average the
+    // premultiplied subpixels and their alphas, then
+    // un-premultiply once — the coverage-correct box filter.
+    let mut out: image::RgbaImage = ImageBuffer::new(ow, oh);
+    for y in 0..oh {
+        for x in 0..ow {
+            let mut sum = [0.0f32; 4];
+            for dy in 0..ss {
+                for dx in 0..ss {
+                    let s = acc[((y * ss + dy) * w + (x * ss + dx)) as usize];
+                    sum[0] += s[0];
+                    sum[1] += s[1];
+                    sum[2] += s[2];
+                    sum[3] += s[3];
+                }
+            }
+            let n = (ss * ss) as f32;
+            let a = sum[3] / n;
+            let (r, g, b) = if a > 0.0 {
+                (sum[0] / n / a, sum[1] / n / a, sum[2] / n / a)
+            } else {
+                (0.0, 0.0, 0.0)
+            };
+            out.put_pixel(
+                x,
+                y,
+                image::Rgba([
+                    r.round().clamp(0.0, 255.0) as u8,
+                    g.round().clamp(0.0, 255.0) as u8,
+                    b.round().clamp(0.0, 255.0) as u8,
+                    (a * 255.0).round().clamp(0.0, 255.0) as u8,
+                ]),
+            );
+        }
+    }
+    // Media segments composite on the final image, exactly
+    // as in the RGB funnel (same gate, same view) — the
+    // buffer is already RGBA here, so sprite and text alpha
+    // compose over the frame's own transparency.
+    if frame_has_media(project) {
+        let ssf = ss as f32;
+        crate::media::composite_media(project, frame_f, &mut out, &|p| {
+            let v = view(p);
+            [v[0] / ssf, v[1] / ssf]
+        });
+    }
+    // Subtitle burn-in, the RGB funnel's tail at parity:
+    // the same overlay, stamped through the same funnel.
+    if let Some(overlay) = subtitle_overlay(project, frame_f, scale) {
+        crate::media::composite_media(&overlay, frame_f, &mut out, &|p| p);
     }
     out
 }
@@ -1531,6 +1831,13 @@ pub type RenderProgressCallback<'a> =
 /// plan dropping the clips without a trace (the plan's own
 /// business stays deciding what sounds: [`mux_plan`]; this
 /// outcome is the report of what could not).
+///
+/// Since Wave X (X12) the WebM RANGE entries
+/// ([`export_webm_range`] and its twins) return this same
+/// type, so a WebM range export's skipped clips are named
+/// exactly as an MP4 range export's are. (The full WebM
+/// entry carries no audio at all and keeps its plain
+/// frame-count return.)
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mp4ExportOutcome {
     /// Frames written to the video file.
@@ -1982,6 +2289,326 @@ fn report_render_progress(progress: RenderProgressCallback<'_>, event: RenderPro
     }
 }
 
+/// The frame total a full video export's encode phase
+/// reports against: the number of sampled frame times in
+/// one full pass over the timeline (duration-expanded /
+/// tween-sampled — see [`EncodeProgressEvent`], whose
+/// `total_frames` is exactly this count, and exactly the
+/// count a successful full video export returns). Exposed
+/// for the bundle progress contract below: a video bundle
+/// member's share of the bundle total must be this number,
+/// allocated before the member runs, and the sampling
+/// itself is this module's private business.
+pub fn sampled_frame_total(project: &Project) -> usize {
+    sample_times(project).len()
+}
+
+/// One progress update from a whole **bundle** export
+/// (Wave X, X11): several member exports run under one
+/// request (the `export_bundle` tool's image members —
+/// PNG sequence, JPEG sequence, SVG, spritesheet — or its
+/// video members — MP4, WebM), and this is the one count
+/// they share. It exists because the members' own phase
+/// contracts cannot be forwarded raw: each member's
+/// counter starts at its own 1, so one observer carrying
+/// the members' events in turn would watch the count
+/// reset at every member boundary — progress running
+/// backwards. [`BundleProgress`] aggregates the members'
+/// events into this type instead.
+///
+/// `total_frames` is the sum of every member's frame
+/// total in that member's own reporting sense — authored
+/// frames for the sequence/SVG/spritesheet members,
+/// sampled frame times ([`sampled_frame_total`]) for the
+/// video members — computed and fixed before the first
+/// member runs; it never changes during the bundle.
+/// `completed_frames` counts the frames the members have
+/// verifiably completed: a hooked member's phase events
+/// advance it as they fire, and a member with no phase
+/// contract of its own (SVG, spritesheet) contributes
+/// its frames atomically when it completes — during such
+/// a member the count lags, but it never overstates.
+///
+/// Delivery contract for the bundle stream a
+/// [`BundleProgress`] tracker emits:
+///
+/// - Emitted `completed_frames` values strictly
+///   increase, with one exception: the terminal event
+///   (below) may repeat the total the last member's own
+///   terminal translation already reached. `finished`
+///   is what distinguishes it. Member events are
+///   clamped to the member's allocated share and
+///   duplicates / regressions are dropped, so no
+///   member can push the count past its share or
+///   backwards.
+/// - Exactly one terminal event fires —
+///   `completed_frames == total_frames`,
+///   `finished == true`, delivered last — and only
+///   when **every** member succeeded, signalled by the
+///   driver's `finish()` call after the last member.
+///   If a member fails, no terminal event fires (the
+///   member contracts' own rule: a failure produces no
+///   terminal); counts already delivered stay delivered
+///   — each was true when sent — and a later member's
+///   counts continue from the failed member's reported
+///   high-water mark rather than retracting, so the
+///   stream cannot run backwards even across a failure.
+/// - A tracker over zero members fires exactly the one
+///   terminal at `(0, 0)` from `finish()` alone — the
+///   sequence contract's empty-project leg, one level
+///   up.
+/// - Events are delivered synchronously from whichever
+///   thread the running member's own contract delivers
+///   on (the caller's thread for render members, the
+///   encode drainer thread for video members), serialised
+///   by the tracker. A panicking observer cannot fail
+///   any member export or the bundle — the panic is
+///   contained at the call site and that event is
+///   dropped, exactly as in the phase contracts.
+/// - `finished` closes the **bundle**, and the bundle is
+///   a set of independent member exports: the driver's
+///   reply remains the only per-member success record.
+///   With no terminal (a member failed) the reply still
+///   arrives and names the failure, as it always has.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BundleProgressEvent {
+    /// Frames completed across all members so far.
+    pub completed_frames: usize,
+    /// Every member's frame total, summed and allocated
+    /// before the first member ran.
+    pub total_frames: usize,
+    /// True only on the single terminal event (see above).
+    pub finished: bool,
+}
+
+/// The bundle-progress hook accepted by
+/// [`BundleProgress`]: `None`, or a shared reference to a
+/// callable invoked with each [`BundleProgressEvent`].
+/// Events may be invoked from a member encode's drainer
+/// thread as well as the caller's (hence `Sync`); a
+/// panicking callback cannot fail any export — the panic
+/// is contained at the call site and that event is
+/// dropped.
+pub type BundleProgressCallback<'a> =
+    Option<&'a (dyn Fn(BundleProgressEvent) + Sync)>;
+
+/// Deliver one bundle-progress event to the hook, if
+/// any — the bundle counterpart of
+/// [`report_encode_progress`], with the same containment:
+/// a panicking observer drops that one event and can
+/// neither fail a member export nor kill a drainer
+/// thread.
+fn report_bundle_progress(progress: BundleProgressCallback<'_>, event: BundleProgressEvent) {
+    if let Some(callback) = progress {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(event)));
+    }
+}
+
+/// Aggregates one bundle's member exports into the
+/// single [`BundleProgressEvent`] stream (Wave X, X11).
+/// Construct with the member frame totals **in run
+/// order**, allocated before the first member runs; then,
+/// for each member in order: take its translator
+/// ([`BundleProgress::render_callback`] or
+/// [`BundleProgress::encode_callback`]) immediately
+/// before running it, pass it to the member's hooked
+/// entry, and call [`BundleProgress::complete_member`]
+/// with the member's outcome before taking the next
+/// member's translator. After the last member, call
+/// [`BundleProgress::finish`] once. Members with no
+/// phase contract take no translator — `complete_member`
+/// alone banks their frames.
+///
+/// The tracker is the honesty mechanism of the bundle
+/// contract: the member translators bank against the
+/// frames banked at the moment they were taken, clamp
+/// every member event to that member's allocated share,
+/// and emit only strict advances, so the emitted stream
+/// is monotonic by construction whatever the members do.
+pub struct BundleProgress<'a> {
+    progress: BundleProgressCallback<'a>,
+    /// Each member's allocated frame total, in run order.
+    member_totals: Vec<usize>,
+    /// The bundle total: `member_totals` summed once, at
+    /// construction, before any member ran.
+    total_frames: usize,
+    state: std::sync::Mutex<BundleProgressState>,
+}
+
+/// The tracker's mutable aggregation state, behind one
+/// mutex: member events can arrive from an encode
+/// drainer thread while the driver thread is between
+/// members, so every translation is serialised.
+#[derive(Default)]
+struct BundleProgressState {
+    /// Frames banked from completed members: a succeeded
+    /// member banks its whole allocation; a failed one
+    /// banks only its reported peak (delivered counts
+    /// are never retracted).
+    banked: usize,
+    /// The running member's reported peak, in that
+    /// member's own count (clamped to its allocation).
+    running_peak: usize,
+    /// The last `completed_frames` value emitted — the
+    /// monotonic floor of the stream.
+    emitted: usize,
+    /// Members the driver has completed so far.
+    members_done: usize,
+    /// Any member failed: the terminal can never fire.
+    any_failed: bool,
+    /// The terminal event has been emitted.
+    terminal_sent: bool,
+}
+
+impl<'a> BundleProgress<'a> {
+    /// A tracker over `member_totals` (frame totals in
+    /// run order, allocated before the first member
+    /// runs), reporting to `progress`.
+    pub fn new(member_totals: &[usize], progress: BundleProgressCallback<'a>) -> Self {
+        BundleProgress {
+            progress,
+            member_totals: member_totals.to_vec(),
+            total_frames: member_totals.iter().sum(),
+            state: std::sync::Mutex::new(BundleProgressState::default()),
+        }
+    }
+
+    /// The bundle total allocated at construction: the
+    /// `total_frames` every emitted event carries.
+    pub fn total_frames(&self) -> usize {
+        self.total_frames
+    }
+
+    /// The render-phase translator for member `member`
+    /// (an index into the construction totals): take it
+    /// immediately before running that member's hooked
+    /// entry, after the previous member's
+    /// `complete_member`. The returned closure translates
+    /// the member's [`RenderProgressEvent`]s into bundle
+    /// events against the frames banked when it was
+    /// taken.
+    pub fn render_callback(
+        &self,
+        member: usize,
+    ) -> impl Fn(RenderProgressEvent) + Sync + '_ {
+        let (base, allocated) = self.member_window(member);
+        move |event: RenderProgressEvent| {
+            self.translate(base, allocated, event.rendered_frames);
+        }
+    }
+
+    /// The encode-phase translator for member `member` —
+    /// the counterpart of
+    /// [`BundleProgress::render_callback`] for a video
+    /// member's [`EncodeProgressEvent`]s.
+    pub fn encode_callback(
+        &self,
+        member: usize,
+    ) -> impl Fn(EncodeProgressEvent) + Sync + '_ {
+        let (base, allocated) = self.member_window(member);
+        move |event: EncodeProgressEvent| {
+            self.translate(base, allocated, event.encoded_frames);
+        }
+    }
+
+    /// The frames banked when member `member`'s
+    /// translator is taken, and that member's allocated
+    /// share. Members run strictly in order, so the
+    /// banked value cannot move while the member runs —
+    /// it changes only in `complete_member`, between
+    /// members.
+    fn member_window(&self, member: usize) -> (usize, usize) {
+        let allocated = self.member_totals[member];
+        let state = self.lock_state();
+        (state.banked, allocated)
+    }
+
+    /// Translate one member event: clamp the member's
+    /// own count to its allocation, add the banked base,
+    /// and emit only on a strict advance of the bundle
+    /// count. The member's own terminal event translates
+    /// like any other — the bundle terminal is
+    /// `finish()`'s, never a member's.
+    fn translate(&self, base: usize, allocated: usize, member_done: usize) {
+        let clamped = member_done.min(allocated);
+        let candidate = base + clamped;
+        let mut state = self.lock_state();
+        if clamped > state.running_peak {
+            state.running_peak = clamped;
+        }
+        if candidate > state.emitted {
+            state.emitted = candidate;
+            report_bundle_progress(
+                self.progress,
+                BundleProgressEvent {
+                    completed_frames: candidate,
+                    total_frames: self.total_frames,
+                    finished: false,
+                },
+            );
+        }
+    }
+
+    /// Bank the member the driver just ran, in run
+    /// order: on success its whole allocation banks; on
+    /// failure only its reported peak banks (delivered
+    /// counts are never retracted) and the bundle
+    /// terminal is forfeited. Call once per member,
+    /// after the member's entry returns and before the
+    /// next member's translator is taken.
+    pub fn complete_member(&self, succeeded: bool) {
+        let mut state = self.lock_state();
+        let member = state.members_done;
+        let allocated = self.member_totals.get(member).copied().unwrap_or(0);
+        if succeeded {
+            state.banked += allocated;
+        } else {
+            state.banked += state.running_peak;
+            state.any_failed = true;
+        }
+        state.running_peak = 0;
+        state.members_done += 1;
+    }
+
+    /// Signal that every member has run: fire the
+    /// single terminal event at `(total, total)` if —
+    /// and only if — every member succeeded. Idempotent:
+    /// a second call, or a call after any member failed,
+    /// emits nothing.
+    pub fn finish(&self) {
+        let mut state = self.lock_state();
+        if state.terminal_sent
+            || state.any_failed
+            || state.members_done < self.member_totals.len()
+        {
+            return;
+        }
+        state.terminal_sent = true;
+        state.emitted = self.total_frames;
+        report_bundle_progress(
+            self.progress,
+            BundleProgressEvent {
+                completed_frames: self.total_frames,
+                total_frames: self.total_frames,
+                finished: true,
+            },
+        );
+    }
+
+    /// Lock the aggregation state, recovering a poisoned
+    /// mutex instead of propagating the panic: the only
+    /// code running under the lock besides arithmetic is
+    /// the contained observer call, so a poisoned lock
+    /// means an observer panicked mid-report in a way
+    /// the containment already bounded — the counts
+    /// remain consistent and the bundle must go on.
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, BundleProgressState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 /// The frame count on one line of ffmpeg's `-progress`
 /// stream (`frame=  123`), or `None` for every other line —
 /// the stream's other values (`fps`, `bitrate`, `out_time_*`,
@@ -2339,7 +2966,9 @@ pub fn export_webm_with_progress(
 /// AAC). Muted clips never sound. A clip no probe can measure
 /// fails the export before anything is written when it may
 /// intersect the range, rather than being dropped silently; a
-/// clip whose file is missing contributes no segment. When no
+/// clip whose file is missing contributes no segment and is
+/// named in the outcome's `missing_audio` ([`Mp4ExportOutcome`],
+/// the shared video-range outcome — Wave X, X12). When no
 /// audible clip intersects the range the export is the plain
 /// video-only encode it always was.
 pub fn export_webm_range(
@@ -2347,7 +2976,7 @@ pub fn export_webm_range(
     from: usize,
     to: usize,
     path: &Path,
-) -> std::io::Result<()> {
+) -> std::io::Result<Mp4ExportOutcome> {
     export_webm_range_with_encode_progress(project, from, to, path, None)
 }
 
@@ -2363,7 +2992,7 @@ pub fn export_webm_range_with_encode_progress(
     to: usize,
     path: &Path,
     progress: EncodeProgressCallback<'_>,
-) -> std::io::Result<()> {
+) -> std::io::Result<Mp4ExportOutcome> {
     export_webm_range_with_progress(project, from, to, path, progress, None)
 }
 
@@ -2384,9 +3013,10 @@ pub fn export_webm_range_with_progress(
     path: &Path,
     encode_progress: EncodeProgressCallback<'_>,
     render_progress: RenderProgressCallback<'_>,
-) -> std::io::Result<()> {
+) -> std::io::Result<Mp4ExportOutcome> {
     let (from, to) = clamp_frame_range(project, from, to)?;
     let times = sample_times_range(project, from, to);
+    let frames = times.len();
     let (win_start, win_len) = range_window(project, from, times.len());
     let outcome = range_plan_outcome(project, win_start, win_len, &probe_duration_secs);
     if !outcome.unprobeable.is_empty() {
@@ -2399,6 +3029,7 @@ pub fn export_webm_range_with_progress(
             outcome.unprobeable.join(", ")
         )));
     }
+    let missing_audio = outcome.missing;
     let plan = outcome.plan;
     if matches!(plan, RangeMuxPlan::None) {
         ffmpeg_encode_times(
@@ -2409,7 +3040,10 @@ pub fn export_webm_range_with_progress(
             encode_progress,
             render_progress,
         )?;
-        return Ok(());
+        return Ok(Mp4ExportOutcome {
+            frames,
+            missing_audio,
+        });
     }
     let silent = unique_temp("silent").with_extension("webm");
     let encode_result = ffmpeg_encode_times(
@@ -2426,7 +3060,10 @@ pub fn export_webm_range_with_progress(
     };
     let _ = std::fs::remove_file(&silent);
     if muxed? {
-        Ok(())
+        Ok(Mp4ExportOutcome {
+            frames,
+            missing_audio,
+        })
     } else {
         Err(std::io::Error::other("audio mux failed"))
     }
@@ -2502,7 +3139,7 @@ pub fn export_webm_range_scaled(
     to: usize,
     path: &Path,
     scale: f32,
-) -> std::io::Result<()> {
+) -> std::io::Result<Mp4ExportOutcome> {
     export_webm_range_scaled_with_encode_progress(project, from, to, path, scale, None)
 }
 
@@ -2521,7 +3158,7 @@ pub fn export_webm_range_scaled_with_encode_progress(
     path: &Path,
     scale: f32,
     progress: EncodeProgressCallback<'_>,
-) -> std::io::Result<()> {
+) -> std::io::Result<Mp4ExportOutcome> {
     export_webm_range_scaled_with_progress(project, from, to, path, scale, progress, None)
 }
 
@@ -2544,7 +3181,7 @@ pub fn export_webm_range_scaled_with_progress(
     scale: f32,
     encode_progress: EncodeProgressCallback<'_>,
     render_progress: RenderProgressCallback<'_>,
-) -> std::io::Result<()> {
+) -> std::io::Result<Mp4ExportOutcome> {
     let scale = check_export_scale(scale)?;
     if scale == 1.0 {
         return export_webm_range_with_progress(
@@ -2558,6 +3195,7 @@ pub fn export_webm_range_scaled_with_progress(
     }
     let (from, to) = clamp_frame_range(project, from, to)?;
     let times = sample_times_range(project, from, to);
+    let frames = times.len();
     let (win_start, win_len) = range_window(project, from, times.len());
     let outcome = range_plan_outcome(project, win_start, win_len, &probe_duration_secs);
     if !outcome.unprobeable.is_empty() {
@@ -2570,6 +3208,7 @@ pub fn export_webm_range_scaled_with_progress(
             outcome.unprobeable.join(", ")
         )));
     }
+    let missing_audio = outcome.missing;
     let plan = outcome.plan;
     if matches!(plan, RangeMuxPlan::None) {
         ffmpeg_encode_times_scaled(
@@ -2581,7 +3220,10 @@ pub fn export_webm_range_scaled_with_progress(
             encode_progress,
             render_progress,
         )?;
-        return Ok(());
+        return Ok(Mp4ExportOutcome {
+            frames,
+            missing_audio,
+        });
     }
     let silent = unique_temp("silent").with_extension("webm");
     let encode_result = ffmpeg_encode_times_scaled(
@@ -2599,7 +3241,10 @@ pub fn export_webm_range_scaled_with_progress(
     };
     let _ = std::fs::remove_file(&silent);
     if muxed? {
-        Ok(())
+        Ok(Mp4ExportOutcome {
+            frames,
+            missing_audio,
+        })
     } else {
         Err(std::io::Error::other("audio mux failed"))
     }
@@ -4148,7 +4793,14 @@ mod range_mux_tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&out);
-        export_webm_range(&project, 0, 2, &out).unwrap();
+        let outcome = export_webm_range(&project, 0, 2, &out).unwrap();
+        // Wave X (X12): the range entry returns the shared
+        // video-range outcome — with its clip present, the
+        // missing-audio report is empty, exactly as the
+        // MP4 range outcome reports.
+        assert!(outcome.missing_audio.is_empty());
+        assert_eq!(outcome.missing_audio_note(), None);
+        assert!(outcome.frames > 0, "the video itself is complete");
         let bytes = std::fs::read(&out).unwrap();
         assert_eq!(&bytes[..4], &[0x1A, 0x45, 0xDF, 0xA3], "an EBML/WebM file");
         assert!(webm_has_opus(&bytes), "the range audio is muxed as Opus");
@@ -4225,6 +4877,61 @@ mod range_mux_tests {
         assert!(msg.contains("junk"), "{msg}");
         assert!(!out.exists(), "no silent file is written");
         let _ = std::fs::remove_file(&junk_path);
+    }
+
+    #[test]
+    fn webm_range_export_names_missing_audio_instead_of_dropping_it_silently() {
+        // The WebM mirror of the MP4 range pin of record
+        // (Wave X, X12): a clip whose file is MISSING never
+        // fails the export — there is nothing to include —
+        // but since the outcome widening the skip is named
+        // in the returned outcome, where the old `()`
+        // return dropped it without a trace. The missing
+        // clip contributes no segment, so the file itself
+        // is the plain video-only encode (no Opus track).
+        let mut project = project_with(vec![("/nonexistent/styk-range-gone.wav", 0, 1.0)]);
+        project.stage = [96.0, 72.0];
+        let out = std::env::temp_dir().join(format!(
+            "styk-range-webm-missing-out-{}.webm",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&out);
+        let outcome = export_webm_range(&project, 0, 2, &out).unwrap();
+        assert_eq!(
+            outcome.missing_audio,
+            vec!["/nonexistent/styk-range-gone.wav".to_string()]
+        );
+        let note = outcome.missing_audio_note().expect("a skipped clip is named");
+        assert!(note.contains("styk-range-gone.wav"), "{note}");
+        assert!(outcome.frames > 0, "the video itself is complete");
+        let bytes = std::fs::read(&out).unwrap();
+        assert_eq!(&bytes[..4], &[0x1A, 0x45, 0xDF, 0xA3], "an EBML/WebM file");
+        assert!(!webm_has_opus(&bytes), "a missing clip contributes no segment");
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn webm_range_scaled_export_names_missing_audio_too() {
+        // The scaled range entry plans its audio exactly
+        // like the unscaled one, so its outcome names a
+        // missing clip the same way (at 2.0 the scaled
+        // body itself runs — 1.0 would route through the
+        // unscaled entry).
+        let mut project = project_with(vec![("/nonexistent/styk-range-gone.wav", 0, 1.0)]);
+        project.stage = [96.0, 72.0];
+        let out = std::env::temp_dir().join(format!(
+            "styk-range-webm-scaled-missing-out-{}.webm",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&out);
+        let outcome = export_webm_range_scaled(&project, 0, 2, &out, 2.0).unwrap();
+        assert_eq!(
+            outcome.missing_audio,
+            vec!["/nonexistent/styk-range-gone.wav".to_string()]
+        );
+        assert!(outcome.frames > 0, "the video itself is complete");
+        assert!(std::fs::metadata(&out).unwrap().len() > 0);
+        let _ = std::fs::remove_file(&out);
     }
 
     #[test]
@@ -4499,6 +5206,146 @@ pub fn export_sheet_range_scaled(
     write_spritesheet_scaled(project, &indices, path, scale)
 }
 
+/// The alpha counterpart of [`write_spritesheet`] (Wave X,
+/// X8): the same square-root grid, tile order and
+/// one-tile-per-authored-frame rule, but tiles are
+/// [`render_frame_alpha`] renders on a transparent sheet —
+/// nothing is flattened onto a background, so per-tile
+/// coverage alpha survives into the sheet. An empty index
+/// list writes a 1x1 TRANSPARENT sheet and returns `Ok(0)`:
+/// transparent is this family's blank, where the RGB
+/// writer's is black.
+fn write_spritesheet_alpha(
+    project: &Project,
+    indices: &[usize],
+    path: &Path,
+) -> std::io::Result<usize> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if indices.is_empty() {
+        let sheet = ImageBuffer::from_pixel(1, 1, image::Rgba([0u8, 0, 0, 0]));
+        sheet.save(path).map_err(std::io::Error::other)?;
+        return Ok(0);
+    }
+    let n = indices.len();
+    let (w, h) = (project.stage[0] as u32, project.stage[1] as u32);
+    let cols = (n as f32).sqrt().ceil() as u32;
+    let rows = (n as u32 + cols - 1) / cols;
+    let mut sheet: image::RgbaImage = ImageBuffer::new(w * cols, h * rows);
+    for (k, &i) in indices.iter().enumerate() {
+        let img = render_frame_alpha(project, i);
+        let (ox, oy) = ((k as u32 % cols) * w, (k as u32 / cols) * h);
+        image::imageops::overlay(&mut sheet, &img, ox as i64, oy as i64);
+    }
+    sheet.save(path).map_err(std::io::Error::other)?;
+    Ok(n)
+}
+
+/// The alpha counterpart of [`write_spritesheet_scaled`]
+/// (Wave X, X8): tile size is [`scaled_output_size`] at the
+/// scale and every tile is a true re-render via
+/// [`render_frame_alpha_scaled`].
+fn write_spritesheet_alpha_scaled(
+    project: &Project,
+    indices: &[usize],
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if indices.is_empty() {
+        let sheet = ImageBuffer::from_pixel(1, 1, image::Rgba([0u8, 0, 0, 0]));
+        sheet.save(path).map_err(std::io::Error::other)?;
+        return Ok(0);
+    }
+    let n = indices.len();
+    let (w, h) = scaled_output_size(project, scale);
+    let cols = (n as f32).sqrt().ceil() as u32;
+    let rows = (n as u32 + cols - 1) / cols;
+    let mut sheet: image::RgbaImage = ImageBuffer::new(w * cols, h * rows);
+    for (k, &i) in indices.iter().enumerate() {
+        let img = render_frame_alpha_scaled(project, i, scale)?;
+        let (ox, oy) = ((k as u32 % cols) * w, (k as u32 / cols) * h);
+        image::imageops::overlay(&mut sheet, &img, ox as i64, oy as i64);
+    }
+    sheet.save(path).map_err(std::io::Error::other)?;
+    Ok(n)
+}
+
+/// Export all authored frames as one spritesheet PNG with
+/// coverage alpha (Wave X, X8): the transparent-background
+/// counterpart of [`export_spritesheet`] — same grid, tiles
+/// keep their per-pixel alpha.
+pub fn export_spritesheet_alpha(project: &Project, path: &Path) -> std::io::Result<usize> {
+    if project.frames.is_empty() {
+        return write_spritesheet_alpha(project, &[], path);
+    }
+    export_sheet_alpha_range(project, 0, project.frames.len() - 1, path)
+}
+
+/// Export the authored frames `from..=to` (inclusive,
+/// clamped to the timeline) as one alpha spritesheet PNG —
+/// the counterpart of [`export_sheet_range`], with the same
+/// range rules.
+pub fn export_sheet_alpha_range(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+) -> std::io::Result<usize> {
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let indices: Vec<usize> = (from..=to).collect();
+    write_spritesheet_alpha(project, &indices, path)
+}
+
+/// Export all authored frames as one alpha spritesheet PNG
+/// at `scale` times the stage size (Wave X, X8) — the
+/// scaled counterpart of [`export_spritesheet_alpha`]. At
+/// exactly 1.0 this delegates to
+/// [`export_spritesheet_alpha`], mirroring the RGB family.
+/// An invalid scale is refused before anything is written.
+pub fn export_sheet_alpha_scaled(
+    project: &Project,
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    if scale == 1.0 {
+        return export_spritesheet_alpha(project, path);
+    }
+    if project.frames.is_empty() {
+        return write_spritesheet_alpha_scaled(project, &[], path, scale);
+    }
+    export_sheet_alpha_range_scaled(project, 0, project.frames.len() - 1, path, scale)
+}
+
+/// Export the authored frames `from..=to` (inclusive,
+/// clamped to the timeline) as one alpha spritesheet PNG at
+/// `scale` times the stage size (Wave X, X8) — the scaled
+/// counterpart of [`export_sheet_alpha_range`], with the
+/// same one-tile-per-authored-frame rule and range rules.
+/// At exactly 1.0 this delegates to
+/// [`export_sheet_alpha_range`]. An invalid scale is
+/// refused before the range is even clamped, so a refused
+/// call writes nothing.
+pub fn export_sheet_alpha_range_scaled(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    if scale == 1.0 {
+        return export_sheet_alpha_range(project, from, to, path);
+    }
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let indices: Vec<usize> = (from..=to).collect();
+    write_spritesheet_alpha_scaled(project, &indices, path, scale)
+}
+
 /// Export every frame as `frame-0001.png`, `frame-0002.png`, ... in `dir`.
 pub fn export_png_sequence(project: &Project, dir: &Path) -> std::io::Result<usize> {
     export_png_sequence_with_render_progress(project, dir, None)
@@ -4675,6 +5522,194 @@ pub fn export_png_sequence_range_scaled_with_render_progress(
     let total = to - from + 1;
     for (written, i) in (from..=to).enumerate() {
         let img = render_frame_scaled(project, i, scale)?;
+        img.save(dir.join(format!("frame-{:04}.png", i + 1)))
+            .map_err(std::io::Error::other)?;
+        let done = written + 1;
+        if done < total {
+            report_render_progress(
+                progress,
+                RenderProgressEvent {
+                    rendered_frames: done,
+                    total_frames: total,
+                    finished: false,
+                },
+            );
+        }
+    }
+    report_render_progress(
+        progress,
+        RenderProgressEvent {
+            rendered_frames: total,
+            total_frames: total,
+            finished: true,
+        },
+    );
+    Ok(total)
+}
+
+/// Export every frame as `frame-0001.png`, `frame-0002.png`,
+/// ... in `dir`, with coverage alpha (Wave X, X8 —
+/// SpriteLoop GAP P-5): the transparent-background
+/// counterpart of [`export_png_sequence`]. Every frame is a
+/// [`render_frame_alpha`] render — transparent where
+/// nothing covers the pixel, partial alpha on antialiased
+/// edges — written as RGBA PNG. Naming, range and progress
+/// rules are the PNG family's own.
+pub fn export_png_alpha_sequence(project: &Project, dir: &Path) -> std::io::Result<usize> {
+    export_png_alpha_sequence_with_render_progress(project, dir, None)
+}
+
+/// [`export_png_alpha_sequence`] with a render-phase
+/// progress hook ([`RenderProgressCallback`]): the same
+/// delivery contract as [`export_png_sequence_with_render_progress`]
+/// — an empty project creates the directory, fires only
+/// the terminal event at `(0, 0)` and returns `Ok(0)`.
+pub fn export_png_alpha_sequence_with_render_progress(
+    project: &Project,
+    dir: &Path,
+    progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
+    if project.frames.is_empty() {
+        std::fs::create_dir_all(dir)?;
+        report_render_progress(
+            progress,
+            RenderProgressEvent {
+                rendered_frames: 0,
+                total_frames: 0,
+                finished: true,
+            },
+        );
+        return Ok(0);
+    }
+    export_png_alpha_sequence_range_with_render_progress(
+        project,
+        0,
+        project.frames.len() - 1,
+        dir,
+        progress,
+    )
+}
+
+/// Export the authored frames `from..=to` (inclusive,
+/// clamped to the timeline) as RGBA `frame-XXXX.png` files
+/// in `dir`, keeping each frame's authored index in its
+/// file name — the alpha counterpart of
+/// [`export_png_sequence_range`], with the same range
+/// rules.
+pub fn export_png_alpha_sequence_range(
+    project: &Project,
+    from: usize,
+    to: usize,
+    dir: &Path,
+) -> std::io::Result<usize> {
+    export_png_alpha_sequence_range_with_render_progress(project, from, to, dir, None)
+}
+
+/// [`export_png_alpha_sequence_range`] with a render-phase
+/// progress hook ([`RenderProgressCallback`]).
+pub fn export_png_alpha_sequence_range_with_render_progress(
+    project: &Project,
+    from: usize,
+    to: usize,
+    dir: &Path,
+    progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
+    export_png_alpha_sequence_range_scaled_with_render_progress(
+        project, from, to, dir, 1.0, progress,
+    )
+}
+
+/// Export every frame as RGBA `frame-0001.png`, ... in
+/// `dir` at `scale` times the stage size (Wave X, X8): the
+/// scaled counterpart of [`export_png_alpha_sequence`],
+/// riding the export-scale entries exactly as the RGB
+/// family does — every frame a true re-render at the
+/// scaled size via [`render_frame_alpha_scaled`], never an
+/// upscaled copy. An invalid scale is refused before
+/// anything is written.
+pub fn export_png_alpha_sequence_scaled(
+    project: &Project,
+    dir: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    export_png_alpha_sequence_scaled_with_render_progress(project, dir, scale, None)
+}
+
+/// [`export_png_alpha_sequence_scaled`] with a
+/// render-phase progress hook ([`RenderProgressCallback`]).
+/// The scale is validated before anything is written or
+/// reported, exactly as in the plain entry; an empty
+/// project creates the directory, fires only the terminal
+/// event at `(0, 0)` and returns `Ok(0)`.
+pub fn export_png_alpha_sequence_scaled_with_render_progress(
+    project: &Project,
+    dir: &Path,
+    scale: f32,
+    progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    if project.frames.is_empty() {
+        std::fs::create_dir_all(dir)?;
+        report_render_progress(
+            progress,
+            RenderProgressEvent {
+                rendered_frames: 0,
+                total_frames: 0,
+                finished: true,
+            },
+        );
+        return Ok(0);
+    }
+    export_png_alpha_sequence_range_scaled_with_render_progress(
+        project,
+        0,
+        project.frames.len() - 1,
+        dir,
+        scale,
+        progress,
+    )
+}
+
+/// Export the authored frames `from..=to` (inclusive,
+/// clamped to the timeline) as RGBA `frame-XXXX.png` files
+/// in `dir` at `scale` times the stage size (Wave X, X8) —
+/// the scaled counterpart of
+/// [`export_png_alpha_sequence_range`], with the same file
+/// naming and range rules. An invalid scale is refused
+/// before the range is even clamped, so a refused call
+/// writes nothing and creates no directory.
+pub fn export_png_alpha_sequence_range_scaled(
+    project: &Project,
+    from: usize,
+    to: usize,
+    dir: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    export_png_alpha_sequence_range_scaled_with_render_progress(
+        project, from, to, dir, scale, None,
+    )
+}
+
+/// [`export_png_alpha_sequence_range_scaled`] with a
+/// render-phase progress hook
+/// ([`RenderProgressCallback`]). The family's one loop
+/// body: the unscaled entries delegate here at scale 1.0,
+/// which always validates, so their observable refusal
+/// order (clamp, then create) is preserved.
+pub fn export_png_alpha_sequence_range_scaled_with_render_progress(
+    project: &Project,
+    from: usize,
+    to: usize,
+    dir: &Path,
+    scale: f32,
+    progress: RenderProgressCallback<'_>,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    std::fs::create_dir_all(dir)?;
+    let total = to - from + 1;
+    for (written, i) in (from..=to).enumerate() {
+        let img = render_frame_alpha_scaled(project, i, scale)?;
         img.save(dir.join(format!("frame-{:04}.png", i + 1)))
             .map_err(std::io::Error::other)?;
         let done = written + 1;
@@ -6173,6 +7208,8 @@ mod tests {
             Easing, FigureDef, FigureInstance, Frame, NodeDef, Pose, Shape,
         };
         let node = |parent: Option<usize>, length: f32, thickness: f32| NodeDef {
+            min_angle: None,
+            max_angle: None,
             name: "n".into(),
             parent,
             length,
@@ -6204,6 +7241,7 @@ mod tests {
                 },
                 hidden: false,
                 clip: None,
+                states: Vec::new(),
             }],
             frames: vec![Frame {
                 poses: vec![Pose {
@@ -6387,6 +7425,8 @@ mod tests {
             Easing, FigureDef, FigureInstance, Frame, NodeDef, NodeStyle, Pose, Shape,
         };
         let node = |parent: Option<usize>, length: f32| NodeDef {
+            min_angle: None,
+            max_angle: None,
             name: "n".into(),
             parent,
             length,
@@ -6410,6 +7450,7 @@ mod tests {
             },
             hidden: false,
             clip: None,
+            states: Vec::new(),
         };
         let styled = NodeStyle {
             opacity: node_opacity,
@@ -6552,6 +7593,8 @@ mod tests {
         // opacity is 1.0 here) — only true alpha over the
         // actual pixel gives the pink.
         let node = |parent: Option<usize>, length: f32, thickness: f32| NodeDef {
+            min_angle: None,
+            max_angle: None,
             name: "n".into(),
             parent,
             length,
@@ -6582,6 +7625,7 @@ mod tests {
             def: FigureDef { nodes },
             hidden: false,
             clip: None,
+            states: Vec::new(),
         };
         let project = Project {
             name: "s10-over".into(),
@@ -6983,8 +8027,8 @@ mod range_export_tests {
         export_webm_range_scaled, export_webm_range_scaled_with_progress,
         export_webm_range_with_progress, export_webm_scaled, export_webm_scaled_with_progress,
         export_webm_scaled_with_encode_progress, export_webm_with_progress,
-        parse_ffmpeg_progress_frame, render_frame, EncodeProgressEvent, Mp4ExportOutcome,
-        RenderProgressEvent,
+        parse_ffmpeg_progress_frame, render_frame, sampled_frame_total, BundleProgress,
+        BundleProgressEvent, EncodeProgressEvent, Mp4ExportOutcome, RenderProgressEvent,
     };
     use crate::model::{AudioClip, Project};
     use image::AnimationDecoder as _;
@@ -7853,6 +8897,275 @@ progress=end
         let _ = std::fs::remove_file(&path);
     }
 
+    /// A bundle-progress sink in the U11 idiom: the
+    /// shared event vector plus the callback that fills
+    /// it (Wave X, X11).
+    fn bundle_event_sink() -> (
+        std::sync::Arc<std::sync::Mutex<Vec<BundleProgressEvent>>>,
+        impl Fn(BundleProgressEvent),
+    ) {
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let callback = move |event: BundleProgressEvent| {
+            sink.lock().unwrap().push(event);
+        };
+        (events, callback)
+    }
+
+    /// Shorthand for one expected bundle event.
+    fn bundle_event(completed: usize, total: usize, finished: bool) -> BundleProgressEvent {
+        BundleProgressEvent {
+            completed_frames: completed,
+            total_frames: total,
+            finished,
+        }
+    }
+
+    #[test]
+    fn sampled_frame_total_counts_sampled_times_not_authored_frames() {
+        // Wave X (X11): the video bundle members' share of
+        // a bundle total is the encode contract's total —
+        // sampled times, so a held frame counts twice.
+        let mut project = tiny_project();
+        assert_eq!(sampled_frame_total(&project), 5);
+        project.frames[2].duration = 2.0;
+        assert_eq!(sampled_frame_total(&project), 6);
+    }
+
+    #[test]
+    fn bundle_progress_translates_member_streams_into_one_monotonic_count() {
+        // Wave X (X11): two members ([3, 2]) under one
+        // tracker — the second member's counts CONTINUE
+        // the count instead of resetting to 1, both
+        // translator kinds feed the same stream, a
+        // member's own terminal translates as an
+        // unfinished bundle event, and the only finished
+        // event is finish()'s terminal at (total, total).
+        let (events, callback) = bundle_event_sink();
+        let tracker = BundleProgress::new(&[3, 2], Some(&callback));
+        assert_eq!(tracker.total_frames(), 5);
+        let render = tracker.render_callback(0);
+        for event in expected_render_events(3) {
+            render(event);
+        }
+        tracker.complete_member(true);
+        let encode = tracker.encode_callback(1);
+        encode(EncodeProgressEvent {
+            encoded_frames: 1,
+            total_frames: 2,
+            finished: false,
+        });
+        encode(EncodeProgressEvent {
+            encoded_frames: 2,
+            total_frames: 2,
+            finished: true,
+        });
+        tracker.complete_member(true);
+        tracker.finish();
+        tracker.finish();
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                bundle_event(1, 5, false),
+                bundle_event(2, 5, false),
+                bundle_event(3, 5, false),
+                bundle_event(4, 5, false),
+                bundle_event(5, 5, false),
+                bundle_event(5, 5, true),
+            ],
+            "one monotonic stream, exactly one terminal, last"
+        );
+    }
+
+    #[test]
+    fn bundle_progress_failed_member_banks_only_its_peak_and_forfeits_the_terminal() {
+        // Wave X (X11): member 0 reports 2 of its 3 frames
+        // and fails. Its delivered counts are never
+        // retracted — member 1 continues from the banked
+        // peak (2), so the stream never runs backwards —
+        // and finish() fires no terminal, mirroring the
+        // member contracts' failure rule.
+        let (events, callback) = bundle_event_sink();
+        let tracker = BundleProgress::new(&[3, 2], Some(&callback));
+        let render = tracker.render_callback(0);
+        render(RenderProgressEvent {
+            rendered_frames: 1,
+            total_frames: 3,
+            finished: false,
+        });
+        render(RenderProgressEvent {
+            rendered_frames: 2,
+            total_frames: 3,
+            finished: false,
+        });
+        tracker.complete_member(false);
+        let render = tracker.render_callback(1);
+        for event in expected_render_events(2) {
+            render(event);
+        }
+        tracker.complete_member(true);
+        tracker.finish();
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                bundle_event(1, 5, false),
+                bundle_event(2, 5, false),
+                bundle_event(3, 5, false),
+                bundle_event(4, 5, false),
+            ],
+            "no terminal after a member failure; counts continue from the peak"
+        );
+    }
+
+    #[test]
+    fn bundle_progress_silent_member_banks_atomically_at_completion() {
+        // Wave X (X11): a member with no phase contract
+        // (the bundle's SVG / spritesheet members) takes
+        // no translator — its frames land in the count
+        // when it completes, so the next member's events
+        // continue past them and the terminal still
+        // closes at (total, total). Nothing is emitted
+        // for the silent member itself: banking is not
+        // an event, only member reports and the terminal
+        // are.
+        let (events, callback) = bundle_event_sink();
+        let tracker = BundleProgress::new(&[2, 2], Some(&callback));
+        tracker.complete_member(true);
+        let render = tracker.render_callback(1);
+        for event in expected_render_events(2) {
+            render(event);
+        }
+        tracker.complete_member(true);
+        tracker.finish();
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                bundle_event(3, 4, false),
+                bundle_event(4, 4, false),
+                bundle_event(4, 4, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn bundle_progress_clamps_member_overreports_and_drops_regressions() {
+        // Wave X (X11): a member event past the member's
+        // allocation clamps to its share (the bundle
+        // count can never pass the member's boundary),
+        // and a regressive event is dropped outright.
+        let (events, callback) = bundle_event_sink();
+        let tracker = BundleProgress::new(&[3], Some(&callback));
+        let render = tracker.render_callback(0);
+        render(RenderProgressEvent {
+            rendered_frames: 2,
+            total_frames: 3,
+            finished: false,
+        });
+        render(RenderProgressEvent {
+            rendered_frames: 1,
+            total_frames: 3,
+            finished: false,
+        });
+        render(RenderProgressEvent {
+            rendered_frames: 9,
+            total_frames: 3,
+            finished: true,
+        });
+        tracker.complete_member(true);
+        tracker.finish();
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                bundle_event(2, 3, false),
+                bundle_event(3, 3, false),
+                bundle_event(3, 3, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn bundle_progress_zero_members_terminates_at_zero() {
+        // Wave X (X11): the empty bundle is the sequence
+        // contract's empty-project leg one level up —
+        // finish() alone fires exactly the (0, 0)
+        // terminal, once.
+        let (events, callback) = bundle_event_sink();
+        let tracker = BundleProgress::new(&[], Some(&callback));
+        tracker.finish();
+        tracker.finish();
+        assert_eq!(*events.lock().unwrap(), vec![bundle_event(0, 0, true)]);
+    }
+
+    #[test]
+    fn bundle_progress_panicking_observer_cannot_break_the_bundle() {
+        // Wave X (X11): the reporter contains observer
+        // panics per event (the phase contracts' rule) —
+        // every tracker call returns normally and the
+        // aggregation state stays usable throughout.
+        let callback = |_event: BundleProgressEvent| panic!("observer boom");
+        let tracker = BundleProgress::new(&[2, 1], Some(&callback));
+        let render = tracker.render_callback(0);
+        render(RenderProgressEvent {
+            rendered_frames: 1,
+            total_frames: 2,
+            finished: false,
+        });
+        render(RenderProgressEvent {
+            rendered_frames: 2,
+            total_frames: 2,
+            finished: true,
+        });
+        tracker.complete_member(true);
+        let render = tracker.render_callback(1);
+        render(RenderProgressEvent {
+            rendered_frames: 1,
+            total_frames: 1,
+            finished: true,
+        });
+        tracker.complete_member(true);
+        tracker.finish();
+        assert_eq!(tracker.total_frames(), 3);
+    }
+
+    #[test]
+    fn bundle_progress_over_real_sequence_members_is_exact() {
+        // Wave X (X11): the tracker driven the way the
+        // export_bundle handler drives it — each member's
+        // hooked entry under its translator,
+        // complete_member between members, finish() at
+        // the end. Render delivery is synchronous, so the
+        // full bundle stream is pinned exactly: the two
+        // members' counts continue across the boundary
+        // instead of resetting, and the only finished
+        // event is finish()'s terminal.
+        let project = tiny_project();
+        let n = project.frames.len();
+        let (events, callback) = bundle_event_sink();
+        let tracker = BundleProgress::new(&[n, n], Some(&callback));
+        let png_dir = temp_dir("bundle-progress-png");
+        let member = tracker.render_callback(0);
+        let count =
+            export_png_sequence_with_render_progress(&project, &png_dir, Some(&member))
+                .unwrap();
+        assert_eq!(count, n);
+        tracker.complete_member(true);
+        let jpeg_dir = temp_dir("bundle-progress-jpeg");
+        let member = tracker.render_callback(1);
+        let count =
+            export_jpeg_sequence_with_render_progress(&project, &jpeg_dir, Some(&member))
+                .unwrap();
+        assert_eq!(count, n);
+        tracker.complete_member(true);
+        tracker.finish();
+        let mut expected: Vec<BundleProgressEvent> = (1..=2 * n)
+            .map(|done| bundle_event(done, 2 * n, false))
+            .collect();
+        expected.push(bundle_event(2 * n, 2 * n, true));
+        assert_eq!(*events.lock().unwrap(), expected);
+        let _ = std::fs::remove_dir_all(&png_dir);
+        let _ = std::fs::remove_dir_all(&jpeg_dir);
+    }
+
     #[test]
     fn mp4_range_dual_hooks_report_their_own_phases() {
         // Wave W (W2): the range entry with both hooks —
@@ -8319,6 +9632,240 @@ progress=end
         empty.frames.clear();
         assert!(export_svg_range(&empty, 0, 0, &dir).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod alpha_export_tests {
+    use super::{
+        export_png_alpha_sequence_range_scaled_with_render_progress,
+        export_png_alpha_sequence_with_render_progress, export_sheet_alpha_scaled,
+        export_spritesheet_alpha, render_frame_alpha, render_frame_alpha_scaled,
+        RenderProgressEvent,
+    };
+    use crate::model::Project;
+    use std::path::PathBuf;
+
+    /// The 5-frame demo project on a small stage so renders
+    /// stay fast (range_export_tests' fixture idiom).
+    fn tiny_project() -> Project {
+        let mut project = Project::new_demo();
+        project.stage = [96.0, 72.0];
+        project
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("styk-alpha-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn temp_file(tag: &str, ext: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "styk-alpha-{tag}-{}.{ext}",
+            std::process::id()
+        ))
+    }
+
+    fn render_event_sink() -> (
+        std::sync::Arc<std::sync::Mutex<Vec<RenderProgressEvent>>>,
+        impl Fn(RenderProgressEvent),
+    ) {
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let callback = move |event: RenderProgressEvent| {
+            sink.lock().unwrap().push(event);
+        };
+        (events, callback)
+    }
+
+    fn alpha_stats(img: &image::RgbaImage) -> (bool, bool, bool) {
+        let mut any_opaque = false;
+        let mut any_clear = false;
+        let mut any_partial = false;
+        for p in img.pixels() {
+            match p[3] {
+                255 => any_opaque = true,
+                0 => any_clear = true,
+                _ => any_partial = true,
+            }
+        }
+        (any_opaque, any_clear, any_partial)
+    }
+
+    #[test]
+    fn empty_stage_renders_fully_transparent() {
+        let mut project = tiny_project();
+        project.figures.clear();
+        project.strokes.clear();
+        project.fx_clips.clear();
+        project.particles.clear();
+        project.weather = None;
+        project.sprites.clear();
+        project.texts.clear();
+        project.subtitles.clear();
+        let img = render_frame_alpha(&project, 0);
+        assert_eq!(img.dimensions(), (96, 72));
+        assert!(
+            img.pixels().all(|p| p[3] == 0),
+            "a frame with no drawables is transparent everywhere"
+        );
+    }
+
+    #[test]
+    fn alpha_render_carries_coverage_and_partial_alpha() {
+        let project = tiny_project();
+        let img = render_frame_alpha(&project, 0);
+        let (opaque, clear, partial) = alpha_stats(&img);
+        assert!(opaque, "figure strokes cover some pixels fully");
+        assert!(clear, "the background is transparent, not the project colour");
+        assert!(
+            partial,
+            "supersampled antialiasing leaves partial-coverage edge pixels"
+        );
+    }
+
+    #[test]
+    fn alpha_render_respects_figure_opacity() {
+        let mut project = tiny_project();
+        // Only figure art may draw: strokes, FX, weather,
+        // ambient particles and media carry their own
+        // opacities and would defeat the cap.
+        project.strokes.clear();
+        project.fx_clips.clear();
+        project.particles.clear();
+        project.weather = None;
+        project.sprites.clear();
+        project.texts.clear();
+        project.subtitles.clear();
+        for fig in &mut project.figures {
+            fig.opacity = 0.5;
+        }
+        let img = render_frame_alpha(&project, 0);
+        let max_alpha = img.pixels().map(|p| p[3]).max().unwrap_or(0);
+        assert!(
+            (100..=160).contains(&max_alpha),
+            "a half-opacity figure caps coverage near 128, got {max_alpha}"
+        );
+    }
+
+    #[test]
+    fn alpha_render_scaled_dimensions_and_refusals() {
+        let project = tiny_project();
+        let img = render_frame_alpha_scaled(&project, 0, 2.0).unwrap();
+        assert_eq!(img.dimensions(), (192, 144));
+        for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let err = render_frame_alpha_scaled(&project, 0, bad)
+                .err()
+                .expect("an invalid scale is refused");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
+
+    #[test]
+    fn png_alpha_sequence_writes_rgba_frames_with_exact_progress() {
+        let project = tiny_project();
+        let dir = temp_dir("seq");
+        let (events, callback) = render_event_sink();
+        let written = export_png_alpha_sequence_range_scaled_with_render_progress(
+            &project,
+            1,
+            3,
+            &dir,
+            2.0,
+            Some(&callback),
+        )
+        .unwrap();
+        assert_eq!(written, 3);
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                RenderProgressEvent {
+                    rendered_frames: 1,
+                    total_frames: 3,
+                    finished: false,
+                },
+                RenderProgressEvent {
+                    rendered_frames: 2,
+                    total_frames: 3,
+                    finished: false,
+                },
+                RenderProgressEvent {
+                    rendered_frames: 3,
+                    total_frames: 3,
+                    finished: true,
+                },
+            ],
+            "one event per written frame, single terminal last"
+        );
+        for i in 2..=4 {
+            assert!(
+                dir.join(format!("frame-{i:04}.png")).exists(),
+                "frames land under authored indices"
+            );
+        }
+        let decoded = image::open(dir.join("frame-0002.png")).unwrap();
+        assert_eq!(decoded.color(), image::ColorType::Rgba8);
+        let rgba = decoded.to_rgba8();
+        assert_eq!(rgba.dimensions(), (192, 144));
+        let (opaque, clear, _) = alpha_stats(&rgba);
+        assert!(opaque && clear, "the written frame carries real alpha");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn png_alpha_sequence_empty_project_fires_only_the_terminal() {
+        let mut project = tiny_project();
+        project.frames.clear();
+        let dir = temp_dir("empty");
+        let (events, callback) = render_event_sink();
+        let written =
+            export_png_alpha_sequence_with_render_progress(&project, &dir, Some(&callback))
+                .unwrap();
+        assert_eq!(written, 0);
+        assert!(dir.exists(), "the directory is still created");
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![RenderProgressEvent {
+                rendered_frames: 0,
+                total_frames: 0,
+                finished: true,
+            }],
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn spritesheet_alpha_tiles_on_a_transparent_sheet() {
+        let project = tiny_project();
+        let path = temp_file("sheet", "png");
+        let tiled = export_spritesheet_alpha(&project, &path).unwrap();
+        assert_eq!(tiled, 5);
+        let decoded = image::open(&path).unwrap();
+        assert_eq!(decoded.color(), image::ColorType::Rgba8);
+        let sheet = decoded.to_rgba8();
+        // 5 tiles on a 3x2 square-root grid of 96x72 tiles.
+        assert_eq!(sheet.dimensions(), (288, 144));
+        assert_eq!(
+            sheet.get_pixel(0, 0)[3],
+            0,
+            "the sheet background is transparent"
+        );
+        let (opaque, _, _) = alpha_stats(&sheet);
+        assert!(opaque, "the tiles carry their coverage");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sheet_alpha_scaled_uses_scaled_tiles() {
+        let project = tiny_project();
+        let path = temp_file("sheet-scaled", "png");
+        let tiled = export_sheet_alpha_scaled(&project, &path, 2.0).unwrap();
+        assert_eq!(tiled, 5);
+        let sheet = image::open(&path).unwrap().to_rgba8();
+        assert_eq!(sheet.dimensions(), (576, 288));
+        let _ = std::fs::remove_file(&path);
     }
 }
 

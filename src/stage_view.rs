@@ -2109,6 +2109,8 @@ mod tests {
         reset_view_nav();
         let mut core = EditorCore::new();
         let node = |name: &str, parent: Option<usize>, thickness: f32| model::NodeDef {
+            min_angle: None,
+            max_angle: None,
             name: name.into(),
             parent,
             length: 0.0,
@@ -2136,6 +2138,7 @@ mod tests {
             },
             hidden: false,
             clip: None,
+            states: Vec::new(),
             locked: false,
             opacity: 1.0,
         }];
