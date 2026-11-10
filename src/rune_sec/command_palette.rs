@@ -1088,10 +1088,11 @@ fn cmd_import_layered_set(s: &mut State) {
             .into();
         return;
     };
+    let figure = s.core.selected_figure;
     if let Err(e) = stykanimate_rs::layered_import::import_layered_folder(
         &mut s.core,
         &root,
-        s.core.selected_figure,
+        figure,
     ) {
         s.core.status = e;
     }

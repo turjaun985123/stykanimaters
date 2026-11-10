@@ -1268,23 +1268,41 @@ fn image_media_for_edit(
             return None;
         }
     };
-    match node.media.image_transform_sanitised() {
-        // The model's own sanitised read (Y3):
-        // non-finite components read as their identity
-        // counterparts and a non-positive scale as 1,
-        // so an op's write repairs a corrupt stored
-        // value instead of stepping from NaN forever.
-        Some((offset, scale, angle_offset, flip)) => Some((
+    match &node.media {
+        // Sanitised read, mirroring the composition
+        // funnel's rule (Y3): non-finite components read
+        // as their identity counterparts and a
+        // non-positive scale as 1, so an op's write
+        // repairs a corrupt stored value instead of
+        // stepping from NaN forever.
+        Some(SegmentMedia::Image {
+            offset,
+            scale,
+            angle_offset,
+            flip,
+            ..
+        }) => Some((
             fi,
             ni,
             MediaTransformState {
-                offset,
-                scale,
-                angle_offset,
-                flip,
+                offset: [
+                    if offset[0].is_finite() { offset[0] } else { 0.0 },
+                    if offset[1].is_finite() { offset[1] } else { 0.0 },
+                ],
+                scale: if scale.is_finite() && *scale > 0.0 {
+                    *scale
+                } else {
+                    1.0
+                },
+                angle_offset: if angle_offset.is_finite() {
+                    *angle_offset
+                } else {
+                    0.0
+                },
+                flip: *flip,
             },
         )),
-        None => {
+        _ => {
             core.status =
                 "The selected segment carries no sprite to adjust.".into();
             None
