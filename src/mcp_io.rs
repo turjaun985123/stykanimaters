@@ -775,11 +775,11 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
         };
     let path_ref = Path::new(&path);
     // Wave X (X8, IA-X8-1): an optional 'alpha' boolean
-    // (default false) honoured by exactly two arms —
-    // 'png_sequence' and 'spritesheet' dispatch to the
-    // transparent-background alpha entries; every other
-    // format ignores it, as formats ignore scale-mismatched
-    // arguments today.
+    // (default false) honoured by exactly three arms —
+    // 'png_sequence', 'spritesheet' and (Wave Y, Y13)
+    // 'apng' dispatch to the transparent-background
+    // alpha entries; every other format ignores it, as
+    // formats ignore scale-mismatched arguments today.
     let alpha = args.get("alpha").and_then(Value::as_bool).unwrap_or(false);
     // Wave P (P15): the MP4 arm fills this with the clips
     // the export had to leave out (missing files); it
@@ -867,19 +867,36 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
             ensure_parent(path_ref)?;
             // Wave S (S5): 'scale' routes to S4's true-scaled
             // APNG entries; absent, the unscaled calls run
-            // unchanged.
+            // unchanged. Wave Y (Y13, IA-Y13-1): 'alpha'
+            // routes the same (range, scale) matrix to the
+            // alpha APNG entries.
             let scale = args.get("scale").and_then(Value::as_f64);
-            match (range, scale) {
-                (Some((f, t)), Some(s)) => {
-                    crate::export::export_apng_range_scaled(project, f, t, path_ref, s as f32)
+            if alpha {
+                match (range, scale) {
+                    (Some((f, t)), Some(s)) => crate::export::export_apng_alpha_range_scaled(
+                        project, f, t, path_ref, s as f32,
+                    ),
+                    (Some((f, t)), None) => {
+                        crate::export::export_apng_alpha_range(project, f, t, path_ref)
+                    }
+                    (None, Some(s)) => {
+                        crate::export::export_apng_alpha_scaled(project, path_ref, s as f32)
+                    }
+                    (None, None) => crate::export::export_apng_alpha(project, path_ref),
                 }
-                (Some((f, t)), None) => {
-                    crate::export::export_apng_range(project, f, t, path_ref)
+            } else {
+                match (range, scale) {
+                    (Some((f, t)), Some(s)) => {
+                        crate::export::export_apng_range_scaled(project, f, t, path_ref, s as f32)
+                    }
+                    (Some((f, t)), None) => {
+                        crate::export::export_apng_range(project, f, t, path_ref)
+                    }
+                    (None, Some(s)) => {
+                        crate::export::export_apng_scaled(project, path_ref, s as f32)
+                    }
+                    (None, None) => crate::export::export_apng(project, path_ref),
                 }
-                (None, Some(s)) => {
-                    crate::export::export_apng_scaled(project, path_ref, s as f32)
-                }
-                (None, None) => crate::export::export_apng(project, path_ref),
             }
         }
         "spritesheet" => {
@@ -1560,7 +1577,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "render",
-            description: "Render the animation. Formats: 'png' renders ONE frame (arg 'frame', default current; arg 'scale', default 1.0 = stage size, a true re-render at that scale) to a PNG file; 'gif', 'mp4' (needs ffmpeg), 'webm', 'apng' and 'spritesheet' render the whole timeline to the file at 'path'; 'svg', 'jpeg' and 'png_sequence' write one file per frame into the DIRECTORY at 'path' (created if needed). The sequence/animation formats 'gif', 'apng', 'spritesheet', 'svg', 'jpeg' and 'png_sequence' accept an optional frame range: args 'from_frame' and 'to_frame' (0-based, inclusive, given together; the Wave 11 spellings 'from'/'to' are still accepted for the same bounds; a bound past the end of the timeline is refused rather than clamped; echoed in the reply under the spelling used). Video ranges are export_file's mp4_range/webm_range. An optional 'scale' (default 1.0) multiplies the output size for 'png', 'png_sequence', 'gif', 'mp4', 'webm', 'apng', 'spritesheet' and 'jpeg' — a true re-render at that scale, never an upscale (the MP4 audio mux is unaffected); 'svg' does not take a scale. Parent directories are created for file targets. CONTENT — the raster formats (png, png_sequence, gif, mp4, webm, apng, spritesheet, jpeg) draw the full frame: camera (pan/zoom/rotation), figures with segment styling (cap, taper, colour gradient, segment opacity AND figure opacity) and bent segments, drawing strokes, FX/particles and weather, with sprite instances, text instances and segment media (images/text attached to segments) composited in. 'mp4' also muxes the project's audio when an unmuted clip's file exists (and fails if that mux fails); 'webm' never carries audio — the WebM path has no audio support. 'svg' is the vector writer: it draws figures (segment taper, gradients, segment opacity AND figure opacity, bent segments arced through the bend midpoint), strokes (a pressured stroke as per-segment lines at its baked widths), FX/particles and weather through the same camera, and it emits sprite instances, text instances and segment media (images embedded once per asset as PNG data with a placement matrix; an image item's figure×style opacity rides as an opacity attribute). One divergence from the raster remains: SVG text is a monospace font run where the raster stamps 3×5 bitmap glyphs (the content and centre agree; the advance width does not). Progress: on a streaming transport (the stdio server), passing '_meta.progressToken' in the tools/call params streams notifications/progress during the call — 'mp4'/'webm' report the encode phase, 'jpeg'/'png_sequence' the render phase; other formats report nothing and the reply is unchanged. An optional 'alpha' boolean (PNG sequence and spritesheet only) exports with a transparent background and per-pixel coverage alpha instead of the project background.",
+            description: "Render the animation. Formats: 'png' renders ONE frame (arg 'frame', default current; arg 'scale', default 1.0 = stage size, a true re-render at that scale) to a PNG file; 'gif', 'mp4' (needs ffmpeg), 'webm', 'apng' and 'spritesheet' render the whole timeline to the file at 'path'; 'svg', 'jpeg' and 'png_sequence' write one file per frame into the DIRECTORY at 'path' (created if needed). The sequence/animation formats 'gif', 'apng', 'spritesheet', 'svg', 'jpeg' and 'png_sequence' accept an optional frame range: args 'from_frame' and 'to_frame' (0-based, inclusive, given together; the Wave 11 spellings 'from'/'to' are still accepted for the same bounds; a bound past the end of the timeline is refused rather than clamped; echoed in the reply under the spelling used). Video ranges are export_file's mp4_range/webm_range. An optional 'scale' (default 1.0) multiplies the output size for 'png', 'png_sequence', 'gif', 'mp4', 'webm', 'apng', 'spritesheet' and 'jpeg' — a true re-render at that scale, never an upscale (the MP4 audio mux is unaffected); 'svg' does not take a scale. Parent directories are created for file targets. CONTENT — the raster formats (png, png_sequence, gif, mp4, webm, apng, spritesheet, jpeg) draw the full frame: camera (pan/zoom/rotation), figures with segment styling (cap, taper, colour gradient, segment opacity AND figure opacity) and bent segments, drawing strokes, FX/particles and weather, with sprite instances, text instances and segment media (images/text attached to segments) composited in. 'mp4' also muxes the project's audio when an unmuted clip's file exists (and fails if that mux fails); 'webm' never carries audio — the WebM path has no audio support. 'svg' is the vector writer: it draws figures (segment taper, gradients, segment opacity AND figure opacity, bent segments arced through the bend midpoint), strokes (a pressured stroke as per-segment lines at its baked widths), FX/particles and weather through the same camera, and it emits sprite instances, text instances and segment media (images embedded once per asset as PNG data with a placement matrix; an image item's figure×style opacity rides as an opacity attribute). One divergence from the raster remains: SVG text is a monospace font run where the raster stamps 3×5 bitmap glyphs (the content and centre agree; the advance width does not). Progress: on a streaming transport (the stdio server), passing '_meta.progressToken' in the tools/call params streams notifications/progress during the call — 'mp4'/'webm' report the encode phase, 'jpeg'/'png_sequence' the render phase; other formats report nothing and the reply is unchanged. An optional 'alpha' boolean (PNG sequence, spritesheet and APNG only) exports with a transparent background and per-pixel coverage alpha instead of the project background.",
             schema: json!({
                 "type": "object",
                 "properties": {

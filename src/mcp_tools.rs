@@ -1774,9 +1774,9 @@ fn tool_set_head_ring_scale(core: &mut EditorCore, args: &Value) -> Result<Value
 
 /// Parse the graph `target` argument shared by graph_key and the
 /// channel transform tools: "root_x"/"root_y" (or "rootx"/"rooty"),
-/// "angle:N" / "length:N" strings, or an object {"angle": node} /
-/// {"length": node}. Node indices are range-checked against the
-/// figure.
+/// "angle:N" / "length:N" / "bend:N" strings, or an object
+/// {"angle": node} / {"length": node} / {"bend": node}. Node
+/// indices are range-checked against the figure.
 fn parse_graph_target(
     core: &EditorCore,
     fi: usize,
@@ -1790,21 +1790,21 @@ fn parse_graph_target(
             "root_y" | "rooty" => return Ok(ChannelTarget::RootY),
             _ => {}
         }
-        for (prefix, is_angle) in [("angle:", true), ("length:", false)] {
+        for (prefix, kind) in [("angle:", 0), ("length:", 1), ("bend:", 2)] {
             if let Some(rest) = s.strip_prefix(prefix) {
                 let ni: usize = rest.parse().map_err(|_| {
                     format!("unknown graph target '{s}' (the {prefix} index must be an integer)")
                 })?;
                 check_node(core, fi, ni)?;
-                return Ok(if is_angle {
-                    ChannelTarget::Angle(ni)
-                } else {
-                    ChannelTarget::Length(ni)
+                return Ok(match kind {
+                    0 => ChannelTarget::Angle(ni),
+                    1 => ChannelTarget::Length(ni),
+                    _ => ChannelTarget::Bend(ni),
                 });
             }
         }
         return Err(format!(
-            "unknown graph target '{s}' (expected \"root_x\", \"root_y\", \"angle:N\", \"length:N\" or an object with an angle/length key)"
+            "unknown graph target '{s}' (expected \"root_x\", \"root_y\", \"angle:N\", \"length:N\", \"bend:N\" or an object with an angle/length/bend key)"
         ));
     }
     if let Some(map) = target_v.as_object() {
@@ -1818,9 +1818,14 @@ fn parse_graph_target(
             check_node(core, fi, ni)?;
             return Ok(ChannelTarget::Length(ni));
         }
-        return Err("argument 'target' object must contain an 'angle' or 'length' node index".into());
+        if let Some(v) = map.get("bend") {
+            let ni = as_usize(v, "target.bend")?;
+            check_node(core, fi, ni)?;
+            return Ok(ChannelTarget::Bend(ni));
+        }
+        return Err("argument 'target' object must contain an 'angle', 'length' or 'bend' node index".into());
     }
-    Err("argument 'target' must be \"root_x\", \"root_y\", \"angle:N\", \"length:N\" or {\"angle\": node}".into())
+    Err("argument 'target' must be \"root_x\", \"root_y\", \"angle:N\", \"length:N\", \"bend:N\" or {\"angle\": node}".into())
 }
 
 /// Index of the (figure, target) channel for the channel
@@ -4079,11 +4084,11 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "graph_key",
-            description: "Add a graph-editor channel key: target is \"root_x\", \"root_y\", \"angle:N\", \"length:N\" or {\"angle\": node}; frame and value are numbers (degrees for angles).",
+            description: "Add a graph-editor channel key: target is \"root_x\", \"root_y\", \"angle:N\", \"length:N\", \"bend:N\" or {\"angle\": node}; frame and value are numbers (degrees for angles).",
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
-                    "target": { "description": "\"root_x\", \"root_y\", \"angle:N\", \"length:N\" or {\"angle\": nodeIndex}" },
+                    "target": { "description": "\"root_x\", \"root_y\", \"angle:N\", \"length:N\", \"bend:N\" or {\"angle\": nodeIndex}" },
                     "frame": { "type": "number" },
                     "value": { "type": "number" }
                 }),
@@ -4122,11 +4127,11 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "mirror_channel_time",
-            description: "Mirror one graph channel's keys in time around 'centre' (a frame coordinate; default: the timeline's middle frame), so that channel's animation plays backwards. Target addressing matches graph_key (\"root_x\", \"root_y\", \"angle:N\", \"length:N\" or {\"angle\": node}). Errors when the channel does not exist. One undo step.",
+            description: "Mirror one graph channel's keys in time around 'centre' (a frame coordinate; default: the timeline's middle frame), so that channel's animation plays backwards. Target addressing matches graph_key (\"root_x\", \"root_y\", \"angle:N\", \"length:N\", \"bend:N\" or {\"angle\": node}). Errors when the channel does not exist. One undo step.",
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
-                    "target": { "description": "\"root_x\", \"root_y\", \"angle:N\", \"length:N\" or {\"angle\": nodeIndex}" },
+                    "target": { "description": "\"root_x\", \"root_y\", \"angle:N\", \"length:N\", \"bend:N\" or {\"angle\": nodeIndex}" },
                     "centre": { "type": "number", "description": "Mirror centre frame (default: middle frame)" }
                 }),
                 &["figure", "target"],
@@ -4139,7 +4144,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
-                    "target": { "description": "\"root_x\", \"root_y\", \"angle:N\", \"length:N\" or {\"angle\": nodeIndex}" },
+                    "target": { "description": "\"root_x\", \"root_y\", \"angle:N\", \"length:N\", \"bend:N\" or {\"angle\": nodeIndex}" },
                     "factor": { "type": "number" },
                     "pivot": { "type": "number", "description": "Value the scaling is centred on (default 0)" }
                 }),
@@ -4153,7 +4158,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
-                    "target": { "description": "\"root_x\", \"root_y\", \"angle:N\", \"length:N\" or {\"angle\": nodeIndex}" }
+                    "target": { "description": "\"root_x\", \"root_y\", \"angle:N\", \"length:N\", \"bend:N\" or {\"angle\": nodeIndex}" }
                 }),
                 &["figure", "target"],
             ),
@@ -4165,7 +4170,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
-                    "target": { "description": "\"root_x\", \"root_y\", \"angle:N\", \"length:N\" or {\"angle\": nodeIndex}" },
+                    "target": { "description": "\"root_x\", \"root_y\", \"angle:N\", \"length:N\", \"bend:N\" or {\"angle\": nodeIndex}" },
                     "keys": { "type": "array", "items": { "type": "object" }, "description": "Key objects as returned by graph_copy_keys" },
                     "at_frame": { "type": "number" }
                 }),
@@ -4675,6 +4680,18 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &[],
             ),
             handler: crate::figure_ops::tool_reset_pose,
+        },
+        Tool {
+            name: "set_rest_pose",
+            description: "Set a figure's rest (setup) pose from the pose it shows at the current frame (the timeline pose, clips and state keys applied), as one undo step — the figure inspector's Set-rest-from-current-pose. With 'rebase' (the default), every authored angle — frame poses, the frames of clips authored on the figure's rig, and its Angle graph channels — shifts by the per-node rest delta, so the animation keeps its content against the new rig; with 'rebase' false only the rest angles change and the timeline is untouched (absolute). Setting the rest to the pose that already is the rest pose is a no-op and spends no undo step.",
+            schema: obj_schema(
+                json!({
+                    "figure": { "type": "integer" },
+                    "rebase": { "type": "boolean", "description": "Shift the authored animation by the rest delta (default true); false sets the rest only" }
+                }),
+                &[],
+            ),
+            handler: crate::figure_ops::tool_set_rest_pose,
         },
         Tool {
             name: "pose_apply_all_frames",
@@ -5747,7 +5764,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "get_node",
-            description: "Read one node in full: definition (name, parent, length, thickness, colour override, shape, head flag), the segment style (colour override + effective colour, color2, cap, taper, opacity), the segment's attached media ('media': null, or {kind: 'image', asset} / {kind: 'text', content, size}), and pose facts at 'frame' (default: current) — the stored parent-relative angle in degrees, the solved world direction of the bone ending at this joint in degrees [0, 360) (null for a root node), and the frame's bend in radians and degrees. Note: get_pose returns stored parent-relative angles; the segment inspector shows this same world direction. Read-only.",
+            description: "Read one node in full: definition (name, parent, length, thickness, colour override, shape, head flag), the segment style (colour override + effective colour, color2, cap, taper, opacity), the segment's attached media ('media': null, or {kind: 'image', asset, offset, scale, angle_offset, flip} / {kind: 'text', content, size}), and pose facts at 'frame' (default: current) — the stored parent-relative angle in degrees, the solved world direction of the bone ending at this joint in degrees [0, 360) (null for a root node), and the frame's bend in radians and degrees. Note: get_pose returns stored parent-relative angles; the segment inspector shows this same world direction. Read-only.",
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
@@ -6027,12 +6044,16 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "asset_attach",
-            description: "Attach the EXISTING asset at index 'asset' to figure 'figure', node 'node' as that segment's image media, replacing whatever media the segment carried (the by-index counterpart of attach_image_to_node, which reads ./import and works on the selection). One undo step.",
+            description: "Attach the EXISTING asset at index 'asset' to figure 'figure', node 'node' as that segment's image media, replacing whatever media the segment carried (the by-index counterpart of attach_image_to_node, which reads ./import and works on the selection). One undo step. Optional 'offset' ([along, across] stage units in the segment's own frame), 'scale' (a positive multiplier on the fitted size), 'angle_offset' (degrees) and 'flip' (boolean) set the sprite's local transform; unnamed components take the identity, and re-attaching the same asset with new transform values is how an attached sprite's transform is set. When any transform argument is given, the reply's 'media' names the resulting media in clip_get_node_media's shape.",
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
                     "node": { "type": "integer" },
-                    "asset": { "type": "integer" }
+                    "asset": { "type": "integer" },
+                    "offset": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+                    "scale": { "type": "number" },
+                    "angle_offset": { "type": "number" },
+                    "flip": { "type": "boolean" }
                 }),
                 &["figure", "node", "asset"],
             ),
@@ -6144,6 +6165,18 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["sprite", "to"],
             ),
             handler: crate::mcp_sprite_tools::tool_sprite_reorder,
+        },
+        Tool {
+            name: "import_layered_set",
+            description: "Import a layered set into the current project from the folder at 'path' — a SpriteLoop package folder (holding spriteloop.import.json, as the official Krita/Photoshop exporters write it) or a plain folder of PNG/JPEG images; a manifest in the folder always wins over the loose-images reading. Every part's image is validated through the shared asset gate before anything changes, so one corrupt part refuses the whole import and spends no undo step. Parts are matched by name to nodes of figure 'figure' (the selected figure when 'figure' is omitted): a matched part dresses its node as segment media, and every unmatched or invisible part becomes a free sprite — no part is ever dropped. The whole import is one undo step.",
+            schema: obj_schema(
+                json!({
+                    "path": { "type": "string" },
+                    "figure": { "type": "integer" }
+                }),
+                &["path"],
+            ),
+            handler: crate::mcp_layered_tools::tool_import_layered_set,
         },
         // ---------------------------------------------------------
         // Wave 14 — parity fill (Squad A + clip media + transport):
@@ -6518,12 +6551,16 @@ Tool {
   },
 Tool {
       name: "clip_asset_attach",
-      description: "Attach the EXISTING asset at index 'asset' to movieclip definition 'clip', node 'node' as that segment's image media, replacing whatever media the definition's segment carried (the clip-def counterpart of asset_attach, which writes a figure's own definition). The media renders on every instance of the clip whose own definition carries no media at that node — an instance's own media wins. One undo step.",
+      description: "Attach the EXISTING asset at index 'asset' to movieclip definition 'clip', node 'node' as that segment's image media, replacing whatever media the definition's segment carried (the clip-def counterpart of asset_attach, which writes a figure's own definition). The media renders on every instance of the clip whose own definition carries no media at that node — an instance's own media wins. One undo step. Optional 'offset', 'scale', 'angle_offset' and 'flip' set the sprite's local transform exactly as on asset_attach; when any is given, the reply's 'media' names the resulting media.",
       schema: obj_schema(
           json!({
               "clip": { "type": "integer" },
               "node": { "type": "integer" },
-              "asset": { "type": "integer" }
+              "asset": { "type": "integer" },
+              "offset": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+              "scale": { "type": "number" },
+              "angle_offset": { "type": "number" },
+              "flip": { "type": "boolean" }
           }),
           &["clip", "node", "asset"],
       ),
@@ -6543,7 +6580,7 @@ Tool {
   },
 Tool {
       name: "clip_get_node_media",
-      description: "Read the segment media attached to movieclip definition 'clip', node 'node': null, or {kind: 'image', asset} / {kind: 'text', content, size} — the same shape get_node returns for a figure's node. Read-only.",
+      description: "Read the segment media attached to movieclip definition 'clip', node 'node': null, or {kind: 'image', asset, offset, scale, angle_offset, flip} / {kind: 'text', content, size} — the same shape get_node returns for a figure's node. Read-only.",
       schema: obj_schema(
           json!({
               "clip": { "type": "integer" },
@@ -6950,11 +6987,15 @@ mod tests {
         // clip_create_range) and +2 sprite tools (X5:
         // sprite_set_asset, sprite_reorder, spliced from
         // the TOOL ENTRY SPECs in src/mcp_sprite_tools.rs).
-        assert_eq!(tools.len(), 328);
+        // +2 in Wave Y: import_layered_set (Y6, spliced
+        // from the TOOL ENTRY SPEC in
+        // src/mcp_layered_tools.rs) and set_rest_pose
+        // (Y7's MCP twin, IA-Y7-1).
+        assert_eq!(tools.len(), 330);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 328, "tool names must be unique");
+        assert_eq!(names.len(), 330, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }

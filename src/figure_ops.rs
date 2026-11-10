@@ -877,6 +877,33 @@ pub fn tool_reset_pose(core: &mut EditorCore, args: &Value) -> Result<Value, Str
     }))
 }
 
+/// MCP `set_rest_pose`: the figure inspector's
+/// Set-rest-from-current-pose (Wave Y, Y7/Y8, P-10) —
+/// the figure's rest (setup) angles become the angles
+/// of the pose it shows at the current frame. `figure`
+/// defaults to the selected figure; `rebase` (default
+/// true) shifts every authored angle store by the
+/// per-node rest delta so the animation keeps its
+/// content against the new rig, while false changes
+/// only the rest angles (absolute). The editor op owns
+/// the snapshot and the status: a real change is one
+/// undo step, and refusals and the already-rest no-op
+/// spend none — both reported here as `changed: false`
+/// with the op's status.
+pub fn tool_set_rest_pose(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = fop_target_figure(core, args)?;
+    let rebase = fop_opt_bool(args, "rebase")?.unwrap_or(true);
+    let changed = core.set_rest_from_pose(fi, rebase);
+    Ok(json!({
+        "ok": true,
+        "figure": fi,
+        "rebase": rebase,
+        "changed": changed,
+        "rest_angles": core.project.figures[fi].def.rest_angles(),
+        "status": core.status,
+    }))
+}
+
 /// MCP `pose_apply_all_frames`: the pose panel's
 /// Apply-pose-to-all-frames, with the pose supplied in the
 /// call (MCP has no shell clipboard). One snapshot for the
@@ -1682,19 +1709,15 @@ pub fn tool_get_node(core: &mut EditorCore, args: &Value) -> Result<Value, Strin
         "bend_degrees": bend.to_degrees(),
         // The segment's attached media (Wave 12, B10 splice):
         // null when the segment carries none, otherwise an
-        // object — {kind: "image", asset} naming the asset
-        // table index, or {kind: "text", content, size}.
+        // object — {kind: "image", asset, offset, scale,
+        // angle_offset, flip} naming the asset table index
+        // and the sprite's local transform (Wave Y, P-8), or
+        // {kind: "text", content, size}. The construction is
+        // media::segment_media_json, shared with the
+        // clip-side read so the two can never drift.
         // Additive: readers written before this field existed
         // simply never look at it.
-        "media": match &node.media {
-            Some(crate::model::SegmentMedia::Image { asset }) => {
-                json!({ "kind": "image", "asset": asset })
-            }
-            Some(crate::model::SegmentMedia::Text { content, size }) => {
-                json!({ "kind": "text", "content": content, "size": size })
-            }
-            None => Value::Null,
-        },
+        "media": crate::media::segment_media_json(&node.media),
     }))
 }
 
