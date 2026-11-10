@@ -2788,8 +2788,8 @@ impl EditorCore {
             self.status = "Select a joint first.".into();
             return;
         }
-        let Some(path) = self.first_file_with("import", &["png"]) else {
-            self.status = "Put a PNG in the import folder first.".into();
+        let Some(path) = self.first_file_with("import", &["png", "jpg", "jpeg"]) else {
+            self.status = "Put a PNG or JPEG in the import folder first.".into();
             return;
         };
         match std::fs::read(&path) {
@@ -6137,32 +6137,52 @@ pub fn tool_get_editor_settings(core: &mut EditorCore, _args: &Value) -> Result<
 //   at all times; inserts are stable, so cues with equal
 //   ranges keep their authoring order. Frame numbers are NOT
 //   clamped to the timeline.
+// * A cue's speaker rides the add/update ops as an optional
+//   name, normalised by `subtitles::normalise_speaker`
+//   (trimmed; empty stores none; a name holding `<`, `>` or
+//   a newline refuses in the same failure voice, before any
+//   snapshot). Update is a full replace: the stored speaker
+//   becomes the normalised argument, so `None` clears it.
 // * Success is reported on `status` with 1-based cue and
 //   frame numbers.
 // ---------------------------------------------------------------------
 
 impl EditorCore {
     /// Add a cue over `[start_frame, end_frame)` with
-    /// `text`, keeping the list sorted. One undo step.
+    /// `text` and an optional `speaker` name, keeping the
+    /// list sorted. One undo step.
+    /// Overlapping an existing cue is allowed — stacking
+    /// is a legitimate authoring choice (the one rule set
+    /// in `subtitles.rs`'s module docs).
     /// Returns the new cue's index in the sorted list, or
-    /// `None` when the cue is refused (invalid range or
-    /// empty text) — a refusal changes nothing and takes
-    /// no snapshot.
+    /// `None` when the cue is refused (invalid range,
+    /// empty text, or a speaker name
+    /// [`crate::subtitles::normalise_speaker`] refuses) —
+    /// a refusal changes nothing and takes no snapshot.
     pub fn subtitle_add(
         &mut self,
         start_frame: usize,
         end_frame: usize,
         text: &str,
+        speaker: Option<&str>,
     ) -> Option<usize> {
         if let Err(reason) = crate::subtitles::SubtitleCue::validate(start_frame, end_frame, text) {
             self.status = format!("Subtitle add failed: {reason}.");
             return None;
         }
+        let speaker = match crate::subtitles::normalise_speaker(speaker) {
+            Ok(speaker) => speaker,
+            Err(reason) => {
+                self.status = format!("Subtitle add failed: {reason}.");
+                return None;
+            }
+        };
         self.snapshot();
         let cue = crate::subtitles::SubtitleCue {
             start_frame,
             end_frame,
             text: text.to_string(),
+            speaker,
         };
         // Insert after every cue whose key is <= the new
         // key: the list stays sorted and the insert is
@@ -6183,8 +6203,11 @@ impl EditorCore {
 
     /// Replace cue `index` (an index into the sorted list —
     /// validated before anything is taken or changed) with a
-    /// new range and text, re-sorting afterwards. One undo
-    /// step. Returns the cue's index after the re-sort, or
+    /// new range, text and speaker, re-sorting afterwards.
+    /// A full replace: the stored speaker becomes the
+    /// normalised `speaker` argument, so `None` (or an
+    /// empty name) clears it. One undo step. Returns the
+    /// cue's index after the re-sort, or
     /// `None` when refused (no such cue, or the new values
     /// fail validation) — a refusal changes nothing and
     /// takes no snapshot.
@@ -6194,6 +6217,7 @@ impl EditorCore {
         start_frame: usize,
         end_frame: usize,
         text: &str,
+        speaker: Option<&str>,
     ) -> Option<usize> {
         if self.project.subtitles.get(index).is_none() {
             self.status = format!("Subtitle update failed: no subtitle {}.", index + 1);
@@ -6203,12 +6227,20 @@ impl EditorCore {
             self.status = format!("Subtitle update failed: {reason}.");
             return None;
         }
+        let speaker = match crate::subtitles::normalise_speaker(speaker) {
+            Ok(speaker) => speaker,
+            Err(reason) => {
+                self.status = format!("Subtitle update failed: {reason}.");
+                return None;
+            }
+        };
         self.snapshot();
         self.project.subtitles.remove(index);
         let cue = crate::subtitles::SubtitleCue {
             start_frame,
             end_frame,
             text: text.to_string(),
+            speaker,
         };
         let key = (cue.start_frame, cue.end_frame);
         let new_index = self
@@ -6305,6 +6337,7 @@ mod subtitle_ops_tests {
             start_frame,
             end_frame,
             text: text.to_string(),
+            speaker: None,
         }
     }
 
@@ -6319,11 +6352,11 @@ mod subtitle_ops_tests {
     #[test]
     fn add_keeps_the_list_sorted_and_reports_the_index() {
         let mut core = EditorCore::new();
-        assert_eq!(core.subtitle_add(10, 14, "last"), Some(0));
-        assert_eq!(core.subtitle_add(0, 4, "first"), Some(0));
-        assert_eq!(core.subtitle_add(4, 10, "middle"), Some(1));
+        assert_eq!(core.subtitle_add(10, 14, "last", None), Some(0));
+        assert_eq!(core.subtitle_add(0, 4, "first", None), Some(0));
+        assert_eq!(core.subtitle_add(4, 10, "middle", None), Some(1));
         // Equal ranges keep authoring order (stable insert).
-        assert_eq!(core.subtitle_add(4, 10, "middle two"), Some(2));
+        assert_eq!(core.subtitle_add(4, 10, "middle two", None), Some(2));
         let texts: Vec<&str> = core.subtitle_cues().iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts, ["first", "middle", "middle two", "last"]);
         assert_eq!(core.subtitle_count(), 4);
@@ -6333,11 +6366,11 @@ mod subtitle_ops_tests {
     fn each_successful_mutation_takes_exactly_one_undo_step() {
         let mut core = EditorCore::new();
         assert_eq!(core.undo_depth(), 0);
-        core.subtitle_add(0, 4, "one");
+        core.subtitle_add(0, 4, "one", None);
         assert_eq!(core.undo_depth(), 1);
-        core.subtitle_add(4, 8, "two");
+        core.subtitle_add(4, 8, "two", None);
         assert_eq!(core.undo_depth(), 2);
-        core.subtitle_update(0, 8, 12, "one moved");
+        core.subtitle_update(0, 8, 12, "one moved", None);
         assert_eq!(core.undo_depth(), 3);
         core.subtitle_delete(0);
         assert_eq!(core.undo_depth(), 4);
@@ -6350,16 +6383,16 @@ mod subtitle_ops_tests {
     #[test]
     fn refused_ops_change_nothing_and_take_no_snapshot() {
         let mut core = EditorCore::new();
-        core.subtitle_add(0, 4, "kept");
+        core.subtitle_add(0, 4, "kept", None);
         let before = project_json(&core);
         let depth = core.undo_depth();
 
-        assert_eq!(core.subtitle_add(4, 4, "empty range"), None);
-        assert_eq!(core.subtitle_add(5, 4, "inverted"), None);
-        assert_eq!(core.subtitle_add(4, 8, "  "), None);
-        assert_eq!(core.subtitle_update(9, 0, 4, "ghost"), None);
-        assert_eq!(core.subtitle_update(0, 3, 3, "bad range"), None);
-        assert_eq!(core.subtitle_update(0, 0, 4, ""), None);
+        assert_eq!(core.subtitle_add(4, 4, "empty range", None), None);
+        assert_eq!(core.subtitle_add(5, 4, "inverted", None), None);
+        assert_eq!(core.subtitle_add(4, 8, "  ", None), None);
+        assert_eq!(core.subtitle_update(9, 0, 4, "ghost", None), None);
+        assert_eq!(core.subtitle_update(0, 3, 3, "bad range", None), None);
+        assert_eq!(core.subtitle_update(0, 0, 4, "", None), None);
         assert!(!core.subtitle_delete(9));
 
         assert_eq!(project_json(&core), before);
@@ -6370,12 +6403,12 @@ mod subtitle_ops_tests {
     #[test]
     fn update_replaces_and_resorts() {
         let mut core = EditorCore::new();
-        core.subtitle_add(0, 4, "a");
-        core.subtitle_add(4, 8, "b");
-        core.subtitle_add(8, 12, "c");
+        core.subtitle_add(0, 4, "a", None);
+        core.subtitle_add(4, 8, "b", None);
+        core.subtitle_add(8, 12, "c", None);
         // Move "a" past "c": it lands at the end, and the
         // returned index is its new position.
-        assert_eq!(core.subtitle_update(0, 12, 16, "a2"), Some(2));
+        assert_eq!(core.subtitle_update(0, 12, 16, "a2", None), Some(2));
         let texts: Vec<&str> = core.subtitle_cues().iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts, ["b", "c", "a2"]);
         assert_eq!(core.subtitle_cues()[2], cue(12, 16, "a2"));
@@ -6384,8 +6417,8 @@ mod subtitle_ops_tests {
     #[test]
     fn delete_removes_the_cue() {
         let mut core = EditorCore::new();
-        core.subtitle_add(0, 4, "a");
-        core.subtitle_add(4, 8, "b");
+        core.subtitle_add(0, 4, "a", None);
+        core.subtitle_add(4, 8, "b", None);
         assert!(core.subtitle_delete(0));
         assert_eq!(core.subtitle_cues(), [cue(4, 8, "b")]);
     }
@@ -6393,7 +6426,7 @@ mod subtitle_ops_tests {
     #[test]
     fn subtitle_at_uses_the_half_open_range() {
         let mut core = EditorCore::new();
-        core.subtitle_add(2, 5, "cue");
+        core.subtitle_add(2, 5, "cue", None);
         assert_eq!(core.subtitle_at(1), None);
         assert_eq!(core.subtitle_at(2).map(|c| c.text.as_str()), Some("cue"));
         assert_eq!(core.subtitle_at(4).map(|c| c.text.as_str()), Some("cue"));
@@ -6404,13 +6437,38 @@ mod subtitle_ops_tests {
     #[test]
     fn subtitles_at_returns_every_live_cue_in_stored_order() {
         let mut core = EditorCore::new();
-        core.subtitle_add(0, 10, "under");
-        core.subtitle_add(2, 6, "over");
+        core.subtitle_add(0, 10, "under", None);
+        core.subtitle_add(2, 6, "over", None);
         let live: Vec<&str> = core.subtitles_at(3).iter().map(|c| c.text.as_str()).collect();
         assert_eq!(live, ["under", "over"]);
         // subtitle_at is exactly the first of subtitles_at.
         assert_eq!(core.subtitle_at(3).map(|c| c.text.as_str()), Some("under"));
         assert!(core.subtitles_at(10).is_empty());
+    }
+
+    #[test]
+    fn core_queries_follow_stored_order_on_a_foreign_list() {
+        // Wave R (R2): the queries never re-sort at read.
+        // A list written directly into the project (the
+        // hand-edited-file shape — every op keeps the list
+        // sorted, so only foreign state looks like this)
+        // is followed in its stored order: `subtitle_at`
+        // is the earliest-STORED live cue, exactly the
+        // first element of `subtitles_at`. An invalid
+        // stored cue (inverted here) is inert — the
+        // half-open liveness test can never hold for it.
+        let mut core = EditorCore::new();
+        core.project.subtitles = vec![
+            cue(8, 20, "stored first"),
+            cue(0, 10, "stored second"),
+            cue(6, 3, "inverted"),
+        ];
+        assert_eq!(core.subtitle_at(9).map(|c| c.text.as_str()), Some("stored first"));
+        let live: Vec<&str> = core.subtitles_at(9).iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(live, ["stored first", "stored second"]);
+        for frame in 0..24 {
+            assert_ne!(core.subtitle_at(frame).map(|c| c.text.as_str()), Some("inverted"));
+        }
     }
 
     #[test]
@@ -6445,6 +6503,61 @@ mod subtitle_ops_tests {
         assert!(err.contains("not a finite number"), "{err}");
         assert_eq!(core.undo_depth(), depth);
         assert_eq!(core.subtitle_style(), kept);
+        assert!(core.status.contains("failed"), "{}", core.status);
+    }
+
+    // -----------------------------------------------------------------
+    // Wave R (R21): the speaker rides the ops — normalised
+    // at the write path, a full-replace field on update,
+    // and never a second undo step.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn add_and_update_carry_the_normalised_speaker() {
+        let mut core = EditorCore::new();
+        // The name is trimmed at the write path; the cue
+        // stores the trimmed form. One undo step.
+        assert_eq!(
+            core.subtitle_add(0, 4, "line", Some("  Mary Jane  ")),
+            Some(0)
+        );
+        assert_eq!(core.subtitle_cues()[0].speaker.as_deref(), Some("Mary Jane"));
+        assert_eq!(core.undo_depth(), 1);
+        // Changing only the speaker is a real change: one
+        // step, and undo restores the earlier name.
+        assert_eq!(core.subtitle_update(0, 0, 4, "line", Some("John")), Some(0));
+        assert_eq!(core.subtitle_cues()[0].speaker.as_deref(), Some("John"));
+        assert_eq!(core.undo_depth(), 2);
+        core.undo();
+        assert_eq!(core.subtitle_cues()[0].speaker.as_deref(), Some("Mary Jane"));
+        assert_eq!(core.undo_depth(), 1);
+        // A whitespace-only name clears the speaker:
+        // update is a full replace and the empty name
+        // normalises to none.
+        assert_eq!(core.subtitle_update(0, 0, 4, "line", Some("   ")), Some(0));
+        assert_eq!(core.subtitle_cues()[0].speaker, None);
+        // And `None` simply means no speaker.
+        assert_eq!(core.subtitle_add(4, 8, "plain", None), Some(1));
+        assert_eq!(core.subtitle_cues()[1].speaker, None);
+    }
+
+    #[test]
+    fn speaker_refusals_change_nothing_and_take_no_snapshot() {
+        let mut core = EditorCore::new();
+        core.subtitle_add(0, 4, "kept", Some("Mary"));
+        let before = project_json(&core);
+        let depth = core.undo_depth();
+        // A name that cannot survive a WebVTT voice tag
+        // refuses at the op, in the failure voice.
+        assert_eq!(core.subtitle_add(4, 8, "new", Some("A>B")), None);
+        assert_eq!(core.subtitle_update(0, 0, 4, "kept", Some("A<B")), None);
+        assert_eq!(core.subtitle_update(0, 0, 4, "kept", Some("A\nB")), None);
+        // The speaker is metadata, not text: whitespace
+        // TEXT with a perfectly good speaker still
+        // refuses — on the text rule.
+        assert_eq!(core.subtitle_add(4, 8, "  ", Some("Mary")), None);
+        assert_eq!(project_json(&core), before);
+        assert_eq!(core.undo_depth(), depth);
         assert!(core.status.contains("failed"), "{}", core.status);
     }
 }
@@ -8130,7 +8243,7 @@ mod tests {
         assert_eq!(c.solo, Some(1));
     }
 
-    fn audio_temp_dir(name: &str) -> PathBuf {
+    pub(super) fn audio_temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "styk-editor-audio-{}-{}",
             std::process::id(),
@@ -8140,7 +8253,7 @@ mod tests {
         dir
     }
 
-    fn write_editor_wav(
+    pub(super) fn write_editor_wav(
         dir: &PathBuf,
         name: &str,
         data: &crate::audio_edit::WavData,
@@ -8150,7 +8263,7 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
-    fn const_editor_wav(
+    pub(super) fn const_editor_wav(
         rate: u32,
         frames: usize,
         value: f32,
@@ -8980,10 +9093,12 @@ mod wave10_tests {
 
 #[cfg(test)]
 mod wave11_tests {
+    use super::tests::{audio_temp_dir, const_editor_wav, write_editor_wav};
     use crate::audio_edit::WavData;
     use crate::editor::EditorCore;
     use crate::graph::{Channel, ChannelTarget, Key};
-    use crate::model::AudioClip;
+    use crate::model::{AudioClip, Project};
+    use std::path::PathBuf;
 
     /// A one-key RootX channel: `value_at` returns the key value
     /// verbatim at every frame, so baked roots are exact.

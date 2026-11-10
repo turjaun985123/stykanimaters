@@ -27,9 +27,61 @@
 //!   legitimate authoring choice). `subtitle_at` on the
 //!   core returns the first live cue in stored order;
 //!   [`live_subtitle_cues`] returns all of them.
+//! * A cue may carry a `speaker` — who says the line
+//!   (Wave R, R21; the user's "build both" decision).
+//!   It is metadata, not text: it plays no part in
+//!   liveness, and the write paths normalise it through
+//!   [`normalise_speaker`]. No renderer draws it yet
+//!   (the prefix display is a filed IA, not part of
+//!   this field); on disk only WebVTT can represent it
+//!   (see the converter sections).
 //! * Frame numbers are NOT clamped to the timeline: a cue
 //!   authored past the last frame simply never shows.
 //!   Extending the timeline later can bring it into view.
+//!
+//! Validation — ONE rule set at every boundary (Wave R,
+//! R2):
+//!
+//! * A cue is valid iff `end_frame > start_frame` and
+//!   its text holds a non-whitespace character
+//!   ([`SubtitleCue::validate`]). The editing ops REFUSE
+//!   an invalid cue: nothing changes, no undo step is
+//!   taken.
+//! * The importers judge a block in the time domain: an
+//!   end timestamp BEFORE the start timestamp is the
+//!   same invalid cue, so the block is skipped like any
+//!   other bad block (and a file of only such blocks is
+//!   zero yield — refused). A non-inverted range that
+//!   rounds onto a single frame — including an authored
+//!   zero-duration range — is NOT invalid: it names a
+//!   live instant, so the importer clamps its end to
+//!   `start + 1`, the model's one-frame minimum.
+//! * Overlapping cues are valid everywhere: the ops
+//!   accept them, the importers keep them, and the
+//!   queries return all of them, stacked in stored
+//!   order.
+//! * Stored state is never re-validated or re-sorted at
+//!   read: the queries follow the list's stored order
+//!   verbatim (for a list the ops or an import built,
+//!   that IS the sorted order), and an invalid cue in
+//!   it — reachable only from a hand-edited project
+//!   file, since every write path refuses or skips it —
+//!   can never be live, because `end <= start` makes
+//!   the half-open liveness test unsatisfiable. It
+//!   leaves only through the ops or a re-import.
+//! * The speaker name has its own small rule, enforced
+//!   by [`normalise_speaker`] at the same write paths:
+//!   it is trimmed, an empty or whitespace-only name
+//!   stores NO speaker (`None`), and a name holding
+//!   `<`, `>` or a newline is REFUSED — it could not
+//!   survive WebVTT's voice tag, the one format that
+//!   represents a speaker at all. The speaker is not
+//!   text: a cue whose TEXT is whitespace-only refuses
+//!   on the text rule however good its speaker is. A
+//!   stored speaker is likewise never re-validated at
+//!   read; one that breaks the rule (hand-edited files
+//!   only) is simply not written as a voice tag on
+//!   WebVTT export.
 
 use serde::{Deserialize, Serialize};
 
@@ -40,7 +92,8 @@ use crate::model::Project;
 // ---------------------------------------------------------------------------
 
 /// One subtitle cue: `text` shown on the half-open frame
-/// range `[start_frame, end_frame)`.
+/// range `[start_frame, end_frame)`, optionally credited
+/// to a `speaker`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SubtitleCue {
     /// First frame the cue is shown on (0-based).
@@ -52,6 +105,17 @@ pub struct SubtitleCue {
     /// The cue's text, stored verbatim. Never empty or
     /// all-whitespace in a cue the ops accepted.
     pub text: String,
+    /// Who says the line, when the cue is credited:
+    /// a name as [`normalise_speaker`] stores it
+    /// (trimmed, never empty). Metadata, not text —
+    /// it plays no part in validation or liveness.
+    /// Additive since Wave R (R21): the serde default
+    /// loads every cue written before the field
+    /// existed as `None`, so `format_version` stays 1
+    /// (the model.rs bump rule: a loader absorbs this
+    /// through the default alone).
+    #[serde(default)]
+    pub speaker: Option<String>,
 }
 
 impl SubtitleCue {
@@ -80,6 +144,39 @@ impl SubtitleCue {
     pub fn is_live_at(&self, frame: usize) -> bool {
         self.start_frame <= frame && frame < self.end_frame
     }
+}
+
+/// Normalise a speaker name offered at a write path
+/// (the editing ops, and through them the MCP tools and
+/// the WebVTT importer) into the value to store:
+///
+/// * `None` in, `None` out — no speaker offered.
+/// * The name is trimmed; an empty or whitespace-only
+///   name stores NO speaker (`None`), so "clear the
+///   speaker" and "never had one" are the same state.
+/// * A name holding `<`, `>` or a newline is REFUSED
+///   (returned as an `Err` in the ops' failure voice):
+///   it could not survive WebVTT's `<v Name>` voice
+///   tag, the one format that represents a speaker.
+///
+/// This is the write-path discipline only — stored
+/// state is never re-normalised at read (the module's
+/// rule set), so a name from a hand-edited file rides
+/// verbatim until an op rewrites its cue.
+pub fn normalise_speaker(raw: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let name = raw.trim();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    if name.contains(['<', '>', '\n', '\r']) {
+        return Err(format!(
+            "speaker name {name:?} must not contain '<', '>' or a newline"
+        ));
+    }
+    Ok(Some(name.to_string()))
 }
 
 /// The sort key the cue list is kept ordered by.
@@ -320,6 +417,25 @@ pub fn subtitle_line_center_y(style: SubtitleStyle, stage_height: f32, from_edge
     }
 }
 
+/// The cue's lines as a renderer should draw them: its
+/// text lines with the speaker prefixed onto the FIRST
+/// line as `Name: `, when it carries one (Wave R, R21 —
+/// IA-R21-4). The prefix rides the first line rather than
+/// adding one, so line counts, stack offsets and centre-y
+/// values are identical on every surface; each line is
+/// centred as a whole string, the standard caption look
+/// for a speaker label. The prefix exists ONLY here —
+/// stored text and the converters never carry it (SRT
+/// stays verbatim; the WebVTT voice tag is the only
+/// on-disk speaker representation).
+pub fn subtitle_display_lines(cue: &SubtitleCue) -> Vec<String> {
+    let mut lines: Vec<String> = cue.text.lines().map(str::to_string).collect();
+    if let (Some(speaker), Some(first)) = (&cue.speaker, lines.first_mut()) {
+        *first = format!("{speaker}: {first}");
+    }
+    lines
+}
+
 // ---------------------------------------------------------------------------
 // SRT import / export
 //
@@ -408,6 +524,15 @@ fn srt_seconds_to_frame(seconds: f64, fps: f32) -> usize {
 /// list's stored order, numbered from 1, with their
 /// text verbatim — multi-line text stays multi-line. A
 /// project with no cues exports as the empty string.
+///
+/// Speaker loss, stated plainly: SRT has NO speaker
+/// syntax, and this exporter invents none (a `Name:`
+/// prefix would come back as part of the text on
+/// re-import, corrupting it). A cue's speaker is
+/// simply not represented in the document, so a round
+/// trip through SRT drops speakers while never
+/// touching a word of text; WebVTT is the interchange
+/// format that keeps them.
 pub fn subtitles_to_srt(project: &Project) -> String {
     // Mirror the exporters' fps discipline (export.rs):
     // a non-positive stored rate cannot name frame
@@ -451,20 +576,38 @@ fn parse_srt_block(lines: &[&str], fps: f32) -> Result<SubtitleCue, (Option<usiz
     let Some(end_s) = parse_srt_timestamp(end_token) else {
         return Err((declared, format!("bad end timestamp {end_token:?}")));
     };
+    // An end timestamp BEFORE the start timestamp is
+    // an inverted cue — invalid under the one rule set
+    // (see the module docs), so the block is bad and
+    // skipped, never repaired into a fabricated frame.
+    // The check runs in the time domain, before
+    // conversion: rounding is monotonic, so a
+    // non-inverted range can collapse onto one frame
+    // but can never invert.
+    if end_s < start_s {
+        return Err((
+            declared,
+            "end timestamp is before the start timestamp".to_string(),
+        ));
+    }
     let start_frame = srt_seconds_to_frame(start_s, fps);
     // The imported end is clamped to at least start+1:
-    // an SRT range that rounds (or is authored) onto a
-    // single frame still names a live instant, and the
-    // cue model's minimum cue is one frame.
+    // a non-inverted range that rounds (or is authored
+    // zero-duration) onto a single frame still names a
+    // live instant, and the cue model's minimum cue is
+    // one frame.
     let end_frame = srt_seconds_to_frame(end_s, fps).max(start_frame.saturating_add(1));
     let text = lines[timing_pos + 1..].join("\n");
     if let Err(reason) = SubtitleCue::validate(start_frame, end_frame, &text) {
         return Err((declared, reason));
     }
+    // SRT carries no speaker; the WebVTT parser layers
+    // its voice-tag read on top of this shared result.
     Ok(SubtitleCue {
         start_frame,
         end_frame,
         text,
+        speaker: None,
     })
 }
 
@@ -474,7 +617,8 @@ fn parse_srt_block(lines: &[&str], fps: f32) -> Result<SubtitleCue, (Option<usiz
 /// leading BOM, unnumbered blocks and the timestamp
 /// variants [`parse_srt_timestamp`] accepts are all
 /// fine, and any block that cannot be understood — a
-/// bad timestamp, no timing line, empty text — is
+/// bad timestamp, no timing line, an end timestamp
+/// before its start timestamp, empty text — is
 /// SKIPPED, not fatal. The returned list is in FILE
 /// order; sorting is the caller's normalisation
 /// ([`sort_subtitle_cues`]).
@@ -587,6 +731,18 @@ pub fn subtitles_from_srt(text: &str, fps: f32) -> Result<Vec<SubtitleCue>, Stri
 //   skipped outright — never cues, never errors, never
 //   the "first bad cue" an empty import complains
 //   about.
+// - A cue's speaker rides the format's native voice
+//   span: export wraps a speaker'd cue's payload as
+//   `<v Name>text</v>` (the tag opens the payload and
+//   the close ends it, across however many lines the
+//   text runs), and import reads exactly that shape —
+//   a well-formed span at the very start of the
+//   payload, closed at its very end — back into the
+//   speaker. Anything else (a span that never closes,
+//   content after the close, a name the write paths
+//   would refuse) degrades to plain text: the payload
+//   is kept verbatim, tag characters and all, with no
+//   speaker — a tag can never cost a cue its text.
 //
 // Frame <-> time mapping is SRT's, unchanged: the
 // half-open frame range converts directly at the
@@ -608,6 +764,22 @@ fn vtt_timestamp(frame: usize, fps: f32) -> String {
     format!("{h:02}:{m:02}:{s:02}.{ms:03}")
 }
 
+/// A stored speaker name as a WebVTT voice-tag name,
+/// when it can be written as one: exactly the names
+/// [`normalise_speaker`] would itself store (already
+/// trimmed, non-empty, free of `<`, `>` and newlines).
+/// A stored name that fails — reachable only from a
+/// hand-edited project file, since stored state is
+/// never re-validated at read — exports WITHOUT the
+/// tag rather than emitting a broken one; the cue's
+/// text is written verbatim either way.
+fn exportable_speaker(name: &str) -> Option<&str> {
+    match normalise_speaker(Some(name)) {
+        Ok(Some(clean)) if clean.as_str() == name => Some(name),
+        _ => None,
+    }
+}
+
 /// Export the project's cues as WebVTT text at the
 /// project's own frame rate: the `WEBVTT` header, then
 /// the cues in the list's stored order with numeric
@@ -617,6 +789,15 @@ fn vtt_timestamp(frame: usize, fps: f32) -> String {
 /// the bare header (a valid, empty WebVTT file) rather
 /// than SRT's empty string: a WebVTT file without its
 /// signature is not a WebVTT file at all.
+///
+/// A cue with a speaker wraps its payload in the
+/// format's voice span, `<v Name>text</v>` — the tag
+/// opens the payload and the close ends it, across
+/// however many lines the text runs — which the
+/// importer below reads back, so a speaker survives
+/// the round trip. A speaker that cannot be written
+/// as a tag (see [`exportable_speaker`]) exports as
+/// plain text, uncredited.
 pub fn subtitles_to_vtt(project: &Project) -> String {
     // Same fps discipline as the SRT export (and the
     // exporters behind it): a non-positive stored rate
@@ -630,10 +811,68 @@ pub fn subtitles_to_vtt(project: &Project) -> String {
         out.push_str(" --> ");
         out.push_str(&vtt_timestamp(cue.end_frame, fps));
         out.push('\n');
-        out.push_str(&cue.text);
+        match cue.speaker.as_deref().and_then(exportable_speaker) {
+            Some(name) => {
+                out.push_str("<v ");
+                out.push_str(name);
+                out.push('>');
+                out.push_str(&cue.text);
+                out.push_str("</v>");
+            }
+            None => out.push_str(&cue.text),
+        }
         out.push_str("\n\n");
     }
     out
+}
+
+/// Split a WebVTT cue payload into its speaker and
+/// its text, reading the format's voice span. Only the
+/// exact span the exporter writes is interpreted: the
+/// payload OPENS with `<v`, optional `.class`
+/// annotations, the voice name running to the tag's
+/// `>`, and the payload ENDS with the matching `</v>`.
+/// The name then goes through [`normalise_speaker`],
+/// like any offered name.
+///
+/// Anything else — no opening tag, a tag that never
+/// closes, content after the close, a name that
+/// crosses a line or that the write paths would
+/// refuse — is not a voice span at all: the payload
+/// comes back verbatim with no speaker. Degrading, not
+/// discarding: a malformed tag costs the cue its
+/// speaker reading, never its text.
+fn split_vtt_voice(payload: &str) -> (Option<String>, String) {
+    let verbatim = || (None, payload.to_string());
+    let Some(mut rest) = payload.strip_prefix("<v") else {
+        return verbatim();
+    };
+    // Class annotations (`.loud`) may ride between the
+    // `v` and the voice name; the exporter never writes
+    // them, but foreign files do.
+    while let Some(after_dot) = rest.strip_prefix('.') {
+        match after_dot.find(|c: char| c.is_whitespace() || c == '>') {
+            Some(end) => rest = &after_dot[end..],
+            None => return verbatim(),
+        }
+    }
+    let rest = rest.trim_start_matches([' ', '\t']);
+    let Some(gt) = rest.find('>') else {
+        return verbatim();
+    };
+    let name = &rest[..gt];
+    if name.contains('\n') {
+        return verbatim();
+    }
+    let Some(text) = rest[gt + 1..].strip_suffix("</v>") else {
+        return verbatim();
+    };
+    match normalise_speaker(Some(name)) {
+        Ok(speaker) => (speaker, text.to_string()),
+        // A name the ops would refuse (it holds `<`)
+        // degrades the whole span to plain text.
+        Err(_) => verbatim(),
+    }
 }
 
 /// Parse one blank-line-separated WebVTT cue block.
@@ -646,8 +885,31 @@ pub fn subtitles_to_vtt(project: &Project) -> String {
 /// including the declared-index error reporting (a
 /// numeric identifier reports as its number, a string
 /// identifier falls back to the block position).
+///
+/// The one WebVTT-only layer is the voice span: after
+/// the shared parse, the payload's `<v Name>…</v>`
+/// wrapper (when well-formed — [`split_vtt_voice`]) is
+/// read into the cue's speaker. The unwrapped text is
+/// validated AGAIN: the shared parse validated the
+/// payload with its tags on, and a span around
+/// whitespace is a textless cue — a bad block, skipped
+/// like any other.
 fn parse_vtt_block(lines: &[&str], fps: f32) -> Result<SubtitleCue, (Option<usize>, String)> {
-    parse_srt_block(lines, fps)
+    let mut cue = parse_srt_block(lines, fps)?;
+    let Some(timing_pos) = lines.iter().position(|l| l.contains("-->")) else {
+        return Ok(cue);
+    };
+    let payload = lines[timing_pos + 1..].join("\n");
+    let (speaker, text) = split_vtt_voice(&payload);
+    if speaker.is_some() || text != payload {
+        if let Err(reason) = SubtitleCue::validate(cue.start_frame, cue.end_frame, &text) {
+            let declared = lines.first().and_then(|l| l.trim().parse::<usize>().ok());
+            return Err((declared, reason));
+        }
+        cue.speaker = speaker;
+        cue.text = text;
+    }
+    Ok(cue)
 }
 
 /// Is this block WebVTT metadata rather than a cue?
@@ -669,7 +931,8 @@ fn vtt_block_is_metadata(lines: &[&str]) -> bool {
 /// mirrored exactly: the parser is forgiving per cue
 /// (CRLF or LF endings, a leading BOM, string or
 /// numeric identifiers, cue settings, comma or
-/// hour-less timestamps via the shared parser), any
+/// hour-less timestamps via the shared parser, voice
+/// spans read into cue speakers), any
 /// cue block that cannot be understood is SKIPPED, and
 /// the hard failures are a bad frame rate and an
 /// import that yields nothing at all — the `Err` then
@@ -753,6 +1016,16 @@ mod tests {
             start_frame,
             end_frame,
             text: text.to_string(),
+            speaker: None,
+        }
+    }
+
+    /// A cue carrying a speaker, as the write paths
+    /// would store it (name already normalised).
+    fn speaker_cue(start_frame: usize, end_frame: usize, text: &str, speaker: &str) -> SubtitleCue {
+        SubtitleCue {
+            speaker: Some(speaker.to_string()),
+            ..cue(start_frame, end_frame, text)
         }
     }
 
@@ -924,6 +1197,107 @@ mod tests {
     }
 
     #[test]
+    fn srt_import_skips_an_inverted_cue_and_keeps_the_good_ones() {
+        // Wave R (R2): an end timestamp before its start
+        // timestamp is the frame domain's inverted cue —
+        // a bad block, skipped, never repaired into a
+        // fabricated one-frame cue at the start.
+        let srt = "1\n00:00:00,000 --> 00:00:01,000\nGood one\n\n\
+                   2\n00:00:02,000 --> 00:00:01,000\nBackwards\n\n\
+                   3\n00:00:02,000 --> 00:00:03,500\nGood two\n";
+        let imported = subtitles_from_srt(srt, 24.0).expect("the good cues import");
+        assert_eq!(imported, vec![cue(0, 24, "Good one"), cue(48, 84, "Good two")]);
+    }
+
+    #[test]
+    fn srt_import_refuses_when_the_only_cue_is_inverted() {
+        // One bad block is zero yield, and zero yield is
+        // the whole-file refusal — the same discipline as
+        // any other all-bad file.
+        let srt = "1\n00:00:02,000 --> 00:00:01,000\nBackwards\n";
+        assert!(subtitles_from_srt(srt, 24.0).is_err());
+    }
+
+    #[test]
+    fn vtt_import_skips_an_inverted_cue_too() {
+        // The two formats share the block parser, so the
+        // rule cannot drift between them — pinned anyway.
+        let vtt = "WEBVTT\n\n\
+                   1\n00:00:02.000 --> 00:00:01.000\nBackwards\n\n\
+                   2\n00:00:00.000 --> 00:00:01.000\nGood\n";
+        let imported = subtitles_from_vtt(vtt, 24.0).expect("the good cue imports");
+        assert_eq!(imported, vec![cue(0, 24, "Good")]);
+    }
+
+    #[test]
+    fn import_clamps_a_collapsed_range_to_one_frame() {
+        // Non-inverted ranges that land on a single frame
+        // are NOT invalid — they name a live instant and
+        // take the model's one-frame minimum. Two shapes:
+        // a sub-frame duration (10 ms < one 24 fps frame)
+        // and an authored zero-duration range.
+        let srt = "1\n00:00:01,000 --> 00:00:01,010\nBlink\n\n\
+                   2\n00:00:02,000 --> 00:00:02,000\nZero duration\n";
+        let imported = subtitles_from_srt(srt, 24.0).expect("collapsed ranges import");
+        assert_eq!(
+            imported,
+            vec![cue(24, 25, "Blink"), cue(48, 49, "Zero duration")]
+        );
+    }
+
+    #[test]
+    fn import_skips_a_block_with_a_timing_line_but_no_text() {
+        let srt = "1\n00:00:00,000 --> 00:00:01,000\nGood one\n\n\
+                   2\n00:00:02,000 --> 00:00:03,000\n\n\
+                   3\n00:00:04,000 --> 00:00:05,000\nGood two\n";
+        let imported = subtitles_from_srt(srt, 24.0).expect("the good cues import");
+        assert_eq!(imported, vec![cue(0, 24, "Good one"), cue(96, 120, "Good two")]);
+    }
+
+    #[test]
+    fn import_keeps_overlapping_cues_in_file_order() {
+        // Overlap is valid authoring, not an error: both
+        // cues import, in the order the file gives them.
+        let srt = "1\n00:00:00,000 --> 00:00:02,000\nUnder\n\n\
+                   2\n00:00:01,000 --> 00:00:03,000\nOver\n";
+        let imported = subtitles_from_srt(srt, 24.0).expect("overlaps import");
+        assert_eq!(imported, vec![cue(0, 48, "Under"), cue(24, 72, "Over")]);
+    }
+
+    #[test]
+    fn queries_follow_stored_order_and_invalid_stored_cues_are_inert() {
+        // Stored state is never re-sorted or re-validated
+        // at read (Wave R, R2): the query follows the
+        // list's stored order verbatim even when a
+        // hand-edited file stored it unsorted, and an
+        // invalid cue in it (zero-length, inverted) can
+        // never be live — `end <= start` makes the
+        // half-open liveness test unsatisfiable.
+        let project = project_with(vec![
+            cue(8, 20, "stored first"),
+            cue(0, 10, "stored second"),
+            cue(4, 4, "zero length"),
+            cue(6, 3, "inverted"),
+        ]);
+        let texts = |frame: usize| -> Vec<&str> {
+            live_subtitle_cues(&project, frame)
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect()
+        };
+        assert_eq!(
+            texts(9),
+            ["stored first", "stored second"],
+            "stored order, not chronological order"
+        );
+        for frame in 0..24 {
+            let live = texts(frame);
+            assert!(!live.contains(&"zero length"), "frame {frame}");
+            assert!(!live.contains(&"inverted"), "frame {frame}");
+        }
+    }
+
+    #[test]
     fn import_refuses_a_non_positive_fps() {
         let srt = subtitles_to_srt(&project_with(vec![cue(0, 24, "Timed.")]));
         assert!(subtitles_from_srt(&srt, 0.0).is_err());
@@ -995,5 +1369,131 @@ mod tests {
         assert!(legacy.subtitles.is_empty());
         assert_eq!(legacy.subtitle_style, SubtitleStyle::default());
         assert_eq!(legacy.format_version, crate::model::FORMAT_VERSION_CURRENT);
+    }
+
+    // -----------------------------------------------------------------
+    // Wave R (R21): the speaker field — normalisation,
+    // serde default, and the two converters' settlements
+    // (WebVTT voice tags carry it; SRT does not).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn normalise_speaker_trims_empties_and_refuses_tag_breakers() {
+        assert_eq!(normalise_speaker(None), Ok(None));
+        assert_eq!(normalise_speaker(Some("")), Ok(None));
+        assert_eq!(normalise_speaker(Some("   ")), Ok(None));
+        assert_eq!(
+            normalise_speaker(Some("  Mary Jane  ")),
+            Ok(Some("Mary Jane".to_string())),
+            "the stored form is trimmed"
+        );
+        // Names that could not survive a WebVTT voice tag
+        // are refused, in the ops' failure voice.
+        for bad in ["A>B", "A<B", "A\nB", "A\rB"] {
+            assert!(normalise_speaker(Some(bad)).is_err(), "{bad:?} refuses");
+        }
+    }
+
+    #[test]
+    fn speaker_defaults_to_none_and_round_trips_through_serde() {
+        // A legacy cue document — the same cue with the
+        // `speaker` key absent, as every file written
+        // before the field existed stores it — loads
+        // with no speaker.
+        let legacy = r#"{"start_frame":0,"end_frame":24,"text":"Old cue"}"#;
+        let loaded: SubtitleCue = serde_json::from_str(legacy).expect("a legacy cue loads");
+        assert_eq!(loaded, cue(0, 24, "Old cue"));
+        assert_eq!(loaded.speaker, None);
+        // A speaker'd cue round-trips at project level,
+        // and an uncredited cue stays uncredited.
+        let project = project_with(vec![
+            speaker_cue(0, 24, "Credited.", "Mary Jane"),
+            cue(24, 48, "Uncredited."),
+        ]);
+        let json = serde_json::to_string(&project).unwrap();
+        assert!(
+            json.contains("\"speaker\":\"Mary Jane\""),
+            "the speaker is stored by name: {json}"
+        );
+        let loaded: Project = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.subtitles, project.subtitles);
+        assert_eq!(loaded.format_version, crate::model::FORMAT_VERSION_CURRENT);
+    }
+
+    #[test]
+    fn vtt_speaker_round_trip_is_exact() {
+        // Names with spaces, a multi-line speaker'd cue,
+        // and a plain cue mixed in: the voice span is the
+        // format's own mechanism, so all of it survives.
+        let cues = vec![
+            speaker_cue(0, 24, "The gate is open.", "Mary Jane"),
+            cue(24, 48, "Uncredited line."),
+            speaker_cue(48, 96, "First line\nSecond line", "John"),
+        ];
+        let project = project_with(cues.clone());
+        let vtt = subtitles_to_vtt(&project);
+        assert!(
+            vtt.contains("<v Mary Jane>The gate is open.</v>"),
+            "the voice span wraps the payload: {vtt:?}"
+        );
+        assert!(
+            vtt.contains("<v John>First line\nSecond line</v>"),
+            "the span spans the cue's lines: {vtt:?}"
+        );
+        let imported = subtitles_from_vtt(&vtt, 24.0).expect("own export re-imports");
+        assert_eq!(imported, cues);
+    }
+
+    #[test]
+    fn vtt_voice_variants_degrade_to_plain_text_never_a_lost_cue() {
+        // One document, every malformed shape: each cue
+        // survives — as plain text, tag characters and
+        // all, with no speaker — except the class-tagged
+        // span and the empty-name span, which ARE voice
+        // spans under the format's grammar.
+        let vtt = "WEBVTT\n\n\
+                   1\n00:00:00.000 --> 00:00:01.000\n<v.loud Mary>Classed.</v>\n\n\
+                   2\n00:00:01.000 --> 00:00:02.000\n<v>Unnamed.</v>\n\n\
+                   3\n00:00:02.000 --> 00:00:03.000\n<v Mary>Never closed.\n\n\
+                   4\n00:00:03.000 --> 00:00:04.000\n<v Mary>Closed.</v> trailing\n\n\
+                   5\n00:00:04.000 --> 00:00:05.000\n<v A<B>Tricky.</v>\n";
+        let imported = subtitles_from_vtt(vtt, 24.0).expect("every cue survives");
+        assert_eq!(
+            imported,
+            vec![
+                speaker_cue(0, 24, "Classed.", "Mary"),
+                cue(24, 48, "Unnamed."),
+                cue(48, 72, "<v Mary>Never closed."),
+                cue(72, 96, "<v Mary>Closed.</v> trailing"),
+                cue(96, 120, "<v A<B>Tricky.</v>"),
+            ]
+        );
+    }
+
+    #[test]
+    fn vtt_voice_span_around_whitespace_is_a_textless_cue_and_skips() {
+        // The speaker is metadata, not text (R2's rule
+        // set): a span around whitespace is an empty-text
+        // cue once unwrapped — a bad block, skipped, with
+        // the good cue kept.
+        let vtt = "WEBVTT\n\n\
+                   1\n00:00:00.000 --> 00:00:01.000\nGood one\n\n\
+                   2\n00:00:01.000 --> 00:00:02.000\n<v Mary>   </v>\n";
+        let imported = subtitles_from_vtt(vtt, 24.0).expect("the good cue imports");
+        assert_eq!(imported, vec![cue(0, 24, "Good one")]);
+    }
+
+    #[test]
+    fn srt_drops_the_speaker_but_never_touches_the_text() {
+        // SRT has no speaker syntax and the exporter
+        // invents none: the name appears nowhere, the
+        // text is byte-verbatim, and the re-import is
+        // the same cue minus its speaker.
+        let project = project_with(vec![speaker_cue(0, 24, "The gate is open.", "Mary Jane")]);
+        let srt = subtitles_to_srt(&project);
+        assert!(!srt.contains("Mary"), "no name leaks into the document: {srt:?}");
+        assert!(srt.contains("The gate is open."), "the text is verbatim: {srt:?}");
+        let imported = subtitles_from_srt(&srt, 24.0).expect("own export re-imports");
+        assert_eq!(imported, vec![cue(0, 24, "The gate is open.")]);
     }
 }

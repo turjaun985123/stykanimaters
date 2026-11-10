@@ -301,6 +301,70 @@ pub fn render_frame(project: &Project, frame_idx: usize) -> ImageBuffer<Rgb<u8>,
     render_frame_at(project, frame_idx as f32)
 }
 
+/// Render one frame index at `scale` times the project stage
+/// size (Wave R, R10): the still-frame half of the export-scale
+/// surface. The scale is validated (finite, > 0) and refused
+/// with an `InvalidInput` error otherwise. At 1.0 the result
+/// is byte-identical to [`render_frame`].
+pub fn render_frame_scaled(
+    project: &Project,
+    frame_idx: usize,
+    scale: f32,
+) -> std::io::Result<ImageBuffer<Rgb<u8>, Vec<u8>>> {
+    render_frame_at_scaled(project, frame_idx as f32, scale)
+}
+
+/// The fractional-time half of [`render_frame_scaled`]:
+/// renders at `frame_f` with the output multiplied by `scale`
+/// end to end — the supersampled buffer, the camera/stage
+/// transform and every derived size scale together, so a 2.0
+/// render is a true 2x image, never an upscaled copy of the
+/// 1.0 raster. The subtitle burn-in at the funnel's tail
+/// multiplies its shared-helper layout by the same scale
+/// (IA-R10-3), so the burn-in scales with the frame.
+pub fn render_frame_at_scaled(
+    project: &Project,
+    frame_f: f32,
+    scale: f32,
+) -> std::io::Result<ImageBuffer<Rgb<u8>, Vec<u8>>> {
+    let scale = check_export_scale(scale)?;
+    Ok(render_frame_at_scaled_inner(project, frame_f, scale))
+}
+
+/// Validate an export scale (Wave R, R10): the raster
+/// funnel's rule, mirroring the MCP render tool's argument
+/// rule — the scale must be a positive finite number.
+/// Refusals are `InvalidInput`, the funnel's voice for bad
+/// arguments (see `clamp_frame_range`).
+fn check_export_scale(scale: f32) -> std::io::Result<f32> {
+    if scale.is_finite() && scale > 0.0 {
+        Ok(scale)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("export scale must be a positive finite number, got {scale}"),
+        ))
+    }
+}
+
+/// The output pixel size of a render at `scale` (Wave R,
+/// R10): stage × scale, rounded and floored at 1 px per
+/// axis — the MCP render tool's long-standing dimension
+/// formula, so the core and the tool agree on dimensions.
+/// At exactly 1.0 this is the historical truncation
+/// `stage as u32`, so scale-1.0 renders keep today's
+/// dimensions for every stage, fractional or not.
+fn scaled_output_size(project: &Project, scale: f32) -> (u32, u32) {
+    if scale == 1.0 {
+        (project.stage[0] as u32, project.stage[1] as u32)
+    } else {
+        (
+            (project.stage[0] * scale).round().max(1.0) as u32,
+            (project.stage[1] * scale).round().max(1.0) as u32,
+        )
+    }
+}
+
 /// Render at a fractional frame time (tween poses, camera and
 /// particles all evaluate at `f`). The camera (centre + zoom +
 /// rotation, interpolated between keys) is applied, as are
@@ -309,11 +373,29 @@ pub fn render_frame(project: &Project, frame_idx: usize) -> ImageBuffer<Rgb<u8>,
 /// strokes, particles, weather and the media composite (which
 /// receives this same view) all inherit it.
 pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+    render_frame_at_scaled_inner(project, frame_f, 1.0)
+}
+
+/// The shared raster funnel behind [`render_frame_at`] and
+/// its scaled variants (Wave R, R10). `scale` arrives
+/// pre-validated by the public entries (exactly 1.0 from
+/// `render_frame_at` itself). The supersample factor `ss`
+/// anti-aliases as always; `scale` multiplies the OUTPUT
+/// size, and `px` — stage units to supersampled buffer
+/// pixels — is `ss * scale`, so the buffer, the transform
+/// and every derived size stay in step. At scale 1.0 `px`
+/// is exactly the historical `ss as f32` and the output
+/// size is exactly the stage size, so the render is
+/// byte-identical to the pre-scale funnel.
+fn render_frame_at_scaled_inner(
+    project: &Project,
+    frame_f: f32,
+    scale: f32,
+) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     let ss = 2u32; // supersample factor
-    let (w, h) = (
-        project.stage[0] as u32 * ss,
-        project.stage[1] as u32 * ss,
-    );
+    let px = ss as f32 * scale;
+    let (ow, oh) = scaled_output_size(project, scale);
+    let (w, h) = (ow * ss, oh * ss);
     let bg = rgb(project.background);
     let mut buf = ImageBuffer::from_pixel(w, h, Rgb(bg));
     // Wave P (P17): the evaluated frame. The stage draws figures
@@ -355,8 +437,8 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
             (r[0], r[1])
         };
         [
-            (ox * zoom + project.stage[0] / 2.0) * ss as f32,
-            (oy * zoom + project.stage[1] / 2.0) * ss as f32,
+            (ox * zoom + project.stage[0] / 2.0) * px,
+            (oy * zoom + project.stage[1] / 2.0) * px,
         ]
     };
     // The head ring's radius is the project's own
@@ -365,7 +447,7 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
     // `head_ring_scale` — the same value the stage and the
     // figure thumbnails use, so exports can never drift
     // from the editor's ring.
-    let head_r = project.head_ring_radius() * zoom * ss as f32;
+    let head_r = project.head_ring_radius() * zoom * px;
 
     // Collect drawables: segments (a, b, color, half-width), head
     // rings (centre, color, half-width, alpha), shape circles and
@@ -412,7 +494,7 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
             let color = rgb(color_hex);
             let node_alpha =
                 crate::style::effective_style(node.style, fig.opacity).opacity;
-            let half = node.thickness / 2.0 * zoom * ss as f32;
+            let half = node.thickness / 2.0 * zoom * px;
             if let Some(p) = node.parent {
                 let style = node.style;
                 // Wave 12: figure segments are built from the
@@ -485,7 +567,7 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
                         segments.push(StyledSeg {
                             a: view(pos[p]),
                             b: view(pos[i]),
-                            half_near: first.width / 2.0 * zoom * ss as f32,
+                            half_near: first.width / 2.0 * zoom * px,
                             half_far,
                             color_near: first.color,
                             color_far,
@@ -507,7 +589,7 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
                     for (k, piece) in pieces.iter().enumerate() {
                         let (far_half, far_color) = if k < last {
                             (
-                                pieces[k + 1].width / 2.0 * zoom * ss as f32,
+                                pieces[k + 1].width / 2.0 * zoom * px,
                                 pieces[k + 1].color,
                             )
                         } else {
@@ -526,7 +608,7 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
                         segments.push(StyledSeg {
                             a,
                             b,
-                            half_near: piece.width / 2.0 * zoom * ss as f32,
+                            half_near: piece.width / 2.0 * zoom * px,
                             half_far: far_half,
                             color_near: piece.color,
                             color_far: far_color,
@@ -541,7 +623,7 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
             }
             match node.shape {
                 Shape::Circle => {
-                    rings.push((view(pos[i]), node.length / 2.0 * zoom * ss as f32, color, half, node_alpha));
+                    rings.push((view(pos[i]), node.length / 2.0 * zoom * px, color, half, node_alpha));
                 }
                 Shape::Polygon(sides) => {
                     let sides = (sides.max(3)) as usize;
@@ -653,7 +735,7 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
                         view(w[0]),
                         view(w[1]),
                         stroke.color,
-                        width / 2.0 * zoom * ss as f32,
+                        width / 2.0 * zoom * px,
                     )
                 });
             }
@@ -661,7 +743,7 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
     }
     let mut particles: Vec<([f32; 2], f32, [u8; 3], f32)> = particles_at(project, frame_f)
         .into_iter()
-        .map(|(p, r, c, a)| (view(p), r * zoom * ss as f32, c, a))
+        .map(|(p, r, c, a)| (view(p), r * zoom * px, c, a))
         .collect();
     // Spray dots (wave 13) ride the particle path from here: same
     // view transform, same radius scaling, same disc blending in
@@ -669,7 +751,7 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
     particles.extend(
         spray
             .into_iter()
-            .map(|(p, r, c, a)| (view(p), r * zoom * ss as f32, c, a)),
+            .map(|(p, r, c, a)| (view(p), r * zoom * px, c, a)),
     );
     // Fog bands (wave 10): (centre, rx, ry, peak alpha) in screen
     // space, filled by the weather block below when the weather
@@ -697,7 +779,7 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
                 let pos = evaluate(def, &poses[entry.figure]);
                 if let Some(&anchor) = pos.get(entry.node) {
                     for (p, r, c, a) in crate::vfx::clip_particles(&entry.clip, frame_f, anchor) {
-                        particles.push((view(p), r * zoom * ss as f32, c, a));
+                        particles.push((view(p), r * zoom * px, c, a));
                     }
                     // A live Trail clip also draws the node's real
                     // recent path (not just the ghost chain opposite
@@ -713,7 +795,7 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
                             node_trail(project, frame_f, entry.figure, entry.node, 8, span)
                         {
                             let hex = ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32;
-                            let half = 1.6 * zoom * ss as f32;
+                            let half = 1.6 * zoom * px;
                             segments.push(StyledSeg {
                                 a: view(a),
                                 b: view(b),
@@ -734,7 +816,7 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
         for (p, r, c, a) in
             crate::vfx::weather_particles(weather, frame_f, project.stage, project.fps)
         {
-            particles.push((view(p), r * zoom * ss as f32, c, a));
+            particles.push((view(p), r * zoom * px, c, a));
         }
     }
 
@@ -783,8 +865,9 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
             buf.put_pixel(x, y, Rgb(px));
         }
     }
-    // Downsample by the supersample factor (box average).
-    let (ow, oh) = (project.stage[0] as u32, project.stage[1] as u32);
+    // Downsample by the supersample factor (box average)
+    // into the output size computed at the top — the stage
+    // size at scale 1.0, stage × scale otherwise (R10).
     let mut out = ImageBuffer::new(ow, oh);
     for y in 0..oh {
         for x in 0..ow {
@@ -834,6 +917,10 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
             .any(|c| c.def.nodes.iter().any(|n| n.media.is_some()));
     if has_media {
         let mut rgba = image::DynamicImage::ImageRgb8(out).to_rgba8();
+        // `view` returns supersampled buffer coordinates;
+        // dividing by `ss` (not `px`) lands on OUTPUT pixels
+        // at any scale, since the buffer is ss × the output
+        // size (R10).
         let ssf = ss as f32;
         crate::media::composite_media(project, frame_f, &mut rgba, &|p| {
             let v = view(p);
@@ -859,14 +946,29 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
     if !live_cues.is_empty() {
         // Placement: centred horizontally, stacked from the
         // style's anchor edge in cue order — the FIRST cue
-        // closest to the edge. Glyph height is 6% of the
-        // stage height (this renderer's house subtitle size),
-        // multiplied by the style's font scale. Legibility on
-        // any background comes from the stamp itself: each
-        // line is stamped in the backing colour at the eight
-        // one-cell offsets first (an outline), then in the
-        // text colour centred — all nine stamps are ordinary
-        // text items through the one funnel, in list order.
+        // closest to the edge. Glyph height and line centres
+        // come from the core's shared layout helpers
+        // (`subtitle_font_size`, `subtitle_line_center_y`):
+        // the base 20-unit font at the style's sanitised
+        // scale, each stacked line's centre one 24-unit line
+        // height further from the edge, the edge line's
+        // centre one edge margin (16) plus half a line
+        // height in — the stage draw's and the SVG writer's
+        // layout exactly, so all three surfaces put a line's
+        // glyphs at the same size on the same centre (the
+        // stamp's +0.5-cell glyph-block offset about its
+        // anchor is the bitmap font's own, shared with the
+        // stage's `label_boxes` placement). Wave R (R1)
+        // retired this block's former proportional sizing —
+        // glyph height 6% of the stage height, a 1.35x line
+        // step and a 1.1x-size anchor — under which the
+        // raster was the last surface off the shared layout.
+        // Legibility on any background comes from the stamp
+        // itself: each line is stamped in the backing colour
+        // at the eight one-cell offsets first (an outline),
+        // then in the text colour centred — all nine stamps
+        // are ordinary text items through the one funnel, in
+        // list order.
         //
         // The block is drawn in STAGE space, NOT through the
         // camera `view`: a subtitle is frame furniture pinned
@@ -874,21 +976,31 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
         // must not move it — the settlement the SVG writer
         // took on this tree (see `append_subtitles` in
         // svg.rs), kept here so the two exporters' bands
-        // agree at any camera. The finished frame is exactly
-        // stage-sized, so the view is the identity.
+        // agree at any camera. The stamps are computed in
+        // output space (the stage-space layout × the render
+        // scale, IA-R10-3), so the composite view is the
+        // identity at any scale.
         //
         // The style is sanitised at read via the core's
         // `SubtitleStyle::sanitised()` — the read-path rule
         // the SVG writer applies the same way: a non-finite
         // font scale falls back to 1.0, a finite one is
         // clamped into [0.5, 3.0]; position and colours pass
-        // through verbatim. The offset arithmetic below is
-        // the core's shared layout helper (first cue closest
-        // to the edge; at the bottom anchor a cue's LAST
-        // line sits closest) — IA-P26-1 in the Wave P
-        // findings.
+        // through verbatim. The placement arithmetic below
+        // is the core's shared layout throughout (first cue
+        // closest to the edge; at the bottom anchor a cue's
+        // LAST line sits closest): the stack offset was
+        // IA-P26-1 in the Wave P findings, executed by Q17
+        // in Wave Q; the font size and line centre joined
+        // the same helpers in Wave R (R1).
         let style = project.subtitle_style.sanitised();
-        let size = project.stage[1] * 0.06 * style.font_scale;
+        // IA-R10-3: on a scaled frame the burn-in layout is
+        // the shared stage-space layout multiplied by the
+        // render scale — font size, centre x and every line
+        // centre scale together, so the burn-in scales with
+        // the picture around it. At scale 1.0 every factor
+        // is 1.0 and the stamps are byte-identical.
+        let size = crate::subtitles::subtitle_font_size(style) * scale;
         let cell = size / 5.0;
         // The funnel draws only what `media_items` derives
         // from a project, so the cues ride a text-only
@@ -910,16 +1022,10 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
                 node.media = None;
             }
         }
-        let cx = project.stage[0] / 2.0;
-        let line_step = size * 1.35;
-        // The anchor lines: the bottom-anchored block's edge
-        // line and its mirror at the top edge. A line's
-        // `from_edge` offset steps it away from its anchor.
-        let last_y = project.stage[1] - size * 1.1;
-        let first_y = size * 1.1;
+        let cx = project.stage[0] / 2.0 * scale;
         let mut lines_before = 0usize;
         for cue in &live_cues {
-            let lines: Vec<&str> = cue.text.lines().collect();
+            let lines: Vec<String> = crate::subtitles::subtitle_display_lines(cue);
             for (i, line) in lines.iter().enumerate() {
                 if line.is_empty() {
                     continue;
@@ -931,21 +1037,21 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
                 // bottom anchor the cue's lines count DOWN
                 // toward the edge — its last line is offset
                 // 0 — while at the top they count away in
-                // their own order.
+                // their own order. The line's centre is the
+                // shared `subtitle_line_center_y` for that
+                // offset — the same centre the stage's band
+                // and the SVG writer's `<text>` use.
                 let from_edge = crate::subtitles::subtitle_stack_line_offset(
                     lines_before,
                     lines.len(),
                     i,
                     style.position,
-                ) as f32;
-                let y = match style.position {
-                    crate::subtitles::SubtitlePosition::Bottom => {
-                        last_y - from_edge * line_step
-                    }
-                    crate::subtitles::SubtitlePosition::Top => {
-                        first_y + from_edge * line_step
-                    }
-                };
+                );
+                let y = crate::subtitles::subtitle_line_center_y(
+                    style,
+                    project.stage[1],
+                    from_edge,
+                ) * scale;
                 let stamp = |x: f32, y: f32, color: u32| -> crate::model::TextInstance {
                     crate::model::TextInstance {
                         content: (*line).to_string(),
@@ -3030,6 +3136,52 @@ pub fn export_png_sequence_range(
     Ok(to - from + 1)
 }
 
+/// Export every frame as `frame-0001.png`, `frame-0002.png`,
+/// ... in `dir`, at `scale` times the stage size (Wave R,
+/// R10) — the export-scale counterpart of
+/// [`export_png_sequence`]. Every frame is a true re-render
+/// at the scaled size via [`render_frame_scaled`], never an
+/// upscaled copy. An invalid scale is refused before
+/// anything is written.
+pub fn export_png_sequence_scaled(
+    project: &Project,
+    dir: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    if project.frames.is_empty() {
+        std::fs::create_dir_all(dir)?;
+        return Ok(0);
+    }
+    export_png_sequence_range_scaled(project, 0, project.frames.len() - 1, dir, scale)
+}
+
+/// Export the authored frames `from..=to` (inclusive, clamped
+/// to the timeline) as `frame-XXXX.png` files in `dir` at
+/// `scale` times the stage size (Wave R, R10) — the scaled
+/// counterpart of [`export_png_sequence_range`], with the
+/// same file naming (each frame keeps its authored index)
+/// and the same range rules. An invalid scale is refused
+/// before the range is even clamped, so a refused call
+/// writes nothing and creates no directory.
+pub fn export_png_sequence_range_scaled(
+    project: &Project,
+    from: usize,
+    to: usize,
+    dir: &Path,
+    scale: f32,
+) -> std::io::Result<usize> {
+    let scale = check_export_scale(scale)?;
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    std::fs::create_dir_all(dir)?;
+    for i in from..=to {
+        let img = render_frame_scaled(project, i, scale)?;
+        img.save(dir.join(format!("frame-{:04}.png", i + 1)))
+            .map_err(std::io::Error::other)?;
+    }
+    Ok(to - from + 1)
+}
+
 /// Export every authored frame as `frame-0001.jpg`, `frame-0002.jpg`,
 /// ... in `dir` (JPEG, quality 90).
 pub fn export_jpeg_sequence(project: &Project, dir: &Path) -> std::io::Result<usize> {
@@ -3364,6 +3516,154 @@ mod tests {
         let clear = render_frame_at(&opacity_marker_project(0.0), 0.0);
         assert_eq!(clear.get_pixel(100, 100), &bg);
         assert_eq!(clear.get_pixel(10, 10), &bg);
+    }
+
+    /// R10 scale marker: on a black 128x96 stage, a white
+    /// filled rectangle spanning stage (40,30)..(88,66) and
+    /// a hairline white segment (width 0.5) at y=84 — precise
+    /// probes for whether a scaled render truly re-renders
+    /// at the new size instead of resampling the 1.0 raster.
+    fn scale_marker_project() -> Project {
+        let mut project = Project::new_demo();
+        project.stage = [128.0, 96.0];
+        project.background = 0x000000;
+        project.figures.clear();
+        project.frames = vec![crate::model::Frame {
+            poses: Vec::new(),
+            duration: 1.0,
+            easing: None,
+            bends: Vec::new(),
+        }];
+        project.strokes = vec![
+            crate::model::Stroke {
+                frame: 0,
+                points: vec![
+                    [40.0, 30.0],
+                    [88.0, 30.0],
+                    [88.0, 66.0],
+                    [40.0, 66.0],
+                ],
+                color: 0xFFFFFF,
+                width: 1.0,
+                widths: Vec::new(),
+                fill: Some(0xFFFFFF),
+                spray: None,
+                opacity: 1.0,
+                scatter: 0.0,
+            },
+            crate::model::Stroke {
+                frame: 0,
+                points: vec![[8.0, 84.0], [120.0, 84.0]],
+                color: 0xFFFFFF,
+                width: 0.5,
+                widths: Vec::new(),
+                fill: None,
+                spray: None,
+                opacity: 1.0,
+                scatter: 0.0,
+            },
+        ];
+        project.camera.clear();
+        project
+    }
+
+    #[test]
+    fn scaled_render_dimensions_follow_the_scale() {
+        let project = scale_marker_project();
+        let half = render_frame_at_scaled(&project, 0.0, 0.5).unwrap();
+        assert_eq!((half.width(), half.height()), (64, 48), "0.5x dims");
+        let one = render_frame_at_scaled(&project, 0.0, 1.0).unwrap();
+        assert_eq!((one.width(), one.height()), (128, 96), "1.0x dims");
+        let two = render_frame_at_scaled(&project, 0.0, 2.0).unwrap();
+        assert_eq!((two.width(), two.height()), (256, 192), "2.0x dims");
+        // The 1.0 size rule is the historical truncation, even
+        // for a fractional stage — pinned directly so a future
+        // "tidy" rounding change cannot slip through.
+        let mut frac = scale_marker_project();
+        frac.stage = [100.5, 50.25];
+        assert_eq!(scaled_output_size(&frac, 1.0), (100, 50));
+        assert_eq!(scaled_output_size(&frac, 2.0), (201, 101));
+    }
+
+    #[test]
+    fn scaled_render_at_one_is_byte_identical() {
+        let project = scale_marker_project();
+        let plain = render_frame_at(&project, 0.0);
+        let scaled = render_frame_at_scaled(&project, 0.0, 1.0).unwrap();
+        assert_eq!(plain.dimensions(), scaled.dimensions());
+        assert_eq!(plain.as_raw(), scaled.as_raw(), "1.0 must not change a byte");
+        let plain_idx = render_frame(&project, 0);
+        let scaled_idx = render_frame_scaled(&project, 0, 1.0).unwrap();
+        assert_eq!(plain_idx.as_raw(), scaled_idx.as_raw());
+    }
+
+    #[test]
+    fn scaled_render_truly_rescales_content() {
+        let project = scale_marker_project();
+        let white = Rgb([255u8, 255, 255]);
+        let one = render_frame_at_scaled(&project, 0.0, 1.0).unwrap();
+        let two = render_frame_at_scaled(&project, 0.0, 2.0).unwrap();
+        let half = render_frame_at_scaled(&project, 0.0, 0.5).unwrap();
+        // The filled rectangle's centre lands at the scaled
+        // coordinate at every scale.
+        assert_eq!(one.get_pixel(64, 48), &white);
+        assert_eq!(two.get_pixel(128, 96), &white);
+        assert_eq!(half.get_pixel(32, 24), &white);
+        // Its pure-white area grows with the SQUARE of the
+        // scale (within edge tolerance) — a resample of the
+        // 1.0 raster would smear the edges and add far less.
+        let count = |img: &ImageBuffer<Rgb<u8>, Vec<u8>>| {
+            img.pixels().filter(|p| p.0 == [255, 255, 255]).count() as f32
+        };
+        let ratio = count(&two) / count(&one);
+        assert!(
+            (3.0..=5.0).contains(&ratio),
+            "2.0x white area ratio {ratio}, expected ~4"
+        );
+        // The hairline (0.5 stage units wide) is the sharpest
+        // witness: at 1.0 its centre pixel is a half-covered
+        // grey, but a true 2.0 re-render covers the centre
+        // fully — an upscale of the 1.0 image could never
+        // raise the centre to full white.
+        let centre_1x = one.get_pixel(64, 84).0[0];
+        assert!(centre_1x < 200, "1.0 hairline centre should be grey, got {centre_1x}");
+        assert_eq!(two.get_pixel(128, 168), &white, "2.0 hairline centre must be full white");
+    }
+
+    #[test]
+    fn scaled_render_refuses_invalid_scales() {
+        let project = scale_marker_project();
+        for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let err = render_frame_at_scaled(&project, 0.0, bad)
+                .err()
+                .expect("invalid scale must refuse");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "scale {bad}");
+            assert!(render_frame_scaled(&project, 0, bad).is_err(), "scale {bad}");
+            assert!(export_png_sequence_scaled(&project, Path::new("/tmp/styk-r10-bad"), bad).is_err());
+            assert!(
+                export_png_sequence_range_scaled(&project, 0, 0, Path::new("/tmp/styk-r10-bad"), bad)
+                    .is_err()
+            );
+        }
+        // Refusal happens before any filesystem work.
+        assert!(!Path::new("/tmp/styk-r10-bad").exists());
+    }
+
+    #[test]
+    fn scaled_png_sequence_writes_scaled_frames() {
+        let project = scale_marker_project();
+        let base = std::env::temp_dir().join(format!("styk-r10-seq-{}", std::process::id()));
+        let dir2x = base.join("two");
+        let n = export_png_sequence_scaled(&project, &dir2x, 2.0).unwrap();
+        assert_eq!(n, 1);
+        let img = image::open(dir2x.join("frame-0001.png")).unwrap();
+        assert_eq!((img.width(), img.height()), (256, 192), "2.0x sequence frame dims");
+        let dir_half = base.join("half");
+        let n = export_png_sequence_range_scaled(&project, 0, 0, &dir_half, 0.5).unwrap();
+        assert_eq!(n, 1);
+        let img = image::open(dir_half.join("frame-0001.png")).unwrap();
+        assert_eq!((img.width(), img.height()), (64, 48), "0.5x sequence frame dims");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
@@ -5355,23 +5655,34 @@ mod spray_render_tests {
 }
 
 // ---------------------------------------------------------------------
-// Wave P (P26): raster subtitle burn-in pins.
+// Wave P (P26): raster subtitle burn-in pins, re-based on
+// the shared layout in Wave R (R1).
 //
-// The fixture stage is 480x400, so under the default style
-// (bottom anchor, font scale 1.0, white text on black
-// backing) the house subtitle size is 400 * 0.06 = 24 stage
-// units, the line step is 32.4, and the stacked line centres
-// sit at 373.6 / 341.2 / 308.8 from the top at the bottom
-// anchor (26.4 / 58.8 / 91.2 at the top anchor). A line's
-// text-colour face spans roughly [centre - 10, centre + 15]
-// rows, so the bands below (a midpoint partition of the
+// The fixture stage is 480x400. Since R1 the burn-in lays
+// out through the core's shared helpers (src/subtitles.rs)
+// exactly as the stage draw and the SVG writer do: under
+// the default style (bottom anchor, font scale 1.0, white
+// text on black backing) the font size is 20 stage units
+// and the line height 24, so the stacked line centres sit
+// at 372 / 348 / 324 from the top at the bottom anchor
+// (28 / 52 / 76 at the top anchor) — edge -/+ (16 margin +
+// offset x 24 line height + 12 half line). A line's
+// text-colour face spans [centre - 8, centre + 11] rows:
+// the 3x5 stamp at cell 4 puts pixel centres at
+// (row - 1.5) x 4 about the anchor and each paints a 4x4
+// block. The bands below (a midpoint partition of the
 // stack) each contain exactly one line's face:
-//   bottom: B0 = 358..=390, B1 = 325..=357, B2 = 292..=324
-//   top:    T0 =  11..= 42, T1 =  43..= 74, T2 =  75..=107
-// The fixture carries no figures, so the ONLY source of the
-// exact text colour in a render is the burn-in's centre
-// stamp (the backing is the box colour; the background is
-// 0x333333).
+//   bottom: B0 = 360..=390, B1 = 336..=359, B2 = 312..=335
+//   top:    T0 =  16..= 40, T1 =  41..= 64, T2 =  65..= 88
+// Before R1 the raster sized its stamps proportionally
+// (6% of stage height: size 24, step 32.4, centres
+// 373.6 / 341.2 / 308.8) and the bands partitioned THAT
+// stack; the bands moved because the layout did — the
+// assertions' kinds are unchanged.
+// The fixture carries no figures, so the ONLY source of
+// the exact text colour in a render is the burn-in's
+// centre stamp (the backing is the box colour; the
+// background is 0x333333).
 // ---------------------------------------------------------------------
 #[cfg(test)]
 mod wave_p_subtitle_burn_in_tests {
@@ -5387,6 +5698,7 @@ mod wave_p_subtitle_burn_in_tests {
             start_frame,
             end_frame,
             text: text.to_string(),
+            speaker: None,
         }
     }
 
@@ -5443,7 +5755,7 @@ mod wave_p_subtitle_burn_in_tests {
         let control = render_frame(&bare, 0);
         // Every changed pixel sits in the bottom band (the
         // burn-in's full extent, backing included, is rows
-        // ~359..394); the rest of the frame is untouched.
+        // 360..387); the rest of the frame is untouched.
         let mut diffs = 0usize;
         for y in 0..img.height() {
             for x in 0..img.width() {
@@ -5458,7 +5770,7 @@ mod wave_p_subtitle_burn_in_tests {
         }
         assert!(diffs > 0, "a live cue must change the frame");
         assert!(
-            white_in(&img, 358..=390) > 0,
+            white_in(&img, 360..=390) > 0,
             "the cue's text-colour face must paint in the bottom band"
         );
     }
@@ -5513,8 +5825,8 @@ mod wave_p_subtitle_burn_in_tests {
         );
         // Bands nearest-to-farthest from the anchor edge.
         let bands: [std::ops::RangeInclusive<u32>; 3] = match position {
-            SubtitlePosition::Bottom => [358..=390, 325..=357, 292..=324],
-            SubtitlePosition::Top => [11..=42, 43..=74, 75..=107],
+            SubtitlePosition::Bottom => [360..=390, 336..=359, 312..=335],
+            SubtitlePosition::Top => [16..=40, 41..=64, 65..=88],
         };
         let f5 = render_frame(&project, 5);
         assert!(white_in(&f5, bands[0].clone()) > 0, "cue A paints at the edge band");
@@ -5563,8 +5875,8 @@ mod wave_p_subtitle_burn_in_tests {
             SubtitleStyle::default(),
         );
         let img = render_frame(&project, 0);
-        let edge = white_in(&img, 358..=390);
-        let above = white_in(&img, 325..=357);
+        let edge = white_in(&img, 360..=390);
+        let above = white_in(&img, 336..=359);
         assert!(above > 0, "the cue's first line paints in the band above");
         assert!(
             edge > 4 * above,
@@ -5584,16 +5896,19 @@ mod wave_p_subtitle_burn_in_tests {
         let img = render_frame(&project, 0);
         let red = [255, 0, 0];
         let green = [0, 255, 0];
-        // Top-anchored at scale 2.0 (glyph height 48): the
-        // red face spans roughly rows 33..82 — it must reach
-        // rows 60..120, which an unscaled top cue (face ends
-        // ~row 40) could never touch.
+        // Top-anchored at scale 2.0 (font size 40, line
+        // height 48): the line centre is 16 + 24 = 40 and
+        // the red face spans rows 24..63 (cell 8: pixel
+        // centres at (row - 1.5) x 8 about the anchor, each
+        // an 8x8 block). It must reach rows 48..63, which
+        // an unscaled top cue (face rows 20..39) could
+        // never touch.
         assert!(
-            count_in_rows(&img, 60..=120, red) > 0,
+            count_in_rows(&img, 48..=63, red) > 0,
             "the scaled cue's text colour must paint in the top band"
         );
         assert!(
-            count_in_rows(&img, 0..=140, green) > 0,
+            count_in_rows(&img, 0..=80, green) > 0,
             "the backing colour must paint around the text"
         );
         assert_eq!(

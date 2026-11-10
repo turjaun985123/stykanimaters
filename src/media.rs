@@ -9,7 +9,7 @@
 //! Geometry: an image becomes a quad centred on the node's segment
 //! (parent joint -> node joint). The quad's long axis follows the
 //! segment, its length is the segment length, and its height is
-//! `length / aspect`, where the aspect is the decoded PNG's
+//! `length / aspect`, where the aspect is the decoded image's
 //! width / height, so sprites are never stretched. Text sits at the
 //! segment midpoint, rotated along the segment direction.
 //!
@@ -37,15 +37,16 @@
 //! - A node with no parent has no segment; its media is placed at
 //!   the joint, extending `length` units along +x. (Media normally
 //!   belongs on real segments.)
-//! - An image whose asset index is out of range, or whose PNG
-//!   bytes fail to decode, is skipped silently.
-//! - PNG assets are decoded on each call (no cache): fine for
+//! - An image whose asset index is out of range, or whose
+//!   stored bytes fail to decode, is skipped silently.
+//! - Assets are decoded on each call (no cache): fine for
 //!   export-time compositing, not a per-frame editor hot path.
 //!
 //! The asset table's MCP handlers also live in this module
 //! (`tool_assets_list`, `tool_asset_info`, `tool_asset_import`,
 //! `tool_asset_rename`, `tool_asset_remove`, `tool_asset_attach`):
-//! import validates PNG magic bytes and decodability and caps
+//! import validates image magic bytes (the PNG signature or
+//! the JPEG SOI marker — Wave R, R9) and decodability and caps
 //! the stored size; removal refuses while anything references
 //! the asset, and when it does remove, references to higher
 //! indices are remapped down by one inside the same undo step.
@@ -87,13 +88,25 @@ pub enum MediaItem {
     Image { corners: [V2; 4], asset: usize, alpha: f32 },
     /// A text label centred at `pos`, running along `angle_deg`
     /// (stage-space degrees, y-down like the rest of the model).
-    /// `size` is the glyph height in stage units.
+    /// `size` is the glyph height in stage units. `alpha` is
+    /// the opacity the glyphs blend at (Wave R, R8 — P17's
+    /// remainder): segment text carries the CARRIER node's
+    /// style opacity — the same value the stage applies to
+    /// its glyph prims (stage_text's "Opacity" settlement) —
+    /// where before this field existed every exporter drew
+    /// text fully opaque while the stage faded it. Figure
+    /// opacity is deliberately NOT a factor (the stage's
+    /// figure fade is a colour blend, and export multiplies
+    /// figure opacity into segment alpha only, never into
+    /// text); free-standing text instances carry 1.0 (an
+    /// instance key has no opacity channel).
     Text {
         pos: V2,
         angle_deg: f32,
         content: String,
         size: f32,
         color: u32,
+        alpha: f32,
     },
 }
 
@@ -110,7 +123,9 @@ fn scale(a: V2, s: f32) -> V2 {
 }
 
 /// Pixel dimensions of asset `idx`, or None when it is missing
-/// or its PNG bytes do not decode.
+/// or its stored bytes do not decode. (The name is the
+/// original PNG-era one; the decode is by content and serves
+/// JPEG assets identically — Wave R, R9.)
 pub fn png_dims(project: &Project, idx: usize) -> Option<(u32, u32)> {
     let asset = project.assets.get(idx)?;
     let img = image::load_from_memory(&asset.png).ok()?;
@@ -122,7 +137,7 @@ pub fn png_dims(project: &Project, idx: usize) -> Option<(u32, u32)> {
 }
 
 /// Width / height of asset `idx`, or None when it is missing or
-/// its PNG bytes do not decode.
+/// its stored bytes do not decode.
 fn png_aspect(project: &Project, idx: usize) -> Option<f32> {
     let (w, h) = png_dims(project, idx)?;
     Some(w as f32 / h as f32)
@@ -240,6 +255,7 @@ pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
                         content: content.clone(),
                         size: *size,
                         color: carrier.color.unwrap_or(fig.color),
+                        alpha: carrier.style.opacity.clamp(0.0, 1.0),
                     });
                 }
             }
@@ -291,6 +307,7 @@ pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
             content: text.content.clone(),
             size,
             color: text.color,
+            alpha: 1.0,
         });
     }
     out
@@ -300,7 +317,8 @@ pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
 /// stage coordinates to image pixel coordinates (the same closure
 /// shape the export rasterizer builds). Images are sampled
 /// nearest-neighbour through the quad's affine map and alpha-blended
-/// over the destination; text is stamped as solid glyph blocks.
+/// over the destination; text is stamped as glyph blocks blended at the
+/// item's alpha.
 pub fn composite_media(
     project: &Project,
     frame_f: f32,
@@ -332,7 +350,8 @@ pub fn composite_media(
                 content,
                 size,
                 color,
-            } => composite_text(pos, angle_deg, &content, size, color, img, view, view_scale),
+                alpha,
+            } => composite_text(pos, angle_deg, &content, size, color, alpha, img, view, view_scale),
         }
     }
 }
@@ -342,7 +361,7 @@ pub fn composite_media(
 //
 // `Project.assets` had no MCP surface before this wave: the only
 // way an asset entered a project through a tool was
-// `attach_image_to_node`, whose core op reads the first PNG in
+// `attach_image_to_node`, whose core op reads the first image in
 // ./import and attaches it in the same breath — there was no way
 // to list, inspect, rename, remove or deliberately attach an
 // asset. These handlers give the table its full lifecycle. The
@@ -356,8 +375,24 @@ pub fn composite_media(
 // comment on `asset_references` (Wave 14, C6).
 // ---------------------------------------------------------------------
 
-/// PNG signature every imported asset must start with.
+/// PNG signature an imported PNG asset must start with.
 const PNG_MAGIC: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// JPEG start-of-image marker (SOI + the first marker byte)
+/// an imported JPEG asset must start with (Wave R, R9).
+const JPEG_MAGIC: [u8; 3] = [0xFF, 0xD8, 0xFF];
+
+/// The import funnel's content gate: `bytes` opens with the
+/// PNG signature or the JPEG SOI marker. Content decides,
+/// never the file name — every downstream consumer decodes
+/// by content (`image::load_from_memory` sniffs the same
+/// way), so the gate and the decoders agree by construction.
+/// Anything else (GIF included — the crate could decode it,
+/// but the funnel's accepted set is PNG + JPEG) is refused
+/// before any decode is attempted.
+fn importable_image_magic(bytes: &[u8]) -> bool {
+    bytes.starts_with(&PNG_MAGIC) || bytes.starts_with(&JPEG_MAGIC)
+}
 
 /// Largest file `tool_asset_import` will store, in bytes
 /// (8 MiB). Asset bytes are stored verbatim inside the project
@@ -603,10 +638,11 @@ pub fn tool_asset_info(core: &mut EditorCore, args: &Value) -> Result<Value, Str
     Ok(out)
 }
 
-/// MCP handler: import a PNG file from disk into the asset
-/// table. The file must start with the PNG magic bytes, decode
-/// as an image, and be at most [`ASSET_IMPORT_MAX_BYTES`] —
-/// anything else is refused before any snapshot is taken. The
+/// MCP handler: import a PNG or JPEG file from disk into the
+/// asset table. The file must start with the PNG magic bytes
+/// or the JPEG SOI marker, decode as an image, and be at most
+/// [`ASSET_IMPORT_MAX_BYTES`] — anything else is refused
+/// before any snapshot is taken. The
 /// asset name defaults to the file's name (the
 /// `attach_image_to_node` op's rule); an optional `name`
 /// overrides it. The new asset is appended; its index is
@@ -625,8 +661,8 @@ pub fn tool_asset_import(core: &mut EditorCore, args: &Value) -> Result<Value, S
         ));
     }
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read '{path}': {e}"))?;
-    if !bytes.starts_with(&PNG_MAGIC) {
-        return Err(format!("'{path}' is not a PNG (bad magic bytes)"));
+    if !importable_image_magic(&bytes) {
+        return Err(format!("'{path}' is not a PNG or JPEG (bad magic bytes)"));
     }
     let img = image::load_from_memory(&bytes)
         .map_err(|e| format!("'{path}' does not decode as an image: {e}"))?;
@@ -1368,12 +1404,22 @@ fn composite_text(
     content: &str,
     size: f32,
     color: u32,
+    alpha: f32,
     img: &mut RgbaImage,
     view: &dyn Fn(V2) -> [f32; 2],
     view_scale: f32,
 ) {
     let chars: Vec<char> = content.chars().collect();
     if chars.is_empty() || size <= 0.0 {
+        return;
+    }
+    // Wave R (R8): the item alpha, clamped and applied
+    // exactly as `composite_image` applies its own. At 1.0
+    // the blend below is the old opaque stamp byte for
+    // byte: source-over at full strength is the source
+    // pixel (out_a = 1, channels = the glyph colour).
+    let alpha = alpha.clamp(0.0, 1.0);
+    if alpha <= 0.0 {
         return;
     }
     let cell = size / 5.0; // stage units per glyph pixel
@@ -1410,7 +1456,23 @@ fn composite_text(
                         let y = cy - block / 2 + dy;
                         if x >= 0 && y >= 0 && (x as u32) < img.width() && (y as u32) < img.height()
                         {
-                            img.put_pixel(x as u32, y as u32, rgba);
+                            // Source-over at the item alpha:
+                            // `composite_image`'s maths with
+                            // the glyph colour as the source
+                            // (its alpha is 255, so sa = alpha).
+                            let dp = img.get_pixel_mut(x as u32, y as u32);
+                            let sa = alpha;
+                            let da = dp[3] as f32 / 255.0;
+                            let out_a = sa + da * (1.0 - sa);
+                            if out_a > 0.0 {
+                                for ch in 0..3 {
+                                    let blended = (rgba[ch] as f32 * sa
+                                        + dp[ch] as f32 * da * (1.0 - sa))
+                                        / out_a;
+                                    dp[ch] = blended.round().clamp(0.0, 255.0) as u8;
+                                }
+                                dp[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+                            }
                         }
                     }
                 }
@@ -1509,6 +1571,21 @@ mod tests {
         let mut buf = Vec::new();
         image::DynamicImage::ImageRgba8(img)
             .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        buf
+    }
+
+    /// A real JPEG fixture, encoded by the `image` crate's
+    /// JPEG encoder (the `jpeg` feature carries both decode
+    /// and encode). JPEG has no alpha, so the fixture is an
+    /// RGB image; the pixel values are lossy by design and
+    /// no pin reads them back — dimensions and the stored
+    /// bytes are what the funnel contracts on.
+    fn jpeg_bytes(w: u32, h: u32, px: image::Rgb<u8>) -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(w, h, px);
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Jpeg)
             .unwrap();
         buf
     }
@@ -1735,6 +1812,7 @@ mod tests {
                 content,
                 size,
                 color,
+                ..
             } => Some((pos, angle_deg, content, size, color)),
             _ => None,
         });
@@ -2004,6 +2082,49 @@ mod tests {
         assert_eq!(core.project.assets[1].png, bytes);
         assert_eq!(core.undo_depth(), undo_before + 1, "exactly one undo step");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn asset_import_accepts_jpeg_by_content_and_refuses_jpeg_magic_junk() {
+        // Wave R (R9): JPEG imports through the same funnel
+        // as PNG. The temp file's name ends in `.png` (the
+        // helper's fixed shape) while its bytes are JPEG —
+        // the import must accept on content, never on name.
+        let mut core = asset_core();
+        let undo_before = core.undo_depth();
+        let bytes = jpeg_bytes(6, 3, image::Rgb([200, 30, 30]));
+        assert!(bytes.starts_with(&JPEG_MAGIC), "fixture is a real JPEG");
+        let path = temp_asset_file("jpegok", &bytes);
+        let out = tool_asset_import(
+            &mut core,
+            &json!({ "path": path.to_string_lossy() }),
+        )
+        .expect("a valid JPEG imports");
+        assert_eq!(out["index"].as_u64(), Some(1));
+        assert_eq!(out["width"].as_u64(), Some(6));
+        assert_eq!(out["height"].as_u64(), Some(3));
+        assert_eq!(core.project.assets.len(), 2);
+        assert_eq!(core.project.assets[1].png, bytes, "stored verbatim");
+        assert_eq!(core.undo_depth(), undo_before + 1, "exactly one undo step");
+        // The dimension funnel the renderer reads reports the
+        // JPEG's dims exactly like a PNG's.
+        assert_eq!(png_dims(&core.project, 1), Some((6, 3)));
+        // JPEG magic over a garbage body is refused at the
+        // decode step, in the funnel's existing voice, and
+        // spends nothing.
+        let mut junk = JPEG_MAGIC.to_vec();
+        junk.extend_from_slice(b"garbagegarbage");
+        let junk_path = temp_asset_file("jpegundecodable", &junk);
+        let err = tool_asset_import(
+            &mut core,
+            &json!({ "path": junk_path.to_string_lossy() }),
+        )
+        .expect_err("JPEG magic over garbage must be refused");
+        assert!(err.contains("does not decode"), "err: {err}");
+        assert_eq!(core.project.assets.len(), 2);
+        assert_eq!(core.undo_depth(), undo_before + 1);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(junk_path);
     }
 
     #[test]
@@ -2652,6 +2773,7 @@ mod tests {
                         content,
                         size,
                         color,
+                        ..
                     } => Some((pos, angle_deg, content, size, color)),
                     _ => None,
                 })

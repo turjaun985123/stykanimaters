@@ -736,7 +736,7 @@ fn append_subtitles(
     let cx = project.stage[0] / 2.0;
     let mut lines_before = 0usize;
     for cue in cues {
-        let lines: Vec<&str> = cue.text.lines().collect();
+        let lines: Vec<String> = crate::subtitles::subtitle_display_lines(cue);
         for (i, line) in lines.iter().enumerate() {
             // Distance of this line from the anchored edge,
             // in lines — the shared layout contract, computed
@@ -821,9 +821,12 @@ fn matrix_num(v: f32) -> String {
 /// verbatim through [`xml_escape`]; the centre agrees, the
 /// advance width cannot), and `image-rendering="pixelated"`
 /// is a hint a renderer may ignore, not a guarantee of the
-/// raster's nearest-neighbour sampling. The MIME type is
-/// fixed `image/png` — the asset table stores PNG bytes
-/// only (imports validate it).
+/// raster's nearest-neighbour sampling. The MIME type
+/// follows the stored bytes (Wave R, R9): the asset table
+/// stores PNG or JPEG bytes (the import funnel validates
+/// the magic), and the embed sniffs the same magic so a
+/// JPEG asset is labelled `image/jpeg`, never mislabelled
+/// as PNG.
 ///
 /// Clip-def media (Wave 14, C4): since C1's per-node
 /// fallback in `media_items` (docs/wave13/CLIP_MEDIA.md
@@ -841,7 +844,12 @@ fn matrix_num(v: f32) -> String {
 /// the view already rotated the position, and a stage-space
 /// direction at angle θ lands at screen angle θ − φ under
 /// the camera convention `export::camera_rotate_offset`
-/// implements (derived there, Wave 6).
+/// implements (derived there, Wave 6). The item alpha
+/// (the carrier node's style opacity — the same value
+/// the stage applies to its glyph prims) rides as an
+/// `opacity` attribute under the image arm's emission
+/// rule: present only below 1.0, two decimals, clamped
+/// (Wave R, R8 — the segment-text alpha gap P17 left).
 fn append_media(
     svg: &mut String,
     defs: &mut String,
@@ -866,8 +874,17 @@ fn append_media(
                     None => {
                         let k = asset_ids.len();
                         asset_ids.push(asset);
+                        // Wave R (R9): the MIME follows the
+                        // stored bytes — JPEG SOI magic means
+                        // `image/jpeg`, anything else the PNG
+                        // the funnel also accepts.
+                        let mime = if asset_rec.png.starts_with(&[0xFF, 0xD8, 0xFF]) {
+                            "image/jpeg"
+                        } else {
+                            "image/png"
+                        };
                         defs.push_str(&format!(
-                            "<image id=\"asset{k}\" width=\"{w}\" height=\"{h}\" image-rendering=\"pixelated\" href=\"data:image/png;base64,{}\"/>\n",
+                            "<image id=\"asset{k}\" width=\"{w}\" height=\"{h}\" image-rendering=\"pixelated\" href=\"data:{mime};base64,{}\"/>\n",
                             crate::mcp_io::base64_encode(&asset_rec.png)
                         ));
                         k
@@ -890,7 +907,7 @@ fn append_media(
                     opacity
                 );
             }
-            crate::media::MediaItem::Text { pos, angle_deg, content, size, color } => {
+            crate::media::MediaItem::Text { pos, angle_deg, content, size, color, alpha } => {
                 let q = view(pos);
                 let rot = angle_deg - cam_angle;
                 let rotate = if rot != 0.0 {
@@ -898,13 +915,26 @@ fn append_media(
                 } else {
                     String::new()
                 };
+                // Wave R (R8): the item alpha — the carrier
+                // node's style opacity, the stage's rule —
+                // emitted exactly as the Image arm above emits
+                // its own: an `opacity` attribute only below
+                // 1.0, two decimals, clamped at emission. At
+                // full alpha the element is byte-identical to
+                // the pre-alpha output.
+                let opacity = if alpha < 1.0 {
+                    format!(" opacity=\"{:.2}\"", alpha.clamp(0.0, 1.0))
+                } else {
+                    String::new()
+                };
                 *svg += &format!(
-                    "<text x=\"{:.1}\" y=\"{:.1}\" font-family=\"monospace\" font-size=\"{:.1}\" fill=\"{}\" text-anchor=\"middle\" dominant-baseline=\"central\"{}>{}</text>\n",
+                    "<text x=\"{:.1}\" y=\"{:.1}\" font-family=\"monospace\" font-size=\"{:.1}\" fill=\"{}\" text-anchor=\"middle\" dominant-baseline=\"central\"{}{}>{}</text>\n",
                     q[0],
                     q[1],
                     size * zoom,
                     hex(color),
                     rotate,
+                    opacity,
                     xml_escape(&content)
                 );
             }
@@ -1989,6 +2019,188 @@ mod tests {
     }
 
     #[test]
+    fn svg_media_segment_text_carries_the_carrier_style_opacity() {
+        // Wave R (R8 — P17's remainder): segment text used
+        // to export fully opaque whatever the carrier node's
+        // style opacity said, while the stage faded the
+        // label with its segment. The Text item now carries
+        // that opacity and this writer emits it under the
+        // image arm's rule.
+        let mut project = media_project();
+        project.figures[0].def.nodes[2].media = Some(crate::model::SegmentMedia::Text {
+            content: "HI".into(),
+            size: 20.0,
+        });
+        project.figures[0].def.nodes[2].style.opacity = 0.5;
+        let dir = std::path::Path::new("/tmp/styk-svg-media-text-opacity-test");
+        export_svg(&project, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        assert_eq!(
+            text.matches(" opacity=\"0.50\"").count(),
+            1,
+            "segment text must carry the carrier style opacity exactly once:\n{text}"
+        );
+        let line = text
+            .lines()
+            .find(|l| l.contains(">HI</text>"))
+            .expect("the segment text element");
+        assert!(
+            line.contains(" opacity=\"0.50\""),
+            "the opacity must ride the <text> element itself:\n{line}"
+        );
+    }
+
+    #[test]
+    fn svg_media_segment_text_ignores_figure_opacity() {
+        // The stage's settled rule (stage_text's module
+        // docs): figure opacity is a colour blend on the
+        // stage and a segment-alpha factor in export — it
+        // is NEVER multiplied into text, on any surface.
+        // The text alpha is the carrier style opacity alone,
+        // unlike the segment-image product beside it.
+        let mut project = media_project();
+        project.figures[0].def.nodes[2].media = Some(crate::model::SegmentMedia::Text {
+            content: "HI".into(),
+            size: 20.0,
+        });
+        project.figures[0].opacity = 0.5;
+        let dir = std::path::Path::new("/tmp/styk-svg-media-text-fig-opacity-test");
+        export_svg(&project, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        let line = text
+            .lines()
+            .find(|l| l.contains(">HI</text>"))
+            .expect("the segment text element");
+        assert!(
+            !line.contains("opacity"),
+            "figure opacity leaked into segment text:\n{line}"
+        );
+        // Both factors at 0.5: the text still reads the
+        // style's 0.50, not the 0.25 product.
+        project.figures[0].def.nodes[2].style.opacity = 0.5;
+        export_svg(&project, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        let line = text
+            .lines()
+            .find(|l| l.contains(">HI</text>"))
+            .expect("the segment text element");
+        assert!(
+            line.contains(" opacity=\"0.50\""),
+            "text alpha must be the style opacity alone:\n{line}"
+        );
+        assert!(
+            !line.contains("opacity=\"0.25\""),
+            "text alpha became the figure x style product:\n{line}"
+        );
+    }
+
+    #[test]
+    fn svg_media_segment_text_element_is_byte_identical_at_full_opacity() {
+        // At the default style the alpha attribute must not
+        // appear at all: projects whose text sits on
+        // opacity-1 nodes (every pre-Wave-R file) export
+        // their <text> elements byte-identically. Proven on
+        // the element itself: the half-opacity element minus
+        // its one attribute equals the full-opacity element
+        // byte for byte. (The segment STROKE legitimately
+        // differs between the two files — node style opacity
+        // has always driven stroke-opacity in this writer —
+        // so the claim is scoped to the text element, the
+        // surface this wave changed.)
+        let build = |opacity: f32| {
+            let mut project = media_project();
+            project.figures[0].def.nodes[2].media = Some(crate::model::SegmentMedia::Text {
+                content: "HI".into(),
+                size: 20.0,
+            });
+            project.figures[0].def.nodes[2].style.opacity = opacity;
+            project
+        };
+        let text_line = |svg_text: &str| {
+            svg_text
+                .lines()
+                .find(|l| l.contains(">HI</text>"))
+                .expect("the segment text element")
+                .to_string()
+        };
+        let dir = std::path::Path::new("/tmp/styk-svg-media-text-alpha-diff-test");
+        export_svg(&build(1.0), dir).unwrap();
+        let full = text_line(&std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap());
+        export_svg(&build(0.5), dir).unwrap();
+        let half = text_line(&std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap());
+        assert!(!full.contains("opacity"), "full-opacity text gained an attribute:\n{full}");
+        assert_eq!(half.replace(" opacity=\"0.50\"", ""), full);
+    }
+
+    #[test]
+    fn svg_media_segment_text_alpha_survives_save_load() {
+        // The alpha's source is the stored node style, so a
+        // save/load round trip re-derives the identical
+        // item: the exported file is byte-identical after
+        // the trip and the item alpha is still 0.5.
+        let mut project = media_project();
+        project.figures[0].def.nodes[2].media = Some(crate::model::SegmentMedia::Text {
+            content: "HI".into(),
+            size: 20.0,
+        });
+        project.figures[0].def.nodes[2].style.opacity = 0.5;
+        let dir = std::path::Path::new("/tmp/styk-svg-media-text-roundtrip-test");
+        export_svg(&project, dir).unwrap();
+        let before = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        let json = serde_json::to_string(&project).unwrap();
+        let back: Project = serde_json::from_str(&json).unwrap();
+        export_svg(&back, dir).unwrap();
+        let after = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        assert_eq!(before, after, "save/load changed the segment-text alpha");
+        let alpha = crate::media::media_items(&back, 0.0)
+            .iter()
+            .find_map(|i| match i {
+                crate::media::MediaItem::Text { alpha, .. } => Some(*alpha),
+                _ => None,
+            })
+            .expect("a text item");
+        assert_eq!(alpha, 0.5);
+    }
+
+    #[test]
+    fn svg_media_segment_text_legacy_project_without_style_loads_opaque() {
+        // Legacy shape: a project file from before node
+        // styles were stored carries no `style` object on
+        // its nodes (NodeDef.style is serde-defaulted).
+        // Such a file's segment text loads at alpha 1.0 and
+        // its element exports exactly as it always did —
+        // no attribute.
+        let mut project = media_project();
+        project.figures[0].def.nodes[2].media = Some(crate::model::SegmentMedia::Text {
+            content: "HI".into(),
+            size: 20.0,
+        });
+        project.figures[0].def.nodes[2].style.opacity = 0.5;
+        let mut value = serde_json::to_value(&project).unwrap();
+        value["figures"][0]["def"]["nodes"][2]
+            .as_object_mut()
+            .unwrap()
+            .remove("style");
+        let back: Project = serde_json::from_value(value).unwrap();
+        let alpha = crate::media::media_items(&back, 0.0)
+            .iter()
+            .find_map(|i| match i {
+                crate::media::MediaItem::Text { alpha, .. } => Some(*alpha),
+                _ => None,
+            })
+            .expect("a text item");
+        assert_eq!(alpha, 1.0, "a style-less legacy node must load at alpha 1.0");
+        let dir = std::path::Path::new("/tmp/styk-svg-media-text-legacy-test");
+        export_svg(&back, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        let line = text
+            .lines()
+            .find(|l| l.contains(">HI</text>"))
+            .expect("the segment text element");
+        assert!(!line.contains("opacity"), "legacy text gained an attribute:\n{line}");
+    }
+
+    #[test]
     fn svg_media_free_project_emits_no_media() {
         let project = Project::new_demo();
         let dir = std::path::Path::new("/tmp/styk-svg-media-free-test");
@@ -2413,6 +2625,7 @@ mod tests {
             start_frame: start,
             end_frame: end,
             text: text.to_string(),
+            speaker: None,
         }
     }
 

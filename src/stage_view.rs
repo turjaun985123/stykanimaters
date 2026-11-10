@@ -2220,6 +2220,7 @@ mod tests {
             start_frame: start,
             end_frame: end,
             text: "HI".into(),
+            speaker: None,
         };
         let none = core_with(None);
         let live = core_with(Some(cue(0, 10)));

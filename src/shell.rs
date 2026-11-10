@@ -321,15 +321,85 @@ fn recovery_newer(recovery: Option<SystemTime>, last_project: Option<SystemTime>
     }
 }
 
-/// Whether the recovery snapshot holds work newer than the
-/// last named save: `true` when a recovery file exists and
-/// either no project has been opened yet or the snapshot's
-/// mtime beats the most recent project's file mtime. This
-/// powers a future "you have unsaved work newer than your
-/// last save" startup prompt. Every filesystem error folds
-/// into `false` — a recent whose file cannot be stat'ed
-/// cannot be compared, so it never claims newer work — and
-/// the check must never block startup.
+/// The pure content decision behind the recovery gate in
+/// [`recovery_is_newer_than_last_project_in`]: do two
+/// project documents hold the *same* project?
+///
+/// Both texts are parsed into [`Project`] and the parsed
+/// values re-serialised for comparison, so the verdict is
+/// about content, not bytes: pretty vs compact formatting,
+/// key order, number spelling and fields an older file
+/// omits (every field carries a serde default) cannot
+/// manufacture a difference, and no field is excluded —
+/// the `Project` document carries no volatile field (no
+/// timestamps, no session state; it is the same document
+/// the undo system snapshots with `serde_json::to_string`,
+/// so "same content" here means exactly what "same work"
+/// means there). The compact re-serialisation of a parsed
+/// struct is deterministic — field order fixed by the
+/// type, floats in serde_json's shortest round-trip form.
+///
+/// Fail-open: `false` means "not proven identical", never
+/// "proven different". A document that fails to parse —
+/// a corrupt snapshot, a corrupt save, a format this
+/// build cannot read — proves nothing, so the two never
+/// "match", not even byte-identical corrupt texts. The
+/// caller reads `false` as "the offer stands": the gate
+/// may only suppress an offer it can *prove* spurious,
+/// never one the user might need.
+fn project_documents_match(a: &str, b: &str) -> bool {
+    let (Ok(pa), Ok(pb)) = (
+        serde_json::from_str::<Project>(a),
+        serde_json::from_str::<Project>(b),
+    ) else {
+        return false;
+    };
+    match (serde_json::to_string(&pa), serde_json::to_string(&pb)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
+}
+
+/// Whether the recovery snapshot in `dir` holds the same
+/// project content as the last-saved project file at
+/// `saved_path` — the recovery gate's disk half. Every
+/// read failure folds into `false` (see
+/// [`project_documents_match`] for why unprovable always
+/// keeps the offer).
+fn recovery_matches_last_save(dir: &Path, saved_path: &Path) -> bool {
+    let Ok(snapshot_text) = std::fs::read_to_string(dir.join(RECOVERY_FILE)) else {
+        return false;
+    };
+    let Ok(saved_text) = std::fs::read_to_string(saved_path) else {
+        return false;
+    };
+    project_documents_match(&snapshot_text, &saved_text)
+}
+
+/// Whether the recovery snapshot holds work the last named
+/// save does not: `true` when a recovery file exists and
+/// either no project has been opened yet, or the snapshot's
+/// mtime beats the most recent project's file mtime *and*
+/// the snapshot's content actually differs from that save.
+///
+/// The content clause is the Wave R (R22) gate on the
+/// spurious offer P42 audited: a clean GUI save refreshes
+/// the snapshot *after* writing the save file, so the
+/// snapshot of a just-saved project is strictly newer by
+/// mtime while holding identical content — recovering it
+/// would hand the user their own saved work as if it were
+/// crash salvage. When the mtime verdict fires and there
+/// is a last save to compare against, the contents are
+/// compared ([`recovery_matches_last_save`]) and an
+/// identical snapshot is not offered. The gate fails
+/// open: a snapshot or save that cannot be read or parsed
+/// keeps the offer, exactly as the mtime-only condition
+/// behaved (see [`project_documents_match`]).
+///
+/// Every filesystem error folds into `false` — a recent
+/// whose file cannot be stat'ed cannot be compared, so it
+/// never claims newer work — and the check must never
+/// block startup.
 pub fn recovery_is_newer_than_last_project() -> bool {
     recovery_is_newer_than_last_project_in(&default_dir())
 }
@@ -338,20 +408,32 @@ pub fn recovery_is_newer_than_last_project() -> bool {
 /// base directory.
 pub fn recovery_is_newer_than_last_project_in(dir: &Path) -> bool {
     let snapshot = file_mtime(&dir.join(RECOVERY_FILE));
-    let saved = match recents_in(dir).into_iter().next() {
+    let (saved, saved_path) = match recents_in(dir).into_iter().next() {
         // No recents: nothing saved to compare against.
-        None => None,
+        None => (None, None),
         Some(name) => {
             let path = dir.join(format!("{}.json", project_file_slug(&name)));
             match file_mtime(&path) {
-                Some(mtime) => Some(mtime),
+                Some(mtime) => (Some(mtime), Some(path)),
                 // A recorded project whose file is gone or
                 // unreadable is an error, not "no save".
                 None => return false,
             }
         }
     };
-    recovery_newer(snapshot, saved)
+    if !recovery_newer(snapshot, saved) {
+        return false;
+    }
+    match saved_path {
+        // No last project (fresh install, snapshot only):
+        // nothing to compare content against, so the
+        // mtime verdict stands as it always has.
+        None => true,
+        // The content gate: an mtime-newer snapshot whose
+        // content is the last save's own content is the
+        // clean-save refresh, not unsaved work.
+        Some(path) => !recovery_matches_last_save(dir, &path),
+    }
 }
 
 // ---- Layout preferences ----
@@ -924,6 +1006,114 @@ mod tests {
         // A recorded project whose file has vanished cannot be
         // compared → false, never a startup-blocking claim.
         std::fs::remove_file(&saved).unwrap();
+        assert!(!recovery_is_newer_than_last_project_in(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_documents_match_decision_table() {
+        // Wave R (R22): the recovery gate's pure decision.
+        let project = Project::new_demo();
+        let pretty = serde_json::to_string_pretty(&project).unwrap();
+        let compact = serde_json::to_string(&project).unwrap();
+        assert!(project_documents_match(&pretty, &pretty));
+        assert!(
+            project_documents_match(&pretty, &compact),
+            "formatting is not content"
+        );
+        // An older-format document that omits every
+        // defaulted field parses to the all-default
+        // project, so it matches that project's own
+        // serialisation — and not the demo's.
+        let defaulted: Project = serde_json::from_str("{}").unwrap();
+        let default_text = serde_json::to_string_pretty(&defaulted).unwrap();
+        assert!(project_documents_match("{}", &default_text));
+        assert!(!project_documents_match("{}", &pretty));
+        // One field differs → different content.
+        let mut edited = Project::new_demo();
+        edited.background = edited.background.wrapping_add(1);
+        let edited_text = serde_json::to_string_pretty(&edited).unwrap();
+        assert!(!project_documents_match(&pretty, &edited_text));
+        // Unparseable proves nothing — not even against
+        // itself (fail-open: the offer must stand).
+        assert!(!project_documents_match("{ not a project", &pretty));
+        assert!(!project_documents_match(
+            "{ not a project",
+            "{ not a project"
+        ));
+    }
+
+    #[test]
+    fn recovery_gate_suppresses_only_the_proven_spurious_offer() {
+        // Wave R (R22): the content gate on
+        // `recovery_is_newer_than_last_project_in`, over
+        // the P42 spurious-offer shape — named save first,
+        // snapshot refreshed after it (the GUI save path's
+        // write order), so the snapshot is strictly newer
+        // by mtime throughout this test.
+        let dir = temp_dir("recovery-gate");
+        let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let t1 = t0 + std::time::Duration::from_secs(60);
+        let mut project = Project::new_demo();
+        project.name = "Gate Check".into();
+        let saved = dir.join("gate-check.json");
+        std::fs::write(&saved, serde_json::to_string_pretty(&project).unwrap()).unwrap();
+        touch_recent_in(&dir, "Gate Check");
+        let snapshot = write_recovery_in(&dir, &project).unwrap();
+        set_mtime(&saved, t0);
+        set_mtime(&snapshot, t1);
+        assert!(
+            !recovery_is_newer_than_last_project_in(&dir),
+            "identical content is the clean-save refresh, not unsaved work"
+        );
+
+        // One field of real work past the save: the offer
+        // stands, exactly as the mtime-only condition had it.
+        project.background = project.background.wrapping_add(1);
+        let snapshot = write_recovery_in(&dir, &project).unwrap();
+        set_mtime(&snapshot, t1);
+        assert!(recovery_is_newer_than_last_project_in(&dir));
+
+        // A corrupt snapshot cannot be proven identical to
+        // anything: fail-open, the offer stands.
+        std::fs::write(&snapshot, "{ not a project").unwrap();
+        set_mtime(&snapshot, t1);
+        assert!(recovery_is_newer_than_last_project_in(&dir));
+
+        // A corrupt save cannot prove the snapshot is its
+        // own content either: the offer stands.
+        let snapshot = write_recovery_in(&dir, &project).unwrap();
+        set_mtime(&snapshot, t1);
+        std::fs::write(&saved, "{ not a project").unwrap();
+        set_mtime(&saved, t0);
+        assert!(recovery_is_newer_than_last_project_in(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recovery_gate_compares_content_not_bytes() {
+        // Wave R (R22): the snapshot as compact JSON against
+        // the pretty-printed save — different bytes, same
+        // project (another writer's formatting, a hand
+        // edit that only reflowed the file) — is still the
+        // spurious offer, and is still suppressed.
+        let dir = temp_dir("recovery-gate-format");
+        let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let t1 = t0 + std::time::Duration::from_secs(60);
+        let mut project = Project::new_demo();
+        project.name = "Format Check".into();
+        let saved = dir.join("format-check.json");
+        std::fs::write(&saved, serde_json::to_string_pretty(&project).unwrap()).unwrap();
+        touch_recent_in(&dir, "Format Check");
+        let snapshot_path = dir.join(RECOVERY_FILE);
+        std::fs::write(&snapshot_path, serde_json::to_string(&project).unwrap()).unwrap();
+        set_mtime(&saved, t0);
+        set_mtime(&snapshot_path, t1);
+        assert_ne!(
+            std::fs::read(&saved).unwrap(),
+            std::fs::read(&snapshot_path).unwrap(),
+            "the two files really do differ as bytes"
+        );
         assert!(!recovery_is_newer_than_last_project_in(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
