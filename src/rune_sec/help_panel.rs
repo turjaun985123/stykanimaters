@@ -390,6 +390,22 @@
 //! until they do, `tr` falls back to the key itself and the
 //! pin below fails by design (the Q7 pattern: wiring and
 //! keys land together at integration).
+//!
+//! Wave W (W11) doc correction, 2026-11-10: the dated
+//! counts above are each refresh's own census — 54 at
+//! Phase M, unchanged through the two Phase N passes,
+//! then 56, 57, 58 and 61 at the UI-mission Waves 9–12
+//! refreshes — so the three paragraphs still reading
+//! "54 rows" state Phase M/N's figure, NOT the current
+//! census. The panel now holds **61 rows**: 10 Shortcuts
+//! + 8 Workspaces + 2 Posing + 5 Timeline + 36 Features,
+//! Drawing none, pinned by
+//! `shortcut_rows_has_exactly_61_rows` below, whose
+//! comment carries the full reconciliation. The dated
+//! paragraphs stand as written — their counts are the
+//! evidence the later +2 / +1 / +1 / +3 arithmetic
+//! stands on — but no "54 rows" above describes the
+//! panel as it is today.
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
@@ -595,7 +611,7 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
             ),
             (
                 "Live MCP control",
-                "Settings — on by default, started at launch; the Live MCP control toggle lets MCP clients and other programs on this computer drive this running editor in full at http://127.0.0.1:32117/mcp: the core tools edit the project, and the live-only shell_* tools drive the window itself — workspace, playback, view, selection, theme and panels (the full tool list is in docs/MCP.md). There is no password: any program on this computer can drive the editor and its window while this is on, so turn it off here when you do not want that",
+                "Settings — off by default; when on, the Live MCP control toggle lets MCP clients and other programs on this computer drive this running editor in full at http://127.0.0.1:32117/mcp: the core tools edit the project, and the live-only shell_* tools drive the window itself — workspace, playback, view, selection, theme and panels (the full tool list is in docs/MCP.md). There is no password: any program on this computer can drive the editor and its window while this is on, so turn it off here when you do not want that",
             ),
         ],
         _ => vec![],
@@ -856,7 +872,7 @@ fn help_text_key(english: &str) -> Option<&'static str> {
         "The mcp_server program serves the same core tools over stdio (JSON-RPC, one message per line) to clients that launch it — it works on its own copy of a project and never sees or drives this editor window" => {
             "help_feature_mcp_stdio_server_desc"
         }
-        "Settings — on by default, started at launch; the Live MCP control toggle lets MCP clients and other programs on this computer drive this running editor in full at http://127.0.0.1:32117/mcp: the core tools edit the project, and the live-only shell_* tools drive the window itself — workspace, playback, view, selection, theme and panels (the full tool list is in docs/MCP.md). There is no password: any program on this computer can drive the editor and its window while this is on, so turn it off here when you do not want that" => {
+        "Settings — off by default; when on, the Live MCP control toggle lets MCP clients and other programs on this computer drive this running editor in full at http://127.0.0.1:32117/mcp: the core tools edit the project, and the live-only shell_* tools drive the window itself — workspace, playback, view, selection, theme and panels (the full tool list is in docs/MCP.md). There is no password: any program on this computer can drive the editor and its window while this is on, so turn it off here when you do not want that" => {
             "help_feature_live_mcp_control_desc"
         }
         _ => return None,
@@ -1439,7 +1455,7 @@ mod tests {
         )));
         assert!(rows.contains(&(
             "Live MCP control",
-            "Settings — on by default, started at launch; the Live MCP control toggle lets MCP clients and other programs on this computer drive this running editor in full at http://127.0.0.1:32117/mcp: the core tools edit the project, and the live-only shell_* tools drive the window itself — workspace, playback, view, selection, theme and panels (the full tool list is in docs/MCP.md). There is no password: any program on this computer can drive the editor and its window while this is on, so turn it off here when you do not want that"
+            "Settings — off by default; when on, the Live MCP control toggle lets MCP clients and other programs on this computer drive this running editor in full at http://127.0.0.1:32117/mcp: the core tools edit the project, and the live-only shell_* tools drive the window itself — workspace, playback, view, selection, theme and panels (the full tool list is in docs/MCP.md). There is no password: any program on this computer can drive the editor and its window while this is on, so turn it off here when you do not want that"
         )));
         // Placement: View zoom sits with the stage /
         // camera rows, directly after Swap frames; Live
@@ -1521,7 +1537,7 @@ mod tests {
         )));
         assert!(rows.contains(&(
             "Live MCP control",
-            "Settings — on by default, started at launch; the Live MCP control toggle lets MCP clients and other programs on this computer drive this running editor in full at http://127.0.0.1:32117/mcp: the core tools edit the project, and the live-only shell_* tools drive the window itself — workspace, playback, view, selection, theme and panels (the full tool list is in docs/MCP.md). There is no password: any program on this computer can drive the editor and its window while this is on, so turn it off here when you do not want that"
+            "Settings — off by default; when on, the Live MCP control toggle lets MCP clients and other programs on this computer drive this running editor in full at http://127.0.0.1:32117/mcp: the core tools edit the project, and the live-only shell_* tools drive the window itself — workspace, playback, view, selection, theme and panels (the full tool list is in docs/MCP.md). There is no password: any program on this computer can drive the editor and its window while this is on, so turn it off here when you do not want that"
         )));
         // Placement: the two MCP rows close the
         // Features section as a pair — the stdio row

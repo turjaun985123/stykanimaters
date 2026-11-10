@@ -506,8 +506,13 @@ pub struct LayoutPrefs {
     /// port 32117) — starts with the editor. Read by the
     /// shell's `init`, written back by the Settings card's
     /// Live MCP toggle (the resulting state, so a failed
-    /// start is never remembered as on).
-    #[serde(default = "default_true")]
+    /// start is never remembered as on). Defaults to OFF
+    /// (Wave W, W4): the endpoint is unauthenticated, so it
+    /// is explicit-enable — a prefs file that predates the
+    /// field, and a mistyped value salvaged by
+    /// [`salvage_layout`], both load off, and only a stored
+    /// `true` the user's toggle wrote starts the bridge.
+    #[serde(default)]
     pub live_mcp: bool,
     /// Width in points of the left column (figures /
     /// library), persisted so the shell's column
@@ -528,7 +533,8 @@ pub struct LayoutPrefs {
 impl Default for LayoutPrefs {
     /// The first-run layout: the Animate workspace, dark
     /// theme, timeline expanded, sidebar visible, live MCP
-    /// control on (see [`LayoutPrefs::live_mcp`]), side
+    /// control off (see [`LayoutPrefs::live_mcp`] — it
+    /// starts only when the user enables it), side
     /// columns at their long-standing fixed widths.
     fn default() -> Self {
         LayoutPrefs {
@@ -537,7 +543,7 @@ impl Default for LayoutPrefs {
             timeline_collapsed: false,
             sidebar_visible: true,
             palette_recents: Vec::new(),
-            live_mcp: true,
+            live_mcp: false,
             col_left_w: 300.0,
             col_right_w: 340.0,
         }
@@ -1387,9 +1393,11 @@ mod tests {
         // make the whole file read as corrupt.
         assert!(!prefs.timeline_collapsed);
         assert!(prefs.sidebar_visible);
-        // Live MCP defaults ON for a pre-field file (the
-        // serde default is `default_true`, like the sidebar).
-        assert!(prefs.live_mcp);
+        // Live MCP defaults OFF for a pre-field file (the
+        // serde default is bool's own `false` — explicit
+        // enable only, Wave W W4; the sidebar above keeps
+        // its `default_true`).
+        assert!(!prefs.live_mcp);
         // Column widths likewise default to the
         // long-standing fixed widths (300 / 340) for a
         // pre-field file.
@@ -1402,6 +1410,45 @@ mod tests {
                 dark: false,
                 ..Default::default()
             }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn live_mcp_defaults_off_until_explicitly_enabled() {
+        // Wave W (W4): live control is explicit-enable. The
+        // endpoint is unauthenticated (see live_mcp's module
+        // docs), so no default anywhere in the load path may
+        // turn it on: not the struct default, not a missing
+        // prefs file, not a file written before the field
+        // existed. A stored `true` — the user's own toggle
+        // choice — is honoured as written.
+        assert!(
+            !LayoutPrefs::default().live_mcp,
+            "the first-run default is off"
+        );
+        let dir = temp_dir("layout-live-mcp-default");
+        // No prefs file at all (fresh install).
+        assert!(
+            !load_layout_in(&dir).live_mcp,
+            "a missing prefs file loads off"
+        );
+        // A pre-field file (written before `live_mcp`
+        // existed) holds no stored choice: off.
+        std::fs::write(
+            dir.join(LAYOUT_FILE),
+            "{\"workspace\":\"Draw\",\"dark\":false}",
+        )
+        .unwrap();
+        assert!(
+            !load_layout_in(&dir).live_mcp,
+            "a pre-field prefs file loads off"
+        );
+        // An explicit stored choice is honoured.
+        std::fs::write(dir.join(LAYOUT_FILE), "{\"live_mcp\":true}").unwrap();
+        assert!(
+            load_layout_in(&dir).live_mcp,
+            "an explicitly enabled pref loads on"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1761,7 +1808,7 @@ mod tests {
         assert_eq!(prefs.col_left_w, 252.0);
         // ...and only the mistyped fields take defaults.
         assert!(prefs.sidebar_visible, "mistyped bool defaults on");
-        assert!(prefs.live_mcp, "mistyped bool defaults on");
+        assert!(!prefs.live_mcp, "mistyped bool defaults off");
         // A missing required field is salvaged the same
         // way: `dark` alone keeps its value instead of
         // condemning the file.

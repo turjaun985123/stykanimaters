@@ -290,17 +290,32 @@
 //!
 //! ## Entry name ↔ backing file mapping
 //!
-//! Proven from `load_library` (editor.rs:162): it reads
-//! `./library/*.json` in sorted order and names each entry
-//! from the file's **stem** (`f.file_stem()`), so a saved
-//! entry's stored name IS its file stem and the backing
-//! file is exactly `./library/<name>.json` — see
-//! [`library_file_for`]. The write side agrees:
-//! `save_figure_to_library` (editor.rs:2182) writes
+//! Proven from `load_library` (editor.rs): it reads
+//! `./library/*.json` in sorted order and names each
+//! entry from the **name stored inside the file** —
+//! the top-level `name` field `save_figure_to_library`
+//! writes alongside the definition (Wave V, V1) —
+//! falling back to the file's **stem** (`f.file_stem()`)
+//! for files that carry no stored name (every library
+//! written before the stored name existed, and any
+//! hand-placed file), so an existing library loads
+//! with exactly the names its user already sees. The
+//! write side: `save_figure_to_library` writes
 //! `./library/<figure name, spaces→'-', lowercased>.json`
-//! and reloads, so the reloaded entry's name is that stem.
-//! Built-ins are not files at all (constructed in code),
-//! which is why they can never be deleted here.
+//! — the file name is still the historical slug — with
+//! the figure's exact name stored inside, and reloads,
+//! so the reloaded entry's name round-trips exactly
+//! ("Styk" is listed as "Styk" and lives in
+//! `styk.json`). Resolving a display name back to its
+//! backing file is [`library_entry_file`]'s job (the
+//! verbatim file when it exists, else the slug's);
+//! [`library_file_for`] remains the bare stem→file
+//! step. Built-ins are not files at all (constructed
+//! in code), which is why they can never be deleted
+//! here. (This section stated the pre-V1 rule — the
+//! entry's name IS its file stem — until the Wave W
+//! doc pass; V1 changed the naming rule, not the
+//! slug.)
 //!
 //! The successful-delete fs dispatch (a real file removed
 //! from `./library`) is deliberately **untested**: test
@@ -484,12 +499,16 @@ pub fn filter_active(query: &str) -> bool {
     !query.trim().is_empty()
 }
 
-/// The backing file name of the library entry `name`:
-/// `<name>.json` for a saved entry (see
-/// [`library_file_for`] — `load_library` names entries
-/// from file stems, so the file name is exactly the stem
-/// plus the extension). Built-ins are constructed in
-/// code and have no file: `None`.
+/// The verbatim file-name form of the library entry
+/// `name`: `<name>.json` for a saved entry — the form
+/// [`entry_matches`] searches against, and the first
+/// candidate [`library_entry_file`] tries when
+/// resolving a display name to its backing file. It
+/// is NOT always the backing file: since Wave V (V1)
+/// an entry's display name is stored inside its file
+/// and can differ from the file's slug ("Styk" lives
+/// in `styk.json`). Built-ins are constructed in code
+/// and have no file: `None`.
 pub fn entry_file_name(name: &str) -> Option<String> {
     if is_builtin(name) {
         None
@@ -500,8 +519,8 @@ pub fn entry_file_name(name: &str) -> Option<String> {
 
 /// True when the library entry `name` matches the search
 /// `query`: a case-insensitive substring hit on the
-/// display name OR — for saved entries — on the backing
-/// file name ([`entry_file_name`]), so `hero.json` and
+/// display name OR — for saved entries — on the entry's
+/// file-name form ([`entry_file_name`]), so `hero.json` and
 /// `.json` find the entry `my-hero`. An empty (or
 /// whitespace-only) query matches everything, via
 /// [`name_matches`].
@@ -606,12 +625,14 @@ pub fn sort_rows(rows: Vec<LibraryRow>, by_name: bool) -> Vec<LibraryRow> {
     rows
 }
 
-/// The backing file of a saved library entry:
-/// `./library/<name>.json`. Exact by construction —
-/// `load_library` names entries from file stems (see the
-/// module docs for the evidence), so the stem→file step
-/// is the precise inverse. Only meaningful for saved
-/// entries; built-ins have no file.
+/// The backing file of the library entry whose STEM
+/// is `name`: `./library/<name>.json` — the stem→file
+/// step. Only meaningful for saved entries; built-ins
+/// have no file. Since Wave V (V1) an entry's DISPLAY
+/// name is stored inside its file and need not equal
+/// its stem ("Styk" lives in `styk.json`); resolving
+/// a display name to its file is
+/// [`library_entry_file`]'s job, not this function's.
 pub fn library_file_for(name: &str) -> PathBuf {
     stykanimate_rs::library_ops::library_file_for(name)
 }
@@ -782,11 +803,12 @@ pub fn delete_entry(s: &mut State, i: usize) {
 /// Re-point the open rename session at the entry named
 /// `target_name`, wherever it sits now; cancel the
 /// session when no entry carries that name any more.
-/// Library entry names are unique in practice (saved
-/// entries are named from file stems, and a directory
-/// cannot hold two files with one stem), so the name
-/// is a stable identity across a reload that may have
-/// moved the entry's slot.
+/// Library entry names are unique in practice (the
+/// save path writes one file per sanitised stem, a
+/// rename refuses a display-name collision, and a
+/// directory cannot hold two files with one stem),
+/// so the name is a stable identity across a reload
+/// that may have moved the entry's slot.
 pub fn reresolve_renaming(s: &mut State, target_name: &str) {
     match s.core.library.iter().position(|(n, _)| n == target_name) {
         Some(slot) => s.library_panel.renaming = Some(slot),

@@ -1806,6 +1806,48 @@ pub fn scan_library(dir: &Path) -> Vec<String> {
     names
 }
 
+/// The file backing the library entry displayed as `name` in
+/// directory `dir`: the file whose stored name IS `name`, found
+/// by the same scan [`scan_library`] lists from — the listing
+/// reads names out of file contents, so resolution must read
+/// them too. A hand-placed or externally renamed file whose
+/// stem is not the slug of its stored name (`fig3d-backup.json`
+/// holding `"Wave Bot"`) is listed by the scan, and only this
+/// resolution finds it again; the name-derived
+/// [`library_file_name`] cannot. When no file stores `name`,
+/// the historical slug path is returned, so loading by a
+/// case/slug variant of a name keeps working and honest fs
+/// errors land on the canonical path. If two files store the
+/// same name, the first in sorted path order wins —
+/// deterministic, and the same first-match rule the 2D
+/// library documents (Wave W, W9).
+pub fn library_entry_file(dir: &Path, name: &str) -> PathBuf {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let mut paths: Vec<PathBuf> =
+            entries.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        for path in paths {
+            let is_library_file = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("fig3d-") && n.ends_with(".json"))
+                .unwrap_or(false);
+            if is_library_file {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    if let Ok(parsed) =
+                        serde_json::from_str::<LibraryEntry>(&text)
+                    {
+                        if parsed.name == name {
+                            return path;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    dir.join(library_file_name(name))
+}
+
 /// File name a library pose called `name` is stored under:
 /// `<slug>.json`, where the slug comes from [`library_slug`] — the
 /// same sanitising the figure library applies (see
@@ -1854,11 +1896,46 @@ pub fn save_pose_library(pose: &Pose3, name: &str) -> std::io::Result<PathBuf> {
     save_pose_library_in(&pose_library_dir(), pose, name)
 }
 
+/// The file backing the pose entry displayed as `name` in
+/// directory `dir` — [`library_entry_file`]'s rule for the
+/// pose library: the file whose stored name IS `name` (the
+/// scan's own inverse, so a listed entry whose stem is not
+/// its name's slug still resolves), else the historical slug
+/// path from [`pose_file_name`].
+fn pose_entry_file_in(dir: &Path, name: &str) -> PathBuf {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let mut paths: Vec<PathBuf> =
+            entries.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        for path in paths {
+            let is_pose_file = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.ends_with(".json"))
+                .unwrap_or(false);
+            if is_pose_file {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    if let Ok(parsed) =
+                        serde_json::from_str::<PoseLibraryEntry>(&text)
+                    {
+                        if parsed.name == name {
+                            return path;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    dir.join(pose_file_name(name))
+}
+
 /// Load the pose saved under `name` from pose library directory
 /// `dir`. An error is returned when no readable, well-formed entry
 /// exists for that name (missing file, invalid JSON, wrong shape).
+/// The name resolves through [`pose_entry_file_in`], so an entry
+/// the scan lists always loads (see there).
 fn load_pose_library_in(dir: &Path, name: &str) -> std::io::Result<Pose3> {
-    let path = dir.join(pose_file_name(name));
+    let path = pose_entry_file_in(dir, name);
     let text = std::fs::read_to_string(&path)?;
     let entry: PoseLibraryEntry = serde_json::from_str(&text).map_err(|e| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, e)
@@ -3232,6 +3309,41 @@ mod tests {
         assert_eq!(loaded_pose, pose);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn library_entry_file_resolves_the_stored_name_not_the_slug() {
+        // Wave W, W9: the listing reads names out of file
+        // contents, so a file whose stem is not its stored
+        // name's slug is listed — and only the scan-based
+        // resolution finds it again.
+        let dir = std::env::temp_dir().join(format!(
+            "stykr-fig3d-entry-file-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let fig = humanoid3();
+        let pose = Pose3::rest(&fig, [5.0, 6.0, 7.0]);
+        let path = save_library_figure(&dir, "Wave Bot", &fig, &pose).unwrap();
+        // An externally renamed file: stem no longer the slug.
+        let placed = dir.join("fig3d-backup.json");
+        std::fs::rename(&path, &placed).unwrap();
+        assert_eq!(scan_library(&dir), vec!["Wave Bot".to_string()]);
+        assert_eq!(library_entry_file(&dir, "Wave Bot"), placed);
+        let (loaded_fig, loaded_pose) =
+            load_library_figure(&library_entry_file(&dir, "Wave Bot")).unwrap();
+        assert_eq!(loaded_fig, fig);
+        assert_eq!(loaded_pose, pose);
+        // App-saved entries resolve to their canonical file,
+        // and a name no file stores falls back to the slug
+        // path (the historical error site).
+        let path2 = save_library_figure(&dir, "My Bot!!", &fig, &pose).unwrap();
+        assert_eq!(library_entry_file(&dir, "My Bot!!"), path2);
+        assert_eq!(
+            library_entry_file(&dir, "Ghost"),
+            dir.join("fig3d-ghost.json")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
@@ -3648,8 +3760,9 @@ mod camera_framing_tests {
 #[cfg(test)]
 mod pose_library_tests {
     use super::{
-        humanoid3, library_file_name, load_pose_library, load_pose_library_in, pose_file_name,
-        save_pose_library, save_pose_library_in, scan_pose_library, scan_pose_library_in, Pose3,
+        humanoid3, library_file_name, load_pose_library, load_pose_library_in, pose_entry_file_in,
+        pose_file_name, save_pose_library, save_pose_library_in, scan_pose_library,
+        scan_pose_library_in, Pose3,
     };
     use std::path::PathBuf;
 
@@ -3683,6 +3796,23 @@ mod pose_library_tests {
         );
 
         assert_eq!(scan_pose_library_in(&dir), vec!["My Pose!!", "Wave Pose"]);
+        // Wave W, W9: a listed entry whose file stem is not
+        // its stored name's slug still resolves and loads —
+        // resolution is the scan's inverse, not the slug.
+        let placed = dir.join("hand-placed.json");
+        std::fs::rename(
+            save_pose_library_in(&dir, &pose, "Placed Pose").unwrap(),
+            &placed,
+        )
+        .unwrap();
+        assert!(scan_pose_library_in(&dir).contains(&"Placed Pose".to_string()));
+        assert_eq!(pose_entry_file_in(&dir, "Placed Pose"), placed);
+        assert_eq!(load_pose_library_in(&dir, "Placed Pose").unwrap(), pose);
+        // A name no file stores falls back to the slug path.
+        assert_eq!(
+            pose_entry_file_in(&dir, "Ghost"),
+            dir.join("ghost.json")
+        );
         let loaded = load_pose_library_in(&dir, "Wave Pose").unwrap();
         // The whole pose survives the round trip exactly, root and
         // every joint rotation (the figure library test's float

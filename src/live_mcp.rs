@@ -185,6 +185,12 @@
 //! header **validation, not authentication**: any program
 //! on this machine can simply send the loopback headers,
 //! so it changes nothing about the warning below.
+//! Live control is **off by default** (Wave W, W4): the
+//! persisted preference (`LayoutPrefs::live_mcp` in
+//! `src/shell.rs`) defaults to `false` — for fresh installs
+//! and for prefs files written before the field existed —
+//! so the bridge starts only when the user enables it in
+//! Settings and that choice has persisted.
 //! **There is NO authentication in v1:**
 //! while live control is enabled, *any program running as your
 //! user on this machine* can call every MCP tool — edit the

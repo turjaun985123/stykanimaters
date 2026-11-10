@@ -213,7 +213,11 @@
 //! unchanged; a healthy selected clip, a stale
 //! selection and no selection all build exactly the
 //! tree they built before — no caption, no geometry
-//! change.
+//! change. Wave W (W5) wired the caption's health
+//! word through the i18n table (the panel's shared
+//! [`crate::rune_sec::audio_panel::health_segment`]),
+//! so the strip's caption localises with the panel's
+//! rows and readout; see [`clip_health_caption`].
 //!
 //! ## Theme wiring (UI mission, Wave 2 — s02 §3.1, s14 D7)
 //!
@@ -298,7 +302,7 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::AudioClip;
 
 use crate::rune_sec::app_theme;
-use crate::rune_sec::audio_panel::{health_word, probe_clip, ClipHealth};
+use crate::rune_sec::audio_panel::{health_segment, probe_clip, ClipHealth};
 use crate::State;
 
 /// Height the caption row takes under the strip in
@@ -722,17 +726,38 @@ pub fn waveform_caption(mode: WaveformMode, muted: bool) -> Option<String> {
 /// The health caption for the SELECTED clip (Wave 6-D;
 /// see the module docs): `"Clip {n} · {health}"` with
 /// the audio panel's own health vocabulary
-/// ([`health_word`] — "missing file" / "unsupported
-/// format" / "unreadable file") and its 1-based clip
-/// numbering, or `None` for a healthy clip — a healthy
-/// selection grows no health caption, exactly as a
-/// healthy row grows no badge in the panel. The caller
-/// (the builder's project-mode tail) only reaches this
-/// with a valid selection whose peaks would not decode;
-/// the health itself comes from the panel's cached
-/// probe ([`probe_clip`]), never a second decoder.
-pub fn clip_health_caption(index: usize, health: ClipHealth) -> Option<String> {
-    health_word(health).map(|word| format!("Clip {} · {word}", index + 1))
+/// ("missing file" / "unsupported format" /
+/// "unreadable file") and its 1-based clip numbering,
+/// or `None` for a healthy clip — a healthy selection
+/// grows no health caption, exactly as a healthy row
+/// grows no badge in the panel. The caller (the
+/// builder's project-mode tail) only reaches this with
+/// a valid selection whose peaks would not decode; the
+/// health itself comes from the panel's cached probe
+/// ([`probe_clip`]), never a second decoder.
+///
+/// Wave W (W5): the health word now resolves through
+/// the i18n table like the panel's own surfaces — the
+/// caption is `"Clip {n}"` plus the panel's shared
+/// [`health_segment`] (the `audio_health_segment`
+/// `{word}` template over the `audio_health_*` words,
+/// IA-U5-1), closing U5's stated remainder, under
+/// which this caption alone stayed canonical-English.
+/// [`crate::rune_sec::audio_panel::health_word`] keeps
+/// its pure signature as the canonical-English
+/// vocabulary — the panel's readout pin asserts the
+/// table's words agree with it word for word — and
+/// the English caption here is byte-identical to the
+/// pre-wiring composition.
+pub fn clip_health_caption(
+    core: &EditorCore,
+    index: usize,
+    health: ClipHealth,
+) -> Option<String> {
+    if health == ClipHealth::Healthy {
+        return None;
+    }
+    Some(format!("Clip {}", index + 1) + &health_segment(core, health))
 }
 
 /// Display columns for a strip `w` points wide: one column
@@ -1332,7 +1357,7 @@ pub fn waveform_el_state(s: &State, el_size: [f32; 2], t: &Theme) -> El {
     // geometry) are byte-identical to before.
     if let Some(i) = s.audio_panel.selected.filter(|&i| i < clip_count) {
         let probe = probe_clip(&s.audio_panel.probe_cache, &s.core.project.audio[i]);
-        if let Some(note) = clip_health_caption(i, probe.health) {
+        if let Some(note) = clip_health_caption(&s.core, i, probe.health) {
             let canvas_h = (el_size[1] - CAPTION_STRIP_H).max(0.0);
             return col()
                 .gap(2.0)
@@ -1773,21 +1798,46 @@ mod tests {
 
     #[test]
     fn clip_health_caption_names_the_three_failure_states() {
+        let core = EditorCore::new();
         // The panel's vocabulary, 1-based numbering.
         assert_eq!(
-            clip_health_caption(0, ClipHealth::Missing).as_deref(),
+            clip_health_caption(&core, 0, ClipHealth::Missing).as_deref(),
             Some("Clip 1 · missing file")
         );
         assert_eq!(
-            clip_health_caption(2, ClipHealth::Unsupported).as_deref(),
+            clip_health_caption(&core, 2, ClipHealth::Unsupported).as_deref(),
             Some("Clip 3 · unsupported format")
         );
         assert_eq!(
-            clip_health_caption(1, ClipHealth::Unreadable).as_deref(),
+            clip_health_caption(&core, 1, ClipHealth::Unreadable).as_deref(),
             Some("Clip 2 · unreadable file")
         );
         // A healthy clip grows no health caption.
-        assert_eq!(clip_health_caption(0, ClipHealth::Healthy), None);
+        assert_eq!(clip_health_caption(&core, 0, ClipHealth::Healthy), None);
+        // Wave W (W5): the word now resolves through
+        // the i18n table (via the panel's shared
+        // `health_segment`); under the default English
+        // core the resolved caption must equal the
+        // canonical composition — "Clip {n} · " plus
+        // `health_word`, the canonical-English
+        // vocabulary the audio panel's readout pin
+        // ties the table's words to.
+        for (i, health) in [
+            (0, ClipHealth::Missing),
+            (2, ClipHealth::Unsupported),
+            (1, ClipHealth::Unreadable),
+        ] {
+            let canonical = format!(
+                "Clip {} · {}",
+                i + 1,
+                crate::rune_sec::audio_panel::health_word(health)
+                    .expect("a non-healthy word")
+            );
+            assert_eq!(
+                clip_health_caption(&core, i, health).as_deref(),
+                Some(canonical.as_str())
+            );
+        }
     }
 
     #[test]
@@ -1894,7 +1944,7 @@ mod tests {
         s.audio_panel.selected = Some(0);
         let probe = probe_clip(&s.audio_panel.probe_cache, &s.core.project.audio[0]);
         assert_eq!(probe.health, ClipHealth::Healthy);
-        assert_eq!(clip_health_caption(0, probe.health), None);
+        assert_eq!(clip_health_caption(&s.core, 0, probe.health), None);
         let t = rune::tok::theme(true);
         let _clip_mode = waveform_el_state(&s, [308.0, 56.0], &t);
         let _ = std::fs::remove_file(&path);

@@ -704,12 +704,55 @@ pub fn save_pose_library(pose: &Pose, name: &str) -> std::io::Result<PathBuf> {
     save_pose_library_in(&pose_library_dir(), pose, name)
 }
 
+/// The file backing the pose entry displayed as `name` in
+/// directory `dir`: the file whose stored name IS `name`,
+/// found by the same scan [`scan_pose_library_in`] lists
+/// from — the listing reads names out of file contents, so
+/// resolution must read them too (a hand-placed or
+/// externally renamed file whose stem is not its name's
+/// slug is listed, and only this resolution finds it
+/// again). When no file stores `name`, the historical slug
+/// path is returned, so loading by a case/slug variant
+/// keeps working and honest fs errors land on the
+/// canonical path. Duplicate stored names resolve to the
+/// first file in sorted path order. Mirrors
+/// `fop_pose_entry_file_in` in figure_ops.rs — the two
+/// copies change together (Wave W, W9).
+fn pose_entry_file_in(dir: &Path, name: &str) -> PathBuf {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let mut paths: Vec<PathBuf> =
+            entries.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        for path in paths {
+            let is_pose_file = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.ends_with(".json"))
+                .unwrap_or(false);
+            if is_pose_file {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    if let Ok(parsed) =
+                        serde_json::from_str::<PoseLibraryEntry>(&text)
+                    {
+                        if parsed.name == name {
+                            return path;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    dir.join(pose_file_name(name))
+}
+
 /// Load the pose saved under `name` from pose library
 /// directory `dir`. An error is returned when no readable,
 /// well-formed entry exists for that name (missing file,
-/// invalid JSON, wrong shape).
+/// invalid JSON, wrong shape). The name resolves through
+/// [`pose_entry_file_in`], so an entry the scan lists
+/// always loads (see there).
 fn load_pose_library_in(dir: &Path, name: &str) -> std::io::Result<Pose> {
-    let path = dir.join(pose_file_name(name));
+    let path = pose_entry_file_in(dir, name);
     let text = std::fs::read_to_string(&path)?;
     let entry: PoseLibraryEntry =
         serde_json::from_str(&text).map_err(|e| {
@@ -1028,7 +1071,7 @@ pub fn delete_library_pose(core: &mut EditorCore, name: &str) {
 /// the saved-name cache on the next build — the same
 /// invalidation a Save relies on.
 fn delete_library_pose_in(core: &mut EditorCore, dir: &Path, name: &str) -> bool {
-    let path = dir.join(pose_file_name(name));
+    let path = pose_entry_file_in(dir, name);
     match std::fs::remove_file(&path) {
         Ok(()) => {
             core.status = format!("Pose '{name}' deleted from the library.");
@@ -1150,7 +1193,7 @@ fn rename_library_pose_in(
         }
         RenamePlan::Ready(name) => name,
     };
-    let old_path = dir.join(pose_file_name(old));
+    let old_path = pose_entry_file_in(dir, old);
     let new_path = dir.join(pose_file_name(&new_name));
     if new_path != old_path && new_path.exists() {
         // A file the scan could not read as a pose entry
@@ -2186,6 +2229,52 @@ mod tests {
         assert_eq!(
             load_pose_library_in(&dir, "Styk").unwrap().angles,
             pose.angles
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hand_placed_entry_loads_renames_and_deletes_by_its_stored_name() {
+        // Wave W, W9: the listing reads names out of file
+        // contents, so an entry whose file stem is not its
+        // stored name's slug is listed — resolution must be
+        // the scan's inverse, or the entry could be seen
+        // but never loaded, renamed, or deleted.
+        let dir = temp_library("hand-placed");
+        let mut c = core();
+        let pose = selected_pose(&c).unwrap().clone();
+        let canonical = save_pose_library_in(&dir, &pose, "Wave Pose").unwrap();
+        let placed = dir.join("backup.json");
+        std::fs::rename(&canonical, &placed).unwrap();
+        assert_eq!(
+            scan_pose_library_in(&dir),
+            vec!["Wave Pose".to_string()]
+        );
+        assert_eq!(pose_entry_file_in(&dir, "Wave Pose"), placed);
+        assert_eq!(
+            load_pose_library_in(&dir, "Wave Pose").unwrap().angles,
+            pose.angles
+        );
+        // Rename moves the hand-placed file, not the
+        // (absent) slug file.
+        assert!(rename_library_pose_in(&mut c, &dir, "Wave Pose", "Hero Pose"));
+        assert!(!placed.exists());
+        assert!(dir.join("hero-pose.json").exists());
+        assert_eq!(
+            scan_pose_library_in(&dir),
+            vec!["Hero Pose".to_string()]
+        );
+        // Delete removes the file the entry actually lives
+        // in, even after another external rename.
+        let placed2 = dir.join("odd name.json");
+        std::fs::rename(dir.join("hero-pose.json"), &placed2).unwrap();
+        assert!(delete_library_pose_in(&mut c, &dir, "Hero Pose"));
+        assert!(!placed2.exists());
+        assert!(scan_pose_library_in(&dir).is_empty());
+        // A name no file stores falls back to the slug path.
+        assert_eq!(
+            pose_entry_file_in(&dir, "Ghost"),
+            dir.join("ghost.json")
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

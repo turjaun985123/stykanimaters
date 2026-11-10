@@ -999,8 +999,45 @@ fn fop_save_pose_library_in(dir: &Path, pose: &Pose, name: &str) -> std::io::Res
     Ok(path)
 }
 
+/// The file backing the pose entry displayed as `name` in
+/// directory `dir`: the file whose stored name IS `name`,
+/// found by the same scan `fop_scan_pose_library_in` lists
+/// from — the listing reads names out of file contents, so
+/// resolution must read them too (a hand-placed or externally
+/// renamed file whose stem is not its name's slug is listed,
+/// and only this resolution finds it again). When no file
+/// stores `name`, the historical slug path is returned, so
+/// loading by a case/slug variant keeps working and honest
+/// fs errors land on the canonical path. Duplicate stored
+/// names resolve to the first file in sorted path order.
+/// Mirrors `pose_entry_file_in` in rune_sec/pose_tools.rs —
+/// the two copies change together (Wave W, W9).
+fn fop_pose_entry_file_in(dir: &Path, name: &str) -> PathBuf {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        for path in paths {
+            let is_pose_file = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.ends_with(".json"))
+                .unwrap_or(false);
+            if is_pose_file {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    if let Ok(parsed) = serde_json::from_str::<FopPoseLibraryEntry>(&text) {
+                        if parsed.name == name {
+                            return path;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    dir.join(fop_pose_file_name(name))
+}
+
 fn fop_load_pose_library_in(dir: &Path, name: &str) -> std::io::Result<Pose> {
-    let path = dir.join(fop_pose_file_name(name));
+    let path = fop_pose_entry_file_in(dir, name);
     let text = std::fs::read_to_string(&path)?;
     let entry: FopPoseLibraryEntry = serde_json::from_str(&text)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -1141,7 +1178,7 @@ pub fn tool_pose_library_apply(core: &mut EditorCore, args: &Value) -> Result<Va
 /// Delete. A file operation, NOT an undo step.
 pub fn tool_pose_library_delete(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let name = fop_req_str(args, "name")?;
-    let path = fop_pose_library_dir().join(fop_pose_file_name(name));
+    let path = fop_pose_entry_file_in(&fop_pose_library_dir(), name);
     std::fs::remove_file(&path).map_err(|e| {
         format!("Delete pose failed: '{name}' could not be removed ({e}).")
     })?;
@@ -1188,7 +1225,7 @@ pub fn tool_pose_library_rename(core: &mut EditorCore, args: &Value) -> Result<V
             "A pose named '{conflict}' already uses that name."
         ));
     }
-    let old_path = dir.join(fop_pose_file_name(old));
+    let old_path = fop_pose_entry_file_in(&dir, old);
     let new_path = dir.join(fop_pose_file_name(new_name));
     if new_path != old_path && new_path.exists() {
         return Err(format!(
@@ -2315,6 +2352,37 @@ mod tests {
         let loaded = fop_load_pose_library_in(&dir, "Wave Pose").expect("load succeeds");
         assert_eq!(loaded.angles, pose.angles);
         assert_eq!(loaded.root, pose.root);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fop_pose_entry_file_resolves_the_stored_name_not_the_slug() {
+        // Wave W, W9 (mirror of the pose_tools pin): a
+        // listed entry whose file stem is not its stored
+        // name's slug still resolves — load, delete and
+        // rename all address files through this resolver.
+        let dir = std::env::temp_dir().join(format!(
+            "stykanimate-fop-pose-entry-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let core = EditorCore::new();
+        let pose = core.project.frames[0].poses[0].clone();
+        let canonical = fop_save_pose_library_in(&dir, &pose, "Wave Pose")
+            .expect("save succeeds");
+        let placed = dir.join("backup.json");
+        std::fs::rename(&canonical, &placed).expect("external rename");
+        assert_eq!(fop_scan_pose_library_in(&dir), vec!["Wave Pose".to_string()]);
+        assert_eq!(fop_pose_entry_file_in(&dir, "Wave Pose"), placed);
+        let loaded = fop_load_pose_library_in(&dir, "Wave Pose").expect("load succeeds");
+        assert_eq!(loaded.angles, pose.angles);
+        // App-saved entries resolve to their canonical
+        // file; a name no file stores falls back to the
+        // slug path (the historical error site).
+        let canonical2 = fop_save_pose_library_in(&dir, &pose, "Styk")
+            .expect("save succeeds");
+        assert_eq!(fop_pose_entry_file_in(&dir, "Styk"), canonical2);
+        assert_eq!(fop_pose_entry_file_in(&dir, "Ghost"), dir.join("ghost.json"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

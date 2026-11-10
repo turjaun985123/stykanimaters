@@ -31,10 +31,17 @@
 //!   (Wave R, R21; the user's "build both" decision).
 //!   It is metadata, not text: it plays no part in
 //!   liveness, and the write paths normalise it through
-//!   [`normalise_speaker`]. No renderer draws it yet
-//!   (the prefix display is a filed IA, not part of
-//!   this field); on disk only WebVTT can represent it
-//!   (see the converter sections).
+//!   [`normalise_speaker`]. The renderers DO draw it:
+//!   [`subtitle_display_lines`] prefixes it onto the
+//!   cue's first display line as `Name: `, and the
+//!   stage, the raster burn-in and the SVG writer all
+//!   draw through that function (the timeline lane and
+//!   the panel's cue rows compose the same prefix), so
+//!   a credited cue is credited identically on every
+//!   surface. The prefix is display composition only —
+//!   stored text never carries it — and on disk only
+//!   WebVTT can represent the speaker itself (see the
+//!   converter sections).
 //! * Frame numbers are NOT clamped to the timeline: a cue
 //!   authored past the last frame simply never shows.
 //!   Extending the timeline later can bring it into view.
