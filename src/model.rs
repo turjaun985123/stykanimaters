@@ -3398,7 +3398,7 @@ mod spray_wave13_tests {
 
 #[cfg(test)]
 mod audio_gain_tests {
-    use crate::model::{AudioClip, FxClipEntry, Project, Stroke};
+    use crate::model::{AudioClip, CameraEase, CameraKey, FxClipEntry, Project, Stroke};
 
     #[test]
     fn audio_clip_json_without_gain_defaults_to_unity() {
@@ -3726,6 +3726,7 @@ mod mcp_roundtrip_wave11_tests {
         ImageAsset, InstanceKey, ParticleEvent, ParticleKind, Pose, Project, SegmentMedia, Shape,
         SprayMark, SpriteInstance, Stroke, TextInstance,
     };
+    use crate::model::{POSE_SCALE_MAX, POSE_SCALE_MIN, evaluate, sanitise_pose_scale};
     use crate::vfx::{ClipKind, ParticleClip, Weather, WeatherKind};
 
     /// A project with a non-default value in every field the

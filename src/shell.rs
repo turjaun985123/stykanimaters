@@ -1767,8 +1767,7 @@ mod tests {
         // same-named subfolders, prefs in config,
         // history/state in state.
         let root = temp_dir("appdirs");
-        let app = rune::dirs::AppDirs::rooted(root.clone(), APP_ID)
-            .expect("a rooted AppDirs always resolves");
+        let app = rune::dirs::AppDirs::rooted(root.clone(), APP_ID);
         let dirs = StoreDirs::from_app_dirs(&app);
         let data = root.join("data").join(APP_ID);
         assert_eq!(dirs.data_root(), data.as_path());
@@ -1841,8 +1840,7 @@ mod tests {
     fn migration_fixture() -> (PathBuf, PathBuf, StoreDirs) {
         let cwd = temp_dir("migration-cwd");
         let root = temp_dir("migration-root");
-        let app = rune::dirs::AppDirs::rooted(root.clone(), APP_ID)
-            .expect("a rooted AppDirs always resolves");
+        let app = rune::dirs::AppDirs::rooted(root.clone(), APP_ID);
         let dirs = StoreDirs::from_app_dirs(&app);
         // Legacy stores: two project files, a project
         // subfolder, the three shell-owned files, and a

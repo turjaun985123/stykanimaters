@@ -13153,8 +13153,10 @@ mod tests {
         core.selected_figure = 1;
         let mut one_fig = core.project.clone();
         one_fig.figures.pop();
-        core.redo
-            .push(serde_json::to_string(&one_fig).unwrap());
+        core.redo.push(HistoryEntry {
+            label: "redo clamp".to_string(),
+            project: serde_json::to_string(&one_fig).unwrap(),
+        });
         core.redo();
         assert_eq!(core.project.figures.len(), 1);
         assert_eq!(

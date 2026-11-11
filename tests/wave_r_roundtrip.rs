@@ -74,7 +74,7 @@ use stykanimate_rs::model::{
     ClipDef, ClipLoop, FigureDef, Project, SegmentMedia,
 };
 use stykanimate_rs::projects;
-use stykanimate_rs::subtitles::{SubtitleCue, SubtitlePosition, SubtitleStyle};
+use stykanimate_rs::subtitles::{SubtitleCue, SubtitleFont, SubtitlePosition, SubtitleStyle};
 
 /// Per-process, per-test scratch directory under the OS temp
 /// dir (P22's idiom, wave-r tag).
@@ -380,6 +380,7 @@ fn subtitle_surface_round_trips_at_the_wave_r_baseline() {
                 font_scale: 0.75,
                 text_color: 0xFFD94D,
                 box_color: 0x201008,
+                font: SubtitleFont::Shaped,
             },
         ),
         (
@@ -389,6 +390,7 @@ fn subtitle_surface_round_trips_at_the_wave_r_baseline() {
                 font_scale: 2.5,
                 text_color: 0x7BE495,
                 box_color: 0x000000,
+                font: SubtitleFont::Shaped,
             },
         ),
     ];
@@ -509,6 +511,7 @@ fn state_the_write_paths_refuse_still_loads_verbatim() {
         font_scale: 4.0,
         text_color: 0xFFFFFF,
         box_color: 0x000000,
+        font: SubtitleFont::Shaped,
     };
     let stored_cues = p.subtitles.clone();
     let stored_style = p.subtitle_style;
@@ -563,6 +566,7 @@ fn legacy_project_without_subtitle_fields_loads_defaults_and_resaves_stably() {
         font_scale: 2.0,
         text_color: 0xFFD94D,
         box_color: 0x102040,
+        font: SubtitleFont::Shaped,
     };
 
     let mut doc: Value =

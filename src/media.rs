@@ -4445,8 +4445,8 @@ mod tests {
             color: 0xFFFFFF,
             keys: vec![key(0.0, 0.25), key(10.0, 0.75)],
         });
-        let alpha_at = |frame_f: f32| {
-            media_items(&project, frame_f)
+        let alpha_at = |project: &Project, frame_f: f32| {
+            media_items(project, frame_f)
                 .iter()
                 .rev()
                 .find_map(|i| match i {
@@ -4455,19 +4455,19 @@ mod tests {
                 })
                 .expect("a text instance item")
         };
-        assert_eq!(alpha_at(0.0), 0.25, "the stored key opacity, verbatim");
-        assert_eq!(alpha_at(10.0), 0.75);
+        assert_eq!(alpha_at(&project, 0.0), 0.25, "the stored key opacity, verbatim");
+        assert_eq!(alpha_at(&project, 10.0), 0.75);
         assert!(
-            (alpha_at(5.0) - 0.5).abs() < 1e-6,
+            (alpha_at(&project, 5.0) - 0.5).abs() < 1e-6,
             "opacity interpolates like the sprite pass reads it: {}",
-            alpha_at(5.0)
+            alpha_at(&project, 5.0)
         );
         // A stored opacity outside 0..=1 (a hand-edited or
         // imported file) clamps, exactly as the sprite pass
         // clamps its items.
         let mine = project.texts.len() - 1;
         project.texts[mine].keys[0].opacity = 1.4;
-        assert_eq!(alpha_at(0.0), 1.0, "clamped to the blendable range");
+        assert_eq!(alpha_at(&project, 0.0), 1.0, "clamped to the blendable range");
     }
 
     #[test]

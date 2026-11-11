@@ -6038,10 +6038,11 @@ mod mux_tests {
 #[cfg(test)]
 mod range_mux_tests {
     use super::{
-        clip_window, decode_window_args, export_mp4_range, export_webm_range,
-        export_webm_range_scaled, parse_ffprobe_duration, probe_duration_secs, range_direct_args,
-        range_direct_args_webm, range_mux_plan, range_plan_outcome, range_window, trim_wav,
-        ClipWindow, RangeMuxPlan, RangeSegment,
+        clip_window, decode_window_args, expanded_frames, export_mp4_range, export_webm_range,
+        export_webm_range_scaled, ffmpeg_framerate, parse_ffprobe_duration,
+        probe_duration_secs, range_direct_args, range_direct_args_webm, range_mux_plan,
+        range_plan_outcome, range_window, sample_times, sample_times_range, trim_wav, ClipWindow,
+        RangeMuxPlan, RangeSegment,
     };
     use crate::model::{AudioClip, Project};
     use std::path::Path;
@@ -9146,7 +9147,7 @@ mod tests {
         let alpha_default =
             render_frame_at_alpha_ss(&project, 0.0, DEFAULT_SUPERSAMPLE).unwrap();
         assert_eq!(legacy_alpha.as_raw(), alpha_default.as_raw());
-        let legacy_alpha_scaled = render_frame_at_alpha_scaled(&project, 0, 1.5).unwrap();
+        let legacy_alpha_scaled = render_frame_at_alpha_scaled(&project, 0.0, 1.5).unwrap();
         let alpha_scaled_default =
             render_frame_at_alpha_scaled_ss(&project, 0.0, 1.5, DEFAULT_SUPERSAMPLE).unwrap();
         assert_eq!(legacy_alpha_scaled.as_raw(), alpha_scaled_default.as_raw());
@@ -11880,9 +11881,12 @@ mod range_export_tests {
         export_webm_range_scaled, export_webm_range_scaled_with_progress,
         export_webm_range_with_progress, export_webm_scaled, export_webm_scaled_with_progress,
         export_webm_scaled_with_encode_progress, export_webm_with_progress,
-        parse_ffmpeg_progress_frame, render_frame, sampled_frame_total, bundle_member_totals,
-        BundleKind, BundleProgress, BundleProgressEvent, EncodeProgressEvent,
-        Mp4ExportOutcome, RenderProgressEvent,
+        export_sheet_range_pack, export_sheet_scaled_pack, export_spritesheet_pack,
+        parse_ffmpeg_progress_frame, read_spritesheet_sidecar, render_frame,
+        render_frame_scaled, sampled_frame_total, slice_sheet_grid, slice_sheet_with_meta,
+        slice_spritesheet, spritesheet_sidecar_path, bundle_member_totals, BundleKind,
+        BundleProgress, BundleProgressEvent, EncodeProgressEvent, Mp4ExportOutcome,
+        RenderProgressEvent, SPRITESHEET_FORMAT, SPRITESHEET_FORMAT_VERSION,
     };
     use crate::model::{AudioClip, Project};
     use image::AnimationDecoder as _;
