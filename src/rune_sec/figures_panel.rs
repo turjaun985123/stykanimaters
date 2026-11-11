@@ -771,6 +771,7 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
     let root = row()
         .key(format!("fig-row-{fi}"))
         .w_full()
+        .min_w(0.0)
         .gap(6.0)
         .px(8.0)
         .py(4.0)
@@ -796,6 +797,7 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
         .child(
             col()
                 .grow(1.0)
+                .min_w(0.0)
                 .gap(2.0)
                 .child(
                     // Line 1: dot + name, the opacity
@@ -807,6 +809,7 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                     // 98 pt, ≈82 of it name text.
                     row()
                         .w_full()
+                        .min_w(0.0)
                         .gap(6.0)
                         .center_y()
                         .child(
@@ -835,6 +838,7 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                                 .gap(6.0)
                                 .center_y()
                                 .grow(1.0)
+                                .min_w(0.0)
                                 .min_h(26.0)
                                 .radius(design::ROW_RADIUS)
                                 .hover(t.hover)
@@ -848,6 +852,7 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                                     text(r.name.clone())
                                         .font(type_::LABEL)
                                         .truncate()
+                                        .min_w(0.0)
                                         .color(if r.hidden { t.text_secondary } else { t.text }),
                                 ),
                         )
@@ -893,6 +898,8 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                     // line totals 214 pt, 4 over budget.
                     row()
                         .w_full()
+                        .min_w(0.0)
+                        .flex_wrap() // wraps below the 207 pt budget
                         .gap(LINE2_GAP)
                         .center_y()
                         .child(el().grow(1.0))

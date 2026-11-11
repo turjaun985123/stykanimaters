@@ -1667,7 +1667,7 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
     let targets = pose_targets(core);
     if !targets.is_empty() {
         body = body.child(design::section_label("Copy pose to", t));
-        let mut trow = row().gap(4.0);
+        let mut trow = row().key("pose-copy-to-row").gap(4.0);
         for j in targets {
             let enabled = has_pose && pose_exists(core, j);
             let key = format!("pose-copy-to-{}", j + 1);

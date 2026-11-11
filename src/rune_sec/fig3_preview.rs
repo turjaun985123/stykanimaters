@@ -88,7 +88,12 @@ pub struct PreviewPrim {
 /// The 3D panel preview's nominal width in points; the actual
 /// size is passed per call, this is the size the calibration
 /// test (and the panel's layout) is written against.
-pub const PREVIEW_W: f32 = 308.0;
+/// 296 pt: the Build3D column is 320 pt wide with 12 pt panel
+/// padding each side, so the preview must not exceed the 296 pt
+/// content width (headless overflow scan, H1). The shape has no
+/// view_box, so it paints 1:1 — the constant, not the element,
+/// is what keeps it inside the card.
+pub const PREVIEW_W: f32 = 296.0;
 /// The 3D panel preview's nominal height in points.
 pub const PREVIEW_H: f32 = 220.0;
 

@@ -5075,7 +5075,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
     // the overwrite note says so BEFORE the press —
     // the guard itself still stops the first press.
     let preset = delivery_preset();
-    let mut preset_row = row().key("xc-preset-row").gap(8.0).center_y();
+    let mut preset_row = row().key("xc-preset-row").w_full().min_w(0.0).flex_wrap().gap(8.0).center_y();
     for p in [
         DeliveryPreset::Master,
         DeliveryPreset::Youtube1080,

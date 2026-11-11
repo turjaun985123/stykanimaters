@@ -601,9 +601,10 @@ Exemptions (closed list -- anything else is a hit):
   vertical clause still applies inside it (see above).
   This is also the scan-time form of the general
   exemption "subtree rooted at an element whose
-  builder sets scroll_x": at scan time the timeline is
-  the only such subtree; a new one must be added here
-  by key with a reason.
+  builder sets scroll_x": at scan time the timeline
+  and the pose copy-to strip are the only such
+  subtrees; a new one must be added here by key with
+  a reason.
 - Zero-size elements (w = 0 or h = 0: collapsed canvases,
   spacers).
 - Vertical overflow in the side columns is never
@@ -637,7 +638,12 @@ CARD_ALIAS_KEYS = {"settings-toggle", "settings-card"}
 
 # Horizontal-scroll subtrees, by path segment (key). Closed
 # list; see module docstring.
-SCROLL_SEGMENTS = {"timeline"}
+# "pose-copy-to-row": the pose-tools "Copy pose to" strip
+# (pose_tools.rs) is a working horizontal scroll by
+# construction (.scroll_x().w_full()), like the timeline:
+# its figure buttons legitimately extend past the card in
+# the 12-figure long-project fixture (headless H1).
+SCROLL_SEGMENTS = {"timeline", "pose-copy-to-row"}
 
 # The Wave Q scan set (see module docstring): the named
 # proof set for the Wave P surfaces. Each entry is

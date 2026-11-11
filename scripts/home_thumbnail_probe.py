@@ -184,19 +184,26 @@ Pair gate -- content fidelity across scenes (Wave V, V7;
   count) cannot see it either. But the constructions fix
   the geometry too: all four projects share the demo
   stage (960x720) and the same 56 pt slot, so the four
-  bands must AGREE -- origin within the strip, width,
-  height. Measured on the real sets (runs 42778622657
-  and 42774207670, identical numbers): every band is
-  112 px wide at origin (0, 78); heights are 83, 84, 83,
-  83 -- a max spread of 1 px, the half-point row's extra
-  strip pixel landing in the band's height. The leg
-  therefore requires every component's spread <=
-  BAND_GEOM_TOL = 1 (the measured variance; the same
-  1 px phase quantum the coverage distance absorbs).
-  The failure signals it guards are far larger: a 1 pt
-  placement slip is 2 px at this scale, and an
-  aspect/scale error in the thumbnail render moves the
-  band height by tens of px.
+  bands must AGREE -- origin-x within the strip, band
+  centre against strip centre, width, height. Measured
+  on the real sets (runs 42778622657 and 42774207670,
+  identical numbers): every band is 112 px wide at
+  origin (0, 78); heights are 83, 84, 83, 83 -- a max
+  spread of 1 px, the half-point row's extra strip pixel
+  landing in the band's height. The leg therefore
+  requires every component's spread <= BAND_GEOM_TOL = 1
+  (the measured variance; the same 1 px phase quantum
+  the coverage distance absorbs). Origin-y is measured
+  centre-relative, not absolute: the thumbnail is
+  vertically centred in its list row, whose height
+  varies with the wrapped metadata line, so a shorter
+  row moves the absolute origin without moving the
+  thumbnail in its slot (run 43009310117: row 2 is 15 pt
+  shorter, its band origin 15 px higher, centres
+  identical). The failure signals it guards are far
+  larger: a 1 pt placement slip is 2 px at this scale,
+  and an aspect/scale error in the thumbnail render
+  moves the band height by tens of px.
 
 Usage:
     python3 scripts/home_thumbnail_probe.py \
@@ -257,15 +264,16 @@ CONTROL_BG_CEIL = 0.06
 # is ~1/4 of the weakest different-content signal.
 INK_UNMATCHED_FLOOR = 12
 # Pair gate, second leg (Wave Y, Y10): the four thumbnails'
-# band geometry (origin within the strip, width, height)
-# must agree to within this many capture pixels. Measured
-# on the real sets (runs 42778622657, 42774207670; identical
-# numbers): origin spread 0, width spread 0, height spread
-# 1 -- the half-point row's extra strip pixel lands in the
-# band's height. Tolerance 1 is that measured variance, the
-# same 1 px phase quantum the coverage distance absorbs;
-# a 1 pt placement slip is 2 px at this scale and an
-# aspect/scale error moves the height by tens of px.
+# band geometry (origin-x within the strip, band centre
+# against strip centre, width, height) must agree to within
+# this many capture pixels. Measured on the real sets (runs
+# 42778622657, 42774207670; identical numbers): origin-x
+# spread 0, width spread 0, height spread 1 -- the
+# half-point row's extra strip pixel lands in the band's
+# height. Tolerance 1 is that measured variance, the same
+# 1 px phase quantum the coverage distance absorbs; a 1 pt
+# placement slip is 2 px at this scale and an aspect/scale
+# error moves the height by tens of px.
 BAND_GEOM_TOL = 1
 ROW_KEYS = ("home-row-0", "home-row-1", "home-row-2")
 MISSING_ROW_KEYS = ("home-row-0",)
@@ -645,14 +653,31 @@ def analyse_pair(pop_bytes, pop_tree, miss_bytes, miss_tree):
         # but moves its band. Transcript first; the FAIL is
         # applied after the ink legs so both legs always
         # report.
+        # The origin-y component is measured CENTRE-relative,
+        # not absolute: the thumbnail is vertically centred
+        # in its list row (design::list_row .center_y()), and
+        # the row height varies with the wrapped metadata
+        # line, so a shorter row moves the band's absolute
+        # origin without moving the thumbnail in its slot
+        # (run 43009310117: row 2 is 15 pt shorter, its band
+        # origin 15 px higher, centres identical). A shifted,
+        # cropped or mis-scaled thumbnail moves the band
+        # centre relative to its strip centre; a row-height
+        # change does not.
         geom = [(b[0], b[1], b[2] - b[0], b[3] - b[1]) for b in bands]
-        spreads = [max(g[i] for g in geom) - min(g[i] for g in geom)
-                   for i in range(4)]
+        strip_hs = [s[1] for s in pop] + [miss[1]]
+        centre_off = [(b[1] + b[3]) / 2.0 - sh / 2.0
+                      for b, sh in zip(bands, strip_hs)]
+        spreads = [max(g[0] for g in geom) - min(g[0] for g in geom),
+                   max(centre_off) - min(centre_off),
+                   max(g[2] for g in geom) - min(g[2] for g in geom),
+                   max(g[3] for g in geom) - min(g[3] for g in geom)]
         lines.append(
             "thumbnail band geometry: "
             + ", ".join(f"origin ({g[0]},{g[1]}) size {g[2]}x{g[3]}"
                         for g in geom)
-            + f" — spreads origin {spreads[0]}/{spreads[1]}, size "
+            + f" — spreads origin-x {spreads[0]}, centre-y "
+              f"{spreads[1]:.1f}, size "
               f"{spreads[2]}/{spreads[3]} (tolerance {BAND_GEOM_TOL})")
         geom_fail = any(s > BAND_GEOM_TOL for s in spreads)
         pop_masks, miss_mask = masks[:3], masks[3]
@@ -706,8 +731,10 @@ def analyse_pair(pop_bytes, pop_tree, miss_bytes, miss_tree):
                      "seeded projects share one stage size and one "
                      "slot, so a thumbnail rendered at the wrong "
                      "scale, cropped or shifted within its slot is "
-                     "the remaining explanation; the band-relative "
-                     "ink legs cannot see it"])
+                     "the remaining explanation; row height is "
+                     "already ruled out (the vertical leg is "
+                     "centre-relative); the band-relative ink legs "
+                     "cannot see it"])
         elif geom_fail:
             lines.append("FAIL  the four thumbnail bands also disagree "
                          "in geometry (a spread above exceeds the "
@@ -966,6 +993,50 @@ def self_test():
     assert verdict == "UNPROVEN" and code == 2, lines
     print("self-test PASS: near-bg singleton strip (no exact stage-bg) "
           "-> UNPROVEN")
+
+    # Rows of different heights with centred thumbnails
+    # (run 43009310117: row 2 is 15 pt shorter, its band
+    # origin 15 px higher, centres identical). The old
+    # absolute origin-y leg FAILs this fixture (origin
+    # spread 8); the centre-relative leg must PASS it.
+    # The painter centres the 42 pt thumb in each row, as
+    # the product does (design::list_row .center_y()).
+    def centred_painter(row_rects, kinds):
+        def paint(x, y):
+            for k, kind in kinds.items():
+                r = row_rects[k]
+                rx, ry = r[0], r[1]
+                rh = r[3]
+                ty = ry + (rh - 42) // 2
+                if not (rx + 8 <= x < rx + 8 + 56
+                        and ty <= y < ty + 42):
+                    continue
+                if kind == "B":
+                    if rx + 36 <= x < rx + 52 \
+                            and ty + 8 <= y < ty + 32:
+                        return (255, 93, 93, 255)
+                if abs((x - (rx + 8)) - (y - ty)) < 2:
+                    return (232, 232, 236, 255)
+                return STAGE_BG + (255,)
+            return CARD
+        return paint
+
+    short_rects = dict(rects)
+    short_rects["home-row-2"] = [16, 192, 300, 65]
+    short_elements = [{"path": "#0", "key": None, "rect": [0, 0, W, H]}]
+    for k, r in short_rects.items():
+        short_elements.append({"path": f"#0/panel/{k}", "key": k, "rect": r})
+    short_tree = {"elements": short_elements}
+    short_pop = encode_png(W, H, centred_painter(
+        short_rects, {"home-row-0": "B", "home-row-1": "B",
+                      "home-row-2": "A"}))
+    short_miss = encode_png(W, H, centred_painter(
+        miss_rects, {"home-row-0": "A"}))
+    verdict, code, lines = analyse_pair(
+        short_pop, short_tree, short_miss, miss_tree)
+    assert verdict == "PASS" and code == 0, lines
+    print("self-test PASS: different-height rows, centred thumbnails "
+          "(absolute origin spread 8, centres agree) -> PASS")
     return 0
 
 

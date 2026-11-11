@@ -2379,16 +2379,29 @@ fn template_section(s: &State, t: &Theme) -> El {
             t,
         ));
     for (idx, tpl) in templates::TEMPLATES.iter().enumerate() {
-        let label = format!("{} — {}", tpl.name, tpl.blurb);
         let key = format!("home-tpl-{}", tpl.id);
         if s.confirm_action == Some(ConfirmAction::NewFromTemplate(idx)) {
             section = section.child(danger_btn(&key, "Discard changes?", t, move |s: &mut State| {
                 template_pressed(s, idx);
             }));
         } else {
-            section = section.child(btn(&key, &label, false, t, move |s: &mut State| {
-                template_pressed(s, idx);
-            }));
+            // Name-only button: the old "name — blurb" label
+            // (71–85 chars) painted past the card edge. The
+            // blurb is a wrapped line under the button.
+            section = section.child(
+                col()
+                    .gap(2.0)
+                    .child(btn(&key, &tpl.name, false, t, move |s: &mut State| {
+                        template_pressed(s, idx);
+                    }))
+                    .child(
+                        text(tpl.blurb.clone())
+                            .font(type_::LABEL)
+                            .color(t.text_secondary)
+                            .wrap()
+                            .w_full(),
+                    ),
+            );
         }
     }
     section = section.child(design::section_label(
@@ -2396,16 +2409,28 @@ fn template_section(s: &State, t: &Theme) -> El {
         t,
     ));
     for (idx, smp) in samples::SAMPLES.iter().enumerate() {
-        let label = format!("{} — {}", smp.name, smp.blurb);
         let key = format!("home-sample-{}", smp.id);
         if s.confirm_action == Some(ConfirmAction::OpenSample(idx)) {
             section = section.child(danger_btn(&key, "Discard changes?", t, move |s: &mut State| {
                 sample_pressed(s, idx);
             }));
         } else {
-            section = section.child(btn(&key, &label, false, t, move |s: &mut State| {
-                sample_pressed(s, idx);
-            }));
+            // Name-only button (see the template loop above):
+            // the "name — blurb" label painted past the card.
+            section = section.child(
+                col()
+                    .gap(2.0)
+                    .child(btn(&key, &smp.name, false, t, move |s: &mut State| {
+                        sample_pressed(s, idx);
+                    }))
+                    .child(
+                        text(smp.blurb.clone())
+                            .font(type_::LABEL)
+                            .color(t.text_secondary)
+                            .wrap()
+                            .w_full(),
+                    ),
+            );
         }
     }
     section

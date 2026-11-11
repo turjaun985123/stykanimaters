@@ -3569,6 +3569,9 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
     };
     let interp_row = row()
         .key("graph-interp")
+        .w_full()
+        .min_w(0.0)
+        .flex_wrap()
         .gap(4.0)
         .center_y()
         .child(design::section_label(&interp_label, t))
@@ -3650,9 +3653,12 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
     // selection could name on it.
     let tangent_modes = row()
         .key("graph-tangent-modes")
+        .w_full()
+        .min_w(0.0)
+        .flex_wrap()
         .gap(4.0)
         .center_y()
-        .child(design::section_label("Tangent mode · selected keys", t))
+        .child(design::section_label("Tangent mode", t))
         .child(btn("graph-tmode-auto", "Auto", false, t, |s: &mut State| {
             apply_tangent_mode_to_selected(
                 &mut s.core,

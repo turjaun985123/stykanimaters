@@ -2530,6 +2530,8 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
         panel = panel.child(
             row()
                 .w_full()
+                .min_w(0.0)
+                .flex_wrap()
                 .center_y()
                 .gap(8.0)
                 .child(

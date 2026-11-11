@@ -1570,6 +1570,9 @@ fn timing_block(s: &State, t: &Theme) -> El {
         )
         .child(
             row()
+                .w_full()
+                .min_w(0.0)
+                .flex_wrap()
                 .gap(6.0)
                 .center_y()
                 .child(

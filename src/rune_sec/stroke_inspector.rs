@@ -1875,6 +1875,9 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
     panel = panel.child(
         row()
             .key("stroke-bulk-frame-row")
+            .w_full()
+            .min_w(0.0)
+            .flex_wrap()
             .gap(8.0)
             .center_y()
             .child(

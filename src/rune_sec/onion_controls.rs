@@ -517,6 +517,9 @@ fn figure_tint_row(side_label: &str, next_side: bool, s: &State, live: bool, t: 
         ("onion-past-tint-auto", "onion-past-tint")
     };
     let mut r = row()
+        .w_full()
+        .min_w(0.0)
+        .flex_wrap()
         .gap(5.0)
         .center_y()
         .child(

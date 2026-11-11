@@ -282,7 +282,7 @@ fn picker_cell(e: Easing, samples: &[f32], active: bool, t: &Theme) -> El {
 /// The project curve picker strip: the four picker cells
 /// in a row, the active cell following the project easing.
 fn picker_strip(core: &EditorCore, t: &Theme) -> El {
-    let mut strip = row().key("ease-picker").gap(6.0);
+    let mut strip = row().key("ease-picker").w_full().min_w(0.0).flex_wrap().gap(6.0);
     for (e, samples) in picker_curves() {
         strip = strip.child(picker_cell(
             e,

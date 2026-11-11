@@ -1179,12 +1179,14 @@ pub fn project_section(s: &State, t: &Theme) -> El {
         .child(
             row()
                 .w_full()
+                .min_w(0.0)
                 .gap(8.0)
                 .center_y()
                 .child(
                     el()
                         .key("proj-name-field")
                         .grow(1.0)
+                        .min_w(0.0)
                         .h(32.0)
                         .px(8.0)
                         .radius(6.0)
@@ -1274,6 +1276,8 @@ pub fn project_section(s: &State, t: &Theme) -> El {
     section = section.child(
         row()
             .w_full()
+            .min_w(0.0)
+            .flex_wrap()
             .gap(8.0)
             .center_y()
             .child(if armed == Some(ConfirmAction::NewProject) {

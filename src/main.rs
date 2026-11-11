@@ -2216,6 +2216,15 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                     )
                     .cursor(crate::stage_view::stage_cursor_now(core, stage_size)),
                 )
+                // Roadmap Wave 2 integration (W2-45, IA-W2-45-1):
+                // mount the shaped subtitle element layer over
+                // the canvas. The canvas prim stream skips bands
+                // claimed by the shaped route, so without this
+                // mount a Shaped cue paints nowhere on stage.
+                // Empty (no claimed band) mounts nothing.
+                .children(rune_sec::stage_text::stage_subtitle_layers(
+                    core, stage_size,
+                ))
                 .child(
                     rune_sec::toasts::toasts_view(s, s.toast_now)
                         .pin(None, Some(12.0), Some(12.0), None),

@@ -1361,6 +1361,9 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
     // the YZ plane (fig3d::mirror_pose).
     panel = panel.child(
         row()
+            .w_full()
+            .min_w(0.0)
+            .flex_wrap()
             .gap(6.0)
             .center_y()
             .child(icon_el("cube", 12.0, t.text_secondary))

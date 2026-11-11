@@ -557,13 +557,16 @@ fn rig_row_el(fi: usize, r: &RigRow, t: &Theme) -> El {
     };
     let mut line = design::list_row(&format!("rig-node-{ni}"), r.selected, t)
         .w_full()
+        .min_w(0.0)
         .child(el().w(r.depth as f32 * RIG_INDENT))
         .child(disclosure)
         .child(
             text(r.name.clone())
                 .font(type_::LABEL)
                 .color(t.text)
-                .grow(1.0),
+                .grow(1.0)
+                .truncate()
+                .min_w(0.0),
         );
     for b in [
         badge(r.head, "circle", "Head", t),
@@ -801,6 +804,9 @@ pub fn rig_tree_panel(s: &State, t: &Theme) -> El {
     );
     card.child(
         row()
+            .w_full()
+            .min_w(0.0)
+            .flex_wrap()
             .gap(4.0)
             .child(insert_button(core, t))
             .child(duplicate_button(core, t))

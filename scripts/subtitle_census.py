@@ -1299,13 +1299,21 @@ def dialogue_leg(directory, check, report):
                 continue
             lr, cr = element_rect(lines[i]), element_rect(cue_block)
             if lr is not None and cr is not None:
-                drift = max(abs(a - b) for a, b in zip(lr, cr))
+                # line_rect delegates to cue_rect only for the
+                # line's window along the timeline (x, width);
+                # y is the lanes' stacking offset (the dialogue
+                # lane sits 40 pt below the subtitle lane), so
+                # compare x/w/h and leave y out of the drift.
+                drift = max(abs(a - b) for a, b in
+                            zip((lr[0], lr[2], lr[3]),
+                                (cr[0], cr[2], cr[3])))
                 check(drift <= LANE_RECT_DRIFT_MAX,
                       f"dialogue line {i} sits exactly on its cue "
                       f"block in the {scene} tree",
-                      f"drift={drift:.1f} pt — line_rect delegates "
-                      f"to cue_rect, so the two lanes cannot "
-                      f"disagree about a line's window")
+                      f"drift={drift:.1f} pt over x/w/h — "
+                      f"line_rect delegates to cue_rect for the "
+                      f"line's window; y differs by the lanes' "
+                      f"stacking offset")
             lt = descendant_text(tree, lines[i])
             ct = descendant_text(tree, cue_block)
             check(lt == ct,
@@ -1795,7 +1803,14 @@ def _self_test():
                 {"path": "/root/timeline/dialogue-lane",
                  "key": "dialogue-lane", "rect": [120, 436, 166, 18]},
                 {"path": "/root/timeline/dialogue-lane/dialogue-line-0",
-                 "key": "dialogue-line-0", "rect": list(LANE_BLOCK)},
+                 "key": "dialogue-line-0",
+                 # The dialogue lane stacks 40 pt below the
+                 # subtitle lane (lane 38 + gap 2), so the real
+                 # line rect carries the cue rect's x/w/h at
+                 # y + 40 — the fixture must model the offset,
+                 # not reuse the lane block's rect.
+                 "rect": [LANE_BLOCK[0], LANE_BLOCK[1] + 40,
+                          LANE_BLOCK[2], LANE_BLOCK[3]]},
                 text_el("/root/timeline/dialogue-lane/dialogue-line-0/#0",
                         label),
             ]
