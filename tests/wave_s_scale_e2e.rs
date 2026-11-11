@@ -19,15 +19,15 @@
 //! edge margin is SUBTITLE_EDGE_MARGIN = 16. On a
 //! 400-tall stage, bottom anchor, one line, the shared
 //! centre is 400 − 16 − 24/2 = 372 — 28 units from the
-//! anchored edge — and the glyph face spans the 20-row
-//! house size (R18's 1.0 calibration: face rows
-//! [centre − 8, centre + 11], the half-cell quirk
-//! included). The burn-in layout is that geometry
+//! anchored edge — and the shaped glyph face spans
+//! ~14 rows (real-font cap ink, ~0.7 of the 20-unit
+//! em; the 20-row span was the retired bitmap stamp).
+//! The burn-in layout is that geometry
 //! multiplied by the render scale, and the output frame
 //! is the stage multiplied by the same scale, so at
 //! scale s:
 //!
-//! - face span = 20·s rows (40 at 2.0, 10 at 0.5);
+//! - face span = ~14·s rows (~28 at 2.0, ~7 at 0.5);
 //! - centre sits 28·s units from the anchored edge of
 //!   the scaled frame (56 at 2.0, 14 at 0.5);
 //! - two stacked lines step 24·s centre-to-centre
@@ -196,15 +196,15 @@ fn single_face(img: &Rgb8) -> (u32, u32) {
 fn s11_burn_in_face_doubles_at_scale_2() {
     let project = bare_stage([480.0, 400.0], vec![cue(0, 30, "HELLO")]);
 
-    // The 1.0 baseline, measured here: the 20-row house
-    // size, centre 28 units from the bottom edge.
+    // The 1.0 baseline, measured here: the ~14-row shaped
+    // cap-ink, centre 28 units from the bottom edge.
     let img1 = render_frame_scaled(&project, 0, 1.0).expect("scale 1.0 renders");
     assert_eq!((img1.width(), img1.height()), (480, 400));
     let face1 = single_face(&img1);
     let span1 = face1.1 - face1.0 + 1;
     assert!(
-        (18..=22).contains(&span1),
-        "1.0: face spans {span1} rows, expected the 20-row house size"
+        (12..=16).contains(&span1),
+        "1.0: face spans {span1} rows, expected the ~14-row shaped cap-ink"
     );
     let edge1 = edge_offset(&img1, face1);
     assert!(
@@ -214,8 +214,8 @@ fn s11_burn_in_face_doubles_at_scale_2() {
     );
 
     // At 2.0 the frame doubles and so does the burn-in:
-    // 40 face rows, centre 56 from the edge. A burn-in
-    // still stamping at stage size would span ~20 rows
+    // ~28 face rows, centre 56 from the edge. A burn-in
+    // still stamping at stage size would span ~14 rows
     // sitting ~28 (or ~428, if anchored to the unscaled
     // stage) from the edge — both fail here.
     let img2 = render_frame_scaled(&project, 0, 2.0).expect("scale 2.0 renders");
@@ -223,8 +223,8 @@ fn s11_burn_in_face_doubles_at_scale_2() {
     let face2 = single_face(&img2);
     let span2 = face2.1 - face2.0 + 1;
     assert!(
-        (36..=44).contains(&span2),
-        "2.0: face spans {span2} rows, expected the doubled 40-row house size"
+        (25..=33).contains(&span2),
+        "2.0: face spans {span2} rows, expected the doubled ~28-row shaped cap-ink"
     );
     let ratio = span2 as f32 / span1 as f32;
     assert!(
@@ -255,16 +255,16 @@ fn s11_burn_in_face_halves_at_scale_0_5() {
     let span1 = face1.1 - face1.0 + 1;
     let edge1 = edge_offset(&img1, face1);
 
-    // At 0.5: a 240x200 frame, a 10-row face, centre 14
+    // At 0.5: a 240x200 frame, a ~7-row face, centre 14
     // from the edge. A burn-in ignoring the scale would
-    // span the full 20 rows at the 1.0 offset.
+    // span the full ~14 rows at the 1.0 offset.
     let img = render_frame_scaled(&project, 0, 0.5).expect("scale 0.5 renders");
     assert_eq!((img.width(), img.height()), (240, 200));
     let face = single_face(&img);
     let span = face.1 - face.0 + 1;
     assert!(
-        (8..=13).contains(&span),
-        "0.5: face spans {span} rows, expected the halved 10-row house size"
+        (5..=9).contains(&span),
+        "0.5: face spans {span} rows, expected the halved ~7-row shaped cap-ink"
     );
     let ratio = span as f32 / span1 as f32;
     assert!(
@@ -305,8 +305,8 @@ fn s11_credited_cue_prefix_scales_with_the_line_at_2_0() {
     let span_plain = face_plain.1 - face_plain.0 + 1;
     let span_credited = face_credited.1 - face_credited.0 + 1;
     assert!(
-        (36..=44).contains(&span_credited),
-        "credited 2.0: face spans {span_credited} rows, expected the doubled 40"
+        (25..=33).contains(&span_credited),
+        "credited 2.0: face spans {span_credited} rows, expected the doubled ~28"
     );
     assert!(
         (span_credited as i32 - span_plain as i32).abs() <= 4,
@@ -377,11 +377,11 @@ fn s11_stack_step_doubles_at_scale_2() {
         "1.0: stacked centres are {step1} rows apart, expected the shared 24-row line height"
     );
 
-    // At 2.0 the faces double (40 rows) and the step
+    // At 2.0 the faces double (~28 rows) and the step
     // doubles with them (48): the clusters stay disjoint
-    // (48 > 40) and the first cue still sits nearest the
+    // (48 > 28) and the first cue still sits nearest the
     // edge. An unscaled step would read ~24 and the two
-    // 40-row faces would collide into one cluster.
+    // ~28-row faces would collide into one cluster.
     let img2 = render_frame_scaled(&project, 0, 2.0).expect("scale 2.0 renders");
     let clusters2 = row_clusters(&rows_with_color(&img2, WHITE));
     assert_eq!(
@@ -403,8 +403,8 @@ fn s11_stack_step_doubles_at_scale_2() {
     for (i, cluster) in clusters2.iter().enumerate() {
         let span = cluster.1 - cluster.0 + 1;
         assert!(
-            (36..=44).contains(&span),
-            "2.0: stacked face {i} spans {span} rows, expected the doubled 40"
+            (25..=33).contains(&span),
+            "2.0: stacked face {i} spans {span} rows, expected the doubled ~28"
         );
     }
     // First-stored cue ("I", sparse) still nearest the

@@ -227,10 +227,10 @@ fn top_style() -> SubtitleStyle {
 
 /// Assert one face cluster is the line the helpers
 /// place `from_edge` lines from `style`'s anchor edge:
-/// inside the stamp's documented face extent about the
-/// helper's line centre ([centre − 8, centre + 11] at
-/// the default style, with slack), spanning close to
-/// the full 20-row face, its own centre within a few
+/// inside the line extent about the helper's line centre
+/// ([centre − 10, centre + 13] at the default style,
+/// with slack), spanning close to the shaped cap-ink
+/// (~14 rows at scale 1), its own centre within a few
 /// rows of the span's centre (helper centre + 1.5).
 fn assert_cluster_at_helper_line(
     cluster: (u32, u32),
@@ -243,13 +243,13 @@ fn assert_cluster_at_helper_line(
     let (lo, hi) = cluster;
     assert!(
         lo as f32 >= centre - 10.0 && hi as f32 <= centre + 13.0,
-        "{what}: face rows {lo}..={hi} must sit inside the stamp extent about \
+        "{what}: face rows {lo}..={hi} must sit inside the line extent about \
          the helper centre {centre} (from_edge {from_edge})"
     );
     let span = hi - lo + 1;
     assert!(
-        (16..=20).contains(&span),
-        "{what}: face spans {span} rows, expected the ~20-row house face"
+        (12..=17).contains(&span),
+        "{what}: face spans {span} rows, expected the ~14-row shaped cap-ink"
     );
     let measured = cluster_centre(cluster);
     assert!(

@@ -53,9 +53,10 @@
 //! identical empty authored frames, fps 24.0, default
 //! subtitle style). JPEG is lossy (quality 90), so its
 //! frames are measured with the near-white face
-//! predicate and S11's geometry ranges — span 36..=44
+//! predicate and S11's geometry ranges — span 25..=33
 //! rows and centre offset 50..=62 px from the bottom
-//! edge at 2.0 (house font 20 × 2, centre 28 × 2) —
+//! edge at 2.0 (shaped cap-ink ~0.7 × house font 20 × 2,
+//! centre 28 × 2) —
 //! never byte equality. The only byte-equality claims
 //! are leg 4's, where the 1.0 entries delegate to the
 //! unscaled entry, making both sides the same encoder
@@ -459,14 +460,14 @@ fn u15_scaled_jpeg_sequence_carries_the_speaker_burn_in() {
 
     // Frame index 1 (frame-0002.jpg): one face cluster
     // at the doubled geometry — S11's derivation (span
-    // ~40 rows, centre ~56 px from the bottom edge),
+    // ~28 rows, centre ~56 px from the bottom edge),
     // measured with the near-white predicate because
     // JPEG is lossy; ranges, never byte equality.
     let face2 = single_face(&rows_with_face(&frames[1]), "scaled JPEG frame 2");
     let span2 = face2.1 - face2.0 + 1;
     assert!(
-        (36..=44).contains(&span2),
-        "scaled JPEG: face spans {span2} rows, expected the doubled 40-row house size"
+        (25..=33).contains(&span2),
+        "scaled JPEG: face spans {span2} rows, expected the doubled ~28-row shaped cap-ink"
     );
     let edge2 = edge_offset(&frames[1], face2);
     assert!(
@@ -484,8 +485,8 @@ fn u15_scaled_jpeg_sequence_carries_the_speaker_burn_in() {
     let face1 = single_face(&rows_with_face(&control1), "control JPEG frame 2");
     let span1 = face1.1 - face1.0 + 1;
     assert!(
-        (18..=22).contains(&span1),
-        "control JPEG: face spans {span1} rows, expected the 20-row house size"
+        (12..=16).contains(&span1),
+        "control JPEG: face spans {span1} rows, expected the ~14-row shaped cap-ink"
     );
     let ratio = span2 as f32 / span1 as f32;
     assert!(

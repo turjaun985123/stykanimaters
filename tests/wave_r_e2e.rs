@@ -26,12 +26,12 @@
 //!   geometry (`subtitles::subtitle_font_size` /
 //!   `subtitle_line_height` / `subtitle_line_center_y`)
 //!   exactly as the stage and the SVG writer do — the
-//!   glyph height is the absolute house size at any stage
+//!   glyph height follows the house font size at any stage
 //!   height (the retired sizing took 6% of the stage
 //!   height), and stacked lines step by the shared line
 //!   height. These legs assert that geometry through
 //!   rendered pixels, calibrated to R1's landed shape
-//!   (face span [centre − 8, centre + 11] at scale 1).
+//!   (shaped cap-ink span ~14 rows at scale 1).
 //! - R8 (segment-text alpha): the carrier node's
 //!   `style.opacity` flows through the evaluated media
 //!   stream to the rendered frame — 1.0 paints the full
@@ -534,15 +534,17 @@ fn r1_glyph_height_is_the_house_size_at_any_stage_height() {
     let rows_short = rows_with_color(&render_frame(&short, 0), WHITE);
     let rows_tall = rows_with_color(&render_frame(&tall, 0), WHITE);
 
-    // The face span at scale 1 is [centre - 8, centre + 11]
-    // = 20 rows at either height (centres 372 and 572).
+    // The shaped face span at scale 1 is ~14 rows (real-font
+    // cap ink, ~0.7 of the 20-unit em) at either height
+    // (centres 372 and 572) — the 20-row span was the
+    // retired bitmap stamp's geometry.
     assert!(
-        (18..=22).contains(&rows_short.len()),
-        "400-tall stage: face spans {} rows, expected the 20-row house size",
+        (12..=16).contains(&rows_short.len()),
+        "400-tall stage: face spans {} rows, expected the ~14-row shaped cap-ink",
         rows_short.len()
     );
     assert!(
-        (18..=22).contains(&rows_tall.len()),
+        (12..=16).contains(&rows_tall.len()),
         "600-tall stage: face spans {} rows — the glyph height must not grow with the stage",
         rows_tall.len()
     );
@@ -567,7 +569,7 @@ fn r1_stacked_cues_step_by_the_shared_line_height_first_cue_nearest_the_edge() {
     // scale 1) apart with the FIRST cue closest to the
     // bottom edge — so the lower face cluster is the
     // sparse one. The retired step was 32.4, at which the
-    // two faces (20 rows each) also sit measurably
+    // two faces (~14 rows each) also sit measurably
     // further apart.
     let project = bare_stage(
         [480.0, 400.0],
@@ -600,7 +602,7 @@ fn r1_stacked_cues_step_by_the_shared_line_height_first_cue_nearest_the_edge() {
 #[test]
 fn r1_top_anchor_and_font_scale_follow_the_helpers() {
     // Top anchor: the face hangs from the shared margin
-    // — centre 28 at scale 1, face rows [20, 39].
+    // — centre 28 at scale 1, face rows ~[21, 34].
     let top = bare_stage(
         [480.0, 400.0],
         vec![cue(0, 30, "HELLO")],
@@ -611,8 +613,8 @@ fn r1_top_anchor_and_font_scale_follow_the_helpers() {
     );
     let rows = rows_with_color(&render_frame(&top, 0), WHITE);
     assert!(
-        (18..=22).contains(&rows.len()),
-        "top anchor: face spans {} rows, expected 20",
+        (12..=16).contains(&rows.len()),
+        "top anchor: face spans {} rows, expected ~14",
         rows.len()
     );
     assert!(
@@ -621,7 +623,8 @@ fn r1_top_anchor_and_font_scale_follow_the_helpers() {
     );
 
     // Font scale 2.0 doubles the house size (20 -> 40):
-    // the face spans 40 rows. The retired sizing gave
+    // the shaped face spans ~28 rows (cap ink ~0.7 of
+    // the 40-unit em). The retired sizing gave
     // 400 * 0.06 * 2 = 48.
     let scaled = bare_stage(
         [480.0, 400.0],
@@ -633,8 +636,8 @@ fn r1_top_anchor_and_font_scale_follow_the_helpers() {
     );
     let rows = rows_with_color(&render_frame(&scaled, 0), WHITE);
     assert!(
-        (36..=44).contains(&rows.len()),
-        "scale 2.0: face spans {} rows, expected the doubled 40-row house size",
+        (25..=33).contains(&rows.len()),
+        "scale 2.0: face spans {} rows, expected the doubled ~28-row shaped cap-ink",
         rows.len()
     );
 }

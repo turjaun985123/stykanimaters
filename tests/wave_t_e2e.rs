@@ -23,11 +23,12 @@
 //!
 //! Measurement derivations are S11's, from the shared
 //! helpers in src/subtitles.rs (house font 20, line
-//! height 24, edge margin 16): at scale s the face spans
-//! 20·s rows and its centre sits 28·s units from the
-//! anchored (bottom) edge — at 2.0 a span of 36..=44
+//! height 24, edge margin 16): at scale s the shaped
+//! face spans ~14·s rows (real-font cap ink, ~0.7 of
+//! the em) and its centre sits 28·s units from the
+//! anchored (bottom) edge — at 2.0 a span of 25..=33
 //! rows and an offset of 50..=62; at 0.5 a span of
-//! 8..=13 and an offset of 11..=17. A speaker prefix
+//! 5..=9 and an offset of 11..=17. A speaker prefix
 //! rides the first line, so a credited cue ("NARRATOR:
 //! HELLO", 15 chars, run 59 cells) paints a line ~3.1×
 //! wider than the same text uncredited ("HELLO", 5
@@ -346,13 +347,13 @@ fn t19_gif_at_2_0_frames_carry_the_scaled_burn_in() {
     }
 
     // Frame 1, scaled: one face cluster at the doubled
-    // geometry — span ~40 rows, centre ~56 from the
+    // geometry — span ~28 rows, centre ~56 from the
     // bottom edge (S11's derivation).
     let face2 = single_face(&rows_with_face(&frames[1]), "scaled GIF frame 1");
     let span2 = face2.1 - face2.0 + 1;
     assert!(
-        (36..=44).contains(&span2),
-        "scaled GIF: face spans {span2} rows, expected the doubled 40-row house size"
+        (25..=33).contains(&span2),
+        "scaled GIF: face spans {span2} rows, expected the doubled ~28-row shaped cap-ink"
     );
     let edge2 = edge_offset(&frames[1], face2);
     assert!(
@@ -365,8 +366,8 @@ fn t19_gif_at_2_0_frames_carry_the_scaled_burn_in() {
     let face1 = single_face(&rows_with_face(&control[1]), "control GIF frame 1");
     let span1 = face1.1 - face1.0 + 1;
     assert!(
-        (18..=22).contains(&span1),
-        "control GIF: face spans {span1} rows, expected the 20-row house size"
+        (12..=16).contains(&span1),
+        "control GIF: face spans {span1} rows, expected the ~14-row shaped cap-ink"
     );
     let ratio = span2 as f32 / span1 as f32;
     assert!(
@@ -478,13 +479,13 @@ fn t19_apng_at_0_5_halves_dimensions_and_keeps_the_burn_in() {
     );
 
     // And its face sits at the halved geometry (S11's
-    // 0.5 derivation: span ~10 rows, centre ~14 from the
+    // 0.5 derivation: span ~7 rows, centre ~14 from the
     // bottom edge), measured on the decoded frame.
     let face = single_face(&rows_with_color(&first, WHITE), "APNG first frame");
     let span = face.1 - face.0 + 1;
     assert!(
-        (8..=13).contains(&span),
-        "APNG first frame: face spans {span} rows, expected the halved 10-row house size"
+        (5..=9).contains(&span),
+        "APNG first frame: face spans {span} rows, expected the halved ~7-row shaped cap-ink"
     );
     let edge = edge_offset(&first, face);
     assert!(

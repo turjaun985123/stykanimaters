@@ -297,8 +297,8 @@ fn render_range_scale_2_credited_png_sequence_through_the_registry() {
             );
             let face_rows = rows_with_color(&img, WHITE);
             assert!(
-                (36..=44).contains(&face_rows.len()),
-                "frame {i}: face spans {} rows, expected the 40-row scaled house size",
+                (25..=33).contains(&face_rows.len()),
+                "frame {i}: face spans {} rows, expected the ~28-row shaped cap-ink at the scaled size",
                 face_rows.len()
             );
             // The prefix widens the centred line BOTH
@@ -465,8 +465,8 @@ fn render_range_legacy_from_to_spelling_drives_the_same_scaled_credited_render()
     );
     let face_rows = rows_with_color(&img, WHITE);
     assert!(
-        (36..=44).contains(&face_rows.len()),
-        "frame 3: face spans {} rows, expected the 40-row scaled house size",
+        (25..=33).contains(&face_rows.len()),
+        "frame 3: face spans {} rows, expected the ~28-row shaped cap-ink at the scaled size",
         face_rows.len()
     );
     let _ = std::fs::remove_dir_all(&dir);
