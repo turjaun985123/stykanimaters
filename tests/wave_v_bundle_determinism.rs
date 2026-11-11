@@ -19,8 +19,8 @@
 //!   intact demo figure WITH authored bends, rain
 //!   weather, a credited two-line cue and a media
 //!   sprite — and demands that two identical bundle
-//!   exports agree on EVERY member (16 files: 5 PNG +
-//!   5 JPEG + 5 SVG + the spritesheet), that an
+//!   exports agree on EVERY member (17 files: 5 PNG +
+//!   5 JPEG + 5 SVG + the spritesheet + its slicing sidecar), that an
 //!   intervening DIFFERENT bundle provably differs,
 //!   and that a return to the original project
 //!   reproduces the first bundle byte for byte. Both
@@ -251,7 +251,7 @@ fn read_tree(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
     out
 }
 
-/// The 16 member names a 5-frame `images` bundle of
+/// The 17 member names a 5-frame `images` bundle of
 /// the demo must contain — the non-vacuity shape of
 /// every tree this suite compares.
 fn expected_member_names() -> Vec<String> {
@@ -261,7 +261,8 @@ fn expected_member_names() -> Vec<String> {
         names.push(format!("png/frame-{i:04}.png"));
         names.push(format!("svg/frame-{i:04}.svg"));
     }
-    names.push("spritesheet.png".to_string());
+    names.push("untitled-spritesheet.png".to_string());
+    names.push("untitled-spritesheet.spritesheet.json".to_string());
     names.sort();
     names
 }
@@ -322,7 +323,7 @@ fn png_dims_of(bytes: &[u8]) -> (u32, u32) {
     )
 }
 
-/// A bundle tree must be exactly the expected 16
+/// A bundle tree must be exactly the expected 17
 /// members, and its bent frame's SVG must carry the
 /// credited cue's text — the population is IN the
 /// bundle, not just in the fixture. (S12 pinned the
@@ -333,7 +334,7 @@ fn assert_populated_tree(tree: &[(String, Vec<u8>)], context: &str) {
     assert_eq!(
         names,
         expected_member_names(),
-        "{context}: the bundle's member set is not the expected 16 files"
+        "{context}: the bundle's member set is not the expected 17 files"
     );
     let svg = String::from_utf8_lossy(member(tree, "svg/frame-0003.svg"));
     assert!(
@@ -372,7 +373,7 @@ fn bundle_images_unscaled_aba_is_byte_identical_member_by_member() {
          differing members: {diffs:?}"
     );
     assert!(
-        diffs.iter().any(|n| n == "spritesheet.png"),
+        diffs.iter().any(|n| n == "untitled-spritesheet.png"),
         "deepening the bends changed no spritesheet — the sheet is not \
          tiling the bent frame; differing members: {diffs:?}"
     );
