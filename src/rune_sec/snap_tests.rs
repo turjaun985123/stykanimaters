@@ -2530,6 +2530,20 @@ fn stage_width_pins_the_phase_j_column_split() {
     let orig_prefs = seed_animate_record();
     tap(&mut rt, "ws-animate");
     rt.frame(DT);
+    // Settle the layout spring before pinning the stage
+    // width: `presented()` reads the DRAWN rect, and the
+    // workspace switch glides the side columns from the
+    // widths the runtime started at to Animate 220/240
+    // on the default SETTLE spring (0.3 s, critically
+    // damped) — 2 frames in, from a 260/320 start, the
+    // stage still reads [281.8, 157, 822.6, 372] (round
+    // 20, serial order). 30 frames leaves <0.04 pt of
+    // travel on either column. Same discipline as
+    // `stage_rect_is_identical_with_a_menu_open`
+    // (round 19); pin and tolerance untouched.
+    for _ in 0..30 {
+        rt.frame(DT);
+    }
 
     // Both side columns are presented: their visibility
     // flags are unpersisted shell state and `init`
