@@ -2426,7 +2426,7 @@ fn main() {
 /// panel / palette hint drift guards), not by a press.
 #[cfg(test)]
 mod key_routing_tests {
-    use super::{init, on_key, text_focused, ConfirmAction, State};
+    use super::{init, on_key, on_space_release, text_focused, ConfirmAction, State};
     use crate::rune_sec;
     use rune::{Key, KeyEvent, Mods, Tx};
     use std::path::PathBuf;
