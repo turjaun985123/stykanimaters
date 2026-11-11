@@ -2961,6 +2961,7 @@ dependencies = [
  "serde",
  "serde_json",
  "swash",
+ "zeno",
 ]
 
 [[package]]

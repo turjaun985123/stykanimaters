@@ -724,29 +724,29 @@ SCAN_SET = [
      "selected figure: the states section's state-row form "
      "(clip-state-row-0 + clip-state-clear-0, rules 1-2); the "
      "row form's only carrier tree (Wave Z, IA-Y17-2)"),
-    ("tree-build-workspace.json", "pending",
+    ("tree-build-workspace.json", "required",
      "Build workspace rig tree (W2-28): rig-tree card "
      "subtree = 73 elements, rig-node-0..=10, six "
      "rig-disclose keys, all four badge kinds live "
      "(fact 38); promotes to required once the headless "
      "loops dump it"),
-    ("tree-long-project.json", "pending",
+    ("tree-long-project.json", "required",
      "W2-74 stress fixture tree: 600 frame chips "
      "(frame-1..=frame-600, exactly once each), "
      "subtitle lane present (fact 40); promotes to "
      "required once the headless loops dump it"),
-    ("tree-dialogue-lane.json", "pending",
+    ("tree-dialogue-lane.json", "required",
      "Dialogue lane full form (W2-77): dialogue-lane subtree = 17 "
      "elements, chapter band + line row over [0,3)/[3,6) of a "
      "six-frame timeline (fact 41); the timeline card's vertical "
      "budget (rule 4) gains the lane's 58 pt in this tree; "
      "promotes to required once the headless loops dump it"),
-    ("tree-subtitles-assist.json", "pending",
+    ("tree-subtitles-assist.json", "required",
      "Timing-assistant block in its proposal form (W2-77): "
      "subtitle-assist subtree = 24 elements over one planted "
      "cue in the Audio workspace (fact 42); promotes to "
      "required once the headless loops dump it"),
-    ("tree-sprites-flipped.json", "pending",
+    ("tree-sprites-flipped.json", "required",
      "Bitmap layer under flip + rotated camera (W2-77, "
      "IA-W2-06-4): stage-sprite-layer subtree = 3 elements, "
      "camera list in its one-key form (fact 44); promotes to "
