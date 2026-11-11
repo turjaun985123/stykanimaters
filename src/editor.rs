@@ -11102,7 +11102,6 @@ mod wave14_settings_mcp_tests {
             .find(|k| k.frame == frame)
             .cloned()
             .unwrap_or_else(|| panic!("no camera key at frame {frame}"))
-Noneeasing: crate::model::CameraEase::Linear,
     }
 
     #[test]

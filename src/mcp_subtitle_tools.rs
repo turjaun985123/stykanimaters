@@ -709,7 +709,7 @@ pub fn tools() -> Vec<Tool> {
                 "type": "object",
                 "properties": {
                     "target_cps": { "type": "number", "description": "Target reading speed in characters per second (default 17, clamped to 5-40)" },
-                    "min_seconds": { "type": "number", "description": "Minimum on-screen seconds for any cue (default 1, clamped to 0-3)" }
+                    "min_seconds": { "type": "number", "description": "Minimum on-screen seconds for any cue (default 1, clamped to 0-3)" },
                     "proposal": { "type": "integer", "minimum": 0, "description": "Optional: apply only this proposal index from subtitle_timing_proposals" }
                 },
                 "required": []
