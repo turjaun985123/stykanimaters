@@ -5,11 +5,11 @@
 //! MUTATING MCP tool spends exactly ONE undo step (one
 //! `EditorCore::snapshot` on its path); read-only tools spend
 //! none; refusals spend none. This suite extends the sample to
-//! the ENTIRE surface — all 392 tools, classified by handler
+//! the ENTIRE surface — all 422 tools, classified by handler
 //! behaviour (static call-path trace + handler reads), not by
 //! name:
 //!
-//!   MUTATING (232)   — a leg per tool below: fresh demo core,
+//!   MUTATING (256)   — a leg per tool below: fresh demo core,
 //!                      invoke the handler through
 //!                      `mcp::all_tools()`, assert the result
 //!                      is Ok and the undo depth moves by
@@ -34,8 +34,8 @@
 //!                      It is kept as a named class so a
 //!                      future exception must be declared
 //!                      here, in the open, to exist.
-//!   NON-MUTATING (160) — read-only (53), session/runtime
-//!                      state (47), library/file state (20),
+//!   NON-MUTATING (166) — read-only (58), session/runtime
+//!                      state (47), library/file state (21),
 //!                      project swaps (4, standing exclusion),
 //!                      the undo/redo tools themselves (2) and
 //!                      the live-only shell stubs (34), which
@@ -371,6 +371,39 @@ fn s_rest_displaced(core: &mut EditorCore) {
     must(core, "pose_apply_all_frames", json!({ "figure": 0, "angles": angles }));
 }
 
+fn s_chapter(core: &mut EditorCore) {
+    must(core, "chapter_add", json!({ "start_frame": 0, "end_frame": 4, "title": "Intro" }));
+}
+
+fn s_two_chapters(core: &mut EditorCore) {
+    must(core, "chapter_add", json!({ "start_frame": 0, "end_frame": 2, "title": "Intro" }));
+    must(core, "chapter_add", json!({ "start_frame": 2, "end_frame": 4, "title": "Outro" }));
+}
+
+fn s_beat(core: &mut EditorCore) {
+    must(core, "beat_marker_add", json!({ "frame": 2, "name": "Drop" }));
+}
+
+fn s_guide(core: &mut EditorCore) {
+    must(core, "stored_guide_add", json!({ "axis": "vertical", "position": 320 }));
+}
+
+/// A cue too fast to read: 44 chars in 12 frames (0.5 s @ 24 fps) needs
+/// 63 frames at the default pace, so the Timing assistant proposes an
+/// EXTEND (last cue => unbounded dead air). The plain s_cue ("Hello
+/// census", 6 CPS) yields an empty report and subtitle_timing_apply would
+/// spend 0 — this setup is what makes that leg real.
+fn s_cue_fast(core: &mut EditorCore) {
+    must(core, "subtitle_add", json!({ "start_frame": 0, "end_frame": 12,
+        "text": "The quick brown fox jumps over the lazy dog." }));
+}
+
+/// A real export file for episode_qa_probe to measure (a PNG probes as
+/// "unmeasured" — the tool never errors, and the leg pins Ok + 0 steps).
+fn s_render_png(core: &mut EditorCore) {
+    must(core, "render", json!({ "path": tmp_path("wave_r_census_qa.png"), "format": "png", "frame": 0 }));
+}
+
 // Wave Y (Y6): a layered-set folder fixture on disk —
 // one part that attaches by stem (head) and one that
 // degrades to a sprite (cape).
@@ -563,8 +596,43 @@ fn a_legs() -> Vec<Leg> {
         Leg { name: "figure_centre", group: "core", setup: s_none, args: |_| json!({}) },
         Leg { name: "figure_ground", group: "core", setup: s_none, args: |_| json!({}) },
         Leg { name: "copy_pose_between", group: "core", setup: s_add_figure, args: |_| json!({ "from_figure": 0, "to_figure": 1 }) },
-        Leg { name: "reset_pose", group: "core", setup: s_none, args: |_| json!({}) },
+        Leg { name: "reset_pose", group: "core", setup: s_rest_displaced, args: |_| json!({}) },
         Leg { name: "set_rest_pose", group: "core", setup: s_rest_displaced, args: |_| json!({ "figure": 0 }) },
+        Leg { name: "camera_move_preset", group: "core", setup: s_none, args: |_| json!({ "preset": "push-in", "frames": 2 }) },
+        Leg { name: "insert_breakdown", group: "core", setup: s_none, args: |_| json!({}) },
+        Leg { name: "insert_breakdown_chain", group: "core", setup: s_none, args: |_| json!({}) },
+        Leg { name: "new_project_from_template", group: "core", setup: s_none, args: |_| json!({ "template": "episode-blank" }) },
+        Leg { name: "import_harness_story", group: "core", setup: s_none, args: |_| {
+            let story = json!({
+                "version": 5, "title": "Core", "fps": 30,
+                "characters": [{ "id": "dad" }],
+                "beats": [{
+                    "seconds": 3, "chapter": "Chapter One — Start",
+                    "actors": { "dad": { "action": "idle" } },
+                    "dialogue": [{ "who": "dad", "text": "Hello." }]
+                }]
+            });
+            let bible = json!({
+                "id": "dad", "name": "Dad", "accessory": "cape",
+                "voice": "local-flite-awb",
+                "personality": "quiet, warm, sacrifices without ever naming it",
+                "design": {
+                    "ink": "#232323", "headColor": "#FFFFFF",
+                    "limbColor": "#232323", "outlineColor": "#141414",
+                    "eyeColor": "#1A1A1A", "accent": "#8A5A2B",
+                    "headRadius": 52, "headSquashY": 0.86,
+                    "eyeSpacing": 34, "eyeScale": 0.95,
+                    "limbWidth": 20, "headLineWidth": 9,
+                    "handStyle": "round", "handScale": 1.05,
+                    "legEnd": "footless", "footLength": 56,
+                    "torso": 193, "neck": 28, "shoulderHalf": 65,
+                    "hipHalf": 27, "upperArm": 102, "foreArm": 93,
+                    "legUpper": 104, "legLower": 102
+                }
+            });
+            json!({ "story_json": story.to_string(), "bible_jsons": [bible.to_string()] })
+        } },
+        Leg { name: "apply_ops", group: "core", setup: s_none, args: |_| json!({ "ops": [{ "name": "duplicate_frame" }, { "name": "duplicate_frame" }] }) },
         Leg { name: "pose_apply_all_frames", group: "core", setup: s_none, args: |c| {
             let n = c.project.figures[0].def.nodes.len();
             let mut angles = vec![0.0; n];
@@ -763,6 +831,24 @@ fn a_legs() -> Vec<Leg> {
         Leg { name: "subtitle_set_style", group: "misc", setup: s_none, args: |_| json!({ "position": "top", "font_scale": 1.5, "text_color": 0xFFFFFF, "box_color": 0x000000 }) },
         Leg { name: "subtitle_import_srt", group: "misc", setup: |_| std::fs::write(tmp_path("wave_r_census.srt"), "1\n00:00:00,000 --> 00:00:02,000\nHello census\n").expect("write srt"), args: |_| json!({ "path": tmp_path("wave_r_census.srt") }) },
         Leg { name: "subtitle_import_vtt", group: "misc", setup: |_| std::fs::write(tmp_path("wave_r_census.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nHello census\n").expect("write vtt"), args: |_| json!({ "path": tmp_path("wave_r_census.vtt") }) },
+        Leg { name: "chapter_add", group: "misc", setup: s_none, args: |_| json!({ "start_frame": 0, "end_frame": 4, "title": "Intro" }) },
+        Leg { name: "chapter_rename", group: "misc", setup: s_chapter, args: |_| json!({ "index": 0, "title": "Renamed" }) },
+        Leg { name: "chapter_set_range", group: "misc", setup: s_chapter, args: |_| json!({ "index": 0, "start_frame": 0, "end_frame": 3 }) },
+        Leg { name: "chapter_move", group: "misc", setup: s_two_chapters, args: |_| json!({ "index": 0, "to_index": 1 }) },
+        Leg { name: "chapter_delete", group: "misc", setup: s_chapter, args: |_| json!({ "index": 0 }) },
+        Leg { name: "beat_marker_add", group: "misc", setup: s_none, args: |_| json!({ "frame": 2, "name": "Drop" }) },
+        Leg { name: "beat_marker_rename", group: "misc", setup: s_beat, args: |_| json!({ "index": 0, "name": "Chorus" }) },
+        Leg { name: "beat_marker_set_frame", group: "misc", setup: s_beat, args: |_| json!({ "index": 0, "frame": 4 }) },
+        Leg { name: "beat_marker_delete", group: "misc", setup: s_beat, args: |_| json!({ "index": 0 }) },
+        Leg { name: "stored_guide_add", group: "misc", setup: s_none, args: |_| json!({ "axis": "vertical", "position": 320 }) },
+        Leg { name: "stored_guide_move", group: "misc", setup: s_guide, args: |_| json!({ "index": 0, "position": 400 }) },
+        Leg { name: "stored_guide_delete", group: "misc", setup: s_guide, args: |_| json!({ "index": 0 }) },
+        Leg { name: "title_cards_set_enabled", group: "misc", setup: s_none, args: |_| json!({ "enabled": true }) },
+        Leg { name: "title_cards_set_duration", group: "misc", setup: s_none, args: |_| json!({ "duration_seconds": 4.0 }) },
+        Leg { name: "subtitle_shift_all", group: "misc", setup: s_cue, args: |_| json!({ "ms": 1000 }) },
+        Leg { name: "subtitle_retime", group: "misc", setup: s_cue, args: |_| json!({ "from_fps": 12.0 }) },
+        Leg { name: "subtitle_timing_apply", group: "misc", setup: s_cue_fast, args: |_| json!({}) },
+        Leg { name: "asset_import_sheet", group: "misc", setup: s_png_file, args: |_| json!({ "path": tmp_path("wave_r_census_asset.png") }) },
     ]
 }
 
@@ -1031,6 +1117,11 @@ fn read_legs() -> Vec<Leg> {
         Leg { name: "render_frame_base64", group: "read", setup: s_none, args: |_| json!({}) },
         Leg { name: "subtitle_export_srt", group: "read", setup: s_cue, args: |_| json!({ "path": tmp_path("wave_r_census_out.srt") }) },
         Leg { name: "subtitle_export_vtt", group: "read", setup: s_cue, args: |_| json!({ "path": tmp_path("wave_r_census_out.vtt") }) },
+        Leg { name: "chapter_list", group: "read", setup: s_none, args: |_| json!({}) },
+        Leg { name: "beat_marker_list", group: "read", setup: s_none, args: |_| json!({}) },
+        Leg { name: "stored_guide_list", group: "read", setup: s_none, args: |_| json!({}) },
+        Leg { name: "subtitle_timing_proposals", group: "read", setup: s_cue_fast, args: |_| json!({}) },
+        Leg { name: "episode_qa_probe", group: "read", setup: s_render_png, args: |_| json!({ "path": tmp_path("wave_r_census_qa.png") }) },
     ]
 }
 
@@ -1060,6 +1151,7 @@ fn libfile_legs() -> Vec<Leg> {
         Leg { name: "fx_preset_delete", group: "lib", setup: |c| { s_fx(c); must(c, "fx_preset_save", json!({ "index": 0, "name": "wave-r-census-del" })); }, args: |_| json!({ "name": "wave-r-census-del" }) },
         Leg { name: "fig3_pose_save", group: "lib", setup: s_fig3, args: |_| json!({ "name": "wave-r-census-3d-lib" }) },
         Leg { name: "pose_library_save", group: "lib", setup: s_none, args: |_| json!({ "name": "wave-r-census-lib" }) },
+        Leg { name: "diagnostics_bundle", group: "lib", setup: s_none, args: |_| json!({}) },
     ]
 }
 
@@ -1131,7 +1223,7 @@ fn census_delete_project_file_spends_no_step() {
     must(
         &mut core,
         "delete_project_file",
-        json!({ "path": "projects/wave_r_census_del.styk.json" }),
+        json!({ "path": "wave_r_census_del.styk.json" }),
     );
     assert_eq!(core.undo_depth(), before, "delete_project_file");
 }
@@ -1254,6 +1346,8 @@ const NON_MUTATING: &[(&str, &str)] = &[
     ("audio_clip_info", "read"),
     ("audio_list_clips", "read"),
     ("audio_mixdown", "library/file"),
+    ("beat_marker_list", "read"),
+    ("chapter_list", "read"),
     ("clear_loop_range", "session"),
     ("clip_compatible", "read"),
     ("clip_enter", "session"),
@@ -1267,7 +1361,9 @@ const NON_MUTATING: &[(&str, &str)] = &[
     ("cycle_brush", "session"),
     ("cycle_project_file", "session"),
     ("delete_project_file", "library/file"),
+    ("diagnostics_bundle", "library/file"),
     ("duplicate_project", "library/file"),
+    ("episode_qa_probe", "read"),
     ("export_bundle", "library/file"),
     ("export_file", "library/file"),
     ("fig3_camera_preset", "session"),
@@ -1405,9 +1501,11 @@ const NON_MUTATING: &[(&str, &str)] = &[
     ("sprite_list", "read"),
     ("sprite_sample", "read"),
     ("step_brush_param", "session"),
+    ("stored_guide_list", "read"),
     ("subtitle_export_srt", "read"),
     ("subtitle_export_vtt", "read"),
     ("subtitle_list", "read"),
+    ("subtitle_timing_proposals", "read"),
     ("undo", "history"),
 ];
 
@@ -1441,11 +1539,11 @@ fn census_covers_every_tool_exactly_once() {
 
     assert_eq!(
         mutating.len(),
-        232,
-        "232 mutating tools (legs may repeat a tool with different args)"
+        256,
+        "256 mutating tools (legs may repeat a tool with different args)"
     );
     assert_eq!(exceptions.len(), 0, "the exception class is closed (RM24)");
-    assert_eq!(non_mutating.len(), 160, "160 non-mutating tools");
+    assert_eq!(non_mutating.len(), 166, "166 non-mutating tools");
     assert!(
         mutating.is_disjoint(&exceptions),
         "a tool is both mutating and exception"
