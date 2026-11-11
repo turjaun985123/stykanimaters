@@ -290,7 +290,7 @@ mod tests {
             let cur = core.current;
             let poses = core.project.frames[cur].poses.clone();
             let duration = core.project.frames[cur].duration;
-            core.project.frames.push(crate::model::Frame {
+            core.project.frames.push(stykanimate_rs::model::Frame {
                 poses,
                 duration,
                 easing: None,
