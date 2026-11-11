@@ -13,6 +13,7 @@ pub mod dialogs;
 pub mod diagnostics;
 pub mod draw_ops;
 pub mod editor;
+pub mod episode_qa;
 pub mod export;
 pub mod fig3d;
 pub mod figure_ops;

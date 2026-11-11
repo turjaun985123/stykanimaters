@@ -3829,8 +3829,7 @@ fn tool_new_project_from_template(
     args: &Value,
 ) -> Result<Value, String> {
     let id = req_str(args, "template")?;
-    let project =
-        crate::templates::template_project(id).ok_or_else(|| format!("unknown template '{id}'"))?;
+    let project = crate::templates::template_project(id)?;
     core.snapshot_labeled("New from template");
     let name = project.name.clone();
     core.project = project;

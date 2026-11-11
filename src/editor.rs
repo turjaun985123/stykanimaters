@@ -4383,7 +4383,7 @@ impl EditorCore {
             return None;
         }
         let pose = self.project.poses_at(self.current as f32).get(self.selected_figure)?;
-        Some(pose.root)
+        Some((pose.root[0], pose.root[1]))
     }
 
     /// The push-in / pull-out zoom travel, as a factor: the
@@ -9847,6 +9847,67 @@ impl EditorCore {
     /// validated rate (the window math itself refuses
     /// unusable rates by leaving windows unchanged,
     /// which lands here as the no-change report).
+    /// Apply dialogue-timing fixes (Roadmap Wave 2,
+    /// W2-16): the op under the Subtitles panel's Timing
+    /// assistant Apply / Apply-all and the MCP
+    /// `subtitle_timing_apply` tool — one home for the
+    /// bulk discipline (compute whole, swap whole, one
+    /// snapshot), so the panel and the tool cannot
+    /// drift. The pure engine
+    /// (`crate::subtitle_timing::timing_report`)
+    /// measures every cue at the project's rate under
+    /// `params` — the author's target pace and minimum
+    /// duration, model parameters, NOT a warning
+    /// threshold — and proposes one fix per needy cue;
+    /// `only` applies the single proposal at that index
+    /// of the report, `None` applies them all. Returns
+    /// how many proposals were applied; a report with
+    /// nothing applicable (or an `only` index the
+    /// report no longer holds) reports on the status
+    /// line and spends no undo step. The panel stands
+    /// its selection and edit session down after a
+    /// landed fix — shell state this op never sees.
+    pub fn subtitle_timing_apply(
+        &mut self,
+        params: &crate::subtitle_timing::TimingParams,
+        only: Option<usize>,
+    ) -> usize {
+        let report = crate::subtitle_timing::timing_report(
+            &self.project.subtitles,
+            self.project.fps,
+            params,
+        );
+        let chosen: Vec<crate::subtitle_timing::Proposal> = match only {
+            Some(k) => match report.proposals.get(k) {
+                Some(p) => vec![p.clone()],
+                None => {
+                    self.status =
+                        "Subtitle timing: that suggestion no longer applies.".to_string();
+                    return 0;
+                }
+            },
+            None => report.proposals,
+        };
+        if chosen.is_empty() {
+            self.status = "Subtitle timing: nothing to change.".to_string();
+            return 0;
+        }
+        let applied = chosen.len();
+        let cues =
+            crate::subtitle_timing::apply_proposals(&self.project.subtitles, &chosen);
+        if cues == self.project.subtitles {
+            self.status = "Subtitle timing: nothing to change.".to_string();
+            return 0;
+        }
+        self.snapshot_labeled("Fix subtitle timing");
+        self.project.subtitles = cues;
+        self.status = format!(
+            "Applied {applied} timing suggestion(s); {} subtitle cue(s) now.",
+            self.project.subtitles.len()
+        );
+        applied
+    }
+
     pub fn subtitle_retime(&mut self, from_fps: f32) -> usize {
         let to = self.project.fps;
         if (from_fps - to).abs() < f32::EPSILON {

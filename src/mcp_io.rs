@@ -1375,8 +1375,8 @@ fn tool_asset_import_sheet(core: &mut EditorCore, args: &Value) -> Result<Value,
 
 fn tool_episode_qa_probe(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let path = arg_path(args)?;
-    let params = crate::rune_sec::export_panel::EpisodeQaParams::default();
-    let report = crate::rune_sec::export_panel::probe_episode(
+    let params = crate::episode_qa::EpisodeQaParams::default();
+    let report = crate::episode_qa::probe_episode(
         std::path::Path::new(&path),
         &core.project,
         &params,
@@ -1388,9 +1388,9 @@ fn tool_episode_qa_probe(core: &mut EditorCore, args: &Value) -> Result<Value, S
             json!({
                 "name": c.name,
                 "status": match c.status {
-                    crate::rune_sec::export_panel::EpisodeCheckStatus::Pass => "pass",
-                    crate::rune_sec::export_panel::EpisodeCheckStatus::Fail => "fail",
-                    crate::rune_sec::export_panel::EpisodeCheckStatus::Unmeasured => "unmeasured",
+                    crate::episode_qa::EpisodeCheckStatus::Pass => "pass",
+                    crate::episode_qa::EpisodeCheckStatus::Fail => "fail",
+                    crate::episode_qa::EpisodeCheckStatus::Unmeasured => "unmeasured",
                 },
                 "evidence": c.evidence,
             })

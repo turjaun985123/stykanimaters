@@ -200,9 +200,9 @@ fn sub_opt_usize(args: &Value, key: &str) -> Result<Option<usize>, String> {
 /// the parameters in force.
 fn timing_params_from_args(
     args: &Value,
-) -> Result<stykanimate_rs::subtitle_timing::TimingParams, String> {
-    let d = stykanimate_rs::subtitle_timing::TimingParams::default();
-    Ok(stykanimate_rs::subtitle_timing::TimingParams {
+) -> Result<crate::subtitle_timing::TimingParams, String> {
+    let d = crate::subtitle_timing::TimingParams::default();
+    Ok(crate::subtitle_timing::TimingParams {
         target_cps: sub_opt_f32(args, "target_cps")?.unwrap_or(d.target_cps),
         min_seconds: sub_opt_f32(args, "min_seconds")?.unwrap_or(d.min_seconds),
     }
@@ -216,7 +216,7 @@ fn tool_subtitle_timing_proposals(
     let params = timing_params_from_args(args)?;
     // Read-only: the engine is pure — no snapshot, no
     // status write (the subtitle_list discipline).
-    let report = stykanimate_rs::subtitle_timing::timing_report(
+    let report = crate::subtitle_timing::timing_report(
         core.subtitle_cues(),
         core.project.fps,
         &params,
@@ -230,8 +230,8 @@ fn tool_subtitle_timing_proposals(
                 "proposal": k,
                 "cue_index": p.cue_index,
                 "kind": match p.kind {
-                    stykanimate_rs::subtitle_timing::ProposalKind::Extend => "extend",
-                    stykanimate_rs::subtitle_timing::ProposalKind::Split => "split",
+                    crate::subtitle_timing::ProposalKind::Extend => "extend",
+                    crate::subtitle_timing::ProposalKind::Split => "split",
                 },
                 "shift_following_by": p.shift_following_by,
                 "chars": p.chars,
