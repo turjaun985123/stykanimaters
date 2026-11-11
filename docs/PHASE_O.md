@@ -1281,6 +1281,49 @@ assertable from dumps, P14). Element count vs
 `default`: recorded from the closing dump at
 docs-close.
 
+**Roadmap Wave 2 upkeep (W2-77, closing-frame):**
+the §10 closing-frame update list (DRIFT amend,
+deltas vs the Wave 1 closing frame) as measured
+on the closing dispatch `43021373183` (H2,
+`1cd02ab`): every tree carries the `ws-build`
+chip (+1 keyed element); `build-workspace`
+rig-tree card subtree 73; the three subtitle
+scenes carry the dialogue-lane subtree (+8) and
+the Dialogue toggle (+2), their timeline content
+columns 40 pt taller; `settings-open` +26
+(section label 1 + 3 rows × 8 + example text 1),
+present identically in `settings-open-light`
+(the two trees are element-identical) and in
+`settings-open-error` (same 25 export paths);
+`sprites-populated` +3 (the W2-06 bitmap layer:
+container + 2 sprite elements, canvas-internal
+— the stage is a single image element, so the
+three are not tree paths); `dialogue-lane`
+dialogue-lane subtree 17; `subtitles-assist`
+subtitle-assist subtree 26 against a predicted
+24 (root 1 + title 1 + target row 8 + minimum
+row 8 + one proposal row 4 + Apply-all row 4;
+the prediction's parts sum to 25, and the dump
+carries the subtree root and the "1
+suggestion(s)" count text on top);
+`marquee-selected` identical to `selected`
+(1612 == 1612); `sprites-flipped` camera panel
+net +3 vs sprites-populated (112 → 115);
+`long-project` 600 frame chips (frame-1…frame-600,
+1,200 elements in the chips subtree);
+`audio-open` unchanged by the assist block. Set
+totals: 42 scenes, facts 1..=44, SCAN_SET 24
+entries all required, snap rows 8. The
+whole-tree deltas (+1 every tree, subtitle trees
++10, settings +26, sprites-populated +3) are
+predictions against the Wave 1 closing frame,
+which was never dumped (Wave 1's CI died at
+compile), so they stand here as predictions with
+the absolute closing counts in §6.25, not as
+re-derived deltas. `focus-field` carries 1388
+elements, identical to `default` 1388 (the W2-66
+paragraph's deferred count, now recorded).
+
 ## 11. Honest remainders
 
 Standing user decisions — named, not relitigated:

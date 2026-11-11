@@ -15081,3 +15081,346 @@ rehearsal read ≥4,389; the observed tally is 4,391. IA-AC15-1
 was applied with IA-AC5-1 (both header figures read 697).
 AC19's edit is comment-only; the pin its board line asked for
 already existed (AB4's origin-refusal pin). Wave AC is CLOSED.
+
+### 6.24 Roadmap Wave 1 — the thirty-seat UI/UX completion
+(RM1–RM30)
+
+Ordered 2026-11-10 (the standing continuous order; the
+board was written while Wave AC's CI ran, so this wave
+launched the moment Wave AC closed): thirty seats,
+RM1–RM30, one owner per item, integrator surfaces via
+filed actions (board: `~/workspace/uiux-roadmap/BOARD.md`;
+findings: `~/workspace/uiux-roadmap/findings/`; integration
+record: `~/workspace/uiux-roadmap/INTEGRATION.md`). The
+board's base is the Wave AC closing HEAD `44ff485`.
+
+Integration commit `0fbf0bd` (2026-11-10 21:51 +06):
+"Roadmap Wave 1 integration — 30 seats (RM1–RM30):
+fonts, key selection, zoom, labelled undo, export
+delivery + QA probe, subtitles as citizens, apply_ops".
+The tree was left uncommitted at handoff (84 status
+entries); the parent committed and pushed it, and the
+CI loop that followed is §6.25's story — this wave's
+own CI round never went green, recorded honestly
+below.
+
+Headlines, as integrated: RM2 real font rasterisation
+(`SubtitleStyle.font`, shaped by default — the
+bitmap-stamp era ends here; the Wave 2 loop's glyph
+recalibration measures against this renderer); RM9
+AppDirs (`shell::projects_dir()` /
+`shell::library_dir()`; IA-RM9-3 — headless.yml sets
+`STYKANIMATE_PORTABLE=1`); RM13 zoom keys (nine
+counted keys, not eight — the Follow toggle is keyed
+like every other control); RM17 breakdown insert
+(`insert_breakdown`); RM24 labelled undo (the
+non-undoable census 21 → 0; a changing set takes
+exactly one undo step); RM28 help panel; RM21
+subtitle timing proposals; RM23 export delivery +
+episode QA probe; RM5/RM14 keying; RM20 MCP work;
+RM26, RM29, RM30.
+
+**Gate: 12/12 PASS** (`scripts/phase_j_checks.py`,
+whole tree, uncommitted). Settled counts (Wave 1
+closing, `INTEGRATION.md`): element keys **1092**
+(952 static + 140 dynamic), floor 1092; i18n **788
+× 28** (697 + 85 Group 3 + 6 RM13), 9 Full languages
+by own-table measure, es-419 Full via the chain;
+State **54 fields / 22 literals**; MCP **396**
+tools (45 built-ins + 331 registry + 9 IO + 4
+subtitle IO + 7 subtitle); palette commands **139**,
+all parity-covered; Help rows **81** (17/8/3/13/4/36);
+BINDINGS 45; scenes **35**; SCAN_SET **19/0**;
+icons 163.
+
+**CI honesty.** Wave 1's own CI round 1 FAILED —
+build `42848835582` (E0603: zeno/swash — the lockfile
+carried zeno 0.3.3 transitively but no root entry,
+and the lib called swash's `Format::Alpha`), and
+headless `42848874783` failed at the same build
+step. No transcripts exist for Wave 1; the tests
+never ran to completion. The defects that round
+carried surfaced in the Wave 2 loop (notably rounds
+11–12) and were fixed there. Wave 1's work stands
+proven by the Wave 2 loop's green suite on the
+combined tree — build `43006645533` (round 29) and,
+on the H2 head, build `43018980522` + headless
+`43021373183` (§6.25). This section claims no Wave 1
+green round, because none happened.
+
+Remainders, all named in `INTEGRATION.md`:
+IA-RM15-7 (snap settings surface + indicator);
+IA-RM26-2 (K6 selection-time naming); IA-RM5-4 +
+IA-RM14-2 (record-only status-string filings for a
+future keying pass); RM20 MCP parameter parity —
+not built; IA-RM22-4 (stage bitmap layer, spec not
+exact text), IA-RM22-5 (mode-aware drag HUD),
+IA-RM23-4 (Shorts reframe), IA-RM23-5 (encoder
+quality), IA-RM23-6 (MCP export naming parity +
+guard, direction named, no exact text); IA-RM28-5(c)
+(Help menu shortcut_hint, optional); IA-RM12-2
+(lane-flag persistence — a different seat's IA,
+outside this brief; lane flags remain session-only);
+IA-RM8-1 (branch protection — maintainer action,
+not attempted).
+
+Seven user decisions stood unanswered at Wave 1
+close (RM17 Q1–Q5 whole-figure scale family, RM18
+log-zoom adoption, RM18 pure-insert camera remap,
+RM15 arrow-key rule, RM21 CPS threshold, RM19
+D-RM19-1 Build placement, RM18 guides default
+flip) — none blocked integration; the unbuilt
+pieces stay unbuilt. One has resolved since: RM18
+log-zoom adoption — RULED by the user 2026-11-10
+22:21 +06: keep log-space zoom (geometric
+midpoints); the Wave 2 loop's camera test pins the
+√2 midpoint. §8 standing exclusions untouched, as
+ordered: D-1 accent contrast, D-2
+`tab_visits_controls`, D-3 two-"New" ruling, D-4
+bundle cancel, D-5 chain-spanning media, D-6
+IA-AA9-1 clamp, D-7 panel alpha toggle, D-8 panel
+export-scale control, D-9 subtitle cap/wrap, D-10
+library-states format, D-11 joint-role metadata.
+Class-C export sentences unchanged.
+
+Wave 1 is CLOSED — through §6.25's green, its
+work proven on the combined tree.
+
+### 6.25 Roadmap Wave 2 — the Ultimate Wave (100 seats)
+
+Ordered 2026-11-10 (the standing continuous order,
+re-issued on Wave 1's close): one hundred seats,
+W2-01–W2-100, integrator surfaces via filed
+actions (board: `~/workspace/uiux-roadmap/BOARD2.md`;
+findings: `~/workspace/uiux-roadmap/findings2/`;
+ledger: `~/workspace/uiux-roadmap/findings2/DRIFT.md`;
+integration record:
+`~/workspace/uiux-roadmap/INTEGRATION2.md`). Base
+master `0fbf0bd` + the uncommitted Wave 2 tree.
+
+Integration commit `697ddca` (2026-11-11 02:02 +06):
+"Roadmap Wave 2 (Ultimate Wave) integration: 100
+seats spliced, gate 12/12". Diff: 94 files,
++41,395 / −2,182, plus 35 untracked paths. The
+pre-integration gate had failed exactly 2 known
+checks (7, 10); the spliced tree closed 12/12.
+
+Headlines, as integrated: the touch verdict
+REVERSED for Rune (single-finger touch works;
+multi-touch/pinch upstream-blocked); W2-79
+subtitle census recalibrated; W2-80 five MCP
+finiteness cast-overflow sites; Dept I drafted all
+19 Basic languages to simulated Full (88.5–97.0%),
+none landed — native-review sign-off is a hard
+precondition for every tranche, and es-419 needs no
+draft; W2-58's gap (Build workspace has no Alt+9 /
+`go-build`) closed in the loop as IA-W2-21-4;
+RM9's AppDirs migration, whose aftershocks are
+most of the loop below (portable mode, the library
+resolver, `projects_dir()`); the shaped subtitle
+layer (W2-45), built but unmounted until H1.
+Seven findings files are tail-truncated on disk
+(w2-02, 04, 29, 46, 54, 59, 76); their handoff
+reports + the DRIFT † entries are the surviving
+record.
+
+**Settled counts** (gate-measured at integration;
+re-run by the docs-close on `1cd02ab` — RESULT:
+PASS, all checks green): gate **12/12 PASS**;
+element keys **1,214** (1066 static + 148 dynamic),
+floor 1214; i18n **954 × 28**, sequences identical;
+MCP **422**, floor 422, audit AGREE; State fields
+**63**; scenes **42** / facts **1..=44**; SCAN_SET
+**24** (19 required + 5 pending); Help rows **86**;
+palette commands **143** mapped; snap rows **8**.
+
+Reconciliation vs the DRIFT forecast, per
+`INTEGRATION2.md`: i18n 954 vs the 898/932 ceiling
+is +22 net over ceiling — +10 IA-W2-39-2's
+camera-move keys (omitted from DRIFT §3's
+arithmetic), +5 IA-W2-96-4 (post-DRIFT seat), +7
+round-14 help keys. MCP 422 = 45 built-ins + 352
+registry + 12 IO + 4 subtitle IO + 9 subtitle
+tools; docs/MCP.md's catalogue lists exactly the
+422 surface tools. Palette 143 = 142 + 1
+(`go-build`, IA-W2-21-4). SCAN_SET's 5 pending W2
+trees promoted to required once the headless loops
+dump them — the H2 run did, so the closing set is
+24 entries, all required.
+
+**The loop.** Twenty-nine build rounds from
+`697ddca` to green, then two headless rounds:
+
+- R1 (`697ddca`; build 42891269109; headless
+42891338855): stale Cargo.lock (zeno) + 5 pending
+SCAN_SET trees.
+- R2–R10: splice defects, then compile defects —
+the episode-QA module moved out of the bin crate,
+`design::access_wiring`, `font` literals.
+- R11 (352242e; 42951374144): the first round the
+tests actually ran — lib 2080 passed, 21 failed.
+- R12 (3afbb99; 42954623538): one failure, the
+Bengali conjunct test — the count invariant was
+wrong; shaping did run.
+- R13 (bc3f669; 42956498715): lib green first time
+(2101/0); the bin target ran first time ever,
+2719 passed, 71 failed.
+- R14 (e7b4386; 42966720613): 59 of 71 fixed; died
+at bin-test compile (E0425, `on_space_release`
+import).
+- R15 (498970a; 42967213598): lib 2100/1 — a
+round-14 regression (mcp named-save asserting
+`./projects`).
+- R16 (1ec366d; 42968218312): lib 2101/0, bin
+2778 passed, 12 failed.
+- R17 (8db86ba; 42970972887): bin compile E0433
+(`crate::model` in bin-crate code).
+- R18 (478fafc; 42971616388): bin 2788 passed, 2
+failed.
+- R19 (3b7a0f8; 42973830899): bin 2789 passed, 1
+failed.
+- R20 (e21de53; 42976240419): tests serialised
+(`--test-threads=1`) for the shared-prefs race;
+the menu test passed, the stage-width test
+failed on the same glide.
+- R21 (6208d04; 42978567713): bin GREEN first time
+(2790/0); failed in `focused_e2e_library_rename`
+(0/3, ENOENT).
+- R22 (7e47304; 42981253893): the rename resolver
+reverted to CWD-relative (3/3); failed in
+`wave11_e2e_projects` (0/1, AppDirs vs temp dir).
+- R23 (78fa0f0; 42984209765): portable mode in
+workflow.yml; wave11 + wave13 pass; failed in
+`wave_r_e2e` (12/2, glyph height).
+- R24 (7b68010; 42986342365): face-span pins
+recalibrated to shaped cap-ink (7 files);
+wave_r_e2e 14/14; failed in `wave_r_undo_census`
+(16/3).
+- R25 (db6e243; 42989384847): census 19/19 (30
+tools classified, 392 → 422); failed in
+`wave_s_e2e` (3/1, descender span).
+- R26 (55dff1b; 42992232056): descender fix;
+wave_s_e2e 4/4; failed in `wave_s_scale_e2e`
+(3/1, zero exact-white rows at em 10).
+- R27 (6ed4114; 43001486664): ≥200 near-white at
+em 10; wave_s_scale 4/4, wave_t 4/4,
+wave_t_mcp_render 4/4, wave_u 4/4; failed in
+`wave_v_bundle_determinism` (0/2).
+- R28 (06ad96c; 43003909661): bundle member set
+17 files; wave_v 2/2 + 6/6; failed in
+`wave_v_subtitle_registry_e2e` (1/2, the `font`
+echo).
+- R29 GREEN (3041bad; build 43006645533;
+concluded ~11:05 UTC): the `font` fix (+2 lines);
+**5,188 passed, 0 failed** across 56 test
+binaries (lib 2101/0, second target 9/9, bin
+2790/0; 60 "test result: ok" lines, zero FAILED
+lines). The two never-before-run binaries finally
+ran, both green: `wave_w_figlib_e2e` 2/2,
+`wave_w_progress_e2e` 3/3. First green round of
+the loop. Test count 4,391 (AC close) → 5,188
+(+797).
+- Headless on `3041bad` FAILED (43009310117):
+subtitle census 9, thumbnail probe 1, overflow
+scan 726 hits. The build step itself was clean.
+- H1 (f8cfe79; build 43014571270 GREEN 5188/0;
+headless 43016480475 FAILED): the W2-45 shaped
+subtitle layer mounted (census PASS), thumbnail
+geometry made centre-relative, 12 overflow
+mechanisms wrapped/shrunk (726 → 1 hit);
+headless failed on the last hit (graph header
+readout, +10.0 pt) with the thumbnail probe
+UNPROVEN (home-totals pushed off-snap by H1's
+own +128 pt).
+- H2 (1cd02ab; build 43018980522 GREEN 5188/0;
+headless 43021373183 GREEN): the graph header
+readout truncated; a scripted 200-pt pre-scroll
+of side-left before the home-populated tree dump
++ snap (no product/probe change; tree rects
+shifted exactly 200.00 pt).
+
+**CI close (both workflows green on `1cd02ab`).**
+Build `43018980522` SUCCESS — 5,188 passed, 0
+failed, identical counts to round 29. Headless
+`43021373183` SUCCESS — all six checks PASS,
+verified from the run's own log and
+`verdict.json`, not the workflow conclusion
+alone: SUBTITLE CENSUS PASS, HOME THUMBNAIL
+PROBE PASS, HOME MISSING-AUDIO MARKER PASS,
+HOME SCAN-FALLBACK MARKER PASS, MCP PROBE PASS,
+focus census all checks PASS, OVERFLOW SCAN
+CLEAN (0 hits, scan set complete), aggregate
+VERDICT: PASS. The overflow streak restarts
+here: the first CLEAN scan on the Wave 1+2
+tree (the AC close's 8th consecutive CLEAN was
+broken by the r29 headless run's 726 hits).
+
+**§10 forward check** (DRIFT amend, W2-77 §7;
+measured by the docs-close from the H2 artifact,
+run `43021373183` — 47 tree files: 42 scenes + 5
+variants). Confirmed to the element:
+dialogue-lane subtree **17**; build-workspace
+rig-tree card subtree **73**; marquee-selected
+identical to selected (**1612 == 1612**, delta 0);
+camera panel net **+3** vs sprites-populated
+(112 → 115; parts as measured: empty-state −4,
+easing +2, key row +5 — the prediction said
+−5/+3/+5, net +3 either way); dialogue-lane
+**+8** inside the subtitle trees (8 in
+subtitles-populated, 8 in subtitles-assist);
+long-project **600 frame chips** (frame-1…frame-600,
+1,200 elements in the chips subtree);
+focus-field **1388** elements, identical to
+default 1388 (the W2-66 paragraph's deferred
+count, now recorded). Two reconciliations:
+subtitles-assist measures **26**, not the
+predicted 24 — anatomy root(1) + title(1) +
+target row(8) + minimum row(8) + one proposal
+row(4) + Apply-all row(4) = 26; the prediction's
+own parts sum to 25, and the closing dump
+carries the subtree root and the "1
+suggestion(s)" count text on top (the SCAN_SET
+entry still says 24 — it predates the count
+text); and the bitmap-layer +3 is canvas-internal
+(the stage is a single image element; the
+layer's container + 2 sprites are not tree
+paths), so it is recorded as designed, not
+re-derived. The whole-tree deltas vs the Wave 1
+closing frame (+1 every tree, subtitle trees
++10, settings +26, sprites-populated +3) cannot
+be re-derived: Wave 1's CI died at compile
+before any headless dump, so no Wave 1
+closing-frame artifact exists. The absolute
+closing counts stand in their place: default
+1388, subtitles-populated/speaker/top 1401,
+settings-open 1627, sprites-populated 1448,
+loop-range 1439, selected 1612, clips-populated
+1463, dopesheet-keys 1495, states-populated
+1482, long-project 12017.
+
+**Open items — recorded, not decided.** DRIFT §5's
+20 rulings await the user (D-10 Q1–Q5 library
+figure-states; Han font bundling; SRT speaker
+prefix; live-control token + scopes; W2-14 Q1–Q4
+faces; YouTube metadata home; UI-scale go/no-go;
+W2-60 F1 stage readout; RM17 Q1 whole-figure
+scale; RM18 pure-insert camera remap; RM21 CPS
+threshold; guides default flip; D-RM19-1 Build
+placement) — none blocks integration. The
+`resolve_face` question stands: whether the
+bundled face should win outright over an
+unvetted full-coverage system font for
+Bengali/Arabic/Hebrew. Durable follow-ups:
+make `column_widths()` read a State mirror
+instead of re-reading the prefs file every view
+pass; complete the AppDirs migration for the 2D
+library by moving load + save together with the
+resolver; `stage_sprite_layers` sits in the
+identical unmounted state the subtitle layers
+were in before H1 — a separate item, not
+bundled. Dept I's 19 Basic-language drafts wait
+on native review. The seven truncated findings
+files (w2-02, 04, 29, 46, 54, 59, 76) keep
+their handoff reports as the surviving record.
+
+Wave 2 is CLOSED.
