@@ -9263,7 +9263,7 @@ mod tests {
         // historical flat 2M at EVERY height — that is
         // what "default is byte-identical" means for a
         // ladder whose other levels scale.
-        let historical = |rate: &str| {
+        let historical = |rate: &'static str| {
             vec!["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", rate]
         };
         for h in [72, 480, 720, 1080, 1440, 2160, 4320] {
