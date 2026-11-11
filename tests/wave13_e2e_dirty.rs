@@ -94,7 +94,8 @@
 //! itself would observe from outside the protocol (that
 //! the promised project files exist). The project-rename
 //! session enters a per-test temp directory because the
-//! named-project tools resolve `./projects/` against the
+//! named-project tools resolve against `shell::projects_dir()`,
+//! which under portable mode is `./projects/` against the
 //! process current directory; it is this file's only test
 //! that does so, and it restores the directory on drop.
 

@@ -10,13 +10,14 @@
 //! the promised files exist under the per-test projects
 //! directory, and what bytes were written in them.
 //!
-//! The named-project tools resolve `./projects/` (and the
-//! figure library resolves `./library/`) against the process
-//! current directory, so the session enters a per-test temp
-//! directory before constructing the server and restores the
-//! original directory before the temp tree is removed. This
-//! file deliberately contains one test: the current directory
-//! is process-global, and a single session keeps that safe.
+//! The named-project tools resolve against `shell::projects_dir()`
+//! (and the figure library resolves `./library/`) — under portable
+//! mode that is `./projects/` against the process current directory,
+//! so the session enters a per-test temp directory before
+//! constructing the server and restores the original directory
+//! before the temp tree is removed. This file deliberately contains
+//! one test: the current directory is process-global, and a single
+//! session keeps that safe.
 //!
 //! Steps the entering MCP surface could not perform were
 //! marked `WAVE11-GAP` at the exact point in the session

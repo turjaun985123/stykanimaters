@@ -18,6 +18,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # Roadmap Wave 1 (RM9, IA-RM9-3): since the AppDirs move, the
+  # editor's store lives in the OS config dir unless
+  # STYKANIMATE_PORTABLE is set — the e2e tests seed and assert
+  # the checkout's ./projects store, so the test run is portable,
+  # as the headless probes already are (headless.yml).
+  STYKANIMATE_PORTABLE: "1"
   CARGO_TERM_COLOR: always
   # Incremental compilation makes CI caches big and mostly unreusable.
   CARGO_INCREMENTAL: "0"
