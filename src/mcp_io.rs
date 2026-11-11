@@ -3509,12 +3509,12 @@ mod tests {
 
         // The spritesheet member: same geometry as the
         // opaque sheet, on a transparent sheet.
-        let alpha_sheet = image::open(alpha_dir.join("spritesheet.png"))
+        let alpha_sheet = image::open(alpha_dir.join("untitled-spritesheet.png"))
             .expect("alpha sheet does not decode");
-        let opaque_sheet = image::open(opaque_dir.join("spritesheet.png"))
+        let opaque_sheet = image::open(opaque_dir.join("untitled-spritesheet.png"))
             .expect("opaque sheet does not decode");
         assert_eq!(alpha_sheet.dimensions(), opaque_sheet.dimensions());
-        let (clear, opaque_px) = file_alpha_stats(&alpha_dir.join("spritesheet.png"));
+        let (clear, opaque_px) = file_alpha_stats(&alpha_dir.join("untitled-spritesheet.png"));
         assert!(clear && opaque_px, "the alpha sheet tiles keep coverage alpha");
 
         // The members with no alpha form are byte-identical
@@ -3592,8 +3592,8 @@ mod tests {
         assert_eq!(png_dims_of(&bytes), (240, 180), "scaled alpha PNG size");
         let (clear, _) = file_alpha_stats(&scaled_png);
         assert!(clear, "the scaled alpha PNG keeps its transparent background");
-        let plain_sheet = image::open(plain_dir.join("spritesheet.png")).unwrap();
-        let scaled_sheet = image::open(scaled_dir.join("spritesheet.png")).unwrap();
+        let plain_sheet = image::open(plain_dir.join("untitled-spritesheet.png")).unwrap();
+        let scaled_sheet = image::open(scaled_dir.join("untitled-spritesheet.png")).unwrap();
         assert_eq!(
             scaled_sheet.dimensions(),
             plain_sheet.dimensions(),

@@ -9905,7 +9905,9 @@ mod tests {
         let err = export_mp4_shorts(&zero, &path).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(!path.exists(), "a refused export writes nothing");
-        let sliver = stage_project(10000.0, 10.0);
+        // Too narrow for its height: at the height-driven
+        // scale the 9:16 window would be under 2 px wide.
+        let sliver = stage_project(5.0, 10000.0);
         assert!(shorts_geometry(&sliver).is_err());
         let err = export_mp4_shorts(&sliver, &path).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
@@ -10926,6 +10928,19 @@ mod tests {
     fn tiny_project() -> Project {
         let mut project = Project::new_demo();
         project.stage = [96.0, 72.0];
+        // The demo figure lives at full-stage coordinates
+        // (roots around [480, 470] on 960x720); on the
+        // 96x72 stage it renders off-frame, so the tiny
+        // encodes are blank and the quality/crop tests
+        // cannot see the figure. Centre the roots on the
+        // small stage (roots only — the geometry stays the
+        // demo's, so the wave offsets survive).
+        for frame in &mut project.frames {
+            for pose in &mut frame.poses {
+                pose.root[0] += 48.0 - 480.0;
+                pose.root[1] += 47.0 - 470.0;
+            }
+        }
         project
     }
 
@@ -11897,6 +11912,19 @@ mod range_export_tests {
     fn tiny_project() -> Project {
         let mut project = Project::new_demo();
         project.stage = [96.0, 72.0];
+        // The demo figure lives at full-stage coordinates
+        // (roots around [480, 470] on 960x720); on the
+        // 96x72 stage it renders off-frame, so the tiny
+        // encodes are blank and the quality/crop tests
+        // cannot see the figure. Centre the roots on the
+        // small stage (roots only — the geometry stays the
+        // demo's, so the wave offsets survive).
+        for frame in &mut project.frames {
+            for pose in &mut frame.poses {
+                pose.root[0] += 48.0 - 480.0;
+                pose.root[1] += 47.0 - 470.0;
+            }
+        }
         project
     }
 

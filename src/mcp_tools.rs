@@ -7701,11 +7701,27 @@ mod tests {
         // from the TOOL ENTRY SPEC in
         // src/mcp_layered_tools.rs) and set_rest_pose
         // (Y7's MCP twin, IA-Y7-1).
-        assert_eq!(tools.len(), 330);
+        // +1 in Roadmap Wave 1: insert_breakdown (RM17) —
+        // the tally was never updated, and Wave 1's CI
+        // never ran the tests to catch it.
+        // +21 in Roadmap Wave 2: +6 chapter tools
+        // (chapter_add, chapter_delete, chapter_list,
+        // chapter_move, chapter_rename, chapter_set_range),
+        // +5 beat-marker tools (beat_marker_add,
+        // beat_marker_delete, beat_marker_list,
+        // beat_marker_rename, beat_marker_set_frame), +4
+        // stored-guide tools (stored_guide_add,
+        // stored_guide_delete, stored_guide_list,
+        // stored_guide_move), +2 title-card tools
+        // (title_cards_set_duration,
+        // title_cards_set_enabled), camera_move_preset,
+        // import_harness_story, insert_breakdown_chain and
+        // new_project_from_template.
+        assert_eq!(tools.len(), 352);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 330, "tool names must be unique");
+        assert_eq!(names.len(), 352, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }

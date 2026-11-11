@@ -285,8 +285,12 @@ pub fn title_card_layout(project: &Project) -> TitleCardLayout {
     // the sum of the half-heights plus a breathing
     // space of half an eyebrow.
     let gap = title_size / 2.0 + eyebrow_size / 2.0 + eyebrow_size * 0.5;
-    let eyebrow_y = center_y - gap / 2.0;
-    let title_y = center_y + gap / 2.0;
+    // Centre the block's EXTENT: the title is taller than
+    // the eyebrow, so centring the line centres would put
+    // the wrapped plate off-centre by (title - eyebrow)/4.
+    let block_h = eyebrow_size / 2.0 + gap + title_size / 2.0;
+    let eyebrow_y = center_y - block_h / 2.0 + eyebrow_size / 2.0;
+    let title_y = center_y + block_h / 2.0 - title_size / 2.0;
     // The plate wraps the block with a title-half of
     // air on every side.
     let pad = title_size * 0.55;

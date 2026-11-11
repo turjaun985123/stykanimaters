@@ -2750,7 +2750,10 @@ mod tests {
         project.set_camera_key(0, 480.0, 360.0, 1.0);
         project.set_camera_key(4, 680.0, 260.0, 2.0);
         let (x, y, z) = project.camera_at(2.0);
-        assert!((x - 580.0).abs() < 0.01 && (y - 310.0).abs() < 0.01 && (z - 1.5).abs() < 0.01);
+        assert!((x - 580.0).abs() < 0.01 && (y - 310.0).abs() < 0.01);
+        // W2-32: zoom lerps in log space, so the midpoint
+        // of 1.0 and 2.0 is the geometric mean, not 1.5.
+        assert!((z - 2.0f32.sqrt()).abs() < 0.01);
         let (x, _, z) = project.camera_at(99.0); // clamps to last key
         assert_eq!((x, z), (680.0, 2.0));
         assert!(project.remove_camera_key(4));

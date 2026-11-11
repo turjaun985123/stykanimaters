@@ -1623,9 +1623,10 @@ mod tests {
     fn tool_adjust_frame_duration_scales_clamps_and_reports_back() {
         // Wave 14 (A2): the relative duration handler —
         // the stored duration is multiplied and clamped by
-        // the op, the reply reads the stored value back,
-        // and the timing-tweak contract holds: no undo
-        // step, one dirty edit per real change.
+        // the op and the reply reads the stored value back.
+        // Since RM24 (A15 H3) a real change takes one
+        // coalesced undo step — the "no undo step" contract
+        // below is Wave 13's, superseded.
         let mut core = staged_core();
         core.current = 2;
         let depth = core.undo_depth();
@@ -1637,7 +1638,11 @@ mod tests {
         assert_eq!(out["frame"], json!(2));
         assert_eq!(out["duration"], json!(3.0));
         assert_eq!(core.project.frames[2].duration, 3.0);
-        assert_eq!(core.undo_depth(), depth, "a timing tweak is not an undo step");
+        assert_eq!(
+            core.undo_depth(),
+            depth + 1,
+            "a real timing change takes one coalesced undo step"
+        );
         assert_eq!(
             core.edits_since_autosave(),
             edits + 1,

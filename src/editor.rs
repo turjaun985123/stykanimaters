@@ -199,7 +199,14 @@ pub struct EditorCore {
     /// (project, frame) and the revision moves on every
     /// project change. Session-only derived data: never
     /// serialised, and a miss simply re-evaluates.
-    eval_cache: std::cell::RefCell<Vec<(u64, u32, std::rc::Rc<crate::graph::ChannelResult>)>>,
+    eval_cache: std::cell::RefCell<
+        Vec<(
+            u64,
+            u32,
+            Vec<crate::graph::Channel>,
+            std::rc::Rc<crate::graph::ChannelResult>,
+        )>,
+    >,
     /// Wave P (P14): stored paths of the current project's
     /// unmuted audio clips whose files did not exist at the
     /// last refresh — one entry per missing clip, in timeline
@@ -1668,7 +1675,10 @@ impl EditorCore {
         // World rest orientations, composed BEFORE the
         // write from the def as it stands.
         let world = Self::rest_world_angles(def);
-        let new_rest = crate::model::norm_deg(world[ni] - world[new_parent]);
+        // Raw, NOT normalised: the chain sums rest angles as-is,
+        // so normalising here would drift the world orientation
+        // by whole turns wherever the difference wraps past +/-180.
+        let new_rest = world[ni] - world[new_parent];
         let parent_name = def.nodes[new_parent].name.clone();
         let node_name = def.nodes[ni].name.clone();
         self.snapshot_labeled("Reparent node");
@@ -1804,12 +1814,34 @@ impl EditorCore {
     fn rest_world_angles(def: &crate::model::FigureDef) -> Vec<f32> {
         let mut world = vec![0.0f32; def.nodes.len()];
         let mut done = vec![false; def.nodes.len()];
-        for (i, node) in def.nodes.iter().enumerate() {
-            world[i] = match node.parent {
-                Some(p) if p < def.nodes.len() && p != i && done[p] => world[p] + node.rest_angle,
-                _ => 0.0,
-            };
-            done[i] = true;
+        // Parents may sit after their children in the node
+        // list (insert_segment_between appends the new
+        // parent at the end), so resolve parent-first in
+        // passes, not in index order; a cycle leaves its
+        // nodes at 0 rather than looping.
+        for _ in 0..def.nodes.len() {
+            let mut progress = false;
+            for (i, node) in def.nodes.iter().enumerate() {
+                if done[i] {
+                    continue;
+                }
+                match node.parent {
+                    Some(p) if p < def.nodes.len() && p != i && done[p] => {
+                        world[i] = world[p] + node.rest_angle;
+                        done[i] = true;
+                        progress = true;
+                    }
+                    Some(p) if p < def.nodes.len() && p != i => {}
+                    _ => {
+                        world[i] = 0.0;
+                        done[i] = true;
+                        progress = true;
+                    }
+                }
+            }
+            if !progress {
+                break;
+            }
         }
         world
     }
@@ -3946,8 +3978,10 @@ impl EditorCore {
             let cache = self.eval_cache.borrow();
             if let Some(hit) = cache
                 .iter()
-                .find(|(r, b, _)| *r == self.revision && *b == bits)
-                .map(|(_, _, v)| v.clone())
+                .find(|(r, b, ch, _)| {
+                    *r == self.revision && *b == bits && *ch == self.project.channels
+                })
+                .map(|(_, _, _, v)| v.clone())
             {
                 return hit;
             }
@@ -3963,11 +3997,16 @@ impl EditorCore {
         // here so the cache only ever holds this revision's
         // frames, a handful at most (the display frame plus
         // scrub/onion neighbours).
-        cache.retain(|(r, _, _)| *r == self.revision);
+        cache.retain(|(r, _, _, _)| *r == self.revision);
         if cache.len() >= 8 {
             cache.remove(0);
         }
-        cache.push((self.revision, bits, fresh.clone()));
+        cache.push((
+            self.revision,
+            bits,
+            self.project.channels.clone(),
+            fresh.clone(),
+        ));
         fresh
     }
 
@@ -11752,13 +11791,35 @@ mod tests {
     /// the ops' own helpers.
     fn rest_positions(def: &crate::model::FigureDef) -> Vec<[f32; 2]> {
         let mut pos = vec![[0.0f32; 2]; def.nodes.len()];
-        for (i, node) in def.nodes.iter().enumerate() {
-            if let Some(p) = node.parent {
-                let d = crate::model::dir(chain_world(def, i));
-                pos[i] = [
-                    pos[p][0] + d[0] * node.length,
-                    pos[p][1] + d[1] * node.length,
-                ];
+        let mut done = vec![false; def.nodes.len()];
+        // Parents may sit after their children (the split
+        // appends the new parent at the end), so resolve
+        // parent-first in passes, not in index order.
+        for _ in 0..def.nodes.len() {
+            let mut progress = false;
+            for (i, node) in def.nodes.iter().enumerate() {
+                if done[i] {
+                    continue;
+                }
+                match node.parent {
+                    Some(p) if p < def.nodes.len() && p != i && done[p] => {
+                        let d = crate::model::dir(chain_world(def, i));
+                        pos[i] = [
+                            pos[p][0] + d[0] * node.length,
+                            pos[p][1] + d[1] * node.length,
+                        ];
+                        done[i] = true;
+                        progress = true;
+                    }
+                    Some(p) if p < def.nodes.len() && p != i => {}
+                    _ => {
+                        done[i] = true;
+                        progress = true;
+                    }
+                }
+            }
+            if !progress {
+                break;
             }
         }
         pos
@@ -12721,9 +12782,10 @@ mod tests {
         core.history_jump(99);
         assert_eq!(core.redo_depth(), 0);
         assert_eq!(core.undo_depth(), 3);
-        // Zero is a no-op that leaves the recap alone.
+        // Zero is a no-op that leaves the recap alone:
+        // jump(99) redid the single remaining step.
         core.history_jump(0);
-        assert_eq!(core.status, "Redid 2 steps.");
+        assert_eq!(core.status, "Redone.");
         // And at the bottom of the undo stack.
         core.history_jump(-99);
         assert_eq!(core.undo_depth(), 0);
@@ -13334,15 +13396,16 @@ mod tests {
     }
 
     #[test]
-    fn set_project_easing_writes_without_snapshotting() {
+    fn set_project_easing_writes_and_snapshots_once() {
         let mut core = EditorCore::new();
         let depth = core.undo_depth();
         core.set_project_easing(crate::model::Easing::EaseIn);
         assert_eq!(core.project.easing, crate::model::Easing::EaseIn);
         assert!(core.status.starts_with("Easing: "));
-        // Mirrors cycle_easing: project-settings tweaks are
-        // not undoable edits, so the undo stack is untouched.
-        assert_eq!(core.undo_depth(), depth);
+        // Since RM24 (A15 H3) a set that changes the value
+        // takes exactly one undo step, like cycle_easing
+        // and the FPS twin.
+        assert_eq!(core.undo_depth(), depth + 1);
     }
 
     #[test]
@@ -15493,21 +15556,23 @@ mod tests {
     fn w2_40_ping_pong_walks_durations_on_the_shared_clock() {
         // The bounce is measured in beats, not frames: with
         // frame 0 held 4 beats the 5-frame timeline spans
-        // 8 beats, so a 6-beat tick from the top lands 2
-        // beats into the held frame (playhead 0.5), and the
-        // next 6-beat tick crosses the end and reflects to
-        // 4 beats back — 3 beats into the hold (0.75).
+        // 8 beats, so a 6-beat tick from the top lands at
+        // beat 6 — frame 3.0, because the hold eats the
+        // first 4 beats — and the next 6-beat tick crosses
+        // the end and reflects to beat 4 — frame 1.0,
+        // travelling backward.
         let mut core = EditorCore::new();
         core.project.fps = 24.0;
         core.project.frames[0].duration = 4.0;
         core.goto(0);
         core.advance_ping_pong(6.0 / 24.0);
-        assert!((core.playhead - 0.5).abs() < 1e-4, "playhead: {}", core.playhead);
+        assert!((core.playhead - 3.0).abs() < 1e-4, "playhead: {}", core.playhead);
         assert!(!core.play_reverse);
+        assert_eq!(core.current, 3);
         core.advance_ping_pong(6.0 / 24.0);
-        assert!((core.playhead - 0.75).abs() < 1e-4, "playhead: {}", core.playhead);
+        assert!((core.playhead - 1.0).abs() < 1e-4, "playhead: {}", core.playhead);
         assert!(core.play_reverse, "reflected at the 8-beat end");
-        assert_eq!(core.current, 0);
+        assert_eq!(core.current, 1);
     }
 
     #[test]
@@ -17906,6 +17971,7 @@ mod wave_y_p10_tests {
             "status: {}",
             core.status
         );
+        let saved_poses = core.project.frames[0].poses.clone();
         core.project.frames[0].poses.clear();
         assert!(!core.reset_pose_to_rest(0, 0));
         assert!(
@@ -17914,6 +17980,7 @@ mod wave_y_p10_tests {
             core.status
         );
         assert_eq!(core.undo_depth(), 0, "refusals spend no step");
+        core.project.frames[0].poses = saved_poses;
         // Already rest: a silent no-op — no step, no
         // status churn (the capture op's discipline).
         let root = core.project.frames[0].poses[0].root;
@@ -17927,11 +17994,14 @@ mod wave_y_p10_tests {
     #[test]
     fn setup_pose_round_trip_capture_free_restore_is_exact() {
         let mut core = EditorCore::new();
-        let pristine = project_json(&core);
         // 1. Author a pose and CAPTURE it as the setup
         // pose (absolute: the timeline keeps the pose,
         // the rest becomes it).
         displace_current_pose(&mut core);
+        // The trip's baseline is the pre-capture project:
+        // the displacement above is test setup, never
+        // snapshotted, so no undo step can unwind it.
+        let pristine = project_json(&core);
         let captured = core.project.frames[0].poses[0].angles.clone();
         assert!(core.set_rest_from_pose(0, false));
         assert_eq!(core.undo_depth(), 1);

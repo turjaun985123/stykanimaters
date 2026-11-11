@@ -4235,10 +4235,21 @@ mod tests {
         assert_eq!(*img.get_pixel(150, 100), Rgba([0, 200, 0, 255]));
         // Inside the quad but off-centre, too.
         assert_eq!(*img.get_pixel(110, 80), Rgba([0, 200, 0, 255]));
-        // A known "on" cell of the H: text runs downward from
-        // (100, 140); the first glyph cell centre lands at
-        // (107.5, 125), just below the sprite quad's bottom edge.
-        assert_eq!(*img.get_pixel(108, 125), Rgba([255, 0, 0, 255]));
+        // The shaped H (RM2's real-font rasterisation,
+        // not the old 3x5 stamp) lands where the font puts
+        // it: red ink somewhere in the text's neighbourhood
+        // — the text runs downward from (100, 140), just
+        // below the sprite quad's bottom edge.
+        let mut red = false;
+        for y in 110..170 {
+            for x in 95..140 {
+                let p = img.get_pixel(x, y);
+                if p[0] > 200 && p[1] < 80 && p[2] < 80 {
+                    red = true;
+                }
+            }
+        }
+        assert!(red, "the shaped text paints red pixels near (100, 140)");
         // Far corner untouched.
         assert_eq!(*img.get_pixel(10, 10), Rgba([255, 255, 255, 255]));
     }
@@ -4777,16 +4788,19 @@ mod tests {
 
     #[test]
     fn shaped_bengali_conjuncts_form_fewer_glyphs_than_chars() {
-        // বাংল = ব + া + ং ligates/conjuncts: the shaper
+        // স্কুল = স + ্ + ক conjuncts to স্ক: the shaper
         // emits fewer glyphs than the string has chars, and
         // every glyph is a proved face glyph (never .notdef).
-        let line = shape_line("বাংলা", 40.0).expect("Bengali shapes on this system");
+        // ("বাংলা" is NOT a conjunct test — its vowel signs
+        // are spacing marks, so a correct shaper rightly
+        // emits 5 glyphs for its 5 chars.)
+        let line = shape_line("স্কুল", 40.0).expect("Bengali shapes on this system");
         assert!(line.glyphs.iter().all(|g| g.id != 0), "a .notdef glyph slipped in");
         assert!(
-            line.glyphs.len() < "বাংলা".chars().count(),
+            line.glyphs.len() < "স্কুল".chars().count(),
             "no shaping happened: {} glyphs for {} chars",
             line.glyphs.len(),
-            "বাংলা".chars().count()
+            "স্কুল".chars().count()
         );
         assert!(line.width > 40.0, "shaped width {} implausibly small", line.width);
     }
