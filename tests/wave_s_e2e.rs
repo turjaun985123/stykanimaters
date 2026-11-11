@@ -51,7 +51,7 @@ use stykanimate_rs::media::tool_asset_import;
 use stykanimate_rs::model::{Frame, InstanceKey, Project, SegmentMedia, SpriteInstance};
 use stykanimate_rs::subtitles::{
     subtitles_from_srt, subtitles_from_vtt, subtitles_to_srt, subtitles_to_vtt, SubtitleCue,
-    SubtitlePosition, SubtitleStyle,
+    SubtitleFont, SubtitlePosition, SubtitleStyle,
 };
 
 // ---------------------------------------------------------------------
@@ -374,6 +374,7 @@ fn jpeg_asset_credited_cues_and_style_round_trip_byte_identically() {
         font_scale: 1.5,
         text_color: 0xFFD94D,
         box_color: 0x201008,
+        font: SubtitleFont::Shaped,
     };
 
     // Non-vacuity: the serialised document visibly holds

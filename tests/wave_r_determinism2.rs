@@ -53,7 +53,7 @@ use stykanimate_rs::media::media_items;
 use stykanimate_rs::model::Project;
 use stykanimate_rs::subtitles::{
     live_subtitle_cues, subtitle_font_size, subtitle_line_center_y, subtitle_stack_line_offset,
-    SubtitleCue, SubtitlePosition, SubtitleStyle,
+    SubtitleCue, SubtitleFont, SubtitlePosition, SubtitleStyle,
 };
 use stykanimate_rs::svg;
 
@@ -79,6 +79,7 @@ fn subtitled_fixture(cues: Vec<SubtitleCue>) -> Project {
         font_scale: 1.0,
         text_color: 0xFF_FF_FF,
         box_color: 0x00_00_00,
+        font: SubtitleFont::Shaped,
     };
     project
 }

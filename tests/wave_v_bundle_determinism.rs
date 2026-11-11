@@ -69,7 +69,7 @@ use serde_json::{json, Value};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::mcp::all_tools;
 use stykanimate_rs::model::{ImageAsset, InstanceKey, Project, SpriteInstance};
-use stykanimate_rs::subtitles::{SubtitleCue, SubtitlePosition, SubtitleStyle};
+use stykanimate_rs::subtitles::{SubtitleCue, SubtitleFont, SubtitlePosition, SubtitleStyle};
 use stykanimate_rs::vfx::{Weather, WeatherKind};
 
 /// The frame the fixture authors bends onto (the
@@ -143,6 +143,7 @@ fn populated_fixture() -> Project {
         font_scale: 1.0,
         text_color: 0xFF_FF_FF,
         box_color: 0x00_00_00,
+        font: SubtitleFont::Shaped,
     };
 
     project.assets = vec![ImageAsset {

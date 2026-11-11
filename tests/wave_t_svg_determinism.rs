@@ -56,7 +56,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 
 use stykanimate_rs::model::{Frame, ImageAsset, InstanceKey, Project, SpriteInstance};
-use stykanimate_rs::subtitles::{SubtitleCue, SubtitlePosition, SubtitleStyle};
+use stykanimate_rs::subtitles::{SubtitleCue, SubtitleFont, SubtitlePosition, SubtitleStyle};
 use stykanimate_rs::svg;
 use stykanimate_rs::vfx::{weather_particles, Weather, WeatherKind};
 
@@ -464,6 +464,7 @@ fn svg_aba_combined_weather_and_top_style_are_byte_identical() {
         font_scale: 1.5,
         text_color: 0xFF_E6_80,
         box_color: 0x10_20_30,
+        font: SubtitleFont::Shaped,
     };
 
     let a1 = svg_string(&base, "combo-a1");

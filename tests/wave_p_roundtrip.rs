@@ -54,7 +54,7 @@ use stykanimate_rs::model::{
     SprayMark, SpriteInstance, Stroke, TextInstance,
 };
 use stykanimate_rs::projects;
-use stykanimate_rs::subtitles::{SubtitleCue, SubtitlePosition, SubtitleStyle};
+use stykanimate_rs::subtitles::{SubtitleCue, SubtitleFont, SubtitlePosition, SubtitleStyle};
 use stykanimate_rs::vfx::{ClipKind, ParticleClip, Weather, WeatherKind};
 
 /// Per-process, per-test scratch directory under the OS temp
@@ -448,6 +448,7 @@ fn full_fixture() -> Project {
         font_scale: 1.5,
         text_color: 0xFFE680,
         box_color: 0x102040,
+        font: SubtitleFont::Shaped,
     };
 
     p
@@ -996,6 +997,7 @@ fn subsystem_fixtures_round_trip_losslessly() {
                     font_scale: 1.5,
                     text_color: 0xFFE680,
                     box_color: 0x102040,
+                    font: SubtitleFont::Shaped,
                 };
             }),
         ),

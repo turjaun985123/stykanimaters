@@ -50,7 +50,7 @@
 
 use stykanimate_rs::export;
 use stykanimate_rs::model::{Project, SegmentMedia};
-use stykanimate_rs::subtitles::{SubtitleCue, SubtitlePosition, SubtitleStyle};
+use stykanimate_rs::subtitles::{SubtitleCue, SubtitleFont, SubtitlePosition, SubtitleStyle};
 
 /// The demo project cut down to 3 authored frames so CI
 /// stays fast (the sibling determinism suites' fixture).
@@ -92,6 +92,7 @@ fn subtitled_fixture(cues: Vec<SubtitleCue>) -> Project {
         font_scale: 1.0,
         text_color: 0xFF_FF_FF,
         box_color: 0x00_00_00,
+        font: SubtitleFont::Shaped,
     };
     project
 }

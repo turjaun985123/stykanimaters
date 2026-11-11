@@ -55,7 +55,7 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::export;
 use stykanimate_rs::model::Project;
 use stykanimate_rs::projects;
-use stykanimate_rs::subtitles::{SubtitleCue, SubtitlePosition, SubtitleStyle};
+use stykanimate_rs::subtitles::{SubtitleCue, SubtitleFont, SubtitlePosition, SubtitleStyle};
 
 /// The frame rate every pin in this file runs at.
 const FPS: f32 = 24.0;
@@ -79,6 +79,7 @@ fn non_default_style() -> SubtitleStyle {
         font_scale: 1.5,
         text_color: 0xFFE680,
         box_color: 0x102040,
+        font: SubtitleFont::Shaped,
     }
 }
 
