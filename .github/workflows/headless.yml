@@ -212,8 +212,22 @@ jobs:
           mkdir -p headless-out
           missing=0
           for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error subtitles-populated subtitles-top subtitles-speaker home-missing-audio home-scan-fallback states-populated build-workspace focus-field long-project dialogue-lane subtitles-assist marquee-selected sprites-flipped; do
-            probe 60 "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
-              > "headless-out/tree-$scene.log" 2>&1
+            # H2: home-populated alone needs a pre-scroll. H1's M4
+            # (template/sample blurbs, +128 pt) pushed home-totals
+            # and row-2 below the 900 pt window, so the thumbnail
+            # probe's control strip is off-snap at scroll 0. The
+            # script wheels side-left down 200 pt (instant, 1:1,
+            # dy negative moves content up); the tree dump reports
+            # drawn rects, so the probe's strips stay aligned with
+            # the snap. The scene list itself is untouched (gate
+            # check 8: this loop is the coverage contract).
+            if [ "$scene" = "home-populated" ]; then
+              probe 60 "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" --script scripts/headless-scroll-home.json --at 0.5 \
+                > "headless-out/tree-$scene.log" 2>&1
+            else
+              probe 60 "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
+                > "headless-out/tree-$scene.log" 2>&1
+            fi
             echo $? > "headless-out/tree-$scene.exit"
             [ -f "headless-out/tree-$scene.json" ] || missing=1
           done
@@ -271,8 +285,14 @@ jobs:
           # is its recovery set, not a subset by design.
           for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error subtitles-populated subtitles-top subtitles-speaker home-missing-audio home-scan-fallback states-populated build-workspace focus-field long-project dialogue-lane subtitles-assist marquee-selected sprites-flipped; do
             if [ ! -f "headless-out/tree-$scene.json" ]; then
-              probe 60 xvfb-run -a "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
-                > "headless-out/tree-$scene-xvfb.log" 2>&1
+              # H2: same pre-scroll as the plain attempt (see above).
+              if [ "$scene" = "home-populated" ]; then
+                probe 60 xvfb-run -a "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" --script scripts/headless-scroll-home.json --at 0.5 \
+                  > "headless-out/tree-$scene-xvfb.log" 2>&1
+              else
+                probe 60 xvfb-run -a "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
+                  > "headless-out/tree-$scene-xvfb.log" 2>&1
+              fi
               echo $? > "headless-out/tree-$scene-xvfb.exit"
             fi
           done
@@ -393,7 +413,11 @@ jobs:
           # the Animate stage carrying strokes, so the
           # stroke inspector rows exist in a tree and a
           # snap for the first time.
-          probe 120 "$BIN" --snap headless-out/snap-home-populated.png --scene home-populated --at 0 \
+          # H2: same pre-scroll as the tree dump (see the tree
+          # loop) — the probe pairs this snap with that tree, so
+          # both must be scrolled identically; --at 0.5 captures
+          # after the t=0 wheel has landed.
+          probe 120 "$BIN" --snap headless-out/snap-home-populated.png --scene home-populated --script scripts/headless-scroll-home.json --at 0.5 \
             > headless-out/snap-home-populated.log 2>&1
           echo $? > headless-out/snap-home-populated.exit
           # Wave V (V7): the missing-audio Home state,

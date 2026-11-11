@@ -3783,7 +3783,13 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
                     None,
                     t,
                 ))
-                .child(text(readout).font(type_::LABEL).color(t.text_secondary)),
+                .child(
+                    text(readout)
+                        .font(type_::LABEL)
+                        .color(t.text_secondary)
+                        .truncate()
+                        .min_w(0.0),
+                ),
         )
         .child(design::divider(t))
         // The list's viewport is bounded (Wave 9, audit
