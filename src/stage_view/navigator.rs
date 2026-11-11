@@ -337,7 +337,7 @@ pub fn draw_navigator(mut shape: Shape, core: &EditorCore, el_size: [f32; 2]) ->
             continue;
         }
         let pos = feedback_positions(core, fi);
-        let selected = core.selected_figure == Some(fi);
+        let selected = core.selected_figure == fi;
         let ink = hex_color(fig.color)
             .unwrap_or(Color::WHITE)
             .alpha(if selected { 1.0 } else { 0.75 });

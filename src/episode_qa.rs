@@ -230,7 +230,7 @@ pub fn fmt_db(v: f32) -> String {
 }
 
 /// A unique scratch path for one probe decode.
-fn qa_temp_path(tag: &str, ext: &str) -> PathBuf {
+pub fn qa_temp_path(tag: &str, ext: &str) -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
@@ -1448,7 +1448,7 @@ pub fn episode_qa_verdict(
 /// The fraction of the episode's timeline any cue
 /// covers (ranges clamped to the timeline, overlaps
 /// merged) — a reported fact, judged by nothing.
-fn episode_cue_coverage(expect: &EpisodeExpectations) -> f32 {
+pub fn episode_cue_coverage(expect: &EpisodeExpectations) -> f32 {
     if expect.total_frames == 0 {
         return 0.0;
     }

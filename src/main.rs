@@ -2186,7 +2186,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                     // pass's cursor for the thing under the
                     // pointer (or the drag in flight).
                     .on_pointer_move_local(
-                        |s: &mut State, e: PointerEvent, _tx: &mut Tx| {
+                        move |s: &mut State, e: PointerEvent, _tx: &mut Tx| {
                             crate::stage_view::set_stage_pointer(Some(
                                 crate::stage_view::StagePointer {
                                     local: [e.x, e.y],

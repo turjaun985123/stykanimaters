@@ -3953,7 +3953,7 @@ thread_local! {
     /// rather than re-baking per frame.
     static SPRITE_BITMAPS: RefCell<
         std::collections::HashMap<(usize, bool, bool, usize), Option<rune::Image>>,
-    > = const { RefCell::new(std::collections::HashMap::new()) };
+    > = RefCell::new(std::collections::HashMap::new());
 }
 
 /// The baked Rune image for asset `asset` under the flip

@@ -1114,6 +1114,19 @@ pub struct NumberEdit {
     pub seed: String,
 }
 
+/// Manual `Debug`: `TextEdit` (rune) has no `Debug`,
+/// so a derive would not compile — the panel states
+/// that hold a `NumberEdit` derive `Debug`, and the
+/// debug view needs only the session, not the buffer.
+impl std::fmt::Debug for NumberEdit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NumberEdit")
+            .field("armed", &self.armed)
+            .field("seed", &self.seed)
+            .finish_non_exhaustive()
+    }
+}
+
 impl NumberEdit {
     /// A closed, empty session state.
     pub fn new() -> Self {
@@ -1253,7 +1266,7 @@ fn number_drag<A, C, R, W, F>(
     press_value: f32,
     wiring: &NumWiring<A, C, R, W, F>,
 ) where
-    A: Fn(&mut State) -> &mut NumberEdit,
+    A: for<'a> Fn(&'a mut State) -> &'a mut NumberEdit,
     W: Fn(&mut State, f32),
     F: Fn(&mut State, f32),
 {
@@ -1331,7 +1344,7 @@ pub fn number_field<A, C, R, W, F>(
     wiring: NumWiring<A, C, R, W, F>,
 ) -> El
 where
-    A: Fn(&mut State) -> &mut NumberEdit + Clone + 'static,
+    A: for<'a> Fn(&'a mut State) -> &'a mut NumberEdit + Clone + 'static,
     C: Fn(&mut State, f32) + 'static,
     R: Fn(&mut State) + 'static,
     W: Fn(&mut State, f32) + 'static,
@@ -1448,7 +1461,7 @@ pub fn bounded_value_row<A, C, R, W, F, D>(
     slider_drag: D,
 ) -> El
 where
-    A: Fn(&mut State) -> &mut NumberEdit + Clone + 'static,
+    A: for<'a> Fn(&'a mut State) -> &'a mut NumberEdit + Clone + 'static,
     C: Fn(&mut State, f32) + 'static,
     R: Fn(&mut State) + 'static,
     W: Fn(&mut State, f32) + 'static,

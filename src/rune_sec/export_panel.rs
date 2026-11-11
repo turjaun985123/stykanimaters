@@ -2009,7 +2009,8 @@ fn run_job(
                     Some(&encode_cb),
                     Some(&render_cb),
                 )
-                .map(ExportJobResult::Mp4);
+                .map(ExportJobResult::Mp4)
+                .map_err(|e| e.to_string());
             }
             stykanimate_rs::export::export_mp4_scaled_with_progress(
                 project,

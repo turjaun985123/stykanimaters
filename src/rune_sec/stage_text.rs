@@ -947,7 +947,7 @@ thread_local! {
     /// key changes).
     static SUBTITLE_TILE_IMAGES: std::cell::RefCell<
         std::collections::HashMap<SubtitleTileKey, Option<rune::Image>>,
-    > = const { std::cell::RefCell::new(std::collections::HashMap::new()) };
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
 /// The baked Rune image for one band's tile at raster

@@ -1115,29 +1115,30 @@ fn shift_pose_key_once(core: &mut EditorCore, fi: usize, at: usize, dir: i32) ->
     if is_key(&figure_keyframes(&core.project, fi), target) {
         return false;
     }
-    let frames = &mut core.project.frames;
     if dir > 0 {
         let (Some(key_pose), Some(prev_pose), true) = (
-            frames[at].poses.get(fi).cloned(),
-            frames[at - 1].poses.get(fi).cloned(),
-            frames[target].poses.get(fi).is_some(),
+            core.project.frames[at].poses.get(fi).cloned(),
+            core.project.frames[at - 1].poses.get(fi).cloned(),
+            core.project.frames[target].poses.get(fi).is_some(),
         ) else {
             return false;
         };
         let key_row = bend_row(&core.project, fi, at);
         let prev_row = bend_row(&core.project, fi, at - 1);
+        let frames = &mut core.project.frames;
         frames[at].poses[fi] = prev_pose;
         frames[target].poses[fi] = key_pose;
         set_bend_row(&mut core.project, fi, at, &prev_row);
         set_bend_row(&mut core.project, fi, target, &key_row);
     } else {
         let (Some(key_pose), true) = (
-            frames[at].poses.get(fi).cloned(),
-            frames[target].poses.get(fi).is_some(),
+            core.project.frames[at].poses.get(fi).cloned(),
+            core.project.frames[target].poses.get(fi).is_some(),
         ) else {
             return false;
         };
         let key_row = bend_row(&core.project, fi, at);
+        let frames = &mut core.project.frames;
         frames[target].poses[fi] = key_pose;
         set_bend_row(&mut core.project, fi, target, &key_row);
     }
@@ -1807,7 +1808,8 @@ pub fn paste_clipboard_at_playhead(s: &mut State) -> bool {
         );
         return false;
     };
-    stykanimate_rs::graph_keys::paste_keys(&mut s.core, ci, &clip.keys, s.core.current as f32)
+    let current = s.core.current as f32;
+    stykanimate_rs::graph_keys::paste_keys(&mut s.core, ci, &clip.keys, current)
 }
 
 // ---------------------------------------------------------------------

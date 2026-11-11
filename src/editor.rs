@@ -3,6 +3,7 @@
 //! undo snapshots, save/load and export triggers. The GPUI layer in
 //! `app.rs` only translates mouse events and buttons into these calls.
 
+use crate::autosave::AutosavePrefs;
 use crate::export::{
     export_gif as render_gif, export_mp4 as render_mp4, export_png_sequence,
     export_spritesheet_pack as render_sheet, export_webm as render_webm,
@@ -154,6 +155,11 @@ pub struct EditorCore {
     edit_count: u64,
     /// Wave 9: `edit_count` at the last successful autosave.
     last_autosave_count: u64,
+    /// The live autosave policy (IA-W2-63-2): the
+    /// Settings card mirrors the saved prefs into this
+    /// field, so the core can never drift from the prefs
+    /// file within the session.
+    pub autosave: AutosavePrefs,
     /// Wave 11 (E9): bumped on every wholesale project swap
     /// (`note_project_swapped` and the MCP io replace path) so
     /// the shell's poll can tell "the project under the session
@@ -419,6 +425,7 @@ impl EditorCore {
             last_save_count: None,
             edit_count: 0,
             last_autosave_count: 0,
+            autosave: AutosavePrefs::default(),
             project_swaps: 0,
             revision: 0,
             eval_cache: std::cell::RefCell::new(Vec::new()),

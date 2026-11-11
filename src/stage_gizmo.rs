@@ -469,7 +469,7 @@ pub fn gizmo_up(core: &mut EditorCore, p: V2, cancelled: bool) {
         .figures
         .iter()
         .copied()
-        .filter(|&fi| fi < core.project.figures.len() && !core.project.figures[*fi].locked)
+        .filter(|&fi| fi < core.project.figures.len() && !core.project.figures[fi].locked)
         .collect();
     let skipped = d.figures.len() - movable.len();
     match d.handle {

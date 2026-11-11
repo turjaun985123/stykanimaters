@@ -1829,8 +1829,8 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
         .child(content)
         .scroll_x()
         .w_full()
-        .on_scroll_offset(|offset_x, _offset_y, viewport_w, _viewport_h| {
-            TIMELINE_SCROLL.with(|c| c.set(Some((offset_x, viewport_w))));
+        .on_scroll_offset(|pos| {
+            TIMELINE_SCROLL.with(|c| c.set(Some((pos.offset[0], pos.viewport[0]))));
         });
     // Phase N (charter §13, see the module docs' Timeline
     // card section): the whole stack sits in one unkeyed

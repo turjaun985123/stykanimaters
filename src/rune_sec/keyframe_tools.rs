@@ -1042,6 +1042,11 @@ pub fn delete_key_here(s: &mut State) {
 pub fn stamp_rows(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let off = effective_copy_offset(core, &s.keyframe_tools);
+    let copy_enabled = if s.key_follow_graph {
+        copy_key_enabled_follow(core, &s.graph_panel, off)
+    } else {
+        copy_key_enabled_with(core, off)
+    };
     let offset_row = if core.selected_node.is_some() {
         let spec = copy_offset_spec(core);
         let help = i18n_wire::tr(core, "number_field_help");
@@ -1121,11 +1126,7 @@ pub fn stamp_rows(s: &State, t: &Theme) -> El {
             } else {
                 icon_btn_inert("key-all-here", "key", "Key all here", t)
             })
-            .child(if s.key_follow_graph {
-                copy_key_enabled_follow(core, &s.graph_panel, off)
-            } else {
-                copy_key_enabled_with(core, off)
-            } {
+            .child(if copy_enabled {
                 icon_btn(
                     "key-copy-to-frame",
                     "copy",
