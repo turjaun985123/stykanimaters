@@ -28,6 +28,9 @@
 //! scale s:
 //!
 //! - face span = ~14·s rows (~28 at 2.0, ~7 at 0.5);
+//!   At 0.5 the span is measured near-white (>= 200 per channel):
+//!   at em 10 the ~1 px strokes never reach full coverage, so no
+//!   pixel is exact white — the geometry (~7 rows) is unchanged.
 //! - centre sits 28·s units from the anchored edge of
 //!   the scaled frame (56 at 2.0, 14 at 0.5);
 //! - two stacked lines step 24·s centre-to-centre
@@ -95,6 +98,29 @@ fn bare_stage(stage: [f32; 2], cues: Vec<SubtitleCue>) -> Project {
 }
 
 const WHITE: [u8; 3] = [255, 255, 255];
+
+/// A face-ink pixel at the 0.5 scale: at em 10 the strokes are ~1 px
+/// wide and unhinted swash anti-aliasing leaves no pixel at full
+/// coverage (see the 0.5 leg), so the face is measured near-white, as
+/// wave_t/wave_u/wave_v already do for lossy formats — but at >= 200,
+/// not >= 240: at em 10 the regular faces' brightest pixel is
+/// 243..=253 and >= 240 counts only 3..=4 rows for Liberation/Noto
+/// Regular, below the (5..=9) band. The background (51) and the
+/// backing box (0) sit far below 200, so this still isolates face ink.
+fn is_face_white(px: [u8; 3]) -> bool {
+    px[0] >= 200 && px[1] >= 200 && px[2] >= 200
+}
+
+/// Rows of `img` holding face ink (the near-white predicate above).
+fn rows_with_face(img: &Rgb8) -> Vec<u32> {
+    let mut rows = Vec::new();
+    for y in 0..img.height() {
+        if (0..img.width()).any(|x| is_face_white(img.get_pixel(x, y).0)) {
+            rows.push(y);
+        }
+    }
+    rows
+}
 
 type Rgb8 = image::ImageBuffer<image::Rgb<u8>, Vec<u8>>;
 
@@ -188,6 +214,19 @@ fn single_face(img: &Rgb8) -> (u32, u32) {
     clusters[0]
 }
 
+/// The single face cluster of a 0.5-scale render, measured near-white
+/// (`rows_with_face`): the only leg that needs it — the 1.0/2.0 legs
+/// keep the exact-white `single_face` above.
+fn single_face_near_white(img: &Rgb8) -> (u32, u32) {
+    let clusters = row_clusters(&rows_with_face(img));
+    assert_eq!(
+        clusters.len(),
+        1,
+        "a one-line cue must paint exactly one near-white face cluster: {clusters:?}"
+    );
+    clusters[0]
+}
+
 // ---------------------------------------------------------------------
 // Scale 2.0 — face height and anchored position double
 // ---------------------------------------------------------------------
@@ -257,10 +296,13 @@ fn s11_burn_in_face_halves_at_scale_0_5() {
 
     // At 0.5: a 240x200 frame, a ~7-row face, centre 14
     // from the edge. A burn-in ignoring the scale would
-    // span the full ~14 rows at the 1.0 offset.
+    // span the full ~14 rows at the 1.0 offset. The face
+    // is measured near-white (>= 200): at em 10 the ~1 px
+    // strokes never reach full coverage, so no pixel is
+    // exact white (the 1.0/2.0 legs keep exact white).
     let img = render_frame_scaled(&project, 0, 0.5).expect("scale 0.5 renders");
     assert_eq!((img.width(), img.height()), (240, 200));
-    let face = single_face(&img);
+    let face = single_face_near_white(&img);
     let span = face.1 - face.0 + 1;
     assert!(
         (5..=9).contains(&span),

@@ -28,7 +28,10 @@
 //! the em) and its centre sits 28·s units from the
 //! anchored (bottom) edge — at 2.0 a span of 25..=33
 //! rows and an offset of 50..=62; at 0.5 a span of
-//! 5..=9 and an offset of 11..=17. A speaker prefix
+//! 5..=9 and an offset of 11..=17. The APNG 0.5 leg
+//! measures the face near-white (>= 200 per channel):
+//! at em 10 the ~1 px strokes never reach full
+//! coverage, so no pixel is exact white. A speaker prefix
 //! rides the first line, so a credited cue ("NARRATOR:
 //! HELLO", 15 chars, run 59 cells) paints a line ~3.1×
 //! wider than the same text uncredited ("HELLO", 5
@@ -123,21 +126,7 @@ fn temp_dir(tag: &str) -> PathBuf {
 // Pixel helpers (S11's, plus the GIF near-white variant)
 // ---------------------------------------------------------------------
 
-const WHITE: [u8; 3] = [255, 255, 255];
-
 type Rgb8 = image::ImageBuffer<image::Rgb<u8>, Vec<u8>>;
-
-/// Rows of `img` that contain at least one pixel of
-/// exactly `color`, in ascending order.
-fn rows_with_color(img: &Rgb8, color: [u8; 3]) -> Vec<u32> {
-    let mut rows = Vec::new();
-    for y in 0..img.height() {
-        if (0..img.width()).any(|x| img.get_pixel(x, y).0 == color) {
-            rows.push(y);
-        }
-    }
-    rows
-}
 
 /// A GIF face pixel: the encoder palette-quantises, so
 /// the white face is near-white rather than exact. The
@@ -152,6 +141,29 @@ fn rows_with_face(img: &Rgb8) -> Vec<u32> {
     let mut rows = Vec::new();
     for y in 0..img.height() {
         if (0..img.width()).any(|x| is_face_white(img.get_pixel(x, y).0)) {
+            rows.push(y);
+        }
+    }
+    rows
+}
+
+/// A face-ink pixel at the 0.5 scale: at em 10 the strokes are ~1 px
+/// wide and unhinted swash anti-aliasing leaves no pixel at full
+/// coverage, so the APNG 0.5 leg measures near-white — at >= 200,
+/// not the GIF legs' >= 240: at em 10 the regular faces' brightest
+/// pixel is 243..=253 and >= 240 counts only 3..=4 rows for
+/// Liberation/Noto Regular, below the (5..=9) band. The background
+/// (51) and the backing box (0) sit far below 200, so this still
+/// isolates face ink.
+fn is_face_white_200(px: [u8; 3]) -> bool {
+    px[0] >= 200 && px[1] >= 200 && px[2] >= 200
+}
+
+/// Rows of a decoded frame holding face ink at the >= 200 predicate.
+fn rows_with_face_200(img: &Rgb8) -> Vec<u32> {
+    let mut rows = Vec::new();
+    for y in 0..img.height() {
+        if (0..img.width()).any(|x| is_face_white_200(img.get_pixel(x, y).0)) {
             rows.push(y);
         }
     }
@@ -480,8 +492,9 @@ fn t19_apng_at_0_5_halves_dimensions_and_keeps_the_burn_in() {
 
     // And its face sits at the halved geometry (S11's
     // 0.5 derivation: span ~7 rows, centre ~14 from the
-    // bottom edge), measured on the decoded frame.
-    let face = single_face(&rows_with_color(&first, WHITE), "APNG first frame");
+    // bottom edge), measured on the decoded frame — near-white
+    // (>= 200): at em 10 no pixel reaches exact white.
+    let face = single_face(&rows_with_face_200(&first), "APNG first frame");
     let span = face.1 - face.0 + 1;
     assert!(
         (5..=9).contains(&span),
