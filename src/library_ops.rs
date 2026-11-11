@@ -49,12 +49,28 @@ pub fn is_builtin(name: &str) -> bool {
     name.starts_with(LIBRARY_BUILTIN_PREFIX)
 }
 
-/// The directory saved library entries live in: the one
-/// resolver's library dir ([`crate::shell::library_dir`],
-/// Roadmap Wave 1, RM9 / F-8) — the folder `load_library`
-/// reads and `save_figure_to_library` writes.
+/// The directory saved library entries live in: `./library`
+/// relative to the process current directory — the SAME
+/// folder `load_library` reads (editor.rs) and
+/// `save_figure_to_library` writes. It MUST stay that
+/// folder: the rename/delete resolver below addresses the
+/// files the loader sees, and the e2e suites isolate
+/// libraries by changing the current directory.
+///
+/// Roadmap Wave 1 (RM9) moved this one resolver to the
+/// AppDirs store dir (`shell::library_dir`) while load
+/// and save stayed CWD-relative, so rename/delete
+/// addressed files in a directory the loader never reads
+/// — every rename failed with "No such file or directory"
+/// (round 21: all three `focused_e2e_library_rename`
+/// tests). Reverted to the pre-RM9 resolution. Completing
+/// the AppDirs migration for the 2D library means moving
+/// load + save together with this resolver, as one change
+/// — not this round.
 fn library_dir() -> PathBuf {
-    crate::shell::library_dir()
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("library")
 }
 
 /// The backing file of the library entry whose STEM is
