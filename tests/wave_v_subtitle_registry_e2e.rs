@@ -122,6 +122,7 @@ fn expected_style() -> Value {
         "font_scale": 1.5,
         "text_color": TEXT_COLOR,
         "box_color": BOX_COLOR,
+        "font": "shaped",
     })
 }
 
@@ -131,6 +132,7 @@ fn default_style() -> Value {
         "font_scale": 1.0,
         "text_color": DEFAULT_TEXT_COLOR,
         "box_color": 0,
+        "font": "shaped",
     })
 }
 
