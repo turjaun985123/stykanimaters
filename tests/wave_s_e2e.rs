@@ -286,8 +286,8 @@ fn credited_cue_range_export_at_scale_2_carries_the_prefixed_burn_in_only_inside
             );
             let face_rows = rows_with_color(&img, WHITE);
             assert!(
-                (25..=33).contains(&face_rows.len()),
-                "frame {i}: face spans {} rows, expected the ~28-row shaped cap-ink at the scaled size",
+                (35..=41).contains(&face_rows.len()),
+                "frame {i}: face spans {} rows, expected the ~38-row shaped ascender-to-descender ink at the scaled size",
                 face_rows.len()
             );
             // The prefix widens the centred line BOTH
