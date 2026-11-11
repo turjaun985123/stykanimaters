@@ -349,6 +349,34 @@ pub fn rig_rows(
             walk(def, collapsed, selected, ni, 0, &mut visited, &mut rows);
         }
     }
+    // A node hidden inside a collapsed subtree is no
+    // root's descendant either — but it is hidden by
+    // the collapse, not orphaned: mark the collapsed
+    // subtrees visited here, so the rescue below only
+    // revives nodes no root reaches because their
+    // parent links are malformed. Gated on the
+    // collapsed node itself having a row, so a
+    // collapsed node caught in a parent cycle is
+    // still rescued as its own root.
+    fn mark_hidden(
+        def: &FigureDef,
+        ni: usize,
+        visited: &mut BTreeSet<usize>,
+    ) {
+        if !visited.insert(ni) {
+            return;
+        }
+        for child in rig_children(def, ni) {
+            mark_hidden(def, child, visited);
+        }
+    }
+    for &c in collapsed {
+        if visited.contains(&c) {
+            for child in rig_children(def, c) {
+                mark_hidden(def, child, &mut visited);
+            }
+        }
+    }
     // A node caught in a parent cycle is no root's
     // descendant; show it as its own root rather than
     // dropping it from the tree entirely.
@@ -411,6 +439,15 @@ pub enum RigNav {
 /// docs.
 pub fn rig_nav_left(def: &FigureDef, collapsed: &BTreeSet<usize>, ni: usize) -> Option<RigNav> {
     if ni >= def.nodes.len() {
+        return None;
+    }
+    // A root is a node with no parent, or one whose parent link names nothing
+    // real (the walk's is_root rule) — Left stops there either way.
+    let is_root = match def.nodes[ni].parent {
+        None => true,
+        Some(p) => p >= def.nodes.len() || p == ni,
+    };
+    if is_root {
         return None;
     }
     if !rig_children(def, ni).is_empty() && !collapsed.contains(&ni) {
@@ -1120,10 +1157,15 @@ mod tests {
     fn panel_thread_local_round_trips() {
         // The collapse set is keyed to its figure: a
         // toggle collected on figure 0 must not leak
-        // onto figure 1.
+        // onto figure 1. The store holds ONE figure's
+        // set, so reading figure 1's set drops figure
+        // 0's (see COLLAPSED) — re-collect it after
+        // the no-leak read before completing the
+        // round trip.
         toggle_collapsed(0, 1);
         assert!(collapsed_for(0).contains(&1));
         assert!(collapsed_for(1).is_empty());
+        toggle_collapsed(0, 1);
         toggle_collapsed(0, 1);
         assert!(collapsed_for(0).is_empty());
     }

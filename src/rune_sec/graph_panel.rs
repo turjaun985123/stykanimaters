@@ -4084,8 +4084,9 @@ mod tests {
         // The carrier was key 0 — its FRAME is untouched,
         // only the value moved (a value write, not a move).
         assert_eq!(core.project.channels[0].keys[0].frame, 0.0);
+        // The recap prints the range in the channel's own readout conventions (`channel_value_text`, one decimal) with the channel label — see `range_recap`.
         assert!(
-            core.status.starts_with("Graph min range: -40..210"),
+            core.status.starts_with("Graph min range: -40.0..210.0 on Root X."),
             "{}",
             core.status
         );
@@ -4093,7 +4094,7 @@ mod tests {
         assert_eq!(core.undo_depth(), depth + 2);
         assert_eq!(channel_range(&core, &st), Some((-40.0, 180.0)));
         assert!(
-            core.status.starts_with("Graph max range: -40..180"),
+            core.status.starts_with("Graph max range: -40.0..180.0 on Root X."),
             "{}",
             core.status
         );
@@ -4111,14 +4112,17 @@ mod tests {
             ],
         )];
         let st = GraphPanelState::default();
-        // Two keys share the min: the FIRST carrier moves,
-        // the twin still pins the range at 50 — and the
-        // recap says so instead of echoing the typed 20.
-        range_commit(&mut core, &st, RangeEnd::Min, 20.0);
+        // Two keys share the min: the FIRST carrier moves
+        // UP to 60, the twin still pins the range at 50 —
+        // and the recap says so instead of echoing the
+        // typed 60. (Moving a shared min DOWN would lower
+        // the range to the moved value; the twin pins it
+        // only against an upward move.)
+        range_commit(&mut core, &st, RangeEnd::Min, 60.0);
         assert_eq!(channel_range(&core, &st), Some((50.0, 90.0)));
-        assert_eq!(core.project.channels[0].keys[0].value, 20.0);
+        assert_eq!(core.project.channels[0].keys[0].value, 60.0);
         assert!(
-            core.status.starts_with("Graph min range: 50..90"),
+            core.status.starts_with("Graph min range: 50.0..90.0 on Root X."),
             "{}",
             core.status
         );
@@ -4138,7 +4142,7 @@ mod tests {
         assert!(!st.range_scrub.open);
         assert_eq!(core.undo_depth(), depth + 1, "the whole scrub is one step");
         assert!(
-            core.status.starts_with("Graph max range: 0..120"),
+            core.status.starts_with("Graph max range: 0.0..120.0 on Root X."),
             "{}",
             core.status
         );

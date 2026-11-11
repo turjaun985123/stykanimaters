@@ -2567,6 +2567,7 @@ mod tests {
         // The toggle set is exactly the data-gated set,
         // in the card's stacking order, whatever subset
         // passes.
+        // Wave 2: cues also open the Dialogue lane (it carries cues and chapters), after Subtitles in the stacking order.
         assert_eq!(
             applicable_lanes(true, true, true, true, false),
             vec![
@@ -2574,11 +2575,16 @@ mod tests {
                 TimelineLane::Clips,
                 TimelineLane::Dopesheet,
                 TimelineLane::Subtitles,
+                TimelineLane::Dialogue,
             ]
         );
         assert_eq!(
             applicable_lanes(false, true, false, true, false),
-            vec![TimelineLane::Clips, TimelineLane::Subtitles]
+            vec![
+                TimelineLane::Clips,
+                TimelineLane::Subtitles,
+                TimelineLane::Dialogue
+            ]
         );
         assert_eq!(
             applicable_lanes(false, false, true, false, false),

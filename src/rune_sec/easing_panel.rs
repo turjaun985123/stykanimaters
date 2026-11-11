@@ -163,11 +163,11 @@ pub fn tangent_curve(preset: TangentPreset, samples: usize) -> Vec<f32> {
 /// Apply a project-tween preset — the project group button
 /// handler's whole body, factored out so tests can drive the
 /// dispatch against a bare `EditorCore`. Goes through the
-/// core's direct setter (Phase E). Unlike the frame group's
-/// `set_frame_easing`, the press is NOT an undoable op:
-/// `set_project_easing` (`editor.rs:1974`) takes no snapshot,
-/// by the core's own ruling that project-settings tweaks are
-/// not undoable edits (the same rule `cycle_easing` follows).
+/// core's direct setter (Phase E). Since RM24 a preset that
+/// changes the value takes exactly one undo step:
+/// `set_project_easing` (`editor.rs:5512`) snapshots on a
+/// real change (and none when the preset is already active),
+/// like the frame group's snapshotting `set_frame_easing`.
 /// The pinning test below keeps this doc honest.
 pub fn set_project_preset(core: &mut EditorCore, e: Easing) {
     core.set_project_easing(e);
@@ -570,22 +570,20 @@ mod tests {
     }
 
     #[test]
-    fn project_preset_dispatch_takes_no_undo_snapshot() {
-        // The truth `set_project_preset`'s doc states:
-        // the press is NOT an undoable op. The core's
-        // project setter takes no snapshot (project-
-        // settings tweaks are not undoable edits there),
-        // unlike the frame group's snapshotting
-        // `set_frame_easing`. Pin the undo depth across a
-        // dispatch, mirroring the engine's own test for
-        // the setter — if the core ever starts
-        // snapshotting here, this panel's doc must change
-        // with it, and this test is what says so.
+    fn project_preset_dispatch_takes_one_undo_snapshot() {
+        // Since RM24 a preset that changes the value
+        // takes exactly one undo step — mirroring the
+        // engine's own test for the setter
+        // (`set_project_easing_writes_and_snapshots_once`).
+        // Re-dispatching the already-active preset
+        // changes nothing and spends nothing.
         let mut core = EditorCore::new();
         let depth = core.undo_depth();
         set_project_preset(&mut core, Easing::EaseIn);
         assert_eq!(core.project.easing, Easing::EaseIn);
-        assert_eq!(core.undo_depth(), depth, "no snapshot is taken");
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot for the change");
+        set_project_preset(&mut core, Easing::EaseIn);
+        assert_eq!(core.undo_depth(), depth + 1, "no snapshot for a no-change dispatch");
     }
 
     #[test]

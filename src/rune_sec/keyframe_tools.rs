@@ -4849,9 +4849,12 @@ mod tests {
         let mut st = KeyframeToolsState::default();
         st.copy_offset = 3;
         // Silent writes: the value moves, the status does not.
+        // (A fresh core's status is the default greeting, not
+        // empty — silent means UNCHANGED, not empty.)
+        let status0 = core.status.clone();
         copy_offset_scrub_write(&core, &mut st, 4.0);
         assert_eq!(st.copy_offset, 4);
-        assert!(core.status.is_empty(), "a scrub write is silent");
+        assert_eq!(core.status, status0, "a scrub write is silent");
         copy_offset_scrub_write(&core, &mut st, 5.0);
         copy_offset_scrub_finish(&mut core, &mut st, 5.0);
         assert_eq!(st.copy_offset, 5);

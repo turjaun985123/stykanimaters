@@ -1577,6 +1577,18 @@ fn text_focused(s: &State) -> bool {
 /// While a text field is focused, everything else is
 /// left to the field. Then: Ctrl+Z undo, Ctrl+Shift+Z /
 /// Ctrl+Y redo, Ctrl+S quick-save (the app-bar Save
+/// Roadmap Wave 2 (W2-04): the Space tap, extracted from the `view()` closure so tests can drive a full tap (press + release); behaviour unchanged.
+fn on_space_release(s: &mut State, ev: &KeyEvent) -> bool {
+    // A release whose hold no pan consumed is the play/pause press users know, one phase later; a consumed hold (a pan) and a release with no armed press (typed into a field) both do nothing.
+    if matches!(&ev.key, Key::Text(text) if text == " ")
+        && stage_view::space_pan_release()
+    {
+        chrome_view::toggle_play(s);
+        return true;
+    }
+    false
+}
+
 /// button's press, nothing more), Space play/pause,
 /// Left/Right frame step, Delete removes the selected stroke
 /// if one is selected, else the selected particle event,
@@ -2365,21 +2377,8 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
             ),
         );
     }
-    root.on_key_up(|s: &mut State, ev: &KeyEvent, _tx: &mut Tx| {
-        // Roadmap Wave 2 (W2-04): the Space tap.
-        // A release whose hold no pan consumed is
-        // the play/pause press users know, one
-        // phase later; a consumed hold (a pan) and
-        // a release with no armed press (typed
-        // into a field) both do nothing.
-        if matches!(&ev.key, Key::Text(text) if text == " ")
-            && stage_view::space_pan_release()
-        {
-            chrome_view::toggle_play(s);
-            return true;
-        }
-        false
-    })
+    // Roadmap Wave 2 (W2-04): the Space tap — see `on_space_release` above.
+    root.on_key_up(|s: &mut State, ev: &KeyEvent, _tx: &mut Tx| on_space_release(s, ev))
 }
 
 /// Wave P (P19): the window-exit flush. The Rune framework
@@ -2459,6 +2458,13 @@ mod key_routing_tests {
     fn press(s: &mut State, ev: &KeyEvent) -> bool {
         let mut tx = Tx::default();
         on_key(s, ev, &mut tx)
+    }
+
+    /// A full Space tap (W2-04): press arms the hold-to-pan state, release fires play/pause.
+    fn tap_space(s: &mut State) -> bool {
+        let ev = typed(" ");
+        assert!(press(s, &ev), "Space press arms the hold");
+        on_space_release(s, &ev)
     }
 
     #[test]
@@ -2621,9 +2627,9 @@ mod key_routing_tests {
         assert_eq!(s.core.current as i32, (cur + 1).rem_euclid(n));
         assert!(press(&mut s, &plain(Key::Left)));
         assert_eq!(s.core.current as i32, cur);
-        // Space toggles playback; C camera mode; O onion.
+        // Space toggles playback on release (W2-04 tap); C camera mode; O onion.
         let playing = s.core.playing;
-        assert!(press(&mut s, &typed(" ")));
+        assert!(tap_space(&mut s));
         assert_eq!(s.core.playing, !playing);
         let cam = s.core.camera_mode;
         assert!(press(&mut s, &typed("c")));

@@ -464,14 +464,12 @@ impl EditorCore {
     }
 
     fn list_project_files() -> Vec<PathBuf> {
-        let dir = std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join("projects");
+        // RM9: same store root as save_named_project — the selector must list the directory the saves land in.
         // Wave 12 (B3): the listing itself lives in
         // `projects::list_project_files` (shell-owned files
         // filtered there) — one implementation, so this
         // selector listing and the refresh seam's cannot drift.
-        crate::projects::list_project_files(&dir)
+        crate::projects::list_project_files(&crate::shell::projects_dir())
     }
 
     /// The on-disk text of a saved library file: the figure
@@ -3004,8 +3002,8 @@ impl EditorCore {
         self.write_node_color(rgb);
     }
 
-    /// The colour write itself, without `set_node_color`'s
-    /// (absent) snapshot: shared with `set_node_style_atomic`,
+    /// The colour write itself, without the snapshot
+    /// `set_node_color` takes when the colour changes: shared with `set_node_style_atomic`,
     /// which snapshots once for the whole style. Silent when
     /// nothing is selected, exactly like `set_node_color`.
     fn write_node_color(&mut self, rgb: u32) {
@@ -8285,10 +8283,9 @@ impl EditorCore {
     /// longer plants a phantom recent. The status line
     /// reports the outcome either way, as it always has.
     pub fn save_named_project(&mut self) -> bool {
-        let dir = std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join("projects");
-        self.save_named_project_to(&dir)
+        // RM9: the store root is shell::projects_dir(), not ./projects — a save that lands
+        // where the Home scan never looks leaves saved projects out of the library on non-portable installs.
+        self.save_named_project_to(&crate::shell::projects_dir())
     }
 
     /// Wave 10 (D10 I1): restart the dirty baseline after a

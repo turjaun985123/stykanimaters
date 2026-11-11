@@ -1835,9 +1835,10 @@ mod tests {
 
         let depth_before = core.undo_depth();
         apply_recent_color(&mut core, 0x22_2222);
-        // `set_node_color` does not snapshot, so the
-        // press is not an undo step.
-        assert_eq!(core.undo_depth(), depth_before);
+        // `set_node_color` snapshots (coalesced, "Segment
+        // colour") when the colour changes — the labelled
+        // undo Wave 1 added — so the press is one undo step.
+        assert_eq!(core.undo_depth(), depth_before + 1);
         // The colour landed as the node's own colour...
         assert_eq!(selected_color(&core), Some(0x22_2222));
         assert_eq!(

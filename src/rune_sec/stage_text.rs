@@ -2050,7 +2050,11 @@ mod tests {
         // fixture style names Pixel explicitly — under the
         // default Shaped style a resolvable line leaves
         // this stream for the element layer (the partition
-        // is pinned in the W2-45 section below).
+        // is pinned in the W2-45 section below). The full
+        // helper style is installed (its pinned colours
+        // 0xFFEE00 / 0x112233 are what the geometry tests
+        // assert); only the font is overridden to Pixel.
+        core.project.subtitle_style = subtitle_style(SubtitlePosition::Bottom, 1.0);
         core.project.subtitle_style.font = SubtitleFont::Pixel;
         core.project.subtitles.push(SubtitleCue {
             start_frame: start,
@@ -2330,6 +2334,10 @@ mod tests {
     fn subtitle_geometry_top_anchor_puts_the_band_at_the_top() {
         let mut core = core_with_cue("HI", 0, 10);
         core.project.subtitle_style = subtitle_style(SubtitlePosition::Top, 1.0);
+        // W2-45: the replacement resets the font to Shaped, the helper's default —
+        // under Shaped a resolving line is claimed by the shaped layer and this bitmap
+        // stream is empty — so re-assert Pixel, the route this test pins.
+        core.project.subtitle_style.font = SubtitleFont::Pixel;
         let prims = subtitle_geometry(&core);
         assert_eq!(prims.len(), 40);
         // The glyph block centre is the top band's centre

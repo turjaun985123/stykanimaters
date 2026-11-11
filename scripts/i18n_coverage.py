@@ -100,7 +100,7 @@ def tier_of(pct: float) -> str:
 # catalogue; baselines below are this instrument's measured
 # counts on the settled tree.
 BASELINE_TRANSLATED = {
-    "en": 947,
+    "en": 954,
     "bn": 905,
     "es": 882,
     "ar": 132,

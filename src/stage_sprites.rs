@@ -1934,18 +1934,29 @@ mod tests {
     fn selected_sprite_gets_corner_marks_and_a_full_strength_outline() {
         let project = project_with_sprites();
         let prims = sprite_prims(&project, 0.0, Some(0));
-        // Sprite 0: fill, outline, 8 marks, label = 11;
-        // sprite 1 unselected: 3.
-        assert_eq!(prims.len(), 14);
+        // Sprite 0: fill, outline, 8 corner ticks, 27
+        // handle glyphs (RM22: 4 corner squares x4 + pivot
+        // cross 2 + rotate link 1 + rotate knob 4; W2-09:
+        // flip glyphs 4), label = 38; sprite 1 unselected: 3.
+        assert_eq!(prims.len(), 41);
         match &prims[1] {
             SpritePrim::Outline { alpha, .. } => {
                 assert_eq!(*alpha, SELECTED_OUTLINE_ALPHA_FACTOR)
             }
             other => panic!("expected Outline, got {other:?}"),
         }
+        // The corner ticks only: the selected sprite also
+        // carries the RM22/W2-09 handle glyphs as
+        // CornerMark segments, so filter to the marks that
+        // start exactly on a quad corner (handle squares
+        // start at corner +/- 4, the pivot/link/flip
+        // glyphs elsewhere).
+        let quads = sprite_quads(&project, 0.0);
         let marks: Vec<&SpritePrim> = prims
             .iter()
-            .filter(|p| matches!(p, SpritePrim::CornerMark { .. }))
+            .filter(|p| {
+                matches!(p, SpritePrim::CornerMark { a, .. } if quads[0].corners.contains(a))
+            })
             .collect();
         assert_eq!(marks.len(), 8, "two ticks per corner, selected sprite only");
         assert!(marks.iter().all(|p| matches!(p, SpritePrim::CornerMark { sprite, width, .. } if *sprite == 0 && *width == CORNER_MARK_WIDTH)));
@@ -2617,10 +2628,12 @@ mod tests {
         assert_eq!(core.status, "Sprite 1 key set at frame 1.");
         core.undo();
         assert_eq!(keys_json(&core, 0), before, "undo restores the unflipped keys");
-        // A second press toggles back — again one step.
+        // A second press toggles it on again — the press
+        // inverts whatever it finds (the undo above already
+        // restored the unflipped key) — again one step.
         sprite_handle_drag_down(&mut core, 0, SpriteHandle::FlipX, [320.0, 200.0]);
         sprite_drag_up(&mut core, [320.0, 200.0], false);
-        assert!(!core.project.sprites[0].keys[0].flip_x, "the toggle is symmetric");
+        assert!(core.project.sprites[0].keys[0].flip_x, "the toggle is symmetric");
         assert_eq!(core.undo_depth(), depth + 1);
     }
 

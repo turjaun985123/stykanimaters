@@ -1105,10 +1105,11 @@ mod tests {
         s.push("Saved Styk to the library.", Severity::Success, 3.0);
         assert_eq!(s.items.len(), 1, "identical consecutive push must not stack");
         assert_eq!(s.items[0].born, 3.0, "the surviving toast is reborn at the latest push");
-        // The refresh is real lifetime: alive 4.9 s after the
-        // refresh, gone 5.1 s after it.
-        assert_eq!(s.live_count(7.9), 1);
-        s.expire(8.1);
+        // The refresh is real lifetime: a Success toast lives
+        // 8 s (W2-59), so alive 7.9 s after the refresh,
+        // gone 8.1 s after it.
+        assert_eq!(s.live_count(10.9), 1);
+        s.expire(11.1);
         assert!(s.is_empty());
     }
 

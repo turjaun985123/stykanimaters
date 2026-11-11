@@ -204,25 +204,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_holds_45_bindings_with_unique_ids_and_labels() {
+    fn registry_holds_50_bindings_with_unique_ids_and_labels() {
         // 25 pre-PL-4 bindings (10 Shortcuts + 8
         // Workspaces + 2 Posing + 5 Timeline) + 19 PL-4
         // additions (RM26: 6 Shortcuts, 1 Posing, 8
         // Timeline, 4 Drawing) + 1 IA-RM28-5 addition
-        // (F1 in Shortcuts).
-        assert_eq!(BINDINGS.len(), 45);
+        // (F1 in Shortcuts) + 5 Roadmap Wave 2
+        // additions (W2-21: workspace-build Alt+6;
+        // W2-22: the four rig-tree arrow rows in the
+        // new Build section).
+        assert_eq!(BINDINGS.len(), 50);
         for (i, b) in BINDINGS.iter().enumerate() {
             assert!(
                 !BINDINGS[..i].iter().any(|o| o.id == b.id),
                 "duplicate binding id: {}",
                 b.id
             );
-            // The help panel forbids two rows sharing a
-            // key label; the registry keeps that law at
-            // the source.
+            // A key label may repeat ACROSS sections —
+            // the Build rig rows reuse the arrows the
+            // palette (Up/Down, scope Palette) and the
+            // timeline (Left/Right) claim, gated by
+            // workspace/scope in `on_key` (W2-22) — but
+            // never twice inside one section, where one
+            // press would carry two meanings.
             assert!(
-                !BINDINGS[..i].iter().any(|o| o.keys == b.keys),
-                "duplicate key label: {}",
+                !BINDINGS[..i]
+                    .iter()
+                    .any(|o| o.section == b.section && o.keys == b.keys),
+                "duplicate key label in {}: {}",
+                b.section,
                 b.keys
             );
             assert!(!b.action.is_empty(), "binding {} has no action", b.id);
@@ -231,11 +241,15 @@ mod tests {
 
     #[test]
     fn section_counts_match_the_help_panel_census() {
-        assert_eq!(section_rows("Shortcuts").len(), 16);
-        assert_eq!(section_rows("Workspaces").len(), 8);
+        // Shortcuts is 17 (10 pre-PL-4 + 6 RM26 + F1) — the old pin of 16 contradicted the registry's own comment arithmetic.
+        assert_eq!(section_rows("Shortcuts").len(), 17);
+        // Workspaces is 9 since Wave 2 added Build (Alt+6, W2-21).
+        assert_eq!(section_rows("Workspaces").len(), 9);
         assert_eq!(section_rows("Posing").len(), 3);
         assert_eq!(section_rows("Timeline").len(), 13);
         assert_eq!(section_rows("Drawing").len(), 4);
+        // Build holds the four rig-tree arrow rows (W2-22).
+        assert_eq!(section_rows("Build").len(), 4);
         // Features holds no bindings, by design.
         assert_eq!(section_rows("Features").len(), 0);
         assert_eq!(section_rows("No such section").len(), 0);
@@ -273,9 +287,10 @@ mod tests {
     }
 
     #[test]
-    fn command_hints_cover_32_commands() {
+    fn command_hints_cover_33_commands() {
+        // 32 pre-Wave-2 + go-build (IA-W2-21-4, the Alt+6 Build jump).
         let hinted = BINDINGS.iter().filter(|b| b.command_key.is_some()).count();
-        assert_eq!(hinted, 32);
+        assert_eq!(hinted, 33);
         assert_eq!(command_hint("play"), Some("Space"));
         assert_eq!(command_hint("first-frame"), Some("Home"));
         assert_eq!(command_hint("last-frame"), Some("End"));
@@ -287,5 +302,6 @@ mod tests {
         // No command twin: the camera-mode key (C) has no
         // palette command, and the nudge has none either.
         assert_eq!(command_hint("toggle-camera-mode"), None);
+        assert_eq!(command_hint("go-build"), Some("Alt+6"));
     }
 }

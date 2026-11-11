@@ -173,7 +173,9 @@ mod tests {
         let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
         assert_eq!(
             labels,
-            vec!["Move joint", "history_current", "Delete frame", "Add frame"]
+            // The marker row carries the RESOLVED string for
+            // `history_current`, not the key itself.
+            vec!["Move joint", "Current position", "Delete frame", "Add frame"]
         );
         let jumps: Vec<i32> = rows.iter().map(|r| r.jump).collect();
         assert_eq!(jumps, vec![1, 0, -1, -2]);

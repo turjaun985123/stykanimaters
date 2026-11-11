@@ -7001,11 +7001,13 @@ mod tests {
         };
         // Global 1/1, figure 1 hidden on the past side only:
         // past draws figure 0 alone; the future still draws
-        // both, in figure order.
+        // both, in figure order: past-fig0, future-fig0,
+        // future-fig1 — figure 0's future ring is the
+        // shared green, not a second past ring.
         let ov = [None, Some(OnionFigureOverride { prev: Some(0), ..Default::default() })];
         assert_eq!(
             bases(&skin_stream(&core, 1, 1, &ov)),
-            vec![(0xE8E8EC, near), (0xE8E8EC, near), (0x7BE495, near)]
+            vec![(0xE8E8EC, near), (0x7BE495, near), (0x7BE495, near)]
         );
         // Global 1/0, figure 0 deepened to 2: figure 0 gains
         // the far past ring, figure 1 stays at the global 1.
@@ -7485,6 +7487,10 @@ mod tests {
     /// is the authored path).
     fn path_core() -> EditorCore {
         let mut core = EditorCore::new();
+        // `poses_at` interpolates fractional frames only
+        // while tween playback is on (model.rs), so the
+        // half-frame samples below need it on.
+        core.project.tween_playback = true;
         for (i, frame) in core.project.frames.iter_mut().enumerate() {
             frame.poses[0].root = [40.0 * i as f32, 100.0];
         }

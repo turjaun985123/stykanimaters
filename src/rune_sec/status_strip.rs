@@ -277,16 +277,18 @@
 //!   box is 640 wide, so it paints 11 × 640 / 512 =
 //!   13.75 pt, plus the 4 pt icon/label gap —
 //!   17.75 pt charged;
-//! - total with the glyph: 512 + 64 + 17.75 =
-//!   **593.75 pt**.
+//! - total with the glyph: 528 + 64 + 17.75 =
+//!   **609.75 pt**.
 //!
 //! The tail absorber must keep at least 160 pt of
-//! the 744: 593.75 + 160 = 753.75 > 744 — **the
-//! glyph still does not fit**, short by 9.75 pt.
-//! Without the glyph the same state totals 576 pt
-//! and passes (576 + 160 = 736 ≤ 744, 8 pt to
-//! spare): the current strip is comfortable at the
-//! new width, but the glyph alone tips it over.
+//! the 744: 609.75 + 160 = 769.75 > 744 — **the
+//! glyph still does not fit**, short by 25.75 pt.
+//! Without the glyph the same state totals 592 pt
+//! and no longer passes the tail floor either
+//! (592 + 160 = 752 > 744, short by 8 pt): RM24's
+//! save-state dot costs the default strip 16 pt,
+//! so the tail sits at 152 pt before the glyph
+//! is even charged.
 //! (This accounting charges segment floors only;
 //! the row's dividers and 8 pt gaps, uncharged here,
 //! would widen the shortfall further.) Phase H's
@@ -2778,9 +2780,10 @@ mod tests {
             est_text_width(&undo_text(&core)),
             est_text_width(play_text(core.playing)),
         ];
+        // Project floor is 136 since RM24: the fresh suffix carries the save-state dot ("Untitled · 0:00 ●", 17 chars).
         assert_eq!(
             floors,
-            [120.0, 72.0, 48.0, 48.0, 72.0, 32.0, 48.0, 72.0],
+            [136.0, 72.0, 48.0, 48.0, 72.0, 32.0, 48.0, 72.0],
             "project / frame / timecode / fps / zoom / selection / undo / play"
         );
         // The audio segment's own floor.
@@ -2796,17 +2799,18 @@ mod tests {
         assert_eq!(glyph_w, 13.75);
         let glyph_total = glyph_w + 4.0;
         // The verdict: the strip minus a 160 pt
-        // minimum for the tail absorber. Without the
-        // glyph the default state fits with 8 pt to
-        // spare; with the glyph charged it overflows
-        // by 9.75 pt — so the audio segment stays
-        // text-only (the module docs carry the full
-        // argument).
+        // minimum for the tail absorber. Since RM24
+        // the glyph-less default state already
+        // overflows the tail floor by 8 pt (the dot
+        // costs 16 pt); with the glyph charged it
+        // overflows by 25.75 pt — so the audio
+        // segment stays text-only (the module docs
+        // carry the full argument).
         let base: f32 = floors.iter().sum::<f32>() + audio_floor;
-        assert_eq!(base, 576.0);
-        assert!(base + 160.0 <= 744.0, "the glyph-less strip fits");
+        assert_eq!(base, 592.0);
+        assert_eq!(base + 160.0 - 744.0, 8.0, "the glyph-less strip is 8 pt over the tail floor");
         let total = base + glyph_total;
-        assert_eq!(total, 593.75);
+        assert_eq!(total, 609.75);
         assert!(
             total + 160.0 > 744.0,
             "with the glyph charged, the tail would fall below 160 pt"
@@ -2890,7 +2894,7 @@ mod tests {
             est_text_width(&undo_text(&core)),
             est_text_width(play_text(core.playing)),
         ];
-        assert_eq!(floors.iter().sum::<f32>(), 512.0);
+        assert_eq!(floors.iter().sum::<f32>(), 528.0); // 512 + 16 for RM24's dot on the fresh suffix.
         // The yielding bases inside that sum: the
         // play segment, the project NAME (the rest
         // of the project floor is the protected
@@ -2902,8 +2906,8 @@ mod tests {
             + est_text_width(&format!("{} fps", fps_text(core.project.fps)))
             + est_text_width(&zoom_text(&core));
         assert_eq!(yield_capacity, 72.0 + 64.0 + 48.0 + 72.0);
-        let protected = 512.0 - yield_capacity;
-        assert_eq!(protected, 256.0);
+        let protected = 528.0 - yield_capacity;
+        assert_eq!(protected, 272.0);
         // The protected set keeps the two segments
         // the wave brief names as always fully
         // visible whole: the frame readout, and the
@@ -2913,21 +2917,22 @@ mod tests {
         // which is built by the floored `segment`
         // path like the frame segment.
         assert_eq!(est_text_width(&frame_text(&core)), 72.0);
-        assert_eq!(est_text_width(&suffix), 56.0);
+        assert_eq!(est_text_width(&suffix), 72.0); // " · 0:00 ●", 9 chars — the dot rides the fresh suffix since RM24.
         assert_eq!(est_text_width("Autosaved 999h ago"), 144.0);
         // At 744 (the reference centre): floors plus
         // the 8 measured boundaries leave the tail
-        // exactly the 96 pt the dump shows — no
-        // shortage, nothing yields, nothing removed.
-        assert_eq!(512.0 + 8.0 * 17.0 + 96.0, 744.0);
+        // exactly the 80 pt the dump shows once RM24's
+        // dot is charged — no shortage, nothing yields,
+        // nothing removed.
+        assert_eq!(528.0 + 8.0 * 17.0 + 80.0, 744.0);
         // At 584, default state: the shortage is
-        // 512 + 136 − 584 = 64, inside the yield
+        // 528 + 136 − 584 = 80, inside the yield
         // capacity; the protected floors plus
         // boundaries fit whole.
-        assert!(512.0 + 8.0 * 17.0 - 584.0 <= yield_capacity);
+        assert!(528.0 + 8.0 * 17.0 - 584.0 <= yield_capacity);
         assert!(protected + 8.0 * 17.0 <= 584.0);
         // The audit's C1 coincidence (audio + speed
-        // 1.5× + 3D live): floors 624 in this
+        // 1.5× + 3D live): floors 640 in this
         // accounting; the protected part fits 584
         // whole and the yielding set covers the
         // rest. The boundary-charged form of this
@@ -2936,11 +2941,11 @@ mod tests {
         // proof in
         // `deepest_coincidence_proven_bound_at_584pt`
         // below.
-        let c1_floors = 512.0
+        let c1_floors = 528.0
             + est_text_width(&audio_segment(true).unwrap())
             + est_text_width(&speed_segment(1.5).unwrap())
             + est_text_width(fig3_segment(true).unwrap());
-        assert_eq!(c1_floors, 624.0);
+        assert_eq!(c1_floors, 640.0);
         assert!(c1_floors - yield_capacity <= 584.0);
     }
 
@@ -2992,34 +2997,37 @@ mod tests {
             + est_text_width(&zoom_text(&core));
         assert_eq!(pool, 256.0);
         // Protected floors in the coincidence: the
-        // default 512 minus the pool, plus the legs.
-        let protected = 512.0 - pool + legs;
-        assert_eq!(protected, 368.0);
+        // default 528 minus the pool, plus the legs.
+        // (528 = live floors sum since RM24's dot.)
+        let protected = 528.0 - pool + legs;
+        assert_eq!(protected, 384.0);
         // 12 elements in the row -> 11 boundaries.
         let boundaries = 11.0 * 17.0;
         assert_eq!(boundaries, 187.0);
         // BEFORE the rung, the zoom floor (72) sat in
-        // the protected set: minimum width 627
+        // the protected set: minimum width 643
         // against the 584 column — an overflow of
-        // exactly 43, the Wave 3 residual made exact.
-        assert_eq!(protected + 72.0 + boundaries, 627.0);
-        assert_eq!(protected + 72.0 + boundaries - 584.0, 43.0);
-        // AFTER the rung: minimum width 555 — the
-        // coincidence fits with 29 pt to spare.
-        assert_eq!(protected + boundaries, 555.0);
+        // exactly 59, the Wave 3 residual made exact.
+        assert_eq!(protected + 72.0 + boundaries, 643.0);
+        assert_eq!(protected + 72.0 + boundaries - 584.0, 59.0);
+        // AFTER the rung: minimum width 571 — the
+        // coincidence fits with 13 pt to spare.
+        assert_eq!(protected + boundaries, 571.0);
         assert!(protected + boundaries <= 584.0);
-        // The dirty variant: a real editing session's
-        // suffix carries the dirty dot, 16 pt wider
-        // than the clean one (` · 0:00` -> ` · 0:01 ●`
-        // at the same runtime width). Before the
-        // rung it overflowed by 59; after, it fits
-        // with 13 to spare.
+        // The dirty variant: since RM24 the fresh
+        // suffix already carries the dirty dot
+        // (` · 0:00 ●`), so a dirty strip at the same
+        // runtime is exactly as wide as the clean one
+        // — the delta is 0, not 16. Before the rung
+        // it overflowed by 59; after, it fits with 13
+        // to spare, dirty exactly like clean.
         let mut dirty = EditorCore::new();
         dirty.add_frame();
         let (_, dirty_suffix) = project_parts(&dirty);
         let dirty_delta =
             est_text_width(&dirty_suffix) - est_text_width(&clean_suffix);
-        assert_eq!(dirty_delta, 16.0);
+        assert_eq!(dirty_delta, 0.0);
+        // 59 either way: the +16 moved from the delta into the floors.
         assert_eq!(protected + 72.0 + dirty_delta + boundaries - 584.0, 59.0);
         assert_eq!(protected + dirty_delta + boundaries, 571.0);
         assert!(protected + dirty_delta + boundaries <= 584.0);
@@ -3027,13 +3035,13 @@ mod tests {
         // speed label (+8 over 1.5×) still fits dirty.
         assert!(protected + dirty_delta + 8.0 + boundaries <= 584.0);
         // The demand side agrees: total floors/bases
-        // (624) plus boundaries, minus the column, is
+        // (640) plus boundaries, minus the column, is
         // the shortage, and the pool covers it in
         // every variant (the longest project name
         // only enlarges the pool — it is rung 2).
-        assert_eq!(624.0 + boundaries - 584.0, 227.0);
-        assert!(624.0 + boundaries - 584.0 <= pool);
-        assert!(624.0 + dirty_delta + 8.0 + boundaries - 584.0 <= pool);
+        assert_eq!(640.0 + boundaries - 584.0, 243.0);
+        assert!(640.0 + boundaries - 584.0 <= pool);
+        assert!(640.0 + dirty_delta + 8.0 + boundaries - 584.0 <= pool);
         // The strip builds in the coincidence state
         // (the audio leg cannot be forced without a
         // player; the speed and 3D legs go through

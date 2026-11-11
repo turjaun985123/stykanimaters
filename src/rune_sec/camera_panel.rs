@@ -2825,9 +2825,9 @@ playback_speed: 1.0,
             core.project.camera[0].easing,
             stykanimate_rs::model::CameraEase::Linear
         );
-        // The full cycle wraps: four more presses return
-        // to Linear via EaseIn, EaseOut and Hold.
-        for _ in 0..4 {
+        // The full cycle wraps: five more presses return
+        // to Linear via Smooth, EaseIn, EaseOut and Hold.
+        for _ in 0..5 {
             cycle_easing_here(&mut core);
         }
         assert_eq!(

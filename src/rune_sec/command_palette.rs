@@ -3290,8 +3290,11 @@ mod tests {
         // +3 in Roadmap Wave 2 (W2-67 — goto-frame /
         // set-fps / set-camera-zoom, the parameterised
         // commands whose runs open the argument step;
-        // see ARG_KINDS).
-        assert_eq!(total, 142, "palette should cover 142 commands, has {total}");
+        // see ARG_KINDS),
+        // +1 in Roadmap Wave 2 (IA-W2-21-4 — go-build,
+        // the Go to Build workspace jump, twin of the
+        // Alt+6 keymap binding).
+        assert_eq!(total, 143, "palette should cover 143 commands, has {total}");
         for c in COMMANDS {
             assert!(!c.title.is_empty() && !c.group.is_empty(), "empty field on {}", c.key);
         }

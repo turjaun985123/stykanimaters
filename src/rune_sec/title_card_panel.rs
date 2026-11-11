@@ -279,6 +279,11 @@ mod tests {
         for (title, start, end) in chapters {
             core.chapter_add(*start, *end, title);
         }
+        // Chapters name frames the project must have: a fresh core has 5 frames, so extend it past the latest chapter end — otherwise `goto` (which no-ops out of range) can never seek to a chapter start.
+        let last_end = chapters.iter().map(|(_, _, end)| *end).max().unwrap_or(0);
+        while core.frame_count() <= last_end {
+            core.add_frame();
+        }
         State {
             core,
             last_poll: None,

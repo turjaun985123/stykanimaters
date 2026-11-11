@@ -1202,8 +1202,8 @@ impl ExportOp {
             ExportOp::Png => "./export/",
             ExportOp::Jpeg => "out/jpeg/",
             ExportOp::Svg => "./export/svg/",
-            ExportOp::Spritesheet => "./export/spritesheet.png",
-            ExportOp::ContactSheet => "./export/contact-sheet.png",
+            ExportOp::Spritesheet => "./export/animation-spritesheet.png",
+            ExportOp::ContactSheet => "./export/animation-contact-sheet.png",
             ExportOp::Gif => "./export/animation.gif",
             ExportOp::Apng => "out/animation.apng",
             ExportOp::Mp4 => "./export/animation.mp4",
@@ -5661,7 +5661,7 @@ mod tests {
     fn bundle_recap_lists_every_planned_op_with_its_destination() {
         assert_eq!(
             bundle_recap(BundleKind::Images, &[], "animation"),
-            "Exported PNG → ./export/, JPEG → out/jpeg/, SVG → ./export/svg/, sheet → ./export/spritesheet.png"
+            "Exported PNG → ./export/, JPEG → out/jpeg/, SVG → ./export/svg/, sheet → ./export/animation-spritesheet.png"
         );
         assert_eq!(
             bundle_recap(BundleKind::Video, &[], "animation"),
@@ -5789,7 +5789,7 @@ mod tests {
         assert_eq!(ExportOp::Jpeg.dest(), "out/jpeg/");
         assert_eq!(ExportOp::Apng.dest(), "out/animation.apng");
         assert_eq!(ExportOp::Png.dest(), "./export/");
-        assert_eq!(ExportOp::Spritesheet.dest(), "./export/spritesheet.png");
+        assert_eq!(ExportOp::Spritesheet.dest(), "./export/animation-spritesheet.png");
     }
 
     // ---- Recent exports history ----
@@ -7288,7 +7288,7 @@ mod tests {
         assert_eq!(lines[1].0, "xc-progress-eta");
         assert_eq!(
             lines[1].1,
-            "Rendering time left: about 0:15 (at the rate measured so far) Encoding follows and is not estimated yet."
+            "Render time left: about 0:15 (at the rate measured so far) Encoding follows and is not estimated yet."
         );
 
         // The same render in a sequence job: no
@@ -7300,7 +7300,7 @@ mod tests {
         let lines = job_lines(&core, &job);
         assert_eq!(
             lines[1].1,
-            "Rendering time left: about 0:15 (at the rate measured so far)"
+            "Render time left: about 0:15 (at the rate measured so far)"
         );
 
         // Encode active: the render terminal is
@@ -7318,7 +7318,7 @@ mod tests {
             .expect("eta line present");
         assert_eq!(
             eta.1,
-            "Encoding time left: about 0:15 (at the rate measured so far)"
+            "Encode time left: about 0:15 (at the rate measured so far)"
         );
 
         // Before a quotable rate exists, the line says
@@ -7328,7 +7328,7 @@ mod tests {
         job.render.store_render_at(render_ev(1, 100, false), at(0));
         let lines = job_lines(&core, &job);
         assert_eq!(lines[1].0, "xc-progress-eta");
-        assert_eq!(lines[1].1, "Rendering time left: estimating…");
+        assert_eq!(lines[1].1, "Render time left: estimating…");
 
         // No events yet: no ETA line at all — the
         // working line stands alone.
@@ -7546,7 +7546,7 @@ mod tests {
             ),
             (
                 "export_delivery_chapters",
-                "Chapter markers: {count} will be embedded in the MP4.",
+                "Chapters: {count}",
             ),
         ] {
             assert!(
@@ -7600,7 +7600,7 @@ mod tests {
         ];
         assert_eq!(
             delivery_chapters_text(&core).unwrap(),
-            "Chapter markers: 2 will be embedded in the MP4."
+            "Chapters: 2"
         );
     }
 

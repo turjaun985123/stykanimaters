@@ -3809,10 +3809,13 @@ mod tests {
         assert!(delete_key_event(&mut s.core, 0, 2));
         assert!(s.core.project.channels[0].keys.is_empty());
         assert_eq!(figure_keyframes(&s.core.project, 0), vec![0, 2], "the pose key stays");
-        // Pose through the engine op.
+        // Pose through the engine op: the frame holds the
+        // previous pose, so the change point moves to
+        // frame 3, which still holds the deleted pose —
+        // the dense-model hold, as the bend arm below.
         let mut s = two_figure_state();
         assert!(delete_key_event(&mut s.core, 0, 2));
-        assert_eq!(figure_keyframes(&s.core.project, 0), vec![0]);
+        assert_eq!(figure_keyframes(&s.core.project, 0), vec![0, 3]);
         // State: the stored key goes.
         let mut s = crate::init();
         let mut fig = figure("Alpha");
@@ -4002,7 +4005,11 @@ mod tests {
         assert_eq!(figure_keyframes(&s.core.project, 0), vec![0, 1]);
         s.core.goto(1);
         assert!(delete_active_keys(&mut s));
-        assert_eq!(figure_keyframes(&s.core.project, 0), vec![0]);
+        // Deleting the frame-1 key holds frame 0's pose there,
+        // so the change point moves to frame 2, which still
+        // holds the deleted pose — the dense-model hold, the
+        // same arithmetic the bend arm below pins ([3, 4]).
+        assert_eq!(figure_keyframes(&s.core.project, 0), vec![0, 2]);
         // Nothing under the playhead: honest refusals.
         let mut s = two_figure_state();
         s.core.goto(1);

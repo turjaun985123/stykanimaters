@@ -3173,7 +3173,8 @@ mod tests {
         // and clamps by APPLIED delta at frame 0.
         let c = cue(10, 20, "x");
         assert_eq!(shifted_window(&c, 5), Some((15, 25)));
-        assert_eq!(shifted_window(&c, -15), Some((0, 5)));
+        // Applied delta is −10 (start clamps at 0), so the end follows to 10 — duration preserved, as the comment above says.
+        assert_eq!(shifted_window(&c, -15), Some((0, 10)));
         assert_eq!(shifted_window(&c, 0), None);
         assert_eq!(shifted_window(&cue(0, 5, "x"), -1), None);
     }

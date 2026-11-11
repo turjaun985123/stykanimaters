@@ -269,9 +269,11 @@ pub fn gizmo_hit(layout: &GizmoLayout, p: V2, scale: f32) -> Option<GizmoHandle>
 /// in the stage's own convention: the y-down rotation
 /// matrix `stage_camera` documents (`[dx·cos − dy·sin,
 /// dx·sin + dy·cos]`), so a positive angle turns the
-/// point clockwise on screen and raises
+/// point clockwise on screen and lowers
 /// [`model::angle_of`] of the offset by exactly `deg`
-/// — the same direction a pose's angles measure in.
+/// (`angle_of` is `atan2(x, y)`, which falls as the point
+/// moves right→down) — the same direction a pose's angles
+/// measure in.
 pub fn rotate_point(p: V2, pivot: V2, deg: f32) -> V2 {
     let (s, c) = deg.to_radians().sin_cos();
     let dx = p[0] - pivot[0];
@@ -292,7 +294,11 @@ pub fn gizmo_rotation_delta(pivot: V2, press: V2, at: V2) -> f32 {
     if model::len(a) <= 0.0 || model::len(b) <= 0.0 {
         return 0.0;
     }
-    model::norm_deg(model::angle_of(b) - model::angle_of(a))
+    // The rotation that carries press onto at: `angle_of` falls as
+    // `rotate_point` turns clockwise on screen, so the delta is
+    // angle_of(press) minus angle_of(at) — the subtraction the
+    // previous line had backwards.
+    model::norm_deg(model::angle_of(a) - model::angle_of(b))
 }
 
 /// The rotation a release would settle for a raw
@@ -408,6 +414,22 @@ pub fn gizmo_down(core: &mut EditorCore, p: V2, scale: f32) -> bool {
     let Some(handle) = gizmo_hit(&layout, p, scale) else {
         return false;
     };
+    // Roadmap Wave 2 (W2-03): a press this close to an evaluated joint is
+    // a pose press, not a gizmo grab — the demo figure's root sits 4.48
+    // stage units from the move grip (the bbox centre), inside the grip's
+    // hit disc, so without this veto every press on the root joint is
+    // swallowed and the joint can never be selected. The veto runs after
+    // the hit test, so a press on a handle away from any joint still grabs.
+    let pick = stage_view::pick_radius(scale);
+    for fi in gizmo_target(core) {
+        if core
+            .positions(core.current, fi)
+            .iter()
+            .any(|j| model::dist(*j, p) <= pick)
+        {
+            return false;
+        }
+    }
     let drag = GizmoDrag {
         handle,
         press: p,
@@ -722,6 +744,10 @@ mod tests {
                 frame.poses[fi].root = *r;
             }
         }
+        // `add_figure` selects the new figure, so the fixture ends on
+        // figure 2 — the tests below read and move figure 0, so
+        // re-select it here.
+        core.selected_figure = 0;
         core
     }
 

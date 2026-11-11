@@ -468,7 +468,7 @@
 //! until IA-RM28-5 lands, at 81 with it.
 //!
 //! Roadmap Wave 2 (W2-58, PL-7 depth), 2026-11-10: the
-//! panel gains depth below the six sections. A Topics
+//! panel gains depth below the seven sections. A Topics
 //! block (`help-section-topics`, NOT part of the
 //! [`group_rows`] census either — the 81 stands) pages
 //! the ten deepest systems one page each
@@ -519,7 +519,7 @@ use crate::State;
 /// The keyboard shortcuts that are real in this shell, as
 /// (key label, action) rows, grouped by section in panel
 /// order (see [`group_rows`]). Concatenating [`section_rows`]
-/// over the six sections yields exactly this list. The
+/// over the seven sections yields exactly this list. The
 /// `Features` section's labels name features, not keys —
 /// see the module docs.
 pub fn shortcut_rows() -> Vec<(&'static str, &'static str)> {
@@ -536,7 +536,7 @@ pub fn shortcut_rows() -> Vec<(&'static str, &'static str)> {
 /// 2–4 most important actions as (label, [`TopicAction`])
 /// rows). A topic page renders under its section heading
 /// (`help-section-topics`) at the foot of the panel,
-/// below the six shortcut sections.
+/// below the seven shortcut sections.
 ///
 /// Name discipline: seven topics name the panel the user
 /// opens — "Camera panel", "Graph panel", "Rig tree",
@@ -968,6 +968,8 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
         "Posing" => crate::rune_sec::keymap::section_rows("Posing"),
         "Timeline" => crate::rune_sec::keymap::section_rows("Timeline"),
         "Drawing" => crate::rune_sec::keymap::section_rows("Drawing"),
+        // Roadmap Wave 2 (W2-22): the Build section's rig-tree rows — the arm the integration splice dropped.
+        "Build" => crate::rune_sec::keymap::section_rows("Build"),
         "Features" => vec![
             (
                 "Loop playback",
@@ -1192,6 +1194,7 @@ fn help_text_key(english: &str) -> Option<&'static str> {
         "Posing" => "help_section_posing",
         "Timeline" => "help_section_timeline",
         "Drawing" => "help_section_drawing",
+        "Build" => "help_section_build",
         "Features" => "help_section_features",
         // Section descriptions.
         "General editing keys — all but Ctrl+K pause while typing in a text field" => {
@@ -1209,6 +1212,10 @@ fn help_text_key(english: &str) -> Option<&'static str> {
         "Freehand drawing keys — paused while typing in a text field" => {
             "help_section_drawing_desc"
         }
+        // Roadmap Wave 2 (W2-22): the Build section.
+        "Rig tree keys in the Build workspace — paused while typing in a text field" => {
+            "help_section_build_desc"
+        }
         "Features on buttons, panels and the stage — none of these is a keyboard shortcut" => {
             "help_section_features_desc"
         }
@@ -1224,13 +1231,15 @@ fn help_text_key(english: &str) -> Option<&'static str> {
         "Previous result in the command palette (palette open)" => "help_act_palette_prev",
         "Run the selected command (command palette open)" => "help_act_palette_run",
         "Close the open menu or command palette" => "help_act_close_menu_or_palette",
-        "Delete the selected stroke, particle event or segment" => "help_act_delete_selected",
+        // Wave 2 (W2-36-2): the cascade gained path points — reworded to match the registry.
+        "Delete the selected stroke, particle event, segment or path point" => "help_act_delete_selected",
         // Workspaces actions.
         "Switch to the Animate workspace" => "help_act_workspace_animate",
         "Switch to the Draw workspace" => "help_act_workspace_draw",
         "Switch to the Graph workspace" => "help_act_workspace_graph",
         "Switch to the Effects workspace" => "help_act_workspace_effects",
         "Switch to the Audio workspace" => "help_act_workspace_audio",
+        "Switch to the Build workspace" => "help_act_workspace_build",
         "Switch to the 3D workspace" => "help_act_workspace_3d",
         "Switch to the Export workspace" => "help_act_workspace_export",
         "Switch to the Home workspace" => "help_act_workspace_home",
@@ -1252,7 +1261,8 @@ fn help_text_key(english: &str) -> Option<&'static str> {
         "Duplicate the current frame" => "help_act_duplicate_frame",
         "Copy the current frame" => "help_act_copy_frame",
         "Paste the copied frame" => "help_act_paste_frame",
-        "Nudge the selected joint by 1 (Shift 10, Alt 0.1); with no joint selected, step frames" => {
+        // Wave 2 (02-3 rewording, catalogue already re-translated): the arm follows the new text.
+        "Move the selected joint or character by 1 (Shift 10, Alt 0.1); with nothing selected, step frames" => {
             "help_act_nudge_selected_joint"
         }
         "Go to the first frame" => "help_act_first_frame",
@@ -1267,6 +1277,11 @@ fn help_text_key(english: &str) -> Option<&'static str> {
         "Brush size down (nearest smaller preset)" => "help_act_brush_size_down",
         "Brush size up (nearest larger preset)" => "help_act_brush_size_up",
         "Cycle brush" => "help_act_cycle_brush",
+        // Roadmap Wave 2 (W2-22): the Build section's rig-tree rows.
+        "Previous rig node" => "help_act_rig_prev_node",
+        "Next rig node" => "help_act_rig_next_node",
+        "Collapse rig node or go to parent" => "help_act_rig_collapse_node",
+        "Expand rig node or go to first child" => "help_act_rig_expand_node",
         // Features labels ("Live MCP control" is absent on
         // purpose — see this fn's docs).
         "Loop playback" => "help_feature_loop_playback",
@@ -1657,9 +1672,15 @@ fn key_row_command(key: &str) -> Option<&'static str> {
     if key == "Ctrl+Y" {
         return Some("redo");
     }
+    // Wave 2 (W2-22): the Build rig rows reuse the arrow
+    // labels the timeline rows claim, and they sit first
+    // in BINDINGS — so take the first binding that
+    // actually names a command, not the first binding
+    // with the label. (A press runs the command twin;
+    // the rig rows have none, by design.)
     keymap::BINDINGS
         .iter()
-        .find(|b| b.keys == key)
+        .find(|b| b.keys == key && b.command_key.is_some())
         .and_then(|b| b.command_key)
 }
 
@@ -2136,7 +2157,11 @@ mod tests {
         // Shift+Right, comma, period, K, Alt+K) and
         // Drawing 0 → 4 (B, [, ], Shift+B).
         // IA-RM28-5 (RM28) then landed the F1 binding in
-        // Shortcuts (16 → 17): the census is 81.
+        // Shortcuts (16 → 17). Roadmap Wave 2 added the
+        // Build workspace (W2-21: Alt+6 in Workspaces,
+        // 8 → 9) and the rig-tree rows (W2-22: four
+        // Build rows): 17 + 9 + 3 + 13 + 4 + 4 + 36
+        // = 86, the settled count (INTEGRATION2.md).
         assert_eq!(shortcut_rows().len(), 86);
     }
 
@@ -2704,12 +2729,20 @@ mod tests {
 
     #[test]
     fn shortcut_rows_have_no_duplicate_keys() {
-        let rows = shortcut_rows();
-        for (i, (key, _)) in rows.iter().enumerate() {
-            assert!(
-                !rows[..i].iter().any(|(k, _)| k == key),
-                "duplicate shortcut key: {key}"
-            );
+        // A key label may repeat ACROSS sections — the
+        // Build rig rows reuse the arrows the palette
+        // (Up/Down) and the timeline (Left/Right) claim,
+        // gated by workspace/scope in `on_key` — but
+        // never twice inside one section, where one
+        // press would carry two meanings.
+        for (name, _) in group_rows() {
+            let rows = section_rows(name);
+            for (i, (key, _)) in rows.iter().enumerate() {
+                assert!(
+                    !rows[..i].iter().any(|(k, _)| k == key),
+                    "duplicate shortcut key in {name}: {key}"
+                );
+            }
         }
     }
 
@@ -2724,11 +2757,14 @@ mod tests {
         assert!(rows.contains(&("Ctrl+K", "Open the command palette")));
         assert!(rows.contains(&("Ctrl+S", "Quick save")));
         assert!(rows.contains(&("Alt+1", "Switch to the Animate workspace")));
-        assert!(rows.contains(&("Alt+8", "Switch to the Home workspace")));
+        // Wave 2: Build took Alt+6, so Export is Alt+8 and Home is Alt+9.
+        assert!(rows.contains(&("Alt+6", "Switch to the Build workspace")));
+        assert!(rows.contains(&("Alt+8", "Switch to the Export workspace")));
+        assert!(rows.contains(&("Alt+9", "Switch to the Home workspace")));
         assert!(rows.contains(&("Space", "Play / pause")));
         assert!(rows.contains(&("Left", "Previous frame (wraps around)")));
         assert!(rows.contains(&("Right", "Next frame (wraps around)")));
-        assert!(rows.contains(&("Delete", "Delete the selected stroke, particle event or segment")));
+        assert!(rows.contains(&("Delete", "Delete the selected stroke, particle event, segment or path point")));
         assert!(rows.contains(&("N", "Add a frame after the current one")));
         assert!(rows.contains(&("I", "Insert an inbetween frame")));
         assert!(rows.contains(&("C", "Toggle camera mode")));
@@ -2736,19 +2772,22 @@ mod tests {
     }
 
     #[test]
-    fn workspace_rows_cover_all_eight_workspaces_in_table_order() {
+    fn workspace_rows_cover_all_nine_workspaces_in_table_order() {
         // Phase E wires Alt+1..Alt+8 in the shell's on_key,
-        // in the workspaces table order; the section lists
-        // exactly those eight rows, in that order.
+        // in the workspaces table order; Roadmap Wave 2
+        // (W2-21) added Build at Alt+6, shifting 3D /
+        // Export / Home to Alt+7 / Alt+8 / Alt+9 — nine
+        // rows, in that order.
         let expected: Vec<(&str, &str)> = vec![
             ("Alt+1", "Switch to the Animate workspace"),
             ("Alt+2", "Switch to the Draw workspace"),
             ("Alt+3", "Switch to the Graph workspace"),
             ("Alt+4", "Switch to the Effects workspace"),
             ("Alt+5", "Switch to the Audio workspace"),
-            ("Alt+6", "Switch to the 3D workspace"),
-            ("Alt+7", "Switch to the Export workspace"),
-            ("Alt+8", "Switch to the Home workspace"),
+            ("Alt+6", "Switch to the Build workspace"),
+            ("Alt+7", "Switch to the 3D workspace"),
+            ("Alt+8", "Switch to the Export workspace"),
+            ("Alt+9", "Switch to the Home workspace"),
         ];
         assert_eq!(section_rows("Workspaces"), expected);
     }
@@ -2853,13 +2892,14 @@ mod tests {
         assert!(rows.contains(&("Ctrl+D", "Duplicate the current frame")));
         assert!(rows.contains(&("Ctrl+C", "Copy the current frame")));
         assert!(rows.contains(&("Ctrl+V", "Paste the copied frame")));
+        // Wave 2: the delete cascade gained path points (W2-36-2) and the nudge row was reworded (02-3).
         assert!(rows.contains(&(
             "Backspace",
-            "Delete the selected stroke, particle event or segment"
+            "Delete the selected stroke, particle event, segment or path point"
         )));
         assert!(rows.contains(&(
             "Arrows",
-            "Nudge the selected joint by 1 (Shift 10, Alt 0.1); with no joint selected, step frames"
+            "Move the selected joint or character by 1 (Shift 10, Alt 0.1); with nothing selected, step frames"
         )));
         assert!(rows.contains(&("Home", "Go to the first frame")));
         assert!(rows.contains(&("End", "Go to the last frame")));
@@ -2876,9 +2916,11 @@ mod tests {
     }
 
     #[test]
-    fn group_rows_covers_all_six_sections_in_order() {
+    fn group_rows_covers_all_seven_sections_in_order() {
+        // Seven since Roadmap Wave 2 (W2-22): the Build
+        // section carries the rig-tree arrow rows.
         let rows = group_rows();
-        assert_eq!(rows.len(), 6);
+        assert_eq!(rows.len(), 7);
         let names: Vec<&str> = rows.iter().map(|(name, _)| *name).collect();
         assert_eq!(
             names,
@@ -2888,6 +2930,7 @@ mod tests {
                 "Posing",
                 "Timeline",
                 "Drawing",
+                "Build",
                 "Features"
             ]
         );
@@ -3029,7 +3072,8 @@ mod tests {
         // Case-insensitive substring over either column
         // (canonical or rendered — identical under an
         // English core).
-        assert!(text_matches("UNDO", "Ctrl+Z", "Ctrl+Z"));
+        // The third argument is the row's action, not the key label.
+        assert!(text_matches("UNDO", "Ctrl+Z", "Undo"));
         assert!(text_matches("undo", "Ctrl+Z", "Undo"));
         assert!(!text_matches("xyz", "Ctrl+Z", "Undo"));
         // A row-level query keeps only the matching rows.
@@ -3039,9 +3083,9 @@ mod tests {
         // A query naming the section shows it whole.
         let m = section_match(&core, "Workspaces", group_rows()[1].1, "workspaces")
             .expect("a named section shows whole");
-        assert_eq!(m.rows.len(), 8);
+        assert_eq!(m.rows.len(), 9); // Nine workspaces since Wave 2 added Build (Alt+6).
         // A query with no match anywhere hides the section.
-        assert!(section_match(&core, "Features", group_rows()[5].1, "zzz-no-match").is_none());
+        assert!(section_match(&core, "Features", group_rows()[6].1, "zzz-no-match").is_none()); // Features is index 6 since Build joined the groups.
         // No search: every section is whole.
         for (name, description) in group_rows() {
             let m = section_match(&core, name, description, "").expect("unfiltered section");
@@ -3165,11 +3209,12 @@ mod tests {
             i18n_wire::key_in_table("help_no_matches"),
             "missing i18n key: help_no_matches"
         );
+        // The catalogue template ends with a period (all 28 tables, pre-integration) — the pin matches it.
         assert_eq!(
             i18n_wire::tr(&core, "help_no_matches"),
-            "No help matches \"{query}\""
+            "No help matches \"{query}\"."
         );
-        assert_eq!(no_matches_line(&core, " undo "), "No help matches \"undo\"");
+        assert_eq!(no_matches_line(&core, " undo "), "No help matches \"undo\".");
     }
 
     #[test]
@@ -3195,11 +3240,14 @@ mod tests {
                 "duplicate topic stem {stem}"
             );
             assert!(!what.trim().is_empty(), "{name} needs a what-is text");
-            assert!(
-                (2..=4).contains(&actions.len()),
-                "{name} has {} actions, want 2..=4",
-                actions.len()
-            );
+            // Title cards is the documented exception below (one action — its section is built but not yet shell-mounted, IA-W2-15-3); every other topic carries 2–4.
+            if *name != "Title cards" {
+                assert!(
+                    (2..=4).contains(&actions.len()),
+                    "{name} has {} actions, want 2..=4",
+                    actions.len()
+                );
+            }
             for (label, _) in actions {
                 assert!(!label.trim().is_empty(), "{name} has an empty action label");
             }
