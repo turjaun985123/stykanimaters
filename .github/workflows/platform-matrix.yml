@@ -87,5 +87,8 @@ jobs:
 
       # Release profile on purpose, matching the Linux job: the
       # test run reuses the build step's artifacts.
+      # Serial test threads, matching the Linux job (round 20): the bin
+      # tests share one prefs file re-read on every view pass, and a
+      # parallel sibling in another workspace can clobber seeded widths.
       - name: Test (release profile — reuses build artifacts)
-        run: cargo test --release --locked
+        run: cargo test --release --locked -- --test-threads=1

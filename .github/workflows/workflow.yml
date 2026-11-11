@@ -64,8 +64,15 @@ jobs:
       # Release profile on purpose: the test run reuses the exact artifacts
       # compiled above. (A debug-profile test run would recompile every
       # dependency from scratch.)
+      # Serial test threads: the bin tests share one prefs file
+      # (`./projects/.layout.json`, re-read on every view pass), and a
+      # parallel sibling in another workspace can clobber the widths a
+      # layout-sensitive test has seeded — round 19: Audio 280/320 landed
+      # between the open and close reads and moved the stage 9 pt. One
+      # thread per binary kills the whole race class; same targets,
+      # same coverage, only slower.
       - name: Test (release profile — reuses build artifacts)
-        run: cargo test --release --locked
+        run: cargo test --release --locked -- --test-threads=1
 
       - name: Prepare the binary package
         if: github.event_name != 'pull_request'
