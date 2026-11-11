@@ -2746,6 +2746,69 @@ thread_local! {
         RefCell::new(swash::scale::ScaleContext::new());
 }
 
+/// Shape one script run with an already-resolved face.
+/// Returns the run's glyphs (x relative to the run start),
+/// its advance, and its ascent/descent; the caller offsets
+/// the glyphs by the running pen. Split out of
+/// [`shape_line`] so a caller can pin a face — the bundled
+/// face for a script the project ships — instead of
+/// whatever the system-font scan resolves first (a system
+/// face's GSUB is unvetted and varies by machine).
+fn shape_run(
+    text: &str,
+    script: swash::text::Script,
+    size_px: f32,
+    face: &Arc<FontFace>,
+) -> Option<(Vec<ShapedGlyph>, f32, f32, f32)> {
+    let font = face.font()?;
+    let metrics = font.metrics(&[]);
+    let mut ascent = size_px * 0.8;
+    let mut descent = size_px * 0.2;
+    if metrics.units_per_em > 0 {
+        let scale = size_px / metrics.units_per_em as f32;
+        ascent = ascent.max(metrics.ascent * scale);
+        descent = descent.max(-metrics.descent * scale);
+    }
+    let direction = if matches!(
+        script,
+        swash::text::Script::Arabic | swash::text::Script::Hebrew
+    ) {
+        swash::shape::Direction::RightToLeft
+    } else {
+        swash::shape::Direction::LeftToRight
+    };
+    let mut glyphs: Vec<ShapedGlyph> = Vec::new();
+    let mut pen = 0.0f32;
+    SHAPE_CTX.with(|ctx| {
+        let mut ctx = ctx.borrow_mut();
+        let mut shaper = ctx
+            .builder(font)
+            .script(script)
+            .direction(direction)
+            .size(size_px)
+            .build();
+        shaper.add_str(text);
+        shaper.shape_with(|cluster| {
+            for g in cluster.glyphs {
+                // A glyph id of 0 is the face's .notdef:
+                // the charmap proof makes it rare, and
+                // when it happens the glyph is SKIPPED —
+                // never drawn as a stamped `?`.
+                if g.id != 0 {
+                    glyphs.push(ShapedGlyph {
+                        face: face.clone(),
+                        id: g.id,
+                        x: pen + g.x,
+                        y: g.y,
+                    });
+                }
+                pen += g.advance;
+            }
+        });
+    });
+    Some((glyphs, pen, ascent, descent))
+}
+
 /// Shape one line (no `\n`) at `size_px`. `None` when any
 /// run resolves to no face at all — the caller's cue to
 /// fall back to the bitmap stamp for the line.
@@ -2769,48 +2832,15 @@ fn shape_line(content: &str, size_px: f32) -> Option<ShapedLine> {
             let mut lib = font_library().lock().ok()?;
             resolve_face(&mut lib, run.script, &probe)?
         };
-        let font = face.font()?;
-        let metrics = font.metrics(&[]);
-        if metrics.units_per_em > 0 {
-            let scale = size_px / metrics.units_per_em as f32;
-            ascent = ascent.max(metrics.ascent * scale);
-            descent = descent.max(-metrics.descent * scale);
+        let (mut run_glyphs, run_width, run_ascent, run_descent) =
+            shape_run(&run.text, run.script, size_px, &face)?;
+        for g in run_glyphs.iter_mut() {
+            g.x += pen;
         }
-        let direction = if matches!(
-            run.script,
-            swash::text::Script::Arabic | swash::text::Script::Hebrew
-        ) {
-            swash::shape::Direction::RightToLeft
-        } else {
-            swash::shape::Direction::LeftToRight
-        };
-        SHAPE_CTX.with(|ctx| {
-            let mut ctx = ctx.borrow_mut();
-            let mut shaper = ctx
-                .builder(font)
-                .script(run.script)
-                .direction(direction)
-                .size(size_px)
-                .build();
-            shaper.add_str(&run.text);
-            shaper.shape_with(|cluster| {
-                for g in cluster.glyphs {
-                    // A glyph id of 0 is the face's .notdef:
-                    // the charmap proof makes it rare, and
-                    // when it happens the glyph is SKIPPED —
-                    // never drawn as a stamped `?`.
-                    if g.id != 0 {
-                        glyphs.push(ShapedGlyph {
-                            face: face.clone(),
-                            id: g.id,
-                            x: pen + g.x,
-                            y: g.y,
-                        });
-                    }
-                    pen += g.advance;
-                }
-            });
-        });
+        glyphs.append(&mut run_glyphs);
+        pen += run_width;
+        ascent = ascent.max(run_ascent);
+        descent = descent.max(run_descent);
     }
     Some(ShapedLine {
         glyphs,
@@ -4787,22 +4817,40 @@ mod tests {
     }
 
     #[test]
-    fn shaped_bengali_conjuncts_form_fewer_glyphs_than_chars() {
-        // স্কুল = স + ্ + ক conjuncts to স্ক: the shaper
-        // emits fewer glyphs than the string has chars, and
-        // every glyph is a proved face glyph (never .notdef).
-        // ("বাংলা" is NOT a conjunct test — its vowel signs
-        // are spacing marks, so a correct shaper rightly
-        // emits 5 glyphs for its 5 chars.)
-        let line = shape_line("স্কুল", 40.0).expect("Bengali shapes on this system");
-        assert!(line.glyphs.iter().all(|g| g.id != 0), "a .notdef glyph slipped in");
-        assert!(
-            line.glyphs.len() < "স্কুল".chars().count(),
-            "no shaping happened: {} glyphs for {} chars",
-            line.glyphs.len(),
-            "স্কুল".chars().count()
+    fn shaped_bengali_conjuncts_apply_gsub_substitutions() {
+        // "স্কুল" (স + ্ + ক + ু + ল) is shaped with the
+        // BUNDLED Noto Sans Bengali face, pinned via
+        // `shape_run` — not via `shape_line`, whose
+        // system-font scan may resolve an unvetted face.
+        // The proof is that the shaped glyph sequence
+        // DIFFERS from the naive 1:1 cmap mapping: the
+        // shaper ran GSUB on it.
+        //
+        // Glyph COUNT is not the proof, and the round-12
+        // version of this test was wrong to assert it:
+        // on CI "স্কুল" shaped to 6 glyphs for 5 chars.
+        // The font forms the স half-form (one glyph for
+        // স + ্) but splits ক and ল into two glyphs each
+        // (base + trailing part, for the marks to attach
+        // to), so the count goes UP even though a conjunct
+        // formed. ("বাংলা" is no conjunct test either —
+        // its vowel signs are spacing marks, so a correct
+        // shaper rightly emits 5 glyphs for its 5 chars.)
+        use swash::text::Script as S;
+        let face = bundled_face(S::Bengali).expect("bundled Bengali face present");
+        let word = "স্কুল";
+        let (glyphs, width, _, _) =
+            shape_run(word, S::Bengali, 40.0, &face).expect("Bengali shapes on this system");
+        assert!(glyphs.iter().all(|g| g.id != 0), "a .notdef glyph slipped in");
+        let font = face.font().expect("bundled face opens");
+        let charmap = font.charmap();
+        let naive: Vec<u16> = word.chars().map(|ch| charmap.map(ch)).collect();
+        let shaped: Vec<u16> = glyphs.iter().map(|g| g.id).collect();
+        assert_ne!(
+            shaped, naive,
+            "no shaping happened: shaped {shaped:?} equals the plain cmap mapping {naive:?}"
         );
-        assert!(line.width > 40.0, "shaped width {} implausibly small", line.width);
+        assert!(width > 40.0, "shaped width {width} implausibly small");
     }
 
     #[test]
