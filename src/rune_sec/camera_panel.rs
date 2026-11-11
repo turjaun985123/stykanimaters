@@ -2226,11 +2226,11 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(
             rows[0],
-            CamKeyRow { frame: 0, zoom_pct: 100, angle: 15.0, is_current: false, stale: false }
+            CamKeyRow { frame: 0, zoom_pct: 100, angle: 15.0, easing: stykanimate_rs::model::CameraEase::Linear, is_current: false, stale: false }
         );
         assert_eq!(
             rows[1],
-            CamKeyRow { frame: 2, zoom_pct: 100, angle: 45.0, is_current: true, stale: false }
+            CamKeyRow { frame: 2, zoom_pct: 100, angle: 45.0, easing: stykanimate_rs::model::CameraEase::Linear, is_current: true, stale: false }
         );
         assert_eq!(rows[1].label(&core), "F3 · 100% · 45°");
         // The current marker follows the playhead.
@@ -2484,7 +2484,7 @@ mod tests {
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
             sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
-            migration_panel: rune_sec::migration_prompt::initial_state(),
+            migration_panel: crate::rune_sec::migration_prompt::initial_state(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),

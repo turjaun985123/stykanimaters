@@ -3630,6 +3630,7 @@ mod tests {
             health,
             duration_secs: None,
             peak: None,
+            rms: None,
         }
     }
 
@@ -3679,6 +3680,7 @@ mod tests {
                 health: ClipHealth::Healthy,
                 duration_secs: Some(2.0),
                 peak: Some(0.5),
+                rms: Some(0.25),
             },
         ];
         let out = probes_with_shared_missing(&clips, probes.clone(), &[]);
@@ -3982,7 +3984,7 @@ mod tests {
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
             sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
-            migration_panel: rune_sec::migration_prompt::initial_state(),
+            migration_panel: crate::rune_sec::migration_prompt::initial_state(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: AudioPanelState::new(),

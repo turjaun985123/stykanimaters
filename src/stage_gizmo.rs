@@ -825,7 +825,6 @@ mod tests {
 
     #[test]
     fn target_resolution_prefers_the_set_and_falls_back_to_the_selection() {
-        clear_figure_set();
         let mut core = gizmo_core();
         // No set: the single selected figure.
         assert_eq!(gizmo_target(&core), vec![0]);
@@ -833,7 +832,7 @@ mod tests {
         let bb = stage_view::figure_stage_bbox(&core, 0).unwrap();
         assert_eq!(l.frame, [bb[0] - 6.0, bb[1] - 6.0, bb[2] + 6.0, bb[3] + 6.0]);
         // A two-figure set takes over, union frame.
-        set_figure_set(vec![0, 1]);
+        set_figure_set(&mut core, vec![0, 1]);
         assert_eq!(gizmo_target(&core), vec![0, 1]);
         let l = gizmo_layout(&core, 1.0).unwrap();
         let bb1 = stage_view::figure_stage_bbox(&core, 1).unwrap();
@@ -841,19 +840,17 @@ mod tests {
         assert_eq!(l.frame[2], bb1[2] + 6.0);
         // A one-figure set is not a set target: the
         // selection still rules.
-        set_figure_set(vec![2]);
+        set_figure_set(&mut core, vec![2]);
         assert_eq!(gizmo_target(&core), vec![0]);
         // No valid selection and no set: no gizmo.
-        clear_figure_set();
+        clear_figure_set(&mut core);
         core.selected_figure = 99;
         assert!(gizmo_target(&core).is_empty());
         assert!(gizmo_layout(&core, 1.0).is_none());
-        clear_figure_set();
     }
 
     #[test]
     fn move_drag_settles_one_step_and_previews_write_nothing() {
-        clear_figure_set();
         stage_view::set_snap_config(SnapConfig::DEFAULT);
         let mut core = gizmo_core();
         let layout = gizmo_layout(&core, 1.0).unwrap();
@@ -874,12 +871,10 @@ mod tests {
         );
         assert_eq!(core.status, "Moved 1 figure at frame 1.");
         assert!(gizmo_preview().is_none());
-        clear_figure_set();
     }
 
     #[test]
     fn rotate_drag_rotates_the_evaluated_figure_rigidly() {
-        clear_figure_set();
         stage_view::set_snap_config(SnapConfig::DEFAULT);
         let mut core = gizmo_core();
         let layout = gizmo_layout(&core, 1.0).unwrap();
@@ -907,15 +902,13 @@ mod tests {
         }
         assert_eq!(core.status, "Rotated 1 figure by 90° at frame 1.");
         assert!(gizmo_preview().is_none());
-        clear_figure_set();
     }
 
     #[test]
     fn rotate_settles_a_set_about_the_union_centre() {
-        clear_figure_set();
         stage_view::set_snap_config(SnapConfig::DEFAULT);
         let mut core = gizmo_core();
-        set_figure_set(vec![0, 1]);
+        set_figure_set(&mut core, vec![0, 1]);
         let layout = gizmo_layout(&core, 1.0).unwrap();
         let before0 = core.positions(0, 0);
         let before1 = core.positions(0, 1);
@@ -935,12 +928,10 @@ mod tests {
         // Figure 2 is outside the set: untouched.
         assert_eq!(core.positions(0, 2), before2);
         assert_eq!(core.status, "Rotated 2 figures by 90° at frame 1.");
-        clear_figure_set();
     }
 
     #[test]
     fn rotate_respects_joint_limits_like_a_drag() {
-        clear_figure_set();
         stage_view::set_snap_config(SnapConfig::DEFAULT);
         let mut core = gizmo_core();
         // Pin figure 0's first first-generation joint to
@@ -977,16 +968,14 @@ mod tests {
             pose.angles[child]
         );
         assert!(close(pose.root, rotate_point(root_before, layout.pivot, 90.0), 0.01));
-        clear_figure_set();
     }
 
     #[test]
     fn locked_members_stay_and_are_named() {
-        clear_figure_set();
         stage_view::set_snap_config(SnapConfig::DEFAULT);
         let mut core = gizmo_core();
         core.project.figures[1].locked = true;
-        set_figure_set(vec![0, 1]);
+        set_figure_set(&mut core, vec![0, 1]);
         let layout = gizmo_layout(&core, 1.0).unwrap();
         let before1 = core.positions(0, 1);
         assert!(gizmo_down(&mut core, layout.rotate_at, 1.0));
@@ -1008,12 +997,10 @@ mod tests {
             core.status,
             "Selected figures are locked — unlock them in the figures list."
         );
-        clear_figure_set();
     }
 
     #[test]
     fn zero_spend_releases_and_guards() {
-        clear_figure_set();
         stage_view::set_snap_config(SnapConfig::DEFAULT);
         let mut core = gizmo_core();
         let layout = gizmo_layout(&core, 1.0).unwrap();
@@ -1047,12 +1034,10 @@ mod tests {
         // orbit and are not the gizmo's edit).
         core.setup_mode = true;
         assert!(!gizmo_down(&mut core, layout.move_at, 1.0));
-        clear_figure_set();
     }
 
     #[test]
     fn draw_pass_paints_the_gizmo_only_with_a_target() {
-        clear_figure_set();
         let mut core = gizmo_core();
         let rt = RotTransform::from_parts([800.0, 600.0], core.project.stage, (0.0, 0.0, 1.0), 0.0);
         let count = |core: &EditorCore, token: &str| {
@@ -1068,6 +1053,5 @@ mod tests {
         core.selected_figure = 99;
         assert_eq!(count(&core, "Stroke { points:"), 0);
         assert_eq!(count(&core, "Fill { points:"), 0);
-        clear_figure_set();
     }
 }

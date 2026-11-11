@@ -2721,7 +2721,7 @@ mod key_routing_tests {
         let mut s = init();
         s.core.selected_node = None;
         // Arm figure 0 as its row press does (IA-W2-02-2).
-        stage_view::note_character_selected(0);
+        crate::stage_view::note_character_selected(0);
         let frame = s.core.current;
         let before = s.core.project.frames[frame].poses[0].root;
         assert!(press(&mut s, &plain(Key::Right)));
@@ -2731,7 +2731,7 @@ mod key_routing_tests {
         assert!(press(&mut s, &plain(Key::Up)));
         let after = s.core.project.frames[frame].poses[0].root;
         assert_eq!(after[1], before[1] - 1.0, "Up moves the character up (stage y is down)");
-        stage_view::release_character_arm();
+        crate::stage_view::release_character_arm();
     }
 
     #[test]

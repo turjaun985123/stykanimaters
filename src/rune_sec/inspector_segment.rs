@@ -4183,14 +4183,14 @@ mod tests {
         let start = stored_angle_deg(&core).unwrap();
         let mut g = ScrubGesture::default();
         let depth = core.undo_depth();
-        scrub_write(&mut g, &mut core, start + 10.0, start, write_angle_quiet);
+        scrub_write(&mut g, &mut core, start + 10.0, start, write_angle_quiet, "Set segment angle");
         let cur = stored_angle_deg(&core).unwrap();
-        scrub_write(&mut g, &mut core, start + 20.0, cur, write_angle_quiet);
+        scrub_write(&mut g, &mut core, start + 20.0, cur, write_angle_quiet, "Set segment angle");
         assert_eq!(core.undo_depth(), depth + 1, "one scrub is one undo step");
         // Cancel: the press value comes back through the
         // scrub write and seals the gesture.
         let cur = stored_angle_deg(&core).unwrap();
-        scrub_write(&mut g, &mut core, start, cur, write_angle_quiet);
+        scrub_write(&mut g, &mut core, start, cur, write_angle_quiet, "Set segment angle");
         assert!(!g.open);
         assert_eq!(stored_angle_deg(&core), Some(start));
     }
@@ -4411,7 +4411,7 @@ mod tests {
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
             sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
-            migration_panel: rune_sec::migration_prompt::initial_state(),
+            migration_panel: crate::rune_sec::migration_prompt::initial_state(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
@@ -4477,7 +4477,7 @@ playback_speed: 1.0,
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
             sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
-            migration_panel: rune_sec::migration_prompt::initial_state(),
+            migration_panel: crate::rune_sec::migration_prompt::initial_state(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
@@ -4543,7 +4543,7 @@ playback_speed: 1.0,
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
             sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
-            migration_panel: rune_sec::migration_prompt::initial_state(),
+            migration_panel: crate::rune_sec::migration_prompt::initial_state(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),

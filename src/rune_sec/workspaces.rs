@@ -1747,10 +1747,6 @@ mod tests {
         let graph_profile = WorkspaceLayout {
             col_left_w: 260.0,
             col_right_w: 300.0,
-            workspace_layouts: Vec::new(),
-            export_dir: String::new(),
-            export_naming: "project".to_string(),
-            export_quality: "standard".to_string(),
             show_left: true,
             show_right: true,
             timeline_collapsed: false,
@@ -1809,10 +1805,6 @@ mod tests {
             WorkspaceLayout {
                 col_left_w: 9999.0,
                 col_right_w: f32::NAN,
-                workspace_layouts: Vec::new(),
-                export_dir: String::new(),
-                export_naming: "project".to_string(),
-                export_quality: "standard".to_string(),
                 show_left: true,
                 show_right: true,
                 timeline_collapsed: false,
@@ -1834,10 +1826,6 @@ mod tests {
             WorkspaceLayout {
                 col_left_w: 240.0,
                 col_right_w: 300.0,
-                workspace_layouts: Vec::new(),
-                export_dir: String::new(),
-                export_naming: "project".to_string(),
-                export_quality: "standard".to_string(),
                 show_left: true,
                 show_right: false,
                 timeline_collapsed: true,

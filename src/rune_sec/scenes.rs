@@ -2576,7 +2576,7 @@ mod tests {
     use super::{
         scene_audio_open, scene_build_open, scene_clips_populated, scene_default_light,
         scene_dopesheet_keys, scene_draw_open,
-        scene_effects_open, scene_export_open, scene_fx_selected, scene_fx_split_mid,
+        scene_effects_open, scene_export_open, scene_focus_field, scene_fx_selected, scene_fx_split_mid,
         scene_graph_duplicates, scene_graph_open, scene_home, scene_home_missing_audio,
         scene_home_populated, scene_home_scan_fallback,
         scene_library_populated, scene_loop_range, scene_menu_open, scene_palette_open,

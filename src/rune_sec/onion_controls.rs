@@ -820,7 +820,7 @@ mod tests {
     #[test]
     fn tint_palette_is_eight_unique_hues_including_the_future_green() {
         assert_eq!(ONION_TINT_PALETTE.len(), 8);
-        let mut sorted = ONION_TINT_PALETTE;
+        let mut sorted = ONION_TINT_PALETTE.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), 8, "palette colours repeat");

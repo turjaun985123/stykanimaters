@@ -3528,7 +3528,7 @@ mod tests {
         // persists the choice through select_workspace,
         // like a chip press; the assertion reads the
         // in-memory field the switch fn sets first.)
-        let jumps: [(&str, Workspace); 8] = [
+        let jumps: [(&str, Workspace); 9] = [
             ("go-animate", Workspace::Animate),
             ("go-draw", Workspace::Draw),
             ("go-graph", Workspace::Graph),
@@ -4084,7 +4084,7 @@ mod tests {
     // keymap registry now — this pin guards the registry
     // against the palette's expectations (17 pairs
     // through Phase N, +15 from PL-4's clusters).
-    const EXPECTED_HINTS: [(&str, &str); 32] = [
+    const EXPECTED_HINTS: [(&str, &str); 33] = [
         ("play", "Space"),
         ("prev", "Left"),
         ("next", "Right"),

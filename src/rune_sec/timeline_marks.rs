@@ -3327,7 +3327,7 @@ mod tests {
             !stykanimate_rs::stats::figure_keyframes(&core.project, 0).is_empty(),
             "the demo figure is posed, so it has pose keyframes"
         );
-        assert!(marker_row(&core, &t).is_none());
+        assert!(marker_row(&core, &t, CHIP_W).is_none());
     }
 
     #[test]
@@ -3345,7 +3345,7 @@ mod tests {
         }
         assert!(stykanimate_rs::stats::figure_keyframes(&core.project, 0).is_empty());
         core.project.set_camera_key(2, 480.0, 360.0, 1.0);
-        assert!(marker_row(&core, &t).is_some());
+        assert!(marker_row(&core, &t, CHIP_W).is_some());
     }
 
     #[test]
@@ -3399,7 +3399,7 @@ mod tests {
         let t = rune::tok::theme(true);
         let mut state = demo_state();
         state.core = marked_core();
-        assert!(marker_row(&state.core, &t).is_some());
+        assert!(marker_row(&state.core, &t, CHIP_W).is_some());
         state.core.goto(2);
         assert_eq!(state.core.current, 2);
         let _ = timeline_marks(&state, &t);
@@ -3435,7 +3435,7 @@ mod tests {
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
             sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
-            migration_panel: rune_sec::migration_prompt::initial_state(),
+            migration_panel: crate::rune_sec::migration_prompt::initial_state(),
             frame_ops: FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
             audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
