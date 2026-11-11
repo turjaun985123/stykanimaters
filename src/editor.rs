@@ -8277,7 +8277,7 @@ impl EditorCore {
     // ---- Named projects ----
 
     /// Save the project under its (slugified) name in
-    /// `./projects/`. Returns true iff the file was actually
+    /// `shell::projects_dir()`. Returns true iff the file was actually
     /// written — callers that sync side state (recovery
     /// snapshot, recents) gate on it, so a failed save no
     /// longer plants a phantom recent. The status line

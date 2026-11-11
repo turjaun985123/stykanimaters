@@ -4042,7 +4042,10 @@ mod tests {
         assert!(!is_error);
         assert_eq!(out["saved"], true);
         // The op's slug: lowercase, non-alphanumerics become '-'.
-        let path = std::path::Path::new("./projects/mcp-parity-save-test.json");
+        // RM9: the named save lands in shell::projects_dir(), not
+        // ./projects — the Home scan roots there, so the test must
+        // look where the save actually lands.
+        let path = crate::shell::projects_dir().join("mcp-parity-save-test.json");
         assert!(path.exists(), "named save wrote {}", path.display());
         std::fs::remove_file(path).expect("clean up the named-save test file");
     }
@@ -4750,7 +4753,8 @@ mod tests {
         assert_eq!(a.undo_depth(), b.undo_depth());
         assert_eq!(a.redo_depth(), b.redo_depth());
         assert_eq!(a.status, b.status);
-        let _ = std::fs::remove_file("./projects/mcp-parity-sweep.json");
+        // RM9: the sweep's named save lands in projects_dir(), not ./projects.
+        let _ = std::fs::remove_file(crate::shell::projects_dir().join("mcp-parity-sweep.json"));
     }
 
     // -----------------------------------------------------------------
