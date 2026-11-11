@@ -4382,7 +4382,8 @@ impl EditorCore {
         if self.project.camera_follow.is_some() {
             return None;
         }
-        let pose = self.project.poses_at(self.current as f32).get(self.selected_figure)?;
+        let poses = self.project.poses_at(self.current as f32);
+        let pose = poses.get(self.selected_figure)?;
         Some((pose.root[0], pose.root[1]))
     }
 

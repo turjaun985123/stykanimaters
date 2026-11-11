@@ -468,7 +468,7 @@ use std::time::{Instant, SystemTime};
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
 use stykanimate_rs::editor::EditorCore;
-use stykanimate_rs::episode_qa::{EpisodeAudioScan, EpisodeCardExpectation, EpisodeChapterExpectation, EpisodeCheck, EpisodeCheckStatus, EpisodeCueFact, EpisodeExpectations, EpisodeFileChapter, EpisodeFrameSample, EpisodeMeasurements, EpisodeQaParams, EpisodeQaReport, QaBurnIn, QaExpectations, VideoProbe, audio_scan, audio_stats, band_ink_count, burn_in_ink, display_name, episode_cue_coverage, episode_expectations, episode_qa_verdict, fmt_db, parse_ffmetadata_chapters, parse_ffprobe_chapters_json, parse_ffprobe_json, probe_episode, probe_video_file, qa_expectations, qa_temp_path};
+use stykanimate_rs::episode_qa::{EpisodeAudioScan, EpisodeCardExpectation, EpisodeChapterExpectation, EpisodeCheck, EpisodeCheckStatus, EpisodeCueFact, EpisodeExpectations, EpisodeFileChapter, EpisodeFrameSample, EpisodeMeasurements, EpisodeQaParams, EpisodeQaReport, QA_BLACK_LUMA, QA_INK_MIN, QA_SILENCE_PEAK, QaBurnIn, QaExpectations, VideoProbe, audio_scan, audio_stats, band_ink_count, burn_in_ink, centre_ink_count, display_name, episode_cue_coverage, episode_expectations, episode_qa_verdict, fmt_db, parse_ffmetadata_chapters, parse_ffprobe_chapters_json, parse_ffprobe_json, probe_episode, probe_video_file, qa_expectations, qa_temp_path};
 
 use crate::chrome_view::{btn, btn_inert};
 use crate::rune_sec::design;
@@ -3269,24 +3269,8 @@ pub fn cancel_row(core: &EditorCore, job: &ExportJob, t: &Theme) -> El {
 // to that module, so the panel carries its own thin
 // readers here rather than widening the lib surface.
 
-/// A decoded peak at or below this amplitude counts as
-/// digital silence (≈ −60 dBFS): encoder padding and
-/// dither sit above it, a dropped or zeroed mix sits at
-/// exactly 0.
-pub const QA_SILENCE_PEAK: f32 = 0.001;
 
-/// Mean luma at or below this (0..=1) counts as a black
-/// sampled frame. A real fade can produce one; the
-/// verdict fails only when EVERY sampled frame is
-/// black.
-pub const QA_BLACK_LUMA: f32 = 0.02;
 
-/// Text-colour pixels the burn-in spot-check must find
-/// in the anchored band of the cue-midpoint frame. The
-/// frame is decoded at 480 pt wide, where one short cue
-/// line stamps hundreds of ink pixels; 12 is far above
-/// compression noise and far below any real line.
-pub const QA_INK_MIN: usize = 12;
 
 /// How many frames the black-frame scan samples across
 /// the file's duration.
@@ -3538,42 +3522,6 @@ pub fn probe_export(path: &Path, expect: &QaExpectations) -> QaReport {
 // is REPORTED against its reference parameter, never
 // judged — the roadmap has not set that threshold.
 
-/// Default minimum length of a silent stretch (audio
-/// expected) that the silence-stretch check fails on:
-/// two seconds of dropped mix inside an episode whose
-/// project carries sound.
-pub const EPISODE_SILENCE_MIN_SECS: f32 = 2.0;
-
-/// Default minimum length of a black stretch that the
-/// black-stretch check fails on. A real fade crosses
-/// black briefly; two seconds of it mid-episode is a
-/// finding, not a transition.
-pub const EPISODE_BLACK_MIN_SECS: f32 = 2.0;
-
-/// Default minimum length of a frozen stretch (sampled
-/// frames bit-identical at the scan's scale) that the
-/// frozen-stretch check fails on. Held frames are a
-/// legitimate stick-figure device, so the bar sits
-/// above the black/silence bars.
-pub const EPISODE_FROZEN_MIN_SECS: f32 = 3.0;
-
-/// Default spacing of the episode frame scan. Every
-/// sampled frame costs one bounded ffmpeg decode; half
-/// a second resolves the stretch bars above with
-/// margin.
-pub const EPISODE_FRAME_INTERVAL_SECS: f32 = 0.5;
-
-
-/// Default tolerance between a chapter marker's start
-/// in the file and the start the export promised.
-pub const EPISODE_CHAPTER_TOL_SECS: f32 = 0.5;
-
-/// The reading-speed reference the cue-timing check
-/// reports the episode's fastest cue against. A
-/// REPORTING reference only (roadmap D-9): no cue
-/// fails on reading speed until the roadmap sets a
-/// threshold.
-pub const EPISODE_CPS_REFERENCE: f32 = 17.0;
 
 
 
@@ -3595,29 +3543,12 @@ pub const EPISODE_CPS_REFERENCE: f32 = 17.0;
 
 
 
-/// Count pixels within tolerance of `colour` in the
-/// MIDDLE half of an RGB frame — the title-card
-/// spot-check's ink counter (a card is centred on the
-/// stage, where `band_ink_count`'s edge bands do not
-/// look). Pure; the tolerance is `band_ink_count`'s.
-pub fn centre_ink_count(rgb: &[u8], width: usize, height: usize, colour: [u8; 3]) -> usize {
-    if width == 0 || height == 0 || rgb.len() < width * height * 3 {
-        return 0;
-    }
-    let mut count = 0;
-    for y in (height / 4)..(3 * height / 4).max(height / 4 + 1) {
-        for x in 0..width {
-            let i = (y * width + x) * 3;
-            let d = (rgb[i] as i32 - colour[0] as i32).abs()
-                + (rgb[i + 1] as i32 - colour[1] as i32).abs()
-                + (rgb[i + 2] as i32 - colour[2] as i32).abs();
-            if d <= 72 {
-                count += 1;
-            }
-        }
-    }
-    count
-}
+
+
+
+
+
+
 
 
 
