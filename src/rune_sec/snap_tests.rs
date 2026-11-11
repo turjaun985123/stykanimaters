@@ -610,6 +610,15 @@ fn seed_animate_record() -> stykanimate_rs::shell::LayoutPrefs {
     let mut prefs = orig.clone();
     if let Some(record) = default_layout_for(Workspace::Animate) {
         store_record(&mut prefs, Workspace::Animate, record);
+        // Mirror the seeded record into the legacy globals too:
+        // `column_widths()` (main.rs) and `live_layout()` read the
+        // globals, and re-selecting Animate stores the live layout
+        // over the record before reading it back (`switch_layouts`),
+        // so a record-only seed is undone by the tap itself.
+        prefs.col_left_w = record.col_left_w;
+        prefs.col_right_w = record.col_right_w;
+        prefs.sidebar_visible = record.show_left;
+        prefs.timeline_collapsed = record.timeline_collapsed;
     }
     save_layout(&prefs);
     orig
@@ -932,27 +941,25 @@ fn stage_rect_is_identical_with_a_menu_open() {
     // dump measures in the real binary — the centre
     // column's share after margins, gaps, the W2-61
     // per-workspace profiles (Animate 220 / 240 → centre
-    // 924) and the centre's own rows. Wave 10: 530 -> 504
-    // — the dopesheet lane joined the timeline card
-    // (header + the demo's one figure row) while the
-    // empty marker row stopped mounting; the timeline's
-    // net growth is the stage's 26 pt. Waves 1–2 grew
-    // the card further (key-actions row, lane toggles,
-    // zoom row, DOPE_ROW_H 20 → 24: +82 to 205) — the
-    // model prices the stage at 422, but round 13's CI
-    // measured 372, 50 pt unaccounted for in the model;
-    // the pin takes the measured value until the
-    // remainder is priced (see the TEMPORARY probe
-    // below, which prints the centre column's rects).
+    // 924) and the centre's own rows. The card is 255
+    // tall (padding 16 + scroll 158 + loop 25 +
+    // lane-toggles 25 + zoom 25 + 3×2 gaps), which
+    // prices the stage at 372 — the old 422/205 model
+    // was stale. One remainder is still unpriced: the
+    // scroll row measures 158 against a ~111 static
+    // derivation; the TEMPORARY probe below prints its
+    // sub-rects so the round-17 log shows where the
+    // 47 pt lives.
     let (closed, _) = rt.presented("stage").expect("stage is presented");
-    // TEMPORARY round-14 probe (remove in round 15): the stage height model
-    // prices 422 from the timeline card but CI measured 372 — print the
-    // centre column's rects so the round-14 log shows where the 50 pt went.
+    // TEMPORARY round-17 probe (remove in round 18): print the timeline
+    // scroll row's sub-rects to price its 158 pt height.
     eprintln!(
-        "PROBE stage={closed:?} timeline={:?} transport={:?} status={:?}",
-        rt.presented("timeline"),
-        rt.presented("transport"),
-        rt.presented("status-strip")
+        "PROBE timeline-subrects ruler={:?} chips={:?} dopesheet-lane={:?} lane-toggles={:?} zoom-row={:?}",
+        rt.presented("timeline-ruler"),
+        rt.presented("timeline-chips"),
+        rt.presented("dopesheet-lane"),
+        rt.presented("timeline-lane-toggles"),
+        rt.presented("timeline-zoom-row")
     );
     for (want, got) in [248.0, 157.0, 924.0, 372.0].iter().zip(closed.iter()) {
         assert!(
@@ -1926,9 +1933,14 @@ fn palette_workspace_jump_switches_workspace() {
     );
     // The shared prefs file's Export record can hide the right column
     // (same pollution family as the roots sweep); re-force both visible
-    // before asserting the Export centre.
+    // before asserting the Export centre. Direct writes are outside
+    // any handler: mark the tree changed, or the next frame
+    // re-presents the tree committed by the Enter frame (built with
+    // the record's hidden column) and the re-force never reaches
+    // the view.
     rt.state.show_left = true;
     rt.state.show_right = true;
+    rt.invalidate();
     rt.frame(DT);
     assert!(
         presented_keys(&rt).contains("export-panel"),
@@ -3395,6 +3407,10 @@ fn panel_card_rects_stay_inside_their_columns() {
     use crate::rune_sec::workspaces::Workspace;
 
     let mut rt = editor();
+    // Seed the Animate record from its W2-61 profile before the chip tap
+    // (see `seed_animate_record`): without it this test measures whatever
+    // widths a sibling left in the shared prefs file (round 16: 340).
+    let orig_prefs = seed_animate_record();
     tap(&mut rt, "ws-animate");
     rt.frame(DT);
     assert_eq!(rt.state.workspace, Workspace::Animate);
@@ -3415,6 +3431,22 @@ fn panel_card_rects_stay_inside_their_columns() {
         .expect("figures card is presented");
     let (frames, _) = rt.presented("frames").expect("frames card is presented");
     let (stage, _) = rt.presented("stage").expect("stage is presented");
+    // TEMPORARY round-17 probe (remove in round 18): the round-16 frames
+    // card measured 340 wide against a 320 column with no 340 constant in
+    // the panel — print the column, the card, and its wide rows, plus the
+    // live widths, so the round-17 log shows whether the card genuinely
+    // overflows or the unseeded race measured a stale layout.
+    eprintln!(
+        "PROBE frames-card side-right={:?} frames={:?} breakdown={:?} chain={:?} this={:?} arrange={:?} widths={:?}/{:?}",
+        rt.presented("side-right"),
+        rt.presented("frames"),
+        rt.presented("frames-breakdown"),
+        rt.presented("frames-chain"),
+        rt.presented("frames-this"),
+        rt.presented("frames-arrange"),
+        stykanimate_rs::shell::load_layout().col_left_w,
+        stykanimate_rs::shell::load_layout().col_right_w
+    );
 
     // The figures card lies fully inside its column's
     // content rect: card padding lives INSIDE the card
@@ -3433,12 +3465,12 @@ fn panel_card_rects_stay_inside_their_columns() {
 
     // The column contract as x-ranges (the charter
     // changes padding inside surfaces, never the
-    // 300 / 744 / 340 split — main.rs): at this
-    // viewport the left content spans [16, 316] (root
-    // padding 16 + viewport 300) and the right content
-    // [1084, 1424] (16 + 300 + 12 + 744 + 12, then
-    // 340). A card swollen by its own padding would
-    // break its range even inside a taller column rect.
+    // W2-61 Animate 220 / 240 split): at this viewport
+    // the left content spans [16, 236] (root padding 16
+    // + viewport 220) and the right content [1184, 1424]
+    // (16 + 220 + 12 + 924 + 12, then 240). A card
+    // swollen by its own padding would break its range
+    // even inside a taller column rect.
     assert!(
         figures[0] >= 16.0 - 0.5 && figures[0] + figures[2] <= 316.0 + 0.5,
         "figures card crosses the left column's x-range: {figures:?}"
@@ -3465,6 +3497,9 @@ fn panel_card_rects_stay_inside_their_columns() {
         !rects_intersect(stage, frames),
         "stage paints over the frames card: stage {stage:?}, card {frames:?}"
     );
+
+    // Leave the shared prefs as the test found them.
+    stykanimate_rs::shell::save_layout(&orig_prefs);
 }
 
 #[test]
@@ -3483,6 +3518,7 @@ fn workspace_card_roots_sweep() {
     rt.state.show_left = true;
     rt.state.show_right = true;
     rt.state.frame_ops.timeline_collapsed = false;
+    rt.invalidate();
     rt.frame(DT);
     // One row per workspace chip: the workspace it
     // selects, two or three card roots that must mount
@@ -3549,8 +3585,12 @@ fn workspace_card_roots_sweep() {
         // The shared prefs file's per-workspace record can hide a column
         // (`select_workspace` overwrites show_left/show_right from its
         // record); re-force both visible before asserting presence.
+        // Direct writes are outside any handler: mark the tree
+        // changed, or the next frame re-presents the tree committed
+        // by the chip tap and the re-force never reaches the view.
         rt.state.show_left = true;
         rt.state.show_right = true;
+        rt.invalidate();
         rt.frame(DT);
         // Mounts land through the presence fade and
         // gate-outs leave through it — settle (bounded)
@@ -5031,23 +5071,18 @@ fn segment_inspector_media_section_shows_an_attached_sprite() {
     // in the right column, so round 6's scroll discipline
     // brings it into view first.
     scroll_into_view(&mut rt, "seg-media-attach-0");
-    // TEMPORARY round-14 probe (remove in round 15): the attach press missed
-    // in round 13 with no static cause — log the button's presented rect and
-    // opacity, the selection the handler reads, and the status the handler
-    // leaves, so the round-14 log shows whether the press missed
-    // geometrically or the handler refused.
+    // TEMPORARY round-17 probe (remove in round 18): the round-16 log
+    // proved the tap runs a MIRROR op instead of attach — print which
+    // element the tap point actually resolves to, so the round-17 log
+    // names the overlapping element.
+    let (tx, ty) = rt.find("seg-media-attach-0").unwrap();
     eprintln!(
-        "PROBE seg-media-attach-0 presented={:?} selected_node={:?} selected_figure={}",
-        rt.presented("seg-media-attach-0"),
-        rt.state.core.selected_node,
-        rt.state.core.selected_figure
+        "PROBE tap-point element_at={:?} fig-flip={:?} pose-mirror={:?}",
+        rt.element_at(tx, ty),
+        rt.presented("fig-flip"),
+        rt.presented("pose-mirror")
     );
     tap(&mut rt, "seg-media-attach-0");
-    eprintln!(
-        "PROBE after tap: status={:?} media={:?}",
-        rt.state.core.status,
-        rt.state.core.project.figures[0].def.nodes[2].media
-    );
     assert_eq!(
         rt.state.core.project.figures[0].def.nodes[2].media,
         Some(stykanimate_rs::model::SegmentMedia::Image { asset: 0, offset: [0.0, 0.0], scale: 1.0, angle_offset: 0.0, flip: false, opacity: 1.0 }),

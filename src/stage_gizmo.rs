@@ -58,8 +58,12 @@
 //! θ about a pivot is therefore exactly:
 //!
 //! * `root' = pivot + R(θ)·(root − pivot)`, and
-//! * `angles[child] += θ` for every child of a
-//!   parentless node, each passed through the node's
+//! * `angles[child] -= θ` for every child of a
+//!   parentless node (a positive θ is clockwise on
+//!   screen, and `angle_of` — the pose angles'
+//!   measure — falls by θ under such a turn, so the
+//!   angles must decrease), each passed through the
+//!   node's
 //!   own [`NodeDef::clamp_angle`] — the drag
 //!   discipline (`aim_node` clamps the same way), so a
 //!   limited joint stops at its limit and the limb
@@ -414,21 +418,31 @@ pub fn gizmo_down(core: &mut EditorCore, p: V2, scale: f32) -> bool {
     let Some(handle) = gizmo_hit(&layout, p, scale) else {
         return false;
     };
-    // Roadmap Wave 2 (W2-03): a press this close to an evaluated joint is
-    // a pose press, not a gizmo grab — the demo figure's root sits 4.48
-    // stage units from the move grip (the bbox centre), inside the grip's
-    // hit disc, so without this veto every press on the root joint is
-    // swallowed and the joint can never be selected. The veto runs after
-    // the hit test, so a press on a handle away from any joint still grabs.
+    // A press belongs to whichever is nearer — the grabbed handle's
+    // centre or the nearest evaluated joint of the target. The
+    // handles are drawn over the figures precisely so they win
+    // their own hit discs (main.rs routes gizmo_down before the
+    // pose drag); a blanket joint veto makes the move grip
+    // unusable whenever a joint sits near the frame centre (the
+    // demo figure's root is 4.48 units from it). A press exactly
+    // on a joint is nearer the joint, so the joint stays
+    // reachable; a press on the grip centre is nearer the grip.
+    // A joint that wins is always inside pick_radius: it is
+    // nearer than the handle, and the hit test already put the
+    // handle within GIZMO_HIT_PX (11) < PICK_RADIUS_PX (13).
+    // Ties go to the gizmo (strict `<`).
+    let handle_at = match handle {
+        GizmoHandle::Move => layout.move_at,
+        GizmoHandle::Rotate => layout.rotate_at,
+    };
     let pick = stage_view::pick_radius(scale);
-    for fi in gizmo_target(core) {
-        if core
-            .positions(core.current, fi)
-            .iter()
-            .any(|j| model::dist(*j, p) <= pick)
-        {
-            return false;
-        }
+    let nearest_joint = gizmo_target(core)
+        .iter()
+        .flat_map(|&fi| core.positions(core.current, fi))
+        .map(|j| model::dist(j, p))
+        .fold(f32::INFINITY, f32::min);
+    if nearest_joint < model::dist(handle_at, p) && nearest_joint <= pick {
+        return false;
     }
     let drag = GizmoDrag {
         handle,
@@ -582,7 +596,7 @@ fn rotate_figure_at_frame(core: &mut EditorCore, fi: usize, frame: usize, pivot:
         .filter_map(|(ni, node)| {
             pose.angles
                 .get(ni)
-                .map(|a| (ni, node.clamp_angle(model::norm_deg(a + deg))))
+                .map(|a| (ni, node.clamp_angle(model::norm_deg(a - deg))))
         })
         .collect();
     let new_root = rotate_point(pose.root, pivot, deg);
@@ -961,9 +975,11 @@ mod tests {
         stage_view::set_snap_config(SnapConfig::DEFAULT);
         let mut core = gizmo_core();
         // Pin figure 0's first first-generation joint to
-        // a 10-degree arc; a 90-degree gizmo rotation
-        // must stop there (aim_node's clamp discipline),
-        // while the root still orbits fully.
+        // a 10-degree arc; a 90-degree clockwise gizmo
+        // rotation drives its angle DOWN to the arc's min
+        // (angles decrease under a clockwise turn —
+        // `angle_of` falls by θ), while the root still
+        // orbits fully.
         let root_idx = core.project.figures[0]
             .def
             .nodes
@@ -989,7 +1005,7 @@ mod tests {
         gizmo_up(&mut core, at, false);
         let pose = &core.project.frames[0].poses[0];
         assert!(
-            (pose.angles[child] - 10.0).abs() < 0.01,
+            (pose.angles[child] - 0.0).abs() < 0.01,
             "clamped at the limit, got {}",
             pose.angles[child]
         );

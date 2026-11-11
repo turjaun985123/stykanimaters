@@ -280,9 +280,22 @@ mod tests {
             core.chapter_add(*start, *end, title);
         }
         // Chapters name frames the project must have: a fresh core has 5 frames, so extend it past the latest chapter end — otherwise `goto` (which no-ops out of range) can never seek to a chapter start.
+        // Extend by pushing frames directly, NOT `add_frame`: that op snapshots
+        // (238 pushes would saturate the 60-deep undo stack, so a later toggle
+        // could never show depth+1) and advances `current` (so the playhead
+        // would end inside the last chapter instead of at frame 0). A fixture
+        // must not spend undo or move the playhead.
         let last_end = chapters.iter().map(|(_, _, end)| *end).max().unwrap_or(0);
         while core.frame_count() <= last_end {
-            core.add_frame();
+            let cur = core.current;
+            let poses = core.project.frames[cur].poses.clone();
+            let duration = core.project.frames[cur].duration;
+            core.project.frames.push(crate::model::Frame {
+                poses,
+                duration,
+                easing: None,
+                bends: Vec::new(),
+            });
         }
         State {
             core,
