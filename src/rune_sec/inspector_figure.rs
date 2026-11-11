@@ -1506,7 +1506,12 @@ fn swatch(rgb: u32, selected: bool, t: &Theme) -> El {
 /// shows selection details; it reads `State.core` plus the
 /// rename field's buffer in `State::inspector_figure`.
 pub fn inspector_figure(s: &State, t: &Theme) -> El {
-    let panel = design::panel_col("inspector-figure", t);
+    // The panel lands layout changes at once (Wave 2 integration):
+    // when the segment inspector above it grows (node selection),
+    // this panel's target drops ~724 pt and its drawn rect would
+    // otherwise spring down over ~0.4 s, painting fig-flip over the
+    // segment inspector's media picker and stealing its press.
+    let panel = design::panel_col("inspector-figure", t).instant_changes();
     let Some(st) = figure_state(&s.core) else {
         // No figures (or a stale selection): the header
         // still renders — the style panel's form (audit

@@ -934,7 +934,20 @@ fn stage_rect_is_identical_with_a_menu_open() {
     // shell test above does (the persisted prefs are
     // shared across the test process).
     tap(&mut rt, "ws-animate");
-    rt.frame(DT);
+    // Settle the layout spring before pinning the closed
+    // rect: `presented()` reads the DRAWN rect, and a
+    // workspace switch glides the side columns from the
+    // widths the shared prefs held before this test to
+    // the Animate 220/240 on the default SETTLE spring
+    // (0.3 s, critically damped), so after the tap's
+    // frame + 1 the stage still sits ~84% of the way
+    // there (round 18: [281.8, 157, 822.6, 372]).
+    // 30 frames leaves <0.04 pt of travel on either
+    // column (20 frames already puts the width inside
+    // the pin's ±1.0).
+    for _ in 0..30 {
+        rt.frame(DT);
+    }
 
     // The closed pin: at this file's 1440×900 viewport
     // the stage is exactly the rect the headless tree
@@ -947,20 +960,11 @@ fn stage_rect_is_identical_with_a_menu_open() {
     // prices the stage at 372 — the old 422/205 model
     // was stale. One remainder is still unpriced: the
     // scroll row measures 158 against a ~111 static
-    // derivation; the TEMPORARY probe below prints its
-    // sub-rects so the round-17 log shows where the
-    // 47 pt lives.
+    // derivation; the round-18 probe showed the
+    // lane-toggles/zoom rows mount and the 47 pt lives
+    // inside the scroll row below the dopesheet lane
+    // (ruler 12 + chips 24 + lane 71 = 107 + gaps vs 158).
     let (closed, _) = rt.presented("stage").expect("stage is presented");
-    // TEMPORARY round-17 probe (remove in round 18): print the timeline
-    // scroll row's sub-rects to price its 158 pt height.
-    eprintln!(
-        "PROBE timeline-subrects ruler={:?} chips={:?} dopesheet-lane={:?} lane-toggles={:?} zoom-row={:?}",
-        rt.presented("timeline-ruler"),
-        rt.presented("timeline-chips"),
-        rt.presented("dopesheet-lane"),
-        rt.presented("timeline-lane-toggles"),
-        rt.presented("timeline-zoom-row")
-    );
     for (want, got) in [248.0, 157.0, 924.0, 372.0].iter().zip(closed.iter()) {
         assert!(
             (want - got).abs() <= 1.0,
@@ -3431,23 +3435,6 @@ fn panel_card_rects_stay_inside_their_columns() {
         .expect("figures card is presented");
     let (frames, _) = rt.presented("frames").expect("frames card is presented");
     let (stage, _) = rt.presented("stage").expect("stage is presented");
-    // TEMPORARY round-17 probe (remove in round 18): the round-16 frames
-    // card measured 340 wide against a 320 column with no 340 constant in
-    // the panel — print the column, the card, and its wide rows, plus the
-    // live widths, so the round-17 log shows whether the card genuinely
-    // overflows or the unseeded race measured a stale layout.
-    eprintln!(
-        "PROBE frames-card side-right={:?} frames={:?} breakdown={:?} chain={:?} this={:?} arrange={:?} widths={:?}/{:?}",
-        rt.presented("side-right"),
-        rt.presented("frames"),
-        rt.presented("frames-breakdown"),
-        rt.presented("frames-chain"),
-        rt.presented("frames-this"),
-        rt.presented("frames-arrange"),
-        stykanimate_rs::shell::load_layout().col_left_w,
-        stykanimate_rs::shell::load_layout().col_right_w
-    );
-
     // The figures card lies fully inside its column's
     // content rect: card padding lives INSIDE the card
     // (charter §1), so a correct card can touch the
@@ -5071,17 +5058,6 @@ fn segment_inspector_media_section_shows_an_attached_sprite() {
     // in the right column, so round 6's scroll discipline
     // brings it into view first.
     scroll_into_view(&mut rt, "seg-media-attach-0");
-    // TEMPORARY round-17 probe (remove in round 18): the round-16 log
-    // proved the tap runs a MIRROR op instead of attach — print which
-    // element the tap point actually resolves to, so the round-17 log
-    // names the overlapping element.
-    let (tx, ty) = rt.find("seg-media-attach-0").unwrap();
-    eprintln!(
-        "PROBE tap-point element_at={:?} fig-flip={:?} pose-mirror={:?}",
-        rt.element_at(tx, ty),
-        rt.presented("fig-flip"),
-        rt.presented("pose-mirror")
-    );
     tap(&mut rt, "seg-media-attach-0");
     assert_eq!(
         rt.state.core.project.figures[0].def.nodes[2].media,
