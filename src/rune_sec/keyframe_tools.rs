@@ -1078,9 +1078,9 @@ pub fn stamp_rows(s: &State, t: &Theme) -> El {
                     Some(&hint),
                     t,
                     design::NumWiring {
-                        access: |s: &mut State| -> &mut design::NumberEdit {
+                        access: design::access_wiring(|s: &mut State| -> &mut design::NumberEdit {
                             &mut s.keyframe_tools.copy_offset_edit
-                        },
+                        }),
                         commit: |s: &mut State, v: f32| {
                             set_copy_offset(&mut s.core, &mut s.keyframe_tools, v)
                         },

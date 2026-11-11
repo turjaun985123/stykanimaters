@@ -1268,7 +1268,7 @@ fn zoom_readout(s: &State, t: &Theme) -> El {
         Some(&i18n_wire::tr(core, "number_field_invalid")),
         t,
         design::NumWiring {
-            access: |s: &mut State| &mut s.camera_panel.zoom_edit,
+            access: design::access_wiring(|s: &mut State| &mut s.camera_panel.zoom_edit),
             commit: |s: &mut State, v: f32| {
                 s.core.snapshot_labeled("Camera zoom");
                 write_zoom_quiet(&mut s.core, v);
@@ -1332,7 +1332,7 @@ fn angle_readout(s: &State, t: &Theme) -> El {
         Some(&i18n_wire::tr(core, "number_field_invalid")),
         t,
         design::NumWiring {
-            access: |s: &mut State| &mut s.camera_panel.angle_edit,
+            access: design::access_wiring(|s: &mut State| &mut s.camera_panel.angle_edit),
             commit: |s: &mut State, v: f32| {
                 s.core.snapshot_labeled("Rotate camera");
                 write_angle_here(&mut s.core, stykanimate_rs::model::norm_deg(v));

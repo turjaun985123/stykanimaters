@@ -2860,7 +2860,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                 Some(&i18n_wire::tr(&s.core, "number_field_invalid")),
                 t,
                 design::NumWiring {
-                    access: |s: &mut State| &mut s.segment_numbers.len_edit,
+                    access: design::access_wiring(|s: &mut State| &mut s.segment_numbers.len_edit),
                     commit: |s: &mut State, v: f32| s.core.set_length(v),
                     reject: |s: &mut State| {
                         s.core.status =
@@ -2900,7 +2900,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                 Some(&i18n_wire::tr(&s.core, "number_field_invalid")),
                 t,
                 design::NumWiring {
-                    access: |s: &mut State| &mut s.segment_numbers.th_edit,
+                    access: design::access_wiring(|s: &mut State| &mut s.segment_numbers.th_edit),
                     commit: |s: &mut State, v: f32| s.core.set_thickness(v),
                     reject: |s: &mut State| {
                         s.core.status =
@@ -2955,9 +2955,9 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                         Some(&i18n_wire::tr(&s.core, "number_field_invalid")),
                         t,
                         design::NumWiring {
-                            access: |s: &mut State| {
+                            access: design::access_wiring(|s: &mut State| {
                                 &mut s.segment_numbers.rot_edit
-                            },
+                            }),
                             commit: |s: &mut State, v: f32| {
                                 set_angle_selected(&mut s.core, v)
                             },
@@ -3067,9 +3067,9 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                                 )),
                                 t,
                                 design::NumWiring {
-                                    access: |s: &mut State| {
+                                    access: design::access_wiring(|s: &mut State| {
                                         &mut s.segment_numbers.bend_edit
-                                    },
+                                    }),
                                     commit: |s: &mut State, v: f32| {
                                         set_bend_selected(&mut s.core, v)
                                     },

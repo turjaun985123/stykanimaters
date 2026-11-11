@@ -1243,6 +1243,21 @@ pub struct NumWiring<A, C, R, W, F> {
     pub scrub_finish: F,
 }
 
+/// Pin an access closure to the kit's linked-lifetime
+/// shape. A [`NumWiring`] field's generic gives the
+/// closure no expected type, so a bare closure's input
+/// and output lifetimes stay unlinked and the bound
+/// check fails ("one type is more general than the
+/// other"); routing the closure through here pins the
+/// lifetimes to the bound before the struct literal
+/// sees it. The closure is returned unchanged.
+pub fn access_wiring<F>(f: F) -> F
+where
+    F: for<'a> Fn(&'a mut State) -> &'a mut NumberEdit + Clone + 'static,
+{
+    f
+}
+
 /// Translate a number field's display drag into the
 /// wiring's calls (the [`number_field`] display form's
 /// adapter — the kit's second adapting builder, on the
@@ -2000,7 +2015,7 @@ mod tests {
     /// so the access projection is never called here —
     /// it panics if that ever stops being true.
     fn test_wiring() -> NumWiring<
-        fn(&mut State) -> &mut NumberEdit,
+        for<'a> fn(&'a mut State) -> &'a mut NumberEdit,
         fn(&mut State, f32),
         fn(&mut State),
         fn(&mut State, f32),

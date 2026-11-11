@@ -2562,7 +2562,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                     Some(&invalid),
                     t,
                     design::NumWiring {
-                        access: |s: &mut State| &mut s.audio_panel.gain_edit,
+                        access: design::access_wiring(|s: &mut State| &mut s.audio_panel.gain_edit),
                         commit: |s: &mut State, db: f32| gain_commit_db(s, db),
                         reject: |s: &mut State| {
                             s.core.status =
@@ -2676,7 +2676,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                     Some(&invalid),
                     t,
                     design::NumWiring {
-                        access: |s: &mut State| &mut s.audio_panel.trim_start_edit,
+                        access: design::access_wiring(|s: &mut State| &mut s.audio_panel.trim_start_edit),
                         commit: |s: &mut State, v: f32| {
                             adopt_trim_now(s);
                             s.audio_panel.trim_start = v;
@@ -2710,7 +2710,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                     Some(&invalid),
                     t,
                     design::NumWiring {
-                        access: |s: &mut State| &mut s.audio_panel.trim_end_edit,
+                        access: design::access_wiring(|s: &mut State| &mut s.audio_panel.trim_end_edit),
                         commit: |s: &mut State, v: f32| {
                             adopt_trim_now(s);
                             s.audio_panel.trim_end = v;

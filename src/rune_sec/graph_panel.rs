@@ -1553,14 +1553,14 @@ fn key_number_field(
         Some(hint),
         t,
         design::NumWiring {
-            access: move |s: &mut State| -> &mut design::NumberEdit {
+            access: design::access_wiring(move |s: &mut State| -> &mut design::NumberEdit {
                 match field {
                     KeyField::Frame => &mut s.graph_panel.key_frame_edit,
                     KeyField::Value => &mut s.graph_panel.key_value_edit,
                     KeyField::InTan => &mut s.graph_panel.key_in_edit,
                     KeyField::OutTan => &mut s.graph_panel.key_out_edit,
                 }
-            },
+            }),
             commit: move |s: &mut State, v: f32| {
                 key_commit(&mut s.core, &s.graph_panel, field, v)
             },
@@ -1891,12 +1891,12 @@ fn range_number_field(
         Some(hint),
         t,
         design::NumWiring {
-            access: move |s: &mut State| -> &mut design::NumberEdit {
+            access: design::access_wiring(move |s: &mut State| -> &mut design::NumberEdit {
                 match field {
                     RangeEnd::Min => &mut s.graph_panel.range_min_edit,
                     RangeEnd::Max => &mut s.graph_panel.range_max_edit,
                 }
-            },
+            }),
             commit: move |s: &mut State, v: f32| {
                 range_commit(&mut s.core, &s.graph_panel, field, v)
             },
