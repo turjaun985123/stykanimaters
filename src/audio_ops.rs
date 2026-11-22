@@ -151,7 +151,10 @@
 //! identical so edit products land in the same place either
 //! way.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use crate::editor::EditorCore;
 
@@ -257,6 +260,120 @@ pub fn clip_peaks(core: &EditorCore, index: usize, buckets: usize) -> Vec<f32> {
     crate::audio_edit::peaks(&data, buckets)
 }
 
+/// Wave 3 (IA-U3-39-1 / IA-U3-85-3): the duration cache
+/// behind [`clip_duration_secs`] — clip path → (file
+/// length, mtime, probed duration). Before this cache the
+/// timeline's `clip_spans` reached `read_wav` through the
+/// duration probe three times per timeline build, and the
+/// timeline card mounts in every workspace, so every
+/// redraw of every workspace re-read and re-decoded every
+/// audio clip's WAV file in full.
+///
+/// The key discipline is the house one (the audio panel's
+/// `ProbeCache`, `waveform_view`'s `PEAKS_CACHE`): a
+/// duration is a property of the file alone, so the entry
+/// is keyed by path and stamped with the file's length +
+/// mtime from one `fs::metadata` call — a rewrite that
+/// keeps the exact byte length still moves the mtime. (A
+/// content hash was considered and rejected: hashing
+/// would read the whole file, which is exactly the I/O
+/// this cache exists to eliminate.) The probed value is
+/// the full `Option`: a present-but-undecodable or empty
+/// file decodes deterministically from the same bytes
+/// under the same stamp, so it too is probed at most once
+/// per stamp. The frame-rate scaling stays outside the
+/// cache in [`clip_duration_frames`], so one entry serves
+/// every project and frame rate.
+///
+/// A file that cannot be statted never reaches the cache:
+/// the probe falls back to the uncached read, whose
+/// failure is `None` exactly as before — a missing file
+/// reads `None` on every call, a file that appears later
+/// probes fresh, and a file deleted after being cached
+/// reads `None`, never the stale entry. The one race —
+/// the file changing between the stat and the read —
+/// self-corrects on the next call, whose stat misses the
+/// stored stamp.
+///
+/// The bound is [`DURATION_CACHE_CAP`] entries, but the
+/// eviction deliberately deviates from both precedent
+/// caches' wholesale clear (U3-55 P2 / IA-U3-81-3):
+/// invalidation is per-entry only — a stamp mismatch
+/// replaces its own entry in place, and inserting a new
+/// path into a full cache evicts exactly ONE entry, the
+/// one with the oldest recorded mtime (path breaks ties,
+/// so the choice is deterministic). The worst case is one
+/// re-decode per evicted clip, never a full flush.
+/// Thread-local like `PEAKS_CACHE`: the probe runs on the
+/// UI thread, and per-thread storage keeps parallel tests
+/// isolated from each other.
+type DurationCache = HashMap<String, (u64, SystemTime, Option<f32>)>;
+
+/// Cap on cached clip durations. A project carries a
+/// handful of clips; 64 (the `PEAKS_CACHE` precedent
+/// size) covers a deep project's clip list.
+const DURATION_CACHE_CAP: usize = 64;
+
+thread_local! {
+    static DURATION_CACHE: RefCell<DurationCache> = RefCell::new(HashMap::new());
+}
+
+/// The `(len, mtime)` stamp for `path` from a fresh stat.
+/// `None` when the file cannot be statted (usually: it
+/// does not exist) or its mtime cannot be read.
+fn duration_stamp(path: &str) -> Option<(u64, SystemTime)> {
+    let md = std::fs::metadata(path).ok()?;
+    let mtime = md.modified().ok()?;
+    Some((md.len(), mtime))
+}
+
+/// The cached duration for `path` under exactly `stamp`:
+/// `Some(secs)` on a hit (the inner `Option` is the
+/// cached probe result, `None` included), `None` on a
+/// miss — no entry, or the entry's stamp has moved on.
+fn duration_cache_get(path: &str, stamp: (u64, SystemTime)) -> Option<Option<f32>> {
+    DURATION_CACHE.with(|c| {
+        c.borrow()
+            .get(path)
+            .and_then(|(len, mtime, secs)| ((*len, *mtime) == stamp).then_some(*secs))
+    })
+}
+
+/// Record `secs` for `path` under `stamp`, replacing any
+/// older stamp for the same path in place. Inserting a
+/// NEW path into a full cache first evicts the single
+/// oldest-mtime entry (see the cache docs) — never a
+/// wholesale clear.
+fn duration_cache_insert(path: String, stamp: (u64, SystemTime), secs: Option<f32>) {
+    DURATION_CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        if !cache.contains_key(&path) && cache.len() >= DURATION_CACHE_CAP {
+            let oldest = cache
+                .iter()
+                .min_by(|(pa, (_, ma, _)), (pb, (_, mb, _))| {
+                    ma.cmp(mb).then_with(|| pa.cmp(pb))
+                })
+                .map(|(k, _)| k.clone());
+            if let Some(oldest) = oldest {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(path, (stamp.0, stamp.1, secs));
+    });
+}
+
+/// The uncached duration probe — the pre-cache body of
+/// [`clip_duration_secs`], unchanged: read the WAV at
+/// `path` in full; a read failure, a zero sample rate or
+/// zero sample frames all read as `None`.
+fn probe_duration_uncached(path: &str) -> Option<f32> {
+    let data = crate::audio_edit::read_wav(path).ok()?;
+    if data.sample_rate == 0 || data.frames() == 0 {
+        return None;
+    }
+    Some(data.frames() as f32 / data.sample_rate as f32)
+}
+
 /// Phase L (section 5): how long the clip at `index` runs,
 /// in seconds: the file's sample-frame count divided by its
 /// sample rate. This is the duration counterpart of
@@ -269,13 +386,28 @@ pub fn clip_peaks(core: &EditorCore, index: usize, buckets: usize) -> Vec<f32> {
 /// file, a file with a zero sample rate, or one that
 /// decodes to no sample frames at all. The clip's `gain`
 /// plays no part — gain scales loudness, never length.
+///
+/// Wave 3 (IA-U3-39-1 / IA-U3-85-3): the file read behind
+/// the answer is served by the stamp-keyed duration
+/// cache above — at most one full read per
+/// clip per file change, instead of one per probe. The
+/// semantics are unchanged: every result is exactly what
+/// the uncached probe returns for the file as it stands.
 pub fn clip_duration_secs(core: &EditorCore, index: usize) -> Option<f32> {
     let clip = core.project.audio.get(index)?;
-    let data = crate::audio_edit::read_wav(&clip.path).ok()?;
-    if data.sample_rate == 0 || data.frames() == 0 {
-        return None;
+    // Stat first: with no stamp there is nothing safe to
+    // key a cache entry on, so the probe runs uncached —
+    // for a missing file its read fails and the answer is
+    // `None`, exactly as before the cache existed.
+    let Some(stamp) = duration_stamp(&clip.path) else {
+        return probe_duration_uncached(&clip.path);
+    };
+    if let Some(hit) = duration_cache_get(&clip.path, stamp) {
+        return hit;
     }
-    Some(data.frames() as f32 / data.sample_rate as f32)
+    let probed = probe_duration_uncached(&clip.path);
+    duration_cache_insert(clip.path.clone(), stamp, probed);
+    probed
 }
 
 /// Phase L (section 5): how long the clip at `index` runs,
@@ -2638,6 +2770,117 @@ mod tests {
         assert_eq!(clip_duration_secs(&core, 0), None);
         assert_eq!(clip_duration_frames(&core, 0), None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- Wave 3 (IA-U3-39-1 / IA-U3-85-3): the duration cache ----
+
+    #[test]
+    fn clip_duration_cache_serves_an_unchanged_stamp_without_rereading() {
+        let dir = temp_dir("duration-cache-hit");
+        let a = write_samples_wav(&dir, "a.wav", vec![0.5; 8000]);
+        let core = core_with(vec![clip(&a, 0)]);
+        let secs = clip_duration_secs(&core, 0).expect("one-second clip");
+        assert!((secs - 1.0).abs() < 0.001, "got {secs}");
+        // Replace the file's bytes in place with same-length
+        // garbage and restore its exact mtime, so the stamp
+        // (len + mtime) is unchanged while the content is no
+        // longer a WAV at all. A probe that re-read the file
+        // would now return None; the cached 1.0 s can only
+        // come from the cache.
+        let path = std::path::Path::new(&a);
+        let md = std::fs::metadata(path).unwrap();
+        let (len, mtime) = (md.len(), md.modified().unwrap());
+        std::fs::write(path, vec![0u8; len as usize]).unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(mtime).unwrap();
+        drop(f);
+        let secs = clip_duration_secs(&core, 0).expect("cached one-second clip");
+        assert!((secs - 1.0).abs() < 0.001, "got {secs}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn clip_duration_cache_reprobes_when_the_stamp_changes() {
+        let dir = temp_dir("duration-cache-miss");
+        let a = write_samples_wav(&dir, "a.wav", vec![0.5; 8000]);
+        let core = core_with(vec![clip(&a, 0)]);
+        let secs = clip_duration_secs(&core, 0).expect("one-second clip");
+        assert!((secs - 1.0).abs() < 0.001, "got {secs}");
+        // A shorter file: the length half of the stamp moves,
+        // so the cached 1.0 s must not be served — the probe
+        // re-reads and reports the new half-second duration.
+        let a = write_samples_wav(&dir, "a.wav", vec![0.5; 4000]);
+        let core = core_with(vec![clip(&a, 0)]);
+        let secs = clip_duration_secs(&core, 0).expect("half-second clip");
+        assert!((secs - 0.5).abs() < 0.001, "got {secs}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn clip_duration_cache_never_serves_a_deleted_file() {
+        let dir = temp_dir("duration-cache-deleted");
+        let a = write_samples_wav(&dir, "a.wav", vec![0.5; 8000]);
+        let core = core_with(vec![clip(&a, 0)]);
+        assert!(clip_duration_secs(&core, 0).is_some(), "cached while present");
+        // Missing-file parity: once the file is gone the
+        // answer is None again — the cached entry is keyed
+        // behind a fresh stat and is never served stale.
+        std::fs::remove_file(&a).unwrap();
+        assert_eq!(clip_duration_secs(&core, 0), None, "deleted file");
+        assert_eq!(clip_duration_frames(&core, 0), None, "deleted file");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn clip_duration_cache_evicts_one_entry_never_the_whole_map() {
+        // Drive the store directly with synthetic stamps:
+        // fill the cache to its cap with strictly increasing
+        // mtimes, then insert one more path. Exactly the
+        // oldest entry goes; the map stays at the cap and
+        // every other entry survives (i.e. NOT the precedent
+        // caches' wholesale clear).
+        let base = SystemTime::UNIX_EPOCH;
+        let stamp = |i: u64| (100 + i, base + std::time::Duration::from_secs(i));
+        for i in 0..DURATION_CACHE_CAP as u64 {
+            duration_cache_insert(format!("evict-{i}.wav"), stamp(i), Some(1.0));
+        }
+        let len = DURATION_CACHE.with(|c| c.borrow().len());
+        assert_eq!(len, DURATION_CACHE_CAP, "cache filled to its cap");
+        duration_cache_insert(
+            "evict-new.wav".to_string(),
+            stamp(DURATION_CACHE_CAP as u64),
+            Some(2.0),
+        );
+        let len = DURATION_CACHE.with(|c| c.borrow().len());
+        assert_eq!(len, DURATION_CACHE_CAP, "one eviction, not a clear");
+        assert_eq!(
+            duration_cache_get("evict-0.wav", stamp(0)),
+            None,
+            "the oldest-mtime entry was evicted"
+        );
+        assert_eq!(
+            duration_cache_get(
+                &format!("evict-{}.wav", DURATION_CACHE_CAP - 1),
+                stamp(DURATION_CACHE_CAP as u64 - 1)
+            ),
+            Some(Some(1.0)),
+            "a newer entry survived the eviction"
+        );
+        assert_eq!(
+            duration_cache_get("evict-new.wav", stamp(DURATION_CACHE_CAP as u64)),
+            Some(Some(2.0)),
+            "the inserted entry is present"
+        );
+        // Replacing an existing path under a new stamp is
+        // in place: the map does not grow.
+        duration_cache_insert("evict-new.wav".to_string(), stamp(10_000), Some(3.0));
+        let len = DURATION_CACHE.with(|c| c.borrow().len());
+        assert_eq!(len, DURATION_CACHE_CAP, "replacement does not grow the map");
+        assert_eq!(
+            duration_cache_get("evict-new.wav", stamp(10_000)),
+            Some(Some(3.0)),
+            "the replacement stamp serves the new value"
+        );
     }
 
     // ---- Phase J: normalise all clips ----

@@ -174,7 +174,7 @@ use rune::{el, row, text, Drag, El, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::Frame;
 
-use crate::chrome_view::{btn, btn_muted_live};
+use crate::chrome_view::{btn, btn_muted_live, danger_btn};
 use crate::rune_sec::design;
 use crate::rune_sec::i18n_wire;
 use crate::State;
@@ -1202,7 +1202,7 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
                 crate::stage_view::delete_selected_path_point(&mut s.core);
             };
             if can_delete_path_point(core) {
-                btn("delete-path-point", &i18n_wire::tr(core, "frame_delete_path_point"), false, t, press)
+                danger_btn("delete-path-point", &i18n_wire::tr(core, "frame_delete_path_point"), t, press)
             } else {
                 btn_muted_live("delete-path-point", &i18n_wire::tr(core, "frame_delete_path_point"), false, t, press)
             }

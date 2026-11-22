@@ -1739,6 +1739,23 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     // dopesheet all stay unmounted, so the chips keep
     // their exact geometry (and drag coordinates) in
     // both forms.
+    // Wave 3 (IA-U3-39-1 / IA-U3-85-3): the clip spans are
+    // derived ONCE per build and the one Vec is threaded
+    // to its three consumers below — the clips lane, the
+    // lane toggles row and the overview strip — instead of
+    // each re-deriving it (and, behind it, re-probing
+    // every audio clip's file) per build. Every consumer
+    // is reachable only in the expanded form (the toggles
+    // row and the overview strip sit under the
+    // `!collapsed` assembly; the clips lane is gated by
+    // `lane_mounted(collapsed, …)`), so the collapsed form
+    // computes an empty Vec it never reads and keeps its
+    // exact previous cost of zero probes.
+    let spans = if collapsed {
+        Vec::new()
+    } else {
+        clip_spans(core)
+    };
     let mut content = col().gap(2.0);
     if !collapsed {
         content = content.child(ruler);
@@ -1771,7 +1788,7 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     // gates the lane beside the data gate inside
     // `clips_lane` (see `lane_mounted`).
     if lane_mounted(collapsed, s.frame_ops.lane_shown(TimelineLane::Clips), true) {
-        if let Some(clips) = clips_lane(core, s.frame_ops.chip_w()) {
+        if let Some(clips) = clips_lane(core, &spans, s.frame_ops.chip_w()) {
             content = content.child(clips);
         }
     }
@@ -1887,7 +1904,7 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
             // under the loop row in the expanded form —
             // the controls for the lanes it can hide must
             // stay reachable while any of them is hidden.
-            if let Some(lanes_row) = lane_toggles_row(s, t) {
+            if let Some(lanes_row) = lane_toggles_row(s, t, &spans) {
                 card = card.child(lanes_row);
             }
             // Roadmap Wave 1 (RM13 — P-1): the zoom row
@@ -1898,7 +1915,7 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
             if let Some(zrow) = zoom_row(s, t) {
                 card = card.child(zrow);
             }
-            if let Some(overview) = overview_strip(s, t) {
+            if let Some(overview) = overview_strip(s, t, &spans) {
                 card = card.child(overview);
             }
         }
@@ -1962,11 +1979,11 @@ fn loop_row(s: &State, t: &Theme) -> Option<El> {
 /// like the lanes it controls. The row's own key is
 /// `timeline-lane-toggles`; the buttons' keys are
 /// [`lane_toggle_key_label`]'s.
-fn lane_toggles_row(s: &State, t: &Theme) -> Option<El> {
+fn lane_toggles_row(s: &State, t: &Theme, spans: &[ClipSpan]) -> Option<El> {
     let core = &s.core;
     let lanes = applicable_lanes(
         any_markers(&markers_for_project(core)),
-        !clip_spans(core).is_empty(),
+        !spans.is_empty(),
         s.workspace == crate::rune_sec::workspaces::Workspace::Animate,
         !core.project.subtitles.is_empty(),
         !core.project.chapters.is_empty(),
@@ -2116,7 +2133,7 @@ fn zoom_row(s: &State, t: &Theme) -> Option<El> {
 /// selection bands, one bar per clip span, a dot per
 /// camera/graph key frame, the current-frame line and
 /// the viewport window.
-fn overview_shape(s: &State, t: &Theme) -> Shape {
+fn overview_shape(s: &State, t: &Theme, spans: &[ClipSpan]) -> Shape {
     let core = &s.core;
     let count = core.frame_count();
     let w = s.frame_ops.chip_w();
@@ -2141,8 +2158,8 @@ fn overview_shape(s: &State, t: &Theme) -> Shape {
     if let Some((lo, hi)) = selected_range(core, &s.frame_ops) {
         shape = band(shape, lo as f32, hi as f32, accent.alpha(0.25));
     }
-    for span in clip_spans(core) {
-        let [x, sw] = span_rect(&span, count, w);
+    for span in spans {
+        let [x, sw] = span_rect(span, count, w);
         if sw <= 0.0 {
             continue;
         }
@@ -2196,7 +2213,7 @@ fn overview_shape(s: &State, t: &Theme) -> Shape {
 /// Pointer x reads against the scroll record's
 /// viewport width, the strip's own width to within
 /// the card's padding.
-fn overview_strip(s: &State, t: &Theme) -> Option<El> {
+fn overview_strip(s: &State, t: &Theme, spans: &[ClipSpan]) -> Option<El> {
     let core = &s.core;
     let count = core.frame_count();
     if count == 0 {
@@ -2208,7 +2225,7 @@ fn overview_strip(s: &State, t: &Theme) -> Option<El> {
         return None;
     }
     Some(
-        canvas(overview_shape(s, t))
+        canvas(overview_shape(s, t, spans))
             .key("timeline-overview")
             .w_full()
             .h(OVERVIEW_H)
@@ -2517,13 +2534,12 @@ pub fn clips_shape(spans: &[ClipSpan], frame_count: usize, chip_w: f32) -> Shape
 /// need. `None` when the project has no audio and no FX
 /// clips — the lane exists only when it has something
 /// to show.
-fn clips_lane(core: &EditorCore, chip_w: f32) -> Option<El> {
-    let spans = clip_spans(core);
+fn clips_lane(core: &EditorCore, spans: &[ClipSpan], chip_w: f32) -> Option<El> {
     if spans.is_empty() {
         return None;
     }
-    let h = clips_lane_height(clip_lane_row_count(&spans, core.frame_count(), chip_w));
-    let shape = clips_shape(&spans, core.frame_count(), chip_w);
+    let h = clips_lane_height(clip_lane_row_count(spans, core.frame_count(), chip_w));
+    let shape = clips_shape(spans, core.frame_count(), chip_w);
     Some(
         canvas(shape)
             .key("timeline-clips")
@@ -3832,14 +3848,14 @@ playback_speed: 1.0,
         let mut state = demo_state();
         // Clip-free: no lane element, and the timeline
         // builds exactly as it did before the lane.
-        assert!(clips_lane(&state.core, CHIP_W).is_none());
+        assert!(clips_lane(&state.core, &clip_spans(&state.core), CHIP_W).is_none());
         let _ = timeline_marks(&state, &t);
         // With clips planted: the lane exists, the whole
         // timeline still builds, and the shape carries
         // bars (on the 5-frame demo the fx span clamps to
         // frames 2..5 and still draws).
         state.core = clipped_core();
-        assert!(clips_lane(&state.core, CHIP_W).is_some());
+        assert!(clips_lane(&state.core, &clip_spans(&state.core), CHIP_W).is_some());
         let _ = timeline_marks(&state, &t);
         let shape = clips_shape(&clip_spans(&state.core), state.core.frame_count(), CHIP_W);
         assert!(!shape.is_empty());

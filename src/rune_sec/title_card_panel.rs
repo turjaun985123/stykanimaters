@@ -71,6 +71,18 @@ fn selected_chapter(chapter_count: usize) -> Option<usize> {
         .filter(|&i| i < chapter_count)
 }
 
+/// Wave 3 (B1-06, IA-U3-86-1): drop the stored chapter
+/// selection — the swap/history reconciliation
+/// contract's reach into this thread-local. The count
+/// guard in [`selected_chapter`] keeps a stale index
+/// from naming a chapter past the end of the list, but
+/// an in-range index would silently select a DIFFERENT
+/// chapter of the new project; the contract clears it
+/// instead of trusting the guard.
+pub fn clear_chapter_selection() {
+    SELECTED_CHAPTER.with(|c| c.set(None));
+}
+
 /// Which chapter the preview shows: the live
 /// selection, else the chapter at the playhead, else
 /// the first chapter. `None` only when the project has

@@ -94,6 +94,24 @@ thread_local! {
 }
 
 thread_local! {
+    /// The swap counter `poll` last reconciled the
+    /// shell's selection state against (Wave 3, B1-06,
+    /// IA-U3-86-1): `poll` compares the core's
+    /// `project_swaps()` against this shadow on every
+    /// tick and runs
+    /// [`reconcile_shell_state_after_swap`] when it has
+    /// moved, so EVERY swap path — GUI open/new/recover,
+    /// Ctrl+O, palette and Home doors, not only the
+    /// live-MCP drain — settles the shell's selections
+    /// against the project that actually landed. A
+    /// thread-local for the same State-census reason as
+    /// the shadows below; `init` leaves it at 0 and the
+    /// first poll reconciles any startup swap as a
+    /// no-op over the fresh state's empty selections.
+    static LAST_SEEN_SWAPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+thread_local! {
     /// The layout-prefs shadow for the persisted view
     /// state `poll` writes back (Focused Wave, D1;
     /// Roadmap Wave 1, RM13 added the timeline zoom
@@ -972,12 +990,21 @@ fn stage_drag(s: &mut State, d: &mut Drag) {
             // picked a stroke — so a cancelled miss never
             // pops an unrelated edit.
             let gesture_live = core.dragging.is_some() || core.draw_mode;
+            // Wave 3 (B1-06, IA-U3-88-1): captured beside
+            // `gesture_live`, before the end call drops
+            // the gesture — a gesture whose project was
+            // swapped away mid-drag was already abandoned
+            // by the end call, and its cancel must NOT
+            // spend the new project's undo restoring a
+            // pre-gesture state that project never had
+            // (U3-88 R1).
+            let gesture_stale = core.live_gesture_stale();
             if core.draw_mode {
                 core.end_draw();
             } else {
                 core.end_drag();
             }
-            if d.cancelled() && gesture_live {
+            if d.cancelled() && gesture_live && !gesture_stale {
                 core.undo();
             }
         }
@@ -1154,6 +1181,119 @@ fn stage_wheel(s: &mut State, e: WheelEvent) -> bool {
 /// deadline ([`PLAYBACK_DEADLINE`], Roadmap Wave 1 RM7 /
 /// F-6) — the Rune form of the GPUI app's 33 ms tick calling
 /// `advance_play`.
+/// Wave 3 (B1-06, IA-U3-86-1 + IA-U3-34-1): THE
+/// SWAP/HISTORY RECONCILIATION CONTRACT.
+///
+/// One settle list for every piece of shell state that
+/// names something inside the project — an index, a
+/// channel+frame pair, a clip — run when the project
+/// under the shell changes wholesale: a swap
+/// ([`reconcile_shell_state_after_swap`]) or a history
+/// restore ([`reconcile_shell_state_after_history`]).
+/// Before this contract, safety was per-consumer
+/// vigilance: the poll's MCP-drain block cleared six
+/// fields on one swap path only, GUI swaps cleared
+/// whatever each handler remembered, undo/redo cleared
+/// nothing but the stroke selection, and two states
+/// (`key_sel`, the core's marquee set) had neither a
+/// clear nor a resolver — the phantom-selection class
+/// (U3-86 P1/P2, U3-34 P2-1). The core half of the
+/// contract (marquee set, gesture drop, clip-session
+/// repair) lives in the core's own funnels
+/// (`note_project_swapped`, `undo`/`redo`); this is
+/// the shell half.
+///
+/// THE RULE for future state: a new project-referencing
+/// `State` field (or panel-struct member, or
+/// thread-local) is not done until its row exists in
+/// [`settle_shell_selections`] below, or its exemption
+/// is written here. The exemptions, by design:
+/// clipboards (`pose_clipboard`, `key_clipboard`, the
+/// core's) carry DATA, not indices — surviving a swap
+/// is correct, cross-project paste is a feature;
+/// identity-addressed state resolves by name/path, not
+/// index (`graph_panel`'s target/selected_channel —
+/// documented double-fallback resolver; `pose_rename`
+/// — Apply resolves through the captured name;
+/// `home_rename` — a PathBuf); the export job owns a
+/// CLONED project and cannot be invalidated; every
+/// derived cache is key-validated and never cleared by
+/// event (U3-86 §D).
+fn settle_shell_selections(s: &mut State) {
+    // The key selection (IA-U3-34-1): channel index +
+    // frame values from the OLD project — on a swap it
+    // could resurrect on unrelated keys that happen to
+    // sit within the match tolerance; after a restore
+    // it silently named moved keys. `KeySel::clear`
+    // existed for this and was called nowhere.
+    s.key_sel.clear();
+    // The MCP block's original six, now the contract's:
+    s.stroke_selected = None;
+    s.particle_selected = None;
+    s.fx_selected = None;
+    s.subtitle_selected = None;
+    s.subtitle_panel.text_target = None;
+    // A destructive confirm armed against one project
+    // never executes against another (the poll block's
+    // sixth; the GUI doors consume their own arm as
+    // their gate, so this only fires for arms left
+    // standing by a path that swapped without one).
+    s.confirm_action = None;
+    // Panel-struct selections the old list never
+    // reached (U3-86 §A). Per-owner choices, recorded:
+    // clear — both are bare indices whose resolvers
+    // only bounds-check, and the contract's rule is
+    // that an index selection does not cross a
+    // wholesale project change.
+    s.audio_panel.selected = None;
+    s.sprites_panel.selected = None;
+    // The movieclip rename session: dropped UNLESS its
+    // captured name still matches the clip at its
+    // index — the session's own documented rule (the
+    // gold-standard pattern), funnelled here instead
+    // of left to each reader.
+    if let Some(target) = s.clips_rename.target {
+        let alive = s
+            .core
+            .project
+            .clips
+            .get(target)
+            .map(|c| Some(&c.name) == s.clips_rename.opened_name.as_ref())
+            .unwrap_or(false);
+        if !alive {
+            s.clips_rename.target = None;
+            s.clips_rename.opened_name = None;
+        }
+    }
+    // The thread-local selections (U3-86 P3): reached
+    // through the panels' own seams, the way the MCP
+    // shell channel already reaches the clips one.
+    rune_sec::clips_panel::set_clip_selection(None);
+    rune_sec::title_card_panel::clear_chapter_selection();
+    rune_sec::export_panel::disarm_overwrite();
+}
+
+/// Settle the shell's selection state after a wholesale
+/// project swap (see [`settle_shell_selections`] for
+/// the contract). Called from the poll's MCP-drain
+/// swap check and from the poll-level swap watch that
+/// covers every other swap path.
+pub fn reconcile_shell_state_after_swap(s: &mut State) {
+    settle_shell_selections(s);
+}
+
+/// Settle the shell's selection state after an
+/// undo/redo (see [`settle_shell_selections`]). A
+/// history restore replaces the project wholesale —
+/// snapshots store `Project` only — so every index
+/// selection can name a different object afterwards,
+/// exactly as on a swap. Called from every GUI
+/// undo/redo site, replacing the Wave 10 C6
+/// stroke-only clear that stood there as precedent.
+pub fn reconcile_shell_state_after_history(s: &mut State) {
+    settle_shell_selections(s);
+}
+
 fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
     let dt = s
         .last_poll
@@ -1243,12 +1383,14 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
             redraw = true;
             mcp_status_changed = s.core.status != status_before_drain;
             if s.core.project_swaps() != swaps_before_drain {
-                s.stroke_selected = None;
-                s.particle_selected = None;
-                s.fx_selected = None;
-                s.subtitle_selected = None;
-                s.subtitle_panel.text_target = None;
-                s.confirm_action = None;
+                // Wave 3 (B1-06, IA-U3-86-1): the
+                // reconciliation contract replaces this
+                // block's old inline six-field list — the
+                // complete settle list lives in ONE fn
+                // now, and the poll watch below covers
+                // the swap paths that never drain.
+                reconcile_shell_state_after_swap(s);
+                LAST_SEEN_SWAPS.with(|c| c.set(s.core.project_swaps()));
             }
             // Wave 12 (E7): refresh the core's cached project
             // list through B3's seam (`projects::
@@ -1283,6 +1425,31 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
             }
         }
         tx.wake_after(MCP_POLL_HEARTBEAT);
+    }
+    // Wave 3 (B1-06, IA-U3-86-1): the swap watch for
+    // every path that does NOT pass through the drain
+    // above — GUI swap doors (project tools, Home,
+    // palette), Ctrl+O, template/sample installs. The
+    // core's swap counter is the one signal they all
+    // bump; when it has moved since the last tick, the
+    // shell's selection state settles against the new
+    // project before anything else in this tick (or any
+    // later gesture) can read it.
+    {
+        let swaps_now = s.core.project_swaps();
+        if LAST_SEEN_SWAPS.with(|c| c.get()) != swaps_now {
+            LAST_SEEN_SWAPS.with(|c| c.set(swaps_now));
+            reconcile_shell_state_after_swap(s);
+            // Wave 3 (IA-U3-88-2): the stage view's own
+            // gesture cells are module-private to
+            // `stage_view`; drop any in-flight stage
+            // gesture in the same tick the swap is seen,
+            // so a pre-swap drag cannot even reach its
+            // next Move/Up phase against the new project
+            // (the phases also validate their own swap
+            // capture — this is the cross-cell half).
+            stage_view::drop_stage_gesture_sessions();
+        }
     }
     // Wave 14 (shell control): drain the shell queue the
     // live drain filled (shell calls intercepted by
@@ -1662,13 +1829,17 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         }
         // Wave 10 (C6): the stroke selection never
         // survives history navigation (see chrome_view's
-        // undo button for the hazard).
-        s.stroke_selected = None;
+        // undo button for the hazard). Wave 3 (B1-06,
+        // IA-U3-86-1): the reconciliation contract's
+        // history half generalises that clear to every
+        // shell selection.
+        reconcile_shell_state_after_history(s);
         return true;
     }
     if ev.is_command('y') {
         s.core.redo();
-        s.stroke_selected = None;
+        // Wave 3 (B1-06, IA-U3-86-1): as the 'z' arm.
+        reconcile_shell_state_after_history(s);
         return true;
     }
     if ev.is_command('s') {
@@ -3019,5 +3190,92 @@ mod secondary_pick_tests {
             "the covering sprite is picked"
         );
         assert_eq!(s.core.undo_depth(), 0);
+    }
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::{init, reconcile_shell_state_after_history, reconcile_shell_state_after_swap};
+    use crate::rune_sec;
+
+    /// Plant every selection the contract settles, the
+    /// way the panels leave them mid-session.
+    fn plant_selections(s: &mut super::State) {
+        s.key_sel.select_one(0, 2.0);
+        s.stroke_selected = Some(0);
+        s.particle_selected = Some(0);
+        s.fx_selected = Some(0);
+        s.subtitle_selected = Some(0);
+        s.subtitle_panel.text_target = Some(0);
+        s.audio_panel.selected = Some(0);
+        s.sprites_panel.selected = Some(0);
+        s.confirm_action = Some(super::ConfirmAction::OpenProject);
+        rune_sec::clips_panel::set_clip_selection(Some(0));
+    }
+
+    fn assert_all_settled(s: &super::State) {
+        assert!(s.key_sel.is_empty(), "key_sel cleared (IA-U3-34-1)");
+        assert_eq!(s.stroke_selected, None);
+        assert_eq!(s.particle_selected, None);
+        assert_eq!(s.fx_selected, None);
+        assert_eq!(s.subtitle_selected, None);
+        assert_eq!(s.subtitle_panel.text_target, None);
+        assert_eq!(s.audio_panel.selected, None);
+        assert_eq!(s.sprites_panel.selected, None);
+        assert_eq!(s.confirm_action, None, "the confirm arm disarms");
+        assert_eq!(
+            rune_sec::clips_panel::clip_selection(),
+            None,
+            "the thread-local clips selection cleared"
+        );
+    }
+
+    #[test]
+    fn b1_06_reconcile_after_swap_clears_key_sel_and_every_selection_home() {
+        // Wave 3 (B1-06, IA-U3-86-1 + IA-U3-34-1): the
+        // swap half of the contract — State fields, panel
+        // structs and the thread-local clips selection
+        // settle in the one fn.
+        let mut s = init();
+        plant_selections(&mut s);
+        reconcile_shell_state_after_swap(&mut s);
+        assert_all_settled(&s);
+    }
+
+    #[test]
+    fn b1_06_reconcile_after_history_clears_key_sel_and_every_selection_home() {
+        // Wave 3 (B1-06, IA-U3-86-1 + IA-U3-34-1): the
+        // history half — a restore replaces the project
+        // wholesale, so the same list settles (the
+        // phantom key selection can no longer resurrect
+        // after an undo either).
+        let mut s = init();
+        plant_selections(&mut s);
+        reconcile_shell_state_after_history(&mut s);
+        assert_all_settled(&s);
+    }
+
+    #[test]
+    fn b1_06_clips_rename_survives_only_on_its_captured_name() {
+        // Wave 3 (B1-06, IA-U3-86-1): the rename session
+        // follows its own documented rule, funnelled —
+        // dropped when the clip at its index is gone or
+        // carries a different name, kept while the name
+        // still matches.
+        let mut s = init();
+        let clip = s.core.create_clip_from_figure(0).expect("a clip is created");
+        let name = s.core.project.clips[clip].name.clone();
+        s.clips_rename.target = Some(clip);
+        s.clips_rename.opened_name = Some(name);
+        reconcile_shell_state_after_swap(&mut s);
+        assert_eq!(
+            s.clips_rename.target,
+            Some(clip),
+            "a name-matching session survives the funnel"
+        );
+        s.clips_rename.opened_name = Some("A different clip".into());
+        reconcile_shell_state_after_swap(&mut s);
+        assert_eq!(s.clips_rename.target, None, "a name mismatch drops the session");
+        assert_eq!(s.clips_rename.opened_name, None);
     }
 }

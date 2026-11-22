@@ -11,10 +11,10 @@
 //! ---- The layout state model, as found in source -------
 //!
 //! * **Sections.** `rune_sec::workspaces::Section`
-//!   (`src/rune_sec/workspaces.rs:143`) has 30 variants;
+//!   (`src/rune_sec/workspaces.rs:143`) has 31 variants;
 //!   `sections_of(ws)` gates them per workspace (Animate
-//!   17, Draw 4, Graph 4, Effects 5, Audio 4, Build3D 3,
-//!   Export 3, Home 3). A section outside the active
+//!   17, Draw 4, Graph 4, Effects 5, Audio 4, Build 7,
+//!   Build3D 3, Export 3, Home 3). A section outside the active
 //!   workspace is not mounted at all — there is no panel
 //!   to collapse — so `shell_set_section` refuses it, and
 //!   the refusal is the applier's (it alone sees the live
@@ -30,7 +30,7 @@
 //!   view state: it lives in the shell `State`, is never
 //!   written to `LayoutPrefs`, and resets on restart —
 //!   the tool persists it exactly the same way, i.e. not
-//!   at all. **The other 28 sections have no collapse
+//!   at all. **The other 29 sections have no collapse
 //!   control anywhere in the editor**, so the tool
 //!   refuses them by name rather than inventing state the
 //!   GUI cannot show. (A general `collapsed_sections`
@@ -112,8 +112,9 @@
 //!   `{"left": w, "right": w}` — the read-back widths.
 //! * `shell_set_timeline`: write the shell's
 //!   `timeline_collapsed` field (the field the view
-//!   gates the timeline card on and the UI toggle
-//!   writes), persist it by load-modify-save of the
+//!   gates the timeline card on; seeded from the
+//!   layout prefs at startup — the shell has no GUI
+//!   toggle for it), persist it by load-modify-save of the
 //!   layout prefs, and reply with the live value plus
 //!   the persisted read-back:
 //!   `{"collapsed": b, "timeline_collapsed": b}`.
@@ -133,12 +134,13 @@ use crate::State;
 /// Every section name on the wire: the
 /// `rune_sec::workspaces::Section` variant names, in
 /// `Section::all()` order (workspaces.rs, the impl at
-/// "All 30 gated sections"). The applier resolves these
+/// "All 31 gated sections"). The applier resolves these
 /// against the real enum; the count and membership are
 /// pinned by this file's tests.
-pub const SECTION_NAMES: [&str; 30] = [
+pub const SECTION_NAMES: [&str; 31] = [
     "Figures",
     "Library",
+    "RigTree",
     "Layers",
     "Project",
     "InspectorSegment",
@@ -175,15 +177,22 @@ pub const SECTION_NAMES: [&str; 30] = [
 pub const COLLAPSIBLE_SECTIONS: [&str; 2] = ["Figures", "Library"];
 
 /// The workspace gating table over [`SECTION_NAMES`],
-/// transcribed from `sections_of`'s eight lists in
+/// transcribed from `sections_of`'s nine lists in
 /// workspaces.rs (Animate 17, Draw 4, Graph 4, Effects
-/// 5, Audio 4, Build3D 3, Export 3, Home 3), keyed by
-/// the workspace's persisted name (`Workspace::name`;
-/// Build3D persists as `"3D"`). The applier gates on
-/// the real `section_visible` — this table is the
-/// cross-check pin (its union is all 30 names) and the
-/// data behind the module doc's counts.
-pub const WORKSPACE_SECTIONS: [(&str, &[&str]); 8] = [
+/// 5, Audio 4, Build 7, Build3D 3, Export 3, Home 3),
+/// keyed by the workspace's persisted name
+/// (`Workspace::name`; Build3D persists as `"3D"`).
+/// The applier gates on the real `section_visible` —
+/// this table is the cross-check pin (its union is
+/// all 31 names) and the data behind the module doc's
+/// counts. The mirror is verified against
+/// `sections_of` itself by this file's tests
+/// (`workspace_table_matches_sections_of_exactly`), so
+/// a future workspace/section split cannot drift it
+/// silently again (the Wave 2 Build split did: this
+/// table carried the pre-split world until Wave 3's
+/// IA-U3-03-1 / IA-U3-04-1 re-sync).
+pub const WORKSPACE_SECTIONS: [(&str, &[&str]); 9] = [
     (
         "Animate",
         &[
@@ -213,6 +222,18 @@ pub const WORKSPACE_SECTIONS: [(&str, &[&str]); 8] = [
         &["FxBrowser", "FxClips", "Particles", "Scene", "Figures"],
     ),
     ("Audio", &["Audio", "Waveform", "Playback", "Figures"]),
+    (
+        "Build",
+        &[
+            "Figures",
+            "Library",
+            "RigTree",
+            "InspectorFigure",
+            "InspectorSegment",
+            "InspectorStyle",
+            "Project",
+        ],
+    ),
     ("3D", &["ThreeD", "Figures", "Camera"]),
     ("Export", &["Export", "Stats", "Project"]),
     ("Home", &["Home", "Project", "Stats"]),
@@ -432,12 +453,14 @@ pub fn tool_shell_set_column_widths(
     Ok(json!({ "left": back.col_left_w, "right": back.col_right_w }))
 }
 
-/// Collapse or expand the timeline — the timeline
-/// header's collapse toggle, by target state. This
-/// tool was excluded in Wave 14, when the pref it would
-/// have written was read by nothing; the Focused Wave
-/// wired the pref into the shell (see the module doc),
-/// so the tool now drives the real state.
+/// Collapse or expand the timeline, by target state.
+/// The shell has no GUI control for this (see the
+/// module doc): the writers are the startup layout
+/// pref and this tool. This tool was excluded in
+/// Wave 14, when the pref it would have written was
+/// read by nothing; the Focused Wave wired the pref
+/// into the shell, so the tool now drives the real
+/// state.
 //
 // TOOL ENTRY SPEC: for the integrator's registry splice
 // in `mcp_tools::tools()`, in the shell-control group,
@@ -445,7 +468,7 @@ pub fn tool_shell_set_column_widths(
 //
 //   Tool {
 //       name: "shell_set_timeline",
-//       description: "Collapse ('collapsed': true) or expand the timeline in the live editor — the timeline header's collapse toggle. The write lands on the shell's own timeline_collapsed state, so the timeline card hides or shows immediately, and persists through the layout prefs (load-modify-save, as a workspace switch persists), so a restart restores it; the reply echoes the live value and the persisted read-back. No undo step. Live endpoint only.",
+//       description: "Collapse ('collapsed': true) or expand the timeline in the live editor. The write lands on the shell's own timeline_collapsed state (State.frame_ops), so the timeline card switches between its full form and its frame-chips-only form immediately, and persists through the layout prefs (load-modify-save, as a workspace switch persists), so a restart restores it; the reply echoes the live value and the persisted read-back. No undo step. Live endpoint only.",
 //       schema: obj_schema(
 //           json!({
 //               "collapsed": { "type": "boolean" }
@@ -458,7 +481,7 @@ pub fn tool_shell_set_column_widths(
 // MCP.md ROW SPEC: for the shell-control table, after
 // the `shell_set_column_widths` row:
 //
-//   | `shell_set_timeline` | Collapse or expand the timeline (the header collapse toggle). Writes the shell's live `timeline_collapsed` state and persists it via the layout prefs; the reply echoes the live value and the persisted read-back. No undo step. Live endpoint only. | `collapsed` | — |
+//   | `shell_set_timeline` | Collapse or expand the timeline. Writes the shell's live `timeline_collapsed` state and persists it via the layout prefs; the reply echoes the live value and the persisted read-back. No undo step. Live endpoint only. | `collapsed` | — |
 /// Parse + validate a `shell_set_timeline` call (the
 /// pure half of the handler — see
 /// [`parse_set_section`]).
@@ -565,12 +588,12 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn section_table_is_the_full_thirty_with_no_duplicates() {
-        assert_eq!(SECTION_NAMES.len(), 30);
+    fn section_table_is_the_full_thirty_one_with_no_duplicates() {
+        assert_eq!(SECTION_NAMES.len(), 31);
         let mut sorted = SECTION_NAMES.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), 30, "section names must be unique");
+        assert_eq!(sorted.len(), 31, "section names must be unique");
     }
 
     #[test]
@@ -578,9 +601,9 @@ mod tests {
         // Per-workspace counts pinned in workspaces.rs
         // (`section_counts_per_workspace_are_pinned`).
         let counts: Vec<usize> = WORKSPACE_SECTIONS.iter().map(|(_, ss)| ss.len()).collect();
-        assert_eq!(counts, vec![17, 4, 4, 5, 4, 3, 3, 3]);
-        // The union of the eight lists is exactly the
-        // 30-name table — every section lives somewhere,
+        assert_eq!(counts, vec![17, 4, 4, 5, 4, 7, 3, 3, 3]);
+        // The union of the nine lists is exactly the
+        // 31-name table — every section lives somewhere,
         // no phantom names.
         let mut union: Vec<&str> = WORKSPACE_SECTIONS
             .iter()
@@ -588,25 +611,53 @@ mod tests {
             .collect();
         union.sort_unstable();
         union.dedup();
-        assert_eq!(union.len(), 30);
+        assert_eq!(union.len(), 31);
         for name in SECTION_NAMES {
             assert!(union.contains(&name), "{name} gated nowhere");
         }
         // The two collapsible sections' homes: Figures
-        // in six workspaces, Library in Animate only —
-        // the gating facts the set_section refusals rely
-        // on.
+        // in seven workspaces, Library in Animate and
+        // Build — the gating facts the set_section
+        // refusals rely on.
         let figures_homes = WORKSPACE_SECTIONS
             .iter()
             .filter(|(_, ss)| ss.contains(&"Figures"))
             .count();
-        assert_eq!(figures_homes, 6);
+        assert_eq!(figures_homes, 7);
         let library_homes: Vec<&str> = WORKSPACE_SECTIONS
             .iter()
             .filter(|(_, ss)| ss.contains(&"Library"))
             .map(|(ws, _)| *ws)
             .collect();
-        assert_eq!(library_homes, vec!["Animate"]);
+        assert_eq!(library_homes, vec!["Animate", "Build"]);
+    }
+
+    #[test]
+    fn workspace_table_matches_sections_of_exactly() {
+        // The drift guard IA-U3-04-1 asked for: the wire
+        // tables are not just count-pinned, they are
+        // compared element-for-element against the real
+        // gating source (`Section::all()` /
+        // `sections_of`, by `Debug` variant name), so a
+        // future workspace/section split fails this test
+        // instead of silently desyncing the mirror the
+        // way the Wave 2 Build split did.
+        use crate::rune_sec::workspaces::{sections_of, Section, Workspace};
+        let all: Vec<String> = Section::all().iter().map(|s| format!("{s:?}")).collect();
+        let wire: Vec<String> = SECTION_NAMES.iter().map(|s| s.to_string()).collect();
+        assert_eq!(wire, all, "SECTION_NAMES must mirror Section::all()");
+        assert_eq!(WORKSPACE_SECTIONS.len(), Workspace::all().len());
+        for (ws, (wire_name, wire_secs)) in
+            Workspace::all().iter().zip(WORKSPACE_SECTIONS.iter())
+        {
+            assert_eq!(*wire_name, ws.name(), "row key must be the persisted name");
+            let real: Vec<String> = sections_of(*ws)
+                .iter()
+                .map(|s| format!("{s:?}"))
+                .collect();
+            let wire: Vec<String> = wire_secs.iter().map(|s| s.to_string()).collect();
+            assert_eq!(wire, real, "{} row must mirror sections_of", ws.name());
+        }
     }
 
     #[test]

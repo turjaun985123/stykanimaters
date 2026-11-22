@@ -421,11 +421,34 @@ fn active_sprites(project: &Project, frame_f: f32) -> Vec<usize> {
 /// instance with no keys, a non-positive sampled scale, or
 /// an asset that is missing or does not decode.
 pub fn sprite_quads(project: &Project, frame_f: f32) -> Vec<SpriteQuad> {
+    // The no-active-sprite early-out runs BEFORE the media
+    // evaluation, exactly as it did when the body lived
+    // here: a sprite-less frame pays no `media_items` at
+    // all through this entry.
+    if active_sprites(project, frame_f).is_empty() {
+        return Vec::new();
+    }
+    sprite_quads_from_items(project, frame_f, &media::media_items(project, frame_f))
+}
+
+/// [`sprite_quads`] over a media stream the CALLER has
+/// already computed at `frame_f` (Wave 3, IA-U3-29-1 /
+/// IA-U3-81-2): the stage's pass context evaluates
+/// `media_items` once per redraw and hands the stream
+/// down, so the quads are derived from the very items
+/// the same pass paints placeholders for — identical
+/// values by construction (the derivation below is the
+/// body `sprite_quads` has always run; only the stream's
+/// provenance changed).
+pub fn sprite_quads_from_items(
+    project: &Project,
+    frame_f: f32,
+    items: &[MediaItem],
+) -> Vec<SpriteQuad> {
     let active = active_sprites(project, frame_f);
     if active.is_empty() {
         return Vec::new();
     }
-    let items = media::media_items(project, frame_f);
     let images: Vec<&MediaItem> = items
         .iter()
         .filter(|i| matches!(i, MediaItem::Image { .. }))
@@ -502,8 +525,27 @@ pub fn sprite_prims(
     frame_f: f32,
     selected: Option<usize>,
 ) -> Vec<SpritePrim> {
+    sprite_prims_from_quads(project, frame_f, selected, &sprite_quads(project, frame_f))
+}
+
+/// [`sprite_prims`] over quads the CALLER has already
+/// derived at `frame_f` (Wave 3, IA-U3-29-1 / IA-U3-81-2):
+/// the stage's pass context derives the quads once per
+/// redraw and hands them down, so the prim stream is
+/// built from the very quads the same pass hit-tests and
+/// labels — identical values by construction (the body
+/// below is the one `sprite_prims` has always run;
+/// `frame_f` is still taken because the selected
+/// sprite's transform handles sample the instance key
+/// directly).
+pub fn sprite_prims_from_quads(
+    project: &Project,
+    frame_f: f32,
+    selected: Option<usize>,
+    quads: &[SpriteQuad],
+) -> Vec<SpritePrim> {
     let mut out = Vec::new();
-    for quad in sprite_quads(project, frame_f) {
+    for quad in quads {
         let sprite = quad.sprite;
         let is_selected = selected == Some(sprite);
         out.push(SpritePrim::Fill {
@@ -1652,6 +1694,32 @@ mod tests {
         assert!(sprite_quads(&project, 0.0).is_empty());
         assert!(sprite_prims(&project, 0.0, None).is_empty());
         assert!(sprite_prims(&project, 0.0, Some(0)).is_empty());
+    }
+
+    /// Wave 3 (IA-U3-29-1 / IA-U3-81-2): the stream-consuming
+    /// entries the stage's pass context uses produce exactly
+    /// the direct entries' output — the pass changes how
+    /// often the stream is evaluated, never what the quads
+    /// or prims are.
+    #[test]
+    fn from_items_and_from_quads_match_the_direct_entries() {
+        let project = project_with_sprites();
+        for frame in [0.0, 1.0, 2.0] {
+            let items = media::media_items(&project, frame);
+            assert_eq!(
+                sprite_quads_from_items(&project, frame, &items),
+                sprite_quads(&project, frame),
+                "quads from a precomputed stream are the direct quads at frame {frame}"
+            );
+            let quads = sprite_quads(&project, frame);
+            for selected in [None, Some(0), Some(1)] {
+                assert_eq!(
+                    sprite_prims_from_quads(&project, frame, selected, &quads),
+                    sprite_prims(&project, frame, selected),
+                    "prims from precomputed quads are the direct prims at frame {frame}"
+                );
+            }
+        }
     }
 
     #[test]

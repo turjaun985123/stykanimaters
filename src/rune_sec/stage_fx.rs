@@ -244,6 +244,26 @@ pub fn weather_geometry(core: &EditorCore) -> Vec<ParticlePrim> {
 /// does not clip, and in exports both kinds of geometry
 /// simply have no pixels outside the frame.
 pub fn fx_geometry(core: &EditorCore) -> Vec<ParticlePrim> {
+    fx_geometry_with_positions(core, &|fi| {
+        std::rc::Rc::new(core.positions_f(core.display_frame(), fi))
+    })
+}
+
+/// [`fx_geometry`] with the per-figure positions supplied
+/// by the caller (Wave 3, IA-U3-29-2 / IA-U3-81-2): the
+/// stage's pass context evaluates each figure's forward
+/// kinematics once per redraw and hands the results down,
+/// so a figure carrying several FX clips is evaluated
+/// once for all of them instead of once per clip. The
+/// flavour is this pass's own historical one —
+/// `positions_f` at the display frame, no setup-mode
+/// branch (preserved verbatim). Standalone callers keep
+/// the delegating [`fx_geometry`], whose closure
+/// evaluates exactly what the body evaluated before.
+pub fn fx_geometry_with_positions(
+    core: &EditorCore,
+    positions: &dyn Fn(usize) -> std::rc::Rc<Vec<stykanimate_rs::model::V2>>,
+) -> Vec<ParticlePrim> {
     let frame_f = core.display_frame();
     let project = &core.project;
     let mut lines: Vec<ParticlePrim> = Vec::new();
@@ -264,7 +284,7 @@ pub fn fx_geometry(core: &EditorCore) -> Vec<ParticlePrim> {
         if entry.hidden {
             continue;
         }
-        let pos = core.positions_f(frame_f, entry.figure);
+        let pos = positions(entry.figure);
         let Some(&anchor) = pos.get(entry.node) else {
             continue;
         };
@@ -347,9 +367,27 @@ const GIZMO_RING_DOTS: usize = 8;
 /// position `add_particle` captured, and exactly where the
 /// rasterizer's `particles_at` would draw the event anyway.
 fn event_anchor(core: &EditorCore, ev: &ParticleEvent) -> [f32; 2] {
+    event_anchor_with_positions(core, ev, &|fi| {
+        std::rc::Rc::new(core.positions_f(core.display_frame(), fi))
+    })
+}
+
+/// [`event_anchor`] with the anchor figure's positions
+/// supplied by the caller (Wave 3, IA-U3-81-2): the
+/// stage's pass context hands down the display frame's
+/// already-evaluated positions, so the gizmo reads the
+/// same values the figure pass drew. The bounds check
+/// still runs BEFORE the positions are requested, exactly
+/// as the direct form ordered it — an out-of-range figure
+/// never reaches `positions_f`.
+fn event_anchor_with_positions(
+    core: &EditorCore,
+    ev: &ParticleEvent,
+    positions: &dyn Fn(usize) -> std::rc::Rc<Vec<stykanimate_rs::model::V2>>,
+) -> [f32; 2] {
     if let Some(fi) = ev.figure {
         if fi < core.project.figures.len() {
-            let pos = core.positions_f(core.display_frame(), fi);
+            let pos = positions(fi);
             if let Some(&p) = pos.get(ev.node.unwrap_or(0)) {
                 return p;
             }
@@ -399,6 +437,20 @@ pub fn gizmo_geometry(core: &EditorCore, clip_index: usize) -> Vec<ParticlePrim>
         return Vec::new();
     };
     gizmo_prims_at(event_anchor(core, ev))
+}
+
+/// [`gizmo_geometry`] with the anchor figure's positions
+/// supplied by the caller (Wave 3, IA-U3-81-2) — see
+/// [`event_anchor_with_positions`].
+pub fn gizmo_geometry_with_positions(
+    core: &EditorCore,
+    clip_index: usize,
+    positions: &dyn Fn(usize) -> std::rc::Rc<Vec<stykanimate_rs::model::V2>>,
+) -> Vec<ParticlePrim> {
+    let Some(ev) = core.project.particles.get(clip_index) else {
+        return Vec::new();
+    };
+    gizmo_prims_at(event_anchor_with_positions(core, ev, positions))
 }
 
 /// The gizmo marker itself, centred on `anchor`: a

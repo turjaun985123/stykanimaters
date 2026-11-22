@@ -294,7 +294,7 @@ use stykanimate_rs::editor::EditorCore;
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
 use crate::rune_sec::i18n_wire;
-use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
+use crate::rune_sec::icon_btn::{danger_icon_btn, icon_btn, icon_only_btn};
 use crate::State;
 
 /// Zoom multiplier applied by one stepper press.
@@ -1803,7 +1803,7 @@ pub fn panel(s: &State, t: &Theme) -> El {
                 .child(btn("cam-hold", &i18n_wire::tr(core, "camera_hold"), false, t, |s: &mut State| {
                     hold_camera(&mut s.core)
                 }))
-                .child(icon_btn("cam-delete-key", "trash-can", &i18n_wire::tr(core, "camera_delete_key_button"), false, t, |s: &mut State| {
+                .child(danger_icon_btn("cam-delete-key", "trash-can", &i18n_wire::tr(core, "camera_delete_key_button"), false, t, |s: &mut State| {
                     let frame = s.core.current;
                     delete_camera_key_at(&mut s.core, frame);
                 })),

@@ -122,6 +122,18 @@ pub struct EditorCore {
     /// the grab frame's `camera_at` at capture, then
     /// lazily per stepped-to frame in `drag_to`).
     drag_cameras_before: Vec<(usize, (f32, f32, f32))>,
+    /// Wave 3 (B1-06, IA-U3-88-1): the `project_swaps`
+    /// counter as it stood when the in-flight core
+    /// gesture (pose/setup/camera drag or draw session)
+    /// began; `None` while no core gesture is live. The
+    /// gesture identity rule: every writing phase of the
+    /// gesture re-checks it (see
+    /// [`EditorCore::gesture_project_live`]) and abandons
+    /// — no writes, no settle, no undo — when the project
+    /// was swapped out from under the gesture, so a drag
+    /// aimed at one project can never settle its indices
+    /// into another (U3-88 R1).
+    drag_swaps: Option<usize>,
     pub status: String,
     undo: Vec<HistoryEntry>,
     redo: Vec<HistoryEntry>,
@@ -425,6 +437,7 @@ impl EditorCore {
             drag_poses_before: Vec::new(),
             drag_rest_before: None,
             drag_cameras_before: Vec::new(),
+            drag_swaps: None,
             status: "Drag a joint to pose. Hands and feet use IK; drag the hips to move.".into(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -671,6 +684,11 @@ impl EditorCore {
                 self.selected_figure = self
                     .selected_figure
                     .min(self.project.figures.len().saturating_sub(1));
+                // Wave 3 (B1-06, IA-U3-86-2): the marquee
+                // set settles beside the single selection —
+                // a restore replaces the project wholesale,
+                // so its indices name different figures.
+                self.selected_figures.clear();
                 let session_dropped = self.repair_clip_session_after_history();
                 self.refresh_missing_audio();
                 // Roadmap Wave 1 (RM6, F-5): a restore replaces
@@ -708,6 +726,10 @@ impl EditorCore {
                 self.selected_figure = self
                     .selected_figure
                     .min(self.project.figures.len().saturating_sub(1));
+                // Wave 3 (B1-06, IA-U3-86-2): the marquee
+                // set settles beside the single selection,
+                // as in `redo`.
+                self.selected_figures.clear();
                 let session_dropped = self.repair_clip_session_after_history();
                 self.refresh_missing_audio();
                 // Roadmap Wave 1 (RM6, F-5): the revision moves
@@ -936,6 +958,64 @@ impl EditorCore {
         evaluate(&fig.def, &fig.def.rest_pose(poses[fi].root))
     }
 
+    /// Wave 3 (B1-06, IA-U3-88-1): the one identity rule
+    /// for every project-writing gesture — a gesture that
+    /// captured the swap counter at its Down is live only
+    /// while the counter has not moved. Shared by the core
+    /// drag/draw sessions below and by the panel/stage
+    /// gesture records (gizmo, dopesheet, subtitle lane,
+    /// graph panel), each of which stores the counter it
+    /// captured and asks this question at every writing
+    /// phase; the sprite/cue/dope identity checks stay as
+    /// second factors, exactly as U3-88 prescribed.
+    pub fn gesture_project_live(&self, recorded_swaps: usize) -> bool {
+        recorded_swaps == self.project_swaps
+    }
+
+    /// Whether a core gesture is in flight whose project
+    /// has been swapped away — the shell's stage-drag
+    /// cancel rollback reads this so a cancelled post-swap
+    /// gesture cannot spend the NEW project's undo
+    /// (U3-88 R1).
+    pub fn live_gesture_stale(&self) -> bool {
+        (self.dragging.is_some() || self.drawing)
+            && self
+                .drag_swaps
+                .map(|recorded| !self.gesture_project_live(recorded))
+                .unwrap_or(false)
+    }
+
+    /// Drop the in-flight core gesture (drag or draw)
+    /// with NO settle and NO undo: the gesture's target
+    /// project is gone, so its baselines name nothing.
+    /// Called by the swap funnels (IA-U3-88-2's core
+    /// half) and by the writing phases when they find
+    /// the gesture stale (IA-U3-88-1).
+    fn drop_core_gesture(&mut self) {
+        self.dragging = None;
+        self.drawing = false;
+        self.camera_last = None;
+        self.drag_poses_before.clear();
+        self.drag_rest_before = None;
+        self.drag_cameras_before.clear();
+        self.erase_changed = 0;
+        self.drag_swaps = None;
+    }
+
+    /// The writing phases' first move (IA-U3-88-1): if
+    /// the in-flight gesture's project was swapped away,
+    /// abandon it silently and report so — the caller
+    /// then does nothing at all (no write, no recap, no
+    /// undo).
+    fn abandon_gesture_if_swapped(&mut self) -> bool {
+        if self.live_gesture_stale() {
+            self.drop_core_gesture();
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn begin_drag(&mut self, p: V2) -> bool {
         if self.playing {
             return false;
@@ -1010,6 +1090,10 @@ impl EditorCore {
             self.project.frames[self.current].poses[fi].clone(),
         )];
         self.dragging = Some(kind);
+        // Wave 3 (B1-06, IA-U3-88-1): the gesture's
+        // project identity, captured before the first
+        // write (the `drag_to` below).
+        self.drag_swaps = Some(self.project_swaps);
         self.drag_to(p);
         true
     }
@@ -1078,6 +1162,9 @@ impl EditorCore {
             fig.def.nodes.iter().map(|n| n.rest_angle).collect(),
         );
         self.dragging = Some(kind);
+        // Wave 3 (B1-06, IA-U3-88-1): project identity,
+        // as in `begin_drag_at`.
+        self.drag_swaps = Some(self.project_swaps);
         self.drag_to(p);
         true
     }
@@ -1091,10 +1178,20 @@ impl EditorCore {
         self.drag_cameras_before = vec![(self.current, self.camera_here())];
         self.snapshot_labeled("Camera drag");
         self.dragging = Some(DragKind::Camera);
+        // Wave 3 (B1-06, IA-U3-88-1): project identity,
+        // as in `begin_drag_at`.
+        self.drag_swaps = Some(self.project_swaps);
         self.camera_last = Some(p);
     }
 
     pub fn drag_to(&mut self, p: V2) {
+        // Wave 3 (B1-06, IA-U3-88-1): a gesture whose
+        // project was swapped away abandons here — its
+        // indices name figures in a project that no
+        // longer exists, and nothing may be written.
+        if self.abandon_gesture_if_swapped() {
+            return;
+        }
         let Some(kind) = self.dragging else { return };
         if let DragKind::Camera = kind {
             // Wave AC (AC4): a mid-gesture frame step
@@ -1180,7 +1277,16 @@ impl EditorCore {
     /// press with no travel) posts nothing — the rotation
     /// dial's dead-zone discipline, applied at gesture end.
     pub fn end_drag(&mut self) {
+        // Wave 3 (B1-06, IA-U3-88-1): a stale gesture
+        // settles NOTHING — no recap against baselines
+        // of a project that is gone, and (via the
+        // shell's stale guard) no cancel-rollback undo
+        // against the new project's stack.
+        if self.abandon_gesture_if_swapped() {
+            return;
+        }
         let kind = self.dragging.take();
+        self.drag_swaps = None;
         self.camera_last = None;
         let poses_before = std::mem::take(&mut self.drag_poses_before);
         let rest_before = self.drag_rest_before.take();
@@ -6378,6 +6484,10 @@ impl EditorCore {
     // ---- Drawing ----
 
     pub fn begin_draw(&mut self, p: V2) {
+        // Wave 3 (B1-06, IA-U3-88-1): the draw session's
+        // project identity, captured before the first
+        // write in either branch below.
+        self.drag_swaps = Some(self.project_swaps);
         if self.draw_tool == DrawTool::Eraser {
             // An eraser drag erases around the pointer instead of
             // recording a stroke; it continues in `draw_to`. One
@@ -6450,6 +6560,13 @@ impl EditorCore {
     }
 
     pub fn draw_to(&mut self, p: V2) {
+        // Wave 3 (B1-06, IA-U3-88-1): a draw session
+        // whose project was swapped away abandons —
+        // its points must never append to the NEW
+        // project's last stroke.
+        if self.abandon_gesture_if_swapped() {
+            return;
+        }
         if !self.drawing {
             return;
         }
@@ -6485,10 +6602,17 @@ impl EditorCore {
     }
 
     pub fn end_draw(&mut self) {
+        // Wave 3 (B1-06, IA-U3-88-1): a stale session
+        // finalises NOTHING — smoothing/nib would write
+        // into the new project's last stroke.
+        if self.abandon_gesture_if_swapped() {
+            return;
+        }
         if !self.drawing {
             return;
         }
         self.drawing = false;
+        self.drag_swaps = None;
         if self.draw_tool == DrawTool::Eraser {
             self.status = format!("Eraser: {} stroke(s) changed.", self.erase_changed);
             self.erase_changed = 0;
@@ -8317,6 +8441,16 @@ impl EditorCore {
         self.revision += 1;
         // Wave 11 (E9): record the swap for the shell's poll.
         self.project_swaps += 1;
+        // Wave 3 (B1-06, IA-U3-86-2): the marquee set
+        // settles HERE, in the one funnel every swap
+        // path already calls — in-range stale indices
+        // would otherwise silently select DIFFERENT
+        // figures in the new project (U3-86 P2).
+        self.selected_figures.clear();
+        // Wave 3 (B1-06, IA-U3-88-2): an in-flight core
+        // gesture dies with its project — dropped, never
+        // settled, never undone (U3-88 R1).
+        self.drop_core_gesture();
         // Wave 11 (C6): a clip-edit session must settle against
         // the NEW project exactly as it does after undo/redo —
         // every swap path funnels through here, so the session
@@ -8342,6 +8476,13 @@ impl EditorCore {
     /// survives — but panel selections must still settle).
     pub fn note_project_replaced(&mut self) {
         self.project_swaps += 1;
+        // Wave 3 (B1-06, IA-U3-86-2 / IA-U3-88-2): a
+        // snapshot-first replace is the same wholesale
+        // swap for selection and gesture purposes — the
+        // marquee set settles and any in-flight gesture
+        // drops, exactly as in `note_project_swapped`.
+        self.selected_figures.clear();
+        self.drop_core_gesture();
         // Roadmap Wave 1 (RM24, P-14): replaced content
         // arrived from a tool payload, not a named file —
         // the save baseline resets to "never saved", and
@@ -14769,6 +14910,82 @@ mod tests {
         c.drag_to([35.0, 15.0]);
         c.end_drag();
         assert_eq!(c.status, "Camera key moved at frame 1.");
+    }
+
+    #[test]
+    fn b1_06_swap_clears_the_marquee_set_and_drops_live_gestures() {
+        // Wave 3 (B1-06, IA-U3-86-2 + IA-U3-88-2): the
+        // swap funnel settles the marquee set (its
+        // indices would silently name different figures
+        // in the new project) and drops an in-flight
+        // gesture outright.
+        let mut c = EditorCore::new();
+        c.selected_figures = vec![0];
+        let root = c.positions(0, 0)[0];
+        assert!(c.begin_drag(root));
+        c.note_project_swapped();
+        assert!(c.selected_figures.is_empty(), "the marquee set settles in the swap funnel");
+        assert!(c.dragging.is_none(), "the in-flight gesture drops with its project");
+        assert!(!c.live_gesture_stale(), "no gesture remains to be stale");
+    }
+
+    #[test]
+    fn b1_06_gesture_begun_before_a_swap_writes_nothing_after_it() {
+        // Wave 3 (B1-06, IA-U3-88-1): the writing phases'
+        // own identity check — the counter moves WITHOUT
+        // the funnel's drop (the belt-and-braces half:
+        // the funnel is the primary, this is what makes
+        // the rule hold for any path that bumps the
+        // counter), and the gesture must abandon: no
+        // writes, no recap, no undo spent.
+        let mut c = EditorCore::new();
+        let root = c.positions(0, 0)[0];
+        assert!(c.begin_drag(root));
+        c.project_swaps += 1;
+        assert!(c.live_gesture_stale());
+        let landed = c.project.frames[0].poses[0].root;
+        c.drag_to([root[0] + 90.0, root[1] + 90.0]);
+        assert_eq!(
+            c.project.frames[0].poses[0].root, landed,
+            "no pose write lands after the swap"
+        );
+        assert!(c.dragging.is_none(), "the stale gesture abandoned");
+        let status = c.status.clone();
+        let depth = c.undo_depth();
+        c.end_drag();
+        assert_eq!(c.status, status, "an abandoned gesture posts no recap");
+        assert_eq!(c.undo_depth(), depth, "an abandoned gesture spends no undo");
+
+        // The draw session obeys the same rule: points
+        // must never append to the new project's last
+        // stroke, and the finalise writes nothing.
+        let mut c = EditorCore::new();
+        c.begin_draw([10.0, 10.0]);
+        assert_eq!(c.project.strokes.len(), 1);
+        c.project_swaps += 1;
+        c.draw_to([60.0, 60.0]);
+        c.end_draw();
+        assert_eq!(c.project.strokes.len(), 1, "the stroke count is untouched");
+        assert_eq!(
+            c.project.strokes[0].points.len(),
+            1,
+            "no points were appended after the swap"
+        );
+    }
+
+    #[test]
+    fn b1_06_history_restore_clears_the_marquee_set() {
+        // Wave 3 (B1-06, IA-U3-86-2): undo/redo restore
+        // the project wholesale, so the marquee set
+        // settles beside the single selection's clamp.
+        let mut c = EditorCore::new();
+        c.add_frame();
+        c.selected_figures = vec![0];
+        c.undo();
+        assert!(c.selected_figures.is_empty(), "undo settles the marquee set");
+        c.selected_figures = vec![0];
+        c.redo();
+        assert!(c.selected_figures.is_empty(), "redo settles the marquee set");
     }
 
     #[test]

@@ -763,6 +763,19 @@ thread_local! {
     static OVERWRITE_ARM: RefCell<Option<String>> = RefCell::new(None);
 }
 
+/// Wave 3 (B1-06, IA-U3-86-1): disarm any armed
+/// overwrite confirm — the swap/history reconciliation
+/// contract's reach into this thread-local. The arm is
+/// scoped to its target signature, so a stale arm can
+/// only ever fire on the identical target set; the
+/// contract still clears it, because a destructive
+/// confirm armed against one project must not survive
+/// into another (the `State::confirm_action` rule,
+/// applied to the arm that lives outside `State`).
+pub fn disarm_overwrite() {
+    OVERWRITE_ARM.with(|a| *a.borrow_mut() = None);
+}
+
 /// Which of an export's targets already exist as
 /// files — the guard's only filesystem read, one stat
 /// per target. Pure apart from those stats.

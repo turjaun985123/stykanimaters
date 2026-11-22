@@ -461,7 +461,7 @@ use stykanimate_rs::graph::Key;
 use stykanimate_rs::model::{FigureInstance, Project, SpriteInstance};
 use stykanimate_rs::stats::figure_keyframes;
 
-use crate::chrome_view::btn;
+use crate::chrome_view::{btn, danger_btn};
 use crate::rune_sec::design;
 use crate::rune_sec::fx_browser::preset_label_width;
 use crate::rune_sec::graph_panel::channel_label;
@@ -1859,6 +1859,16 @@ pub struct DopeDrag {
     pub snapshot_taken: bool,
     /// Whether any key has actually moved.
     pub moved: bool,
+    /// Wave 3 (B1-06, IA-U3-88-1): the core's swap
+    /// counter at Down — the gesture's project identity.
+    /// Every writing phase validates it, and the two
+    /// rollback undos (the leftover settlement in
+    /// `drag_down`, the cancelled settle in `drag_up`)
+    /// fire ONLY while it still matches: after a swap
+    /// the staged snapshot died with its project, and
+    /// an undo would pop the NEW project's top edit
+    /// (U3-88 R3).
+    pub swaps: usize,
 }
 
 thread_local! {
@@ -1910,7 +1920,12 @@ fn drag_channel_holds(s: &State, g: &DopeDrag) -> bool {
 /// it had moved anything.
 pub fn drag_down(s: &mut State, drag: &mut Option<DopeDrag>, fi: usize, frame: usize) {
     if let Some(old) = drag.take() {
-        if old.snapshot_taken {
+        // Wave 3 (B1-06, IA-U3-88-1): the rollback undo
+        // fires only while the leftover record's project
+        // is still current — after a swap its snapshot
+        // died with the old project, and undoing would
+        // pop the NEW project's top edit (U3-88 R3).
+        if old.snapshot_taken && s.core.gesture_project_live(old.swaps) {
             s.core.undo();
             if let DopeKeyRef::Channel { channel, .. } = old.kind {
                 if let Some(ch) = s.core.project.channels.get(channel) {
@@ -1941,6 +1956,7 @@ pub fn drag_down(s: &mut State, drag: &mut Option<DopeDrag>, fi: usize, frame: u
                 at: frame,
                 snapshot_taken: false,
                 moved: false,
+                swaps: s.core.project_swaps(),
             })
         }
         Some(kind @ DopeKeyRef::Pose) => {
@@ -1966,6 +1982,7 @@ pub fn drag_down(s: &mut State, drag: &mut Option<DopeDrag>, fi: usize, frame: u
                 at: frame,
                 snapshot_taken: false,
                 moved: false,
+                swaps: s.core.project_swaps(),
             })
         }
         Some(kind @ (DopeKeyRef::State | DopeKeyRef::Bend)) => Some(DopeDrag {
@@ -1977,6 +1994,7 @@ pub fn drag_down(s: &mut State, drag: &mut Option<DopeDrag>, fi: usize, frame: u
             at: frame,
             snapshot_taken: false,
             moved: false,
+            swaps: s.core.project_swaps(),
         }),
         None => None,
     };
@@ -2000,6 +2018,13 @@ pub fn drag_apply(s: &mut State, drag: &mut Option<DopeDrag>, dx: f32) {
     let Some(g) = drag.as_ref() else {
         return;
     };
+    // Wave 3 (B1-06, IA-U3-88-1): a gesture whose
+    // project was swapped away abandons — no step may
+    // write into the new project.
+    if !s.core.gesture_project_live(g.swaps) {
+        *drag = None;
+        return;
+    }
     let target_delta = frame_delta(dx, s.frame_ops.chip_w());
     match g.kind {
         DopeKeyRef::Channel { .. } => {
@@ -2086,7 +2111,11 @@ pub fn drag_apply(s: &mut State, drag: &mut Option<DopeDrag>, dx: f32) {
 pub fn drag_up(s: &mut State, drag: &mut Option<DopeDrag>, dx: f32, cancelled: bool) {
     if cancelled {
         if let Some(g) = drag.take() {
-            if g.snapshot_taken {
+            // Wave 3 (B1-06, IA-U3-88-1): the rollback
+            // undo fires only while the gesture's
+            // project is still current (U3-88 R3) — a
+            // post-swap cancel drops the record silently.
+            if g.snapshot_taken && s.core.gesture_project_live(g.swaps) {
                 s.core.undo();
                 if let DopeKeyRef::Channel { channel, .. } = g.kind {
                     if let Some(ch) = s.core.project.channels.get(channel) {
@@ -2205,7 +2234,7 @@ fn key_actions_row(s: &State, t: &Theme) -> Option<El> {
             .child(btn("dope-key-copy", "Copy key", false, t, |s| {
                 copy_active_keys(s);
             }))
-            .child(btn("dope-key-delete", "Delete key", false, t, |s| {
+            .child(danger_btn("dope-key-delete", "Delete key", t, |s| {
                 delete_active_keys(s);
             }));
     }
@@ -3917,6 +3946,47 @@ mod tests {
         let mut bare = two_figure_state();
         assert!(!paste_clipboard_at_playhead(&mut bare));
         assert!(bare.core.status.contains("Nothing to paste"));
+    }
+
+    #[test]
+    fn b1_06_stale_dope_record_never_undoes_the_new_project() {
+        // Wave 3 (B1-06, IA-U3-88-1; U3-88 R3): a record
+        // left over from a gesture on the OLD project —
+        // staged snapshot and all — settles at the next
+        // press (and at a cancelled Up) WITHOUT its
+        // rollback undo: after a swap the snapshot died
+        // with its project, and undoing would pop the
+        // NEW project's top edit.
+        let mut s = two_figure_state();
+        s.core.add_frame();
+        let depth = s.core.undo_depth();
+        let frames = s.core.frame_count();
+        let stale = |swaps: usize| {
+            Some(DopeDrag {
+                fi: 0,
+                frame: 0,
+                kind: DopeKeyRef::Pose,
+                ch_target: None,
+                applied_delta: 0,
+                at: 0,
+                snapshot_taken: true,
+                moved: true,
+                swaps,
+            })
+        };
+        // The leftover settlement at the next Down:
+        let mut drag = stale(s.core.project_swaps());
+        s.core.note_project_swapped();
+        drag_down(&mut s, &mut drag, 0, 0);
+        assert_eq!(s.core.undo_depth(), depth, "the leftover spent no undo");
+        assert_eq!(s.core.frame_count(), frames, "the new project's frame survives");
+        // The cancelled settle at Up:
+        let mut drag = stale(s.core.project_swaps());
+        s.core.note_project_swapped();
+        drag_up(&mut s, &mut drag, 0.0, true);
+        assert!(drag.is_none(), "the stale record dropped");
+        assert_eq!(s.core.undo_depth(), depth, "the cancelled settle spent no undo");
+        assert_eq!(s.core.frame_count(), frames);
     }
 
     #[test]

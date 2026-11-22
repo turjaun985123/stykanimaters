@@ -197,7 +197,7 @@ use stykanimate_rs::paint::ShapeKind;
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
 use crate::rune_sec::i18n_wire;
-use crate::rune_sec::icon_btn::{chip_btn, icon_btn};
+use crate::rune_sec::icon_btn::{chip_btn, danger_icon_btn, icon_btn};
 use crate::State;
 
 /// Douglas-Peucker epsilon (stage units) for the Simplify
@@ -819,7 +819,7 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
         .child(icon_btn("smooth-strokes", "bezier-curve", "Smooth", false, t, |s| {
             smooth_current_frame(&mut s.core);
         }))
-        .child(icon_btn("clear-drawing", "trash-can", &i18n_wire::tr(core, "clear_drawing"), false, t, |s| {
+        .child(danger_icon_btn("clear-drawing", "trash-can", &i18n_wire::tr(core, "clear_drawing"), false, t, |s| {
             // The stroke panel's press, not the bare core
             // op: it remaps `stroke_selected` over the
             // removed indices, so the selection cannot

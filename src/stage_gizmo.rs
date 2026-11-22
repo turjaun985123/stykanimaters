@@ -217,14 +217,33 @@ pub fn gizmo_layout_for_frame(bbox: [f32; 4], scale: f32) -> GizmoLayout {
 /// stage box. Empty when there is nothing to transform
 /// — no gizmo is drawn and no press is consumed.
 pub fn gizmo_target(core: &EditorCore) -> Vec<usize> {
+    gizmo_target_with(core, &|fi| {
+        std::rc::Rc::new(stage_view::feedback_positions(core, fi))
+    })
+}
+
+/// [`gizmo_target`] with the per-figure positions
+/// supplied by the caller (Wave 3, IA-U3-81-2): the
+/// stage's pass context evaluates each figure's forward
+/// kinematics once per redraw and hands the results
+/// down, so the gizmo's stage-box probes read the same
+/// values the figure pass drew instead of re-evaluating
+/// them (up to three box evaluations per figure per
+/// pass, before). Standalone callers keep the delegating
+/// [`gizmo_target`], whose closure evaluates exactly
+/// what the body evaluated before.
+pub fn gizmo_target_with(
+    core: &EditorCore,
+    positions: &dyn Fn(usize) -> std::rc::Rc<Vec<V2>>,
+) -> Vec<usize> {
     let set: Vec<usize> = stage_view::figure_set(core)
         .into_iter()
-        .filter(|&fi| stage_view::figure_stage_bbox(core, fi).is_some())
+        .filter(|&fi| stage_view::figure_stage_bbox_with(core, fi, positions).is_some())
         .collect();
     if set.len() >= 2 {
         return set;
     }
-    if stage_view::figure_stage_bbox(core, core.selected_figure).is_some() {
+    if stage_view::figure_stage_bbox_with(core, core.selected_figure, positions).is_some() {
         return vec![core.selected_figure];
     }
     Vec::new()
@@ -235,10 +254,23 @@ pub fn gizmo_target(core: &EditorCore) -> Vec<usize> {
 /// bounding boxes (the set's outline geometry, shared
 /// with W2-01) framed at display scale `scale`.
 pub fn gizmo_layout(core: &EditorCore, scale: f32) -> Option<GizmoLayout> {
-    let target = gizmo_target(core);
+    gizmo_layout_with(core, scale, &|fi| {
+        std::rc::Rc::new(stage_view::feedback_positions(core, fi))
+    })
+}
+
+/// [`gizmo_layout`] with the per-figure positions
+/// supplied by the caller (Wave 3, IA-U3-81-2) — see
+/// [`gizmo_target_with`].
+pub fn gizmo_layout_with(
+    core: &EditorCore,
+    scale: f32,
+    positions: &dyn Fn(usize) -> std::rc::Rc<Vec<V2>>,
+) -> Option<GizmoLayout> {
+    let target = gizmo_target_with(core, positions);
     let mut it = target
         .iter()
-        .filter_map(|&fi| stage_view::figure_stage_bbox(core, fi));
+        .filter_map(|&fi| stage_view::figure_stage_bbox_with(core, fi, positions));
     let first = it.next()?;
     let mut bbox = first;
     for b in it {
@@ -340,6 +372,13 @@ struct GizmoDrag {
     frame: [f32; 4],
     rotate_at: V2,
     figures: Vec<usize>,
+    /// Wave 3 (B1-06, IA-U3-88-1): the core's swap
+    /// counter at Down — the gesture's project identity.
+    /// The settle writes by bare figure index, so a
+    /// project swap mid-drag would land the transform
+    /// on the NEW project's figures; every later phase
+    /// validates this first and abandons on mismatch.
+    swaps: usize,
 }
 
 thread_local! {
@@ -452,6 +491,7 @@ pub fn gizmo_down(core: &mut EditorCore, p: V2, scale: f32) -> bool {
         frame: layout.frame,
         rotate_at: layout.rotate_at,
         figures: gizmo_target(core),
+        swaps: core.project_swaps(),
     };
     GIZMO_DRAG.with(|c| *c.borrow_mut() = Some(drag));
     true
@@ -467,7 +507,13 @@ pub fn gizmo_move(core: &mut EditorCore, p: V2) -> bool {
     let alive = GIZMO_DRAG.with(|c| {
         let mut cell = c.borrow_mut();
         match cell.as_mut() {
-            Some(d) if d.figures.iter().any(|&fi| fi < core.project.figures.len()) => {
+            // Wave 3 (B1-06, IA-U3-88-1): the record also
+            // dies when its project was swapped away —
+            // its figure indices name another project.
+            Some(d)
+                if core.gesture_project_live(d.swaps)
+                    && d.figures.iter().any(|&fi| fi < core.project.figures.len()) =>
+            {
                 d.at = p;
                 true
             }
@@ -497,6 +543,13 @@ pub fn gizmo_up(core: &mut EditorCore, p: V2, cancelled: bool) {
     let Some(d) = GIZMO_DRAG.with(|c| c.borrow_mut().take()) else {
         return;
     };
+    // Wave 3 (B1-06, IA-U3-88-1): a gesture whose
+    // project was swapped away settles NOTHING — the
+    // record drops and no transform lands on the new
+    // project's figures.
+    if !core.gesture_project_live(d.swaps) {
+        return;
+    }
     if cancelled {
         return;
     }
@@ -678,16 +731,31 @@ fn fmt_deg(deg: f32) -> String {
 /// With no target the pass adds nothing at all: the
 /// idle stage is byte-for-byte the stage without it.
 pub fn draw_gizmo(
+    shape: Shape,
+    core: &EditorCore,
+    rt: &RotTransform,
+    s: f32,
+) -> Shape {
+    draw_gizmo_with(shape, core, rt, s, &|fi| {
+        std::rc::Rc::new(stage_view::feedback_positions(core, fi))
+    })
+}
+
+/// [`draw_gizmo`] with the per-figure positions supplied
+/// by the caller (Wave 3, IA-U3-81-2) — see
+/// [`gizmo_target_with`].
+pub fn draw_gizmo_with(
     mut shape: Shape,
     core: &EditorCore,
     rt: &RotTransform,
     s: f32,
+    positions: &dyn Fn(usize) -> std::rc::Rc<Vec<V2>>,
 ) -> Shape {
     let accent = stage_view::hex_color(SELECTION_ACCENT).unwrap_or(Color::WHITE);
     let preview = gizmo_preview();
     let (frame, pivot, rotate_at) = match &preview {
         Some(pv) => (pv.frame, pv.pivot, pv.rotate_at),
-        None => match gizmo_layout(core, s) {
+        None => match gizmo_layout_with(core, s, positions) {
             Some(l) => (l.frame, l.pivot, l.rotate_at),
             None => return shape,
         },
@@ -767,6 +835,37 @@ mod tests {
 
     fn close(a: V2, b: V2, tol: f32) -> bool {
         (a[0] - b[0]).abs() <= tol && (a[1] - b[1]).abs() <= tol
+    }
+
+    #[test]
+    fn b1_06_gizmo_settle_after_a_swap_writes_nothing() {
+        // Wave 3 (B1-06, IA-U3-88-1): a gizmo record
+        // planted against one project must not settle
+        // its transform onto the next project's figures
+        // after a swap — no write, no snapshot.
+        let mut core = gizmo_core();
+        let before = core.project.frames[0].poses[0].root;
+        GIZMO_DRAG.with(|c| {
+            *c.borrow_mut() = Some(GizmoDrag {
+                handle: GizmoHandle::Move,
+                press: [0.0, 0.0],
+                at: [0.0, 0.0],
+                pivot: [0.0, 0.0],
+                frame: [0.0; 4],
+                rotate_at: [0.0, 0.0],
+                figures: vec![0],
+                swaps: core.project_swaps(),
+            })
+        });
+        core.note_project_swapped();
+        let depth = core.undo_depth();
+        gizmo_up(&mut core, [60.0, 60.0], false);
+        assert_eq!(
+            core.project.frames[0].poses[0].root, before,
+            "no transform lands on the new project"
+        );
+        assert_eq!(core.undo_depth(), depth, "no snapshot was spent");
+        assert!(gizmo_preview().is_none(), "the stale record dropped");
     }
 
     #[test]

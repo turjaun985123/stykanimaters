@@ -478,6 +478,28 @@ pub fn sprite_label_boxes(corners: [V2; 4], name: &str, color: u32) -> Vec<TextP
 /// segment-text glyphs, which carry their node's
 /// `style.opacity` as alpha (see the module docs).
 pub fn text_geometry(core: &EditorCore) -> Vec<TextPrim> {
+    text_geometry_with_positions(core, &|fi| {
+        std::rc::Rc::new(core.positions_f(core.display_frame(), fi))
+    })
+}
+
+/// [`text_geometry`] with the per-figure positions
+/// supplied by the caller (Wave 3, IA-U3-29-2 /
+/// IA-U3-81-2): the stage's pass context evaluates each
+/// figure's forward kinematics once per redraw and hands
+/// the results down, so this pass reads the same values
+/// the figure pass drew instead of re-evaluating them.
+/// The flavour is THIS pass's own historical one —
+/// `positions_f` at the display frame, with no setup-mode
+/// branch (the figure pass's setup awareness is its own;
+/// the divergence in setup mode predates this slice and
+/// is preserved verbatim). Standalone callers keep the
+/// delegating [`text_geometry`], whose closure evaluates
+/// exactly what the body evaluated before.
+pub fn text_geometry_with_positions(
+    core: &EditorCore,
+    positions: &dyn Fn(usize) -> std::rc::Rc<Vec<V2>>,
+) -> Vec<TextPrim> {
     let project = &core.project;
     let display = core.display_frame();
     let mut out = Vec::new();
@@ -487,7 +509,7 @@ pub fn text_geometry(core: &EditorCore) -> Vec<TextPrim> {
         if !visible[fi] {
             continue;
         }
-        let pos = core.positions_f(display, fi);
+        let pos = positions(fi);
         for (ni, node) in fig.def.nodes.iter().enumerate() {
             // Wave 14, C2 — resolve the CARRIER node: the
             // instance's own node when it carries media,

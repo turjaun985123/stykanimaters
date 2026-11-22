@@ -1317,12 +1317,16 @@ fn cmd_paste_frame(s: &mut State) {
 
 fn cmd_undo(s: &mut State) {
     s.core.undo();
-    s.stroke_selected = None;
+    // Wave 3 (B1-06, IA-U3-86-1): the reconciliation
+    // contract's history half replaces the old
+    // stroke-only clear (the Wave 10 C6 precedent).
+    crate::reconcile_shell_state_after_history(s);
 }
 
 fn cmd_redo(s: &mut State) {
     s.core.redo();
-    s.stroke_selected = None;
+    // Wave 3 (B1-06, IA-U3-86-1): as `cmd_undo`.
+    crate::reconcile_shell_state_after_history(s);
 }
 
 fn cmd_save(s: &mut State) {

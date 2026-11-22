@@ -848,6 +848,17 @@ pub struct GraphPanelState {
     /// through to the click-seek instead. No snapshot is
     /// ever taken for it — selection is not an edit.
     pub marquee: Option<f32>,
+    /// Wave 3 (B1-06, IA-U3-88-1): the core's swap
+    /// counter captured when the current canvas gesture
+    /// (key drag, tangent drag or marquee) began; `None`
+    /// while no canvas gesture is live. Every writing
+    /// phase validates it through
+    /// `EditorCore::gesture_project_live` and abandons
+    /// on mismatch — the Down snapshot belongs to a
+    /// project that no longer exists, so a post-swap
+    /// settle must neither write nor roll back with
+    /// `core.undo()` (U3-88 R1/R3).
+    pub drag_swaps: Option<usize>,
     /// Number-field session for the selected key's frame
     /// (Roadmap Wave 1, F-3 — see [`KeyField`]).
     pub key_frame_edit: design::NumberEdit,
@@ -3042,6 +3053,9 @@ pub fn drag_down(
             st.drag_handle = Some((sel, side));
             st.drag_key = None;
             st.marquee = None;
+            // Wave 3 (B1-06, IA-U3-88-1): the gesture's
+            // project identity.
+            st.drag_swaps = Some(core.project_swaps());
             // Grabbing a handle selects its key (F-4).
             ksel.select_one(ci, core.project.channels[ci].keys[sel].frame);
             return true;
@@ -3055,6 +3069,9 @@ pub fn drag_down(
             st.drag_key = Some(i);
             st.drag_handle = None;
             st.marquee = None;
+            // Wave 3 (B1-06, IA-U3-88-1): the gesture's
+            // project identity.
+            st.drag_swaps = Some(core.project_swaps());
             // Pressing a key selects it (F-4) — the
             // selection then follows the drag (drag_move).
             ksel.select_one(ci, st.drag_anchor);
@@ -3066,6 +3083,11 @@ pub fn drag_down(
             // the gesture still reports unowned, so a
             // short Up can fall through to the click-seek.
             st.marquee = Some(view.to_data(px).0);
+            // Wave 3 (B1-06, IA-U3-88-1): the marquee's
+            // project identity — its Moves write the
+            // shared key selection, which is project
+            // state too.
+            st.drag_swaps = Some(core.project_swaps());
             false
         }
     }
@@ -3087,6 +3109,24 @@ pub fn drag_move(
     px: V2,
     size: [f32; 2],
 ) -> bool {
+    // Wave 3 (B1-06, IA-U3-88-1): a canvas gesture whose
+    // project was swapped away abandons — the gesture
+    // fields clear and nothing is written. (A record
+    // carrying no captured counter — only constructible
+    // by hand in tests — is treated as live: the rule
+    // binds gestures that captured an identity.)
+    if (st.drag_key.is_some() || st.drag_handle.is_some() || st.marquee.is_some())
+        && !st
+            .drag_swaps
+            .map(|recorded| core.gesture_project_live(recorded))
+            .unwrap_or(true)
+    {
+        st.drag_key = None;
+        st.drag_handle = None;
+        st.marquee = None;
+        st.drag_swaps = None;
+        return false;
+    }
     if let Some((idx, side)) = st.drag_handle {
         if size[0] <= 0.0 || size[1] <= 0.0 {
             return false;
@@ -3176,6 +3216,26 @@ pub fn drag_up(
     travel: f32,
     cancelled: bool,
 ) -> bool {
+    // Wave 3 (B1-06, IA-U3-88-1): a stale gesture
+    // settles NOTHING — above all it must not run the
+    // cancelled branches' `core.undo()` against the
+    // new project's stack (U3-88 R1/R3). The fields
+    // clear and the release is not even a click-seek:
+    // it belongs to a gesture the user started on
+    // another project.
+    if (st.drag_key.is_some() || st.drag_handle.is_some() || st.marquee.is_some())
+        && !st
+            .drag_swaps
+            .map(|recorded| core.gesture_project_live(recorded))
+            .unwrap_or(true)
+    {
+        st.drag_key = None;
+        st.drag_handle = None;
+        st.marquee = None;
+        st.drag_swaps = None;
+        return false;
+    }
+    st.drag_swaps = None;
     if let Some((idx, side)) = st.drag_handle.take() {
         if cancelled {
             core.undo();
@@ -5225,6 +5285,60 @@ mod tests {
         assert_eq!(seek_frame(&view, -30.0, 10), Some(0), "before the start clamps");
         assert_eq!(seek_frame(&view, 10_000.0, 5), Some(4), "past the end clamps");
         assert_eq!(seek_frame(&view, 144.0, 0), None, "no frames: no seek");
+    }
+
+    #[test]
+    fn b1_06_graph_gesture_abandons_after_a_swap() {
+        // Wave 3 (B1-06, IA-U3-88-1): a canvas gesture
+        // whose project swaps away mid-drag abandons —
+        // a Move writes nothing, and a cancelled Up does
+        // NOT roll back with `core.undo()` against the
+        // new project's stack (U3-88 R1/R3).
+        let mut core = EditorCore::new();
+        core.project.channels = vec![channel(
+            ChannelTarget::RootX,
+            vec![
+                Key::flat(0.0, 0.0),
+                Key::flat(4.0, 80.0),
+                Key::flat(8.0, 20.0),
+            ],
+        )];
+        let mut st = GraphPanelState::default();
+        let size = [480.0, 170.0];
+        let view = drag_view(&core, ChannelTarget::RootX, size);
+        let grab = view.to_px(4.0, 80.0);
+        assert!(drag_down(&mut core, &mut st, &mut KeySel::default(), grab, size));
+        assert_eq!(st.drag_key, Some(1));
+        core.note_project_swapped();
+        let depth = core.undo_depth();
+        // The cancelled settle: no undo spent, gesture
+        // dropped, key unmoved.
+        assert!(!drag_up(
+            &mut core,
+            &mut st,
+            &mut KeySel::default(),
+            grab,
+            size,
+            40.0,
+            true
+        ));
+        assert_eq!(st.drag_key, None, "the stale gesture dropped");
+        assert_eq!(core.undo_depth(), depth, "no undo was spent on the new project");
+        assert!(
+            approx(core.project.channels[0].keys[1].frame, 4.0),
+            "the key never moved"
+        );
+        // A Move on a fresh stale gesture writes nothing
+        // either.
+        assert!(drag_down(&mut core, &mut st, &mut KeySel::default(), grab, size));
+        core.note_project_swapped();
+        let dest = view.to_px(6.0, 10.0);
+        assert!(!drag_move(&mut core, &mut st, &mut KeySel::default(), dest, size));
+        assert_eq!(st.drag_key, None);
+        assert!(
+            approx(core.project.channels[0].keys[1].frame, 4.0),
+            "the key still never moved"
+        );
     }
 
     #[test]

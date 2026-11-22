@@ -393,6 +393,13 @@ pub struct CueDrag {
     /// changes the window, so a plain click (or a wiggle
     /// inside one frame) spends no undo step.
     pub snapshot_taken: bool,
+    /// Wave 3 (B1-06, IA-U3-88-1): the core's swap
+    /// counter at Down — the gesture's project identity,
+    /// the second factor of [`drag_identity_holds`]: a
+    /// different project could hold a cue with the same
+    /// text at the same index, and the text check alone
+    /// would call that the same cue.
+    pub swaps: usize,
 }
 
 thread_local! {
@@ -443,11 +450,16 @@ pub fn drag_target(mode: DragMode, orig_start: usize, orig_end: usize, delta: i3
 /// text. The one guard every writing phase runs (see
 /// [`CueDrag::text`]).
 fn drag_identity_holds(s: &State, g: &CueDrag) -> bool {
-    s.core
-        .project
-        .subtitles
-        .get(g.index)
-        .is_some_and(|c| c.text == g.text)
+    // Wave 3 (B1-06, IA-U3-88-1): the project itself
+    // must still be the one the gesture began on —
+    // the swap counter is the first factor, the cue's
+    // text the second.
+    s.core.gesture_project_live(g.swaps)
+        && s.core
+            .project
+            .subtitles
+            .get(g.index)
+            .is_some_and(|c| c.text == g.text)
 }
 
 /// The gesture's Down phase: the click, then the grab.
@@ -477,6 +489,7 @@ pub fn drag_down(s: &mut State, drag: &mut Option<CueDrag>, i: usize, x: f32, w:
         orig_end: cue.end_frame,
         text: cue.text.clone(),
         snapshot_taken: false,
+        swaps: s.core.project_swaps(),
     };
     press_cue(s, i);
     *drag = Some(record);
@@ -1117,6 +1130,25 @@ mod tests {
         assert_eq!(g.mode, DragMode::Body);
         assert_eq!((g.orig_start, g.orig_end), (4, 6));
         assert!(!g.snapshot_taken);
+    }
+
+    #[test]
+    fn b1_06_cue_drag_abandons_after_a_swap_even_with_matching_text() {
+        // Wave 3 (B1-06, IA-U3-88-1): the swap counter
+        // is drag_identity_holds' first factor — after a
+        // swap the gesture abandons even though the cue
+        // at its index still carries the grabbed text
+        // (the fixture project itself is untouched by
+        // the funnel call, so text identity alone would
+        // have called this the same cue).
+        let mut s = two_cue_state();
+        let mut drag = None;
+        drag_down(&mut s, &mut drag, 1, 32.0, 64.0);
+        s.core.note_project_swapped();
+        drag_apply(&mut s, &mut drag, 3.0 * CHIP_PITCH);
+        assert!(drag.is_none(), "the stale gesture abandoned");
+        assert_eq!(windows(&s), vec![(0, 2), (4, 6)], "nothing moved after the swap");
+        assert_eq!(s.core.undo_depth(), 0, "no snapshot was staged after the swap");
     }
 
     #[test]

@@ -119,6 +119,8 @@
 //! the toggle) — see [`limit_arc_prims`].
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::rc::Rc;
 
 use rune::{col, el, Color, El, LineCap, Shape};
 use stykanimate_rs::editor::EditorCore;
@@ -499,11 +501,134 @@ pub fn stage_pointer() -> Option<StagePointer> {
 /// the display frame's, setup-aware — the very positions the
 /// figure pass of [`stage_shape`] draws, so a highlight sits
 /// on the joint as drawn, not on a neighbouring frame's.
-fn feedback_positions(core: &EditorCore, fi: usize) -> Vec<V2> {
+pub fn feedback_positions(core: &EditorCore, fi: usize) -> Vec<V2> {
     if core.setup_mode {
         core.setup_positions_f(core.display_frame(), fi)
     } else {
         core.positions_f(core.display_frame(), fi)
+    }
+}
+
+// ----------------------------------------------------------------
+// Stage pass context (Wave 3, IA-U3-29-1 + IA-U3-81-2)
+// ----------------------------------------------------------------
+//
+// One `stage_shape` invocation used to recompute the same
+// values in every sub-pass that needed them: the media
+// stream three times (sprite quads, the placeholder loop,
+// the sprite prim stream — each a full `media_items`
+// evaluation with its own channel pass), and each figure's
+// forward kinematics at least three times (figure pass,
+// text pass, navigator), plus full-set sweeps in the
+// feedback hit tests, per-figure stage-box evaluations in
+// the marquee/gizmo passes, and one evaluation per FX clip
+// in the FX pass. `StagePass` is the pass-context object
+// those sub-passes now share: the media stream and sprite
+// quads computed ONCE up front, and a positions memo that
+// evaluates each figure's FK at most once per flavour.
+//
+// Lifetime: exactly one `stage_shape` call. The context is
+// constructed at the top of the pass and dropped at its
+// end — no thread-local, no statics, nothing keyed by
+// revision or frame across passes, so it can never serve
+// a value from an older project state. Within the pass
+// the core is borrowed immutably, so a memoised value
+// cannot go stale mid-pass: the first evaluation of a
+// (figure, flavour) pair IS what every later caller in
+// the same pass would have computed.
+//
+// Two FK flavours exist because the pass's consumers
+// historically split (see [`StagePass::positions_plain`]):
+// the memo keys them separately so each consumer keeps
+// receiving exactly the values it computed before.
+
+/// The shared context of one [`stage_shape`] pass (see
+/// the section docs above).
+pub struct StagePass {
+    /// The display frame the pass was opened at; every
+    /// memoised position is this frame's.
+    display: f32,
+    /// The pass's one media stream evaluation.
+    media_items: Vec<stykanimate_rs::media::MediaItem>,
+    /// The pass's one sprite-quad derivation, from
+    /// [`StagePass::media_items`]. Held in an `Rc` so the
+    /// hover classification can take the quads lazily
+    /// (see [`hover_at_with`]) without a copy.
+    sprite_quads: Rc<Vec<crate::stage_sprites::SpriteQuad>>,
+    /// FK memo: (figure, setup flavour) → positions.
+    positions: RefCell<HashMap<(usize, bool), Rc<Vec<V2>>>>,
+}
+
+impl StagePass {
+    /// Open the pass for `core`: capture the display
+    /// frame, evaluate the media stream once, and derive
+    /// the sprite quads from that same stream.
+    pub fn new(core: &EditorCore) -> StagePass {
+        let display = core.display_frame();
+        let media_items = stykanimate_rs::media::media_items(&core.project, display);
+        let sprite_quads =
+            crate::stage_sprites::sprite_quads_from_items(&core.project, display, &media_items);
+        StagePass {
+            display,
+            media_items,
+            sprite_quads: Rc::new(sprite_quads),
+            positions: RefCell::new(HashMap::new()),
+        }
+    }
+
+    /// The pass's media stream (the one evaluation every
+    /// media consumer in the pass shares).
+    pub fn media_items(&self) -> &[stykanimate_rs::media::MediaItem] {
+        &self.media_items
+    }
+
+    /// The pass's sprite quads (derived once from
+    /// [`StagePass::media_items`]).
+    pub fn sprite_quads(&self) -> &[crate::stage_sprites::SpriteQuad] {
+        &self.sprite_quads
+    }
+
+    /// The pass's sprite quads as a shared handle (the
+    /// lazy-quads shape [`hover_at_with`] takes).
+    pub fn sprite_quads_rc(&self) -> Rc<Vec<crate::stage_sprites::SpriteQuad>> {
+        self.sprite_quads.clone()
+    }
+
+    /// Figure `fi`'s display-frame positions in the
+    /// SETUP-AWARE flavour — [`feedback_positions`]' exact
+    /// contract (the rest pose in setup mode, the animated
+    /// pose otherwise): what the figure pass draws and the
+    /// feedback/navigator/marquee/gizmo passes read.
+    /// Evaluated at most once per pass.
+    pub fn positions(&self, core: &EditorCore, fi: usize) -> Rc<Vec<V2>> {
+        self.positions_flavoured(core, fi, core.setup_mode)
+    }
+
+    /// Figure `fi`'s display-frame positions in the PLAIN
+    /// flavour — `EditorCore::positions_f` verbatim, with
+    /// NO setup-mode branch. This is the flavour the text
+    /// and FX passes have always used (stage_text /
+    /// stage_fx call `positions_f` unconditionally), so in
+    /// setup mode they read the animated pose while the
+    /// figure pass draws the rest pose — a pre-existing
+    /// divergence this context preserves exactly, in its
+    /// own memo slot. Evaluated at most once per pass.
+    pub fn positions_plain(&self, core: &EditorCore, fi: usize) -> Rc<Vec<V2>> {
+        self.positions_flavoured(core, fi, false)
+    }
+
+    fn positions_flavoured(&self, core: &EditorCore, fi: usize, setup: bool) -> Rc<Vec<V2>> {
+        if let Some(pos) = self.positions.borrow().get(&(fi, setup)) {
+            return pos.clone();
+        }
+        let pos = if setup {
+            core.setup_positions_f(self.display, fi)
+        } else {
+            core.positions_f(self.display, fi)
+        };
+        let pos = Rc::new(pos);
+        self.positions.borrow_mut().insert((fi, setup), pos.clone());
+        pos
     }
 }
 
@@ -528,9 +653,27 @@ pub fn dist_to_segment(p: V2, a: V2, b: V2) -> (f32, f32) {
 /// ([`pick_radius`]). Nearest wins; ties keep the earlier
 /// figure/node, the hit test's own convention.
 pub fn joint_hit(core: &EditorCore, p: V2, radius: f32) -> Option<(usize, usize)> {
+    joint_hit_with(core, p, radius, &|fi| {
+        Rc::new(feedback_positions(core, fi))
+    })
+}
+
+/// [`joint_hit`] with the per-figure positions supplied
+/// by the caller (Wave 3, IA-U3-81-2): the stage's pass
+/// context hands down its memoised positions, so a hover
+/// sweep inside a pass reads the values the figure pass
+/// drew instead of re-evaluating every figure. The
+/// flavour is [`feedback_positions`]' (setup-aware), as
+/// before.
+pub fn joint_hit_with(
+    core: &EditorCore,
+    p: V2,
+    radius: f32,
+    positions: &dyn Fn(usize) -> Rc<Vec<V2>>,
+) -> Option<(usize, usize)> {
     let mut best: Option<(usize, usize, f32)> = None;
     for fi in 0..core.project.figures.len() {
-        for (ni, joint) in feedback_positions(core, fi).iter().enumerate() {
+        for (ni, joint) in positions(fi).iter().enumerate() {
             let d = model::dist(p, *joint);
             if d <= radius && best.map(|(_, _, bd)| d < bd).unwrap_or(true) {
                 best = Some((fi, ni, d));
@@ -547,9 +690,23 @@ pub fn joint_hit(core: &EditorCore, p: V2, radius: f32) -> Option<(usize, usize)
 /// mostly segment; until now only its joints were pickable
 /// (R-A2-4).
 pub fn segment_hit(core: &EditorCore, p: V2, radius: f32) -> Option<(usize, usize, f32)> {
+    segment_hit_with(core, p, radius, &|fi| {
+        Rc::new(feedback_positions(core, fi))
+    })
+}
+
+/// [`segment_hit`] with the per-figure positions supplied
+/// by the caller (Wave 3, IA-U3-81-2) — see
+/// [`joint_hit_with`].
+pub fn segment_hit_with(
+    core: &EditorCore,
+    p: V2,
+    radius: f32,
+    positions: &dyn Fn(usize) -> Rc<Vec<V2>>,
+) -> Option<(usize, usize, f32)> {
     let mut best: Option<(usize, usize, f32)> = None;
     for fi in 0..core.project.figures.len() {
-        let pos = feedback_positions(core, fi);
+        let pos = positions(fi);
         for (ni, node) in core.project.figures[fi].def.nodes.iter().enumerate() {
             let Some(par) = node.parent else { continue };
             let (Some(&a), Some(&b)) = (pos.get(par), pos.get(ni)) else {
@@ -582,14 +739,47 @@ pub enum StageHover {
 /// [`StageHover`]): the pick radius is screen-space, so the
 /// classification is the same at any zoom.
 pub fn hover_at(core: &EditorCore, p: V2, scale: f32) -> StageHover {
+    hover_at_with(
+        core,
+        p,
+        scale,
+        &|fi| Rc::new(feedback_positions(core, fi)),
+        &|| {
+            Rc::new(crate::stage_sprites::sprite_quads(
+                &core.project,
+                core.display_frame(),
+            ))
+        },
+    )
+}
+
+/// [`hover_at`] with the per-figure positions and the
+/// sprite quads supplied by the caller (Wave 3,
+/// IA-U3-81-2): inside a stage pass, the pass context
+/// hands down its memoised positions and its one quad
+/// derivation, so classifying the hover costs no fresh
+/// FK sweep and no fresh media evaluation. The quads
+/// arrive as a LAZY closure, invoked only if the sprite
+/// arm is reached — the same reachability the direct
+/// form's `sprite_pick_at` call had. The sprite arm
+/// reads the supplied quads through `sprite_at_point` —
+/// the same pick `sprite_pick_at` performs over its own
+/// freshly derived quads, over identical values.
+pub fn hover_at_with(
+    core: &EditorCore,
+    p: V2,
+    scale: f32,
+    positions: &dyn Fn(usize) -> Rc<Vec<V2>>,
+    quads: &dyn Fn() -> Rc<Vec<crate::stage_sprites::SpriteQuad>>,
+) -> StageHover {
     let radius = pick_radius(scale);
-    if let Some((fi, ni)) = joint_hit(core, p, radius) {
+    if let Some((fi, ni)) = joint_hit_with(core, p, radius, positions) {
         return StageHover::Joint(fi, ni);
     }
-    if let Some((fi, ni, _)) = segment_hit(core, p, radius) {
+    if let Some((fi, ni, _)) = segment_hit_with(core, p, radius, positions) {
         return StageHover::Segment(fi, ni);
     }
-    if let Some(si) = crate::stage_sprites::sprite_pick_at(core, p) {
+    if let Some(si) = crate::stage_sprites::sprite_at_point(&quads(), p) {
         return StageHover::Sprite(si);
     }
     if let Some(si) = crate::rune_sec::stage_layers::stroke_at_point(core, p, radius) {
@@ -1607,6 +1797,7 @@ fn draw_stage_feedback(
     rt: &crate::rune_sec::stage_camera::RotTransform,
     el_size: [f32; 2],
     s: f32,
+    pass: &StagePass,
 ) -> Shape {
     let Some(ptr) = stage_pointer() else {
         return shape;
@@ -1623,9 +1814,15 @@ fn draw_stage_feedback(
         || path_drag_active()
         || marquee_live_rect().is_some();
     if !dragging {
-        match hover_at(core, stage_p, s) {
+        match hover_at_with(
+            core,
+            stage_p,
+            s,
+            &|fi| pass.positions(core, fi),
+            &|| pass.sprite_quads_rc(),
+        ) {
             StageHover::Joint(fi, ni) => {
-                if let Some(&joint) = feedback_positions(core, fi).get(ni) {
+                if let Some(&joint) = pass.positions(core, fi).get(ni) {
                     shape = shape.fill(
                         ngon(rt.to_screen(joint), 11.0 * s.max(0.6), 8),
                         accent.alpha(0.40),
@@ -1633,7 +1830,7 @@ fn draw_stage_feedback(
                 }
             }
             StageHover::Segment(fi, ni) => {
-                let pos = feedback_positions(core, fi);
+                let pos = pass.positions(core, fi);
                 if let (Some(&a), Some(&b)) = (
                     core.project.figures[fi]
                         .def
@@ -1667,7 +1864,7 @@ fn draw_stage_feedback(
                 }
             }
             StageHover::Sprite(si) => {
-                let quads = crate::stage_sprites::sprite_quads(&core.project, core.display_frame());
+                let quads = pass.sprite_quads();
                 if let Some(q) = quads.iter().find(|q| q.sprite == si) {
                     let pts: Vec<[f32; 2]> = q.corners.iter().map(|p| rt.to_screen(*p)).collect();
                     shape = shape.stroke_with(pts, true, 1.5, LineCap::Round, accent.alpha(0.95));
@@ -1704,7 +1901,7 @@ fn draw_stage_feedback(
     // itself at that bend (see `bend_preview_apply`);
     // this dot is the grab point the pointer is holding.
     if let Some((fi, ni, bend)) = bend_drag_preview() {
-        let pos = feedback_positions(core, fi);
+        let pos = pass.positions(core, fi);
         if let (Some(&a), Some(&b)) = (
             core.project
                 .figures
@@ -2985,6 +3182,12 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
     LAST_STAGE_SIZE.with(|c| c.set(el_size));
     let project = &core.project;
     let display = core.display_frame();
+    // The pass context (Wave 3, IA-U3-29-1 + IA-U3-81-2):
+    // this pass's ONE media-stream evaluation and sprite-quad
+    // derivation, plus the FK positions memo every sub-pass
+    // below reads through — see the `StagePass` section docs.
+    // It lives for this call only.
+    let pass = StagePass::new(core);
     // The display transform: the camera at the display frame
     // with the shell view navigation folded in (identity view
     // = the camera's own transform, bit for bit).
@@ -3303,11 +3506,13 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
         // frame's sampled root) — what you see is what
         // a setup drag edits. The joint handles below
         // derive from this same `pos`.
-        let pos = if core.setup_mode {
-            core.setup_positions_f(display, fi)
-        } else {
-            core.positions_f(display, fi)
-        };
+        // Wave 3 (IA-U3-81-2): the positions come from the
+        // pass context's memo — the setup-aware flavour,
+        // this very branch's contract — so the text,
+        // navigator, feedback, marquee and gizmo passes
+        // below read the same evaluation instead of each
+        // re-running the FK walk.
+        let pos = pass.positions(core, fi);
         // Per-node bends at the display frame (export.rs makes
         // the same per-figure fetch); empty when the project
         // carries no bend data, and every segment then takes
@@ -3547,8 +3752,13 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
     // divergence from the raster, where media composites over
     // everything. Text items are not drawn here; stage_text
     // owns them later in this same shape.
-    let sprite_quads = crate::stage_sprites::sprite_quads(&core.project, display);
-    for item in stykanimate_rs::media::media_items(&core.project, display) {
+    // Wave 3 (IA-U3-29-1): both halves read the pass
+    // context's ONE media stream and quad derivation —
+    // before, this block evaluated `media_items` twice
+    // itself (once inside `sprite_quads`, once directly)
+    // and the prim stream below evaluated it a third time.
+    let sprite_quads = pass.sprite_quads();
+    for item in pass.media_items() {
         if let stykanimate_rs::media::MediaItem::Image { corners, alpha, .. } = item {
             // Sprite instances are painted by the sprite
             // pass below from `stage_sprites`' prim stream
@@ -3588,7 +3798,7 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
     // placeholder, and stay canvas-drawn over the artwork.
     {
         let accent = hex_color(SELECTION_ACCENT).unwrap_or(Color::WHITE);
-        for prim in crate::stage_sprites::sprite_prims(&core.project, display, overlays.sprite_selected) {
+        for prim in crate::stage_sprites::sprite_prims_from_quads(&core.project, display, overlays.sprite_selected, pass.sprite_quads()) {
             use crate::stage_sprites::SpritePrim;
             match prim {
                 SpritePrim::Fill { .. } | SpritePrim::Outline { .. } => {
@@ -3641,10 +3851,14 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
     // pixels outside the frame, and the canvas must not
     // paint any there either.
     let disc_clip = disc_clip_stage(project.stage);
-    for prim in crate::rune_sec::stage_fx::fx_geometry(core) {
+    for prim in crate::rune_sec::stage_fx::fx_geometry_with_positions(core, &|fi| {
+        pass.positions_plain(core, fi)
+    }) {
         shape = particle_prim(shape, &rt, s, prim, disc_clip);
     }
-    for prim in crate::rune_sec::stage_text::text_geometry(core) {
+    for prim in crate::rune_sec::stage_text::text_geometry_with_positions(core, &|fi| {
+        pass.positions_plain(core, fi)
+    }) {
         let crate::rune_sec::stage_text::TextPrim::GlyphBox { corners, color, alpha } = prim;
         let screen: Vec<[f32; 2]> = corners.iter().map(|p| rt.to_screen(*p)).collect();
         shape = shape.fill(screen, hex_color(color).unwrap_or(Color::WHITE).alpha(alpha));
@@ -3687,7 +3901,9 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
     // path; a stale index yields an empty vec and draws
     // nothing.
     if let Some(idx) = overlays.particle_selected {
-        for prim in crate::rune_sec::stage_fx::gizmo_geometry(core, idx) {
+        for prim in crate::rune_sec::stage_fx::gizmo_geometry_with_positions(core, idx, &|fi| {
+            pass.positions_plain(core, fi)
+        }) {
             // No disc clip: gizmo markers are exempt by
             // design (stage_fx delta 9) — the marker must
             // stay findable at an off-stage anchor.
@@ -3729,14 +3945,16 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
     // feedback pass, whose HUD annotates the same stage.
     // Both halves read session thread-locals only, so an
     // idle stage draws exactly what it drew before.
-    let shape = draw_marquee_selection(shape, core, &rt, s);
+    let shape = draw_marquee_selection(shape, core, &rt, s, &pass);
     // Transform gizmo (Roadmap Wave 2, W2-03): the
     // selected figure's / marquee set's frame with its
     // move grip and rotate knob — over the marquee
     // outlines it frames, under the feedback pass,
     // whose HUD annotates the same stage. Draws
     // nothing without a target.
-    let shape = crate::stage_gizmo::draw_gizmo(shape, core, &rt, s);
+    let shape = crate::stage_gizmo::draw_gizmo_with(shape, core, &rt, s, &|fi| {
+        pass.positions(core, fi)
+    });
     // Navigator minimap (Roadmap Wave 2, W2-04): the
     // whole scene in miniature with the viewport quad,
     // pinned to the canvas's top-left corner — chrome
@@ -3744,14 +3962,16 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
     // whose HUD annotates the same stage. Screen-space:
     // it takes the element size, not the stage transform.
     // Hides itself on small elements (see the module).
-    let shape = navigator::draw_navigator(shape, core, el_size);
+    let shape = navigator::draw_navigator_with_positions(shape, core, el_size, &|fi| {
+        pass.positions(core, fi)
+    });
     // Stage feedback (Roadmap Wave 1, RM15 — P-3): hover
     // highlight, the live drag HUD and the pointer
     // coordinate readout — after even the motion-path
     // markers, since the HUD must never be covered by the
     // content it annotates. Draws nothing while the
     // pointer probe is empty.
-    let shape = draw_stage_feedback(shape, core, &rt, el_size, s);
+    let shape = draw_stage_feedback(shape, core, &rt, el_size, s, &pass);
     shape
 }
 
@@ -3937,22 +4157,37 @@ pub fn sprite_bitmap_placements(
     out
 }
 
+/// Entry cap for the sprite bitmap cache (see
+/// [`SPRITE_BITMAPS`]): the same wholesale-clear bound as
+/// the decoded-asset cache (`media::DECODED_ASSET_CACHE_MAX`)
+/// — comfortably above the referenced-asset count of a real
+/// episode project at four flip variants per asset, far
+/// below any memory concern at episode asset sizes.
+const SPRITE_BITMAP_CACHE_MAX: usize = 32;
+
 thread_local! {
     /// Baked sprite bitmaps, one per (asset, flip pair) —
     /// the element layer's counterpart of the Asset Manager
     /// thumbnails' cache, with the same validity discipline:
-    /// an entry is served while the asset at that index
-    /// still stores the same byte length, and re-baked when
-    /// that changes. `None` entries are cached too (an
+    /// an entry is keyed by (asset index, flip pair,
+    /// full-content hash of the stored bytes,
+    /// `media::asset_bytes_hash` — IA-U3-87-3), so it is
+    /// served only while the asset at that index still
+    /// stores the same bytes, and re-baked when the content
+    /// changes — a same-length replacement can never serve
+    /// the previous image (the length-only key it replaces
+    /// could). `None` entries are cached too (an
     /// undecodable asset is re-asked only when its bytes
     /// change). The unflipped variant and each flipped
     /// variant are separate entries — flips are baked
     /// mirrored copies, per the spike (the element path has
     /// no mirror) — and a flip is part of the sampled key,
     /// so a track that flips mid-animation swaps variants
-    /// rather than re-baking per frame.
+    /// rather than re-baking per frame. Bounded like the
+    /// decoded-asset cache: cleared wholesale when full (a
+    /// miss costs one bake, never correctness).
     static SPRITE_BITMAPS: RefCell<
-        std::collections::HashMap<(usize, bool, bool, usize), Option<rune::Image>>,
+        std::collections::HashMap<(usize, bool, bool, u64), Option<rune::Image>>,
     > = RefCell::new(std::collections::HashMap::new());
 }
 
@@ -3969,13 +4204,22 @@ fn sprite_bitmap(
     flip_y: bool,
 ) -> Option<rune::Image> {
     let stored = project.assets.get(asset)?;
-    let cache_key = (asset, flip_x, flip_y, stored.png.len());
+    let cache_key = (
+        asset,
+        flip_x,
+        flip_y,
+        stykanimate_rs::media::asset_bytes_hash(&stored.png),
+    );
     if let Some(hit) = SPRITE_BITMAPS.with(|c| c.borrow().get(&cache_key).cloned()) {
         return hit;
     }
     let baked = bake_sprite_bitmap(project, asset, flip_x, flip_y);
     SPRITE_BITMAPS.with(|c| {
-        c.borrow_mut().insert(cache_key, baked.clone());
+        let mut c = c.borrow_mut();
+        if !c.contains_key(&cache_key) && c.len() >= SPRITE_BITMAP_CACHE_MAX {
+            c.clear();
+        }
+        c.insert(cache_key, baked.clone());
     });
     baked
 }
@@ -4284,6 +4528,17 @@ struct PathDrag {
     fi: usize,
     press: V2,
     at: V2,
+    /// Wave 3 (B1-11, IA-U3-88-1): the project identity
+    /// captured at Down — `core.project_swaps()` as it
+    /// stood when the press landed. Every writing phase
+    /// validates it through
+    /// [`EditorCore::gesture_project_live`]; on mismatch
+    /// the gesture abandons (record dropped, nothing
+    /// written, no undo spent against the new project —
+    /// U3-88 R1). The stage-view records carry the same
+    /// field under the same rule as the core/gizmo/dope/
+    /// cue/graph records B1-06 landed.
+    swaps: usize,
 }
 
 thread_local! {
@@ -4395,6 +4650,7 @@ pub fn path_drag_down(core: &mut EditorCore, p: V2) -> bool {
             fi,
             press: p,
             at: p,
+            swaps: core.project_swaps(),
         });
     });
     core.goto(frame);
@@ -4411,7 +4667,11 @@ pub fn path_drag_move(core: &mut EditorCore, p: V2) -> bool {
     let alive = PATH_DRAG.with(|c| {
         let mut cell = c.borrow_mut();
         match cell.as_mut() {
-            Some(d) if d.fi < core.project.figures.len() && d.frame < core.frame_count() => {
+            Some(d)
+                if d.fi < core.project.figures.len()
+                    && d.frame < core.frame_count()
+                    && core.gesture_project_live(d.swaps) =>
+            {
                 d.at = p;
                 true
             }
@@ -4437,6 +4697,13 @@ pub fn path_drag_up(core: &mut EditorCore, p: V2, cancelled: bool) {
         return;
     };
     if cancelled {
+        return;
+    }
+    // Wave 3 (B1-11, IA-U3-88-1): the gesture's project
+    // was swapped away mid-drag — the record is already
+    // taken (dropped); the nudge must not land in the
+    // NEW project at the old project's indices.
+    if !core.gesture_project_live(d.swaps) {
         return;
     }
     let delta = [p[0] - d.press[0], p[1] - d.press[1]];
@@ -4821,6 +5088,14 @@ struct BendDrag {
     press: V2,
     start: f32,
     bend: f32,
+    /// Wave 3 (B1-11, IA-U3-88-1): the project identity
+    /// captured at Down (`core.project_swaps()`),
+    /// validated through
+    /// [`EditorCore::gesture_project_live`] at every
+    /// writing phase — on mismatch the gesture abandons
+    /// with no write and no undo (U3-88 R1). Same field,
+    /// same rule as [`PathDrag`].
+    swaps: usize,
 }
 
 thread_local! {
@@ -4924,6 +5199,7 @@ pub fn bend_drag_down(core: &mut EditorCore, p: V2, radius: f32) -> bool {
             press: p,
             start,
             bend: shown,
+            swaps: core.project_swaps(),
         });
     });
     true
@@ -4940,7 +5216,11 @@ pub fn bend_drag_move(core: &mut EditorCore, p: V2) -> bool {
     let alive = BEND_DRAG.with(|c| {
         let mut cell = c.borrow_mut();
         match cell.as_mut() {
-            Some(d) if d.fi < core.project.figures.len() && d.frame < core.frame_count() => {
+            Some(d)
+                if d.fi < core.project.figures.len()
+                    && d.frame < core.frame_count()
+                    && core.gesture_project_live(d.swaps) =>
+            {
                 d.bend = bend_from_pointer(d.a, d.b, p);
                 true
             }
@@ -4970,6 +5250,13 @@ pub fn bend_drag_up(core: &mut EditorCore, p: V2, cancelled: bool) {
         return;
     };
     if cancelled {
+        return;
+    }
+    // Wave 3 (B1-11, IA-U3-88-1): the gesture's project
+    // was swapped away mid-drag — the record is already
+    // taken (dropped); no snapshot, no stored-row write
+    // and no status may land in the NEW project.
+    if !core.gesture_project_live(d.swaps) {
         return;
     }
     if d.fi >= core.project.figures.len() || d.frame >= core.project.frames.len() {
@@ -5101,6 +5388,18 @@ pub const MARQUEE_CLICK_SLOP: f32 = 4.0;
 struct MarqueeDrag {
     anchor: V2,
     at: V2,
+    /// Wave 3 (B1-11, IA-U3-88-1): the project identity
+    /// captured at Down (`core.project_swaps()`),
+    /// validated through
+    /// [`EditorCore::gesture_project_live`] at the
+    /// settle — on mismatch the release changes nothing
+    /// in the NEW project (no set replace, no set clear,
+    /// no selection write; U3-88 R1). The Move phase
+    /// takes no core handle (its call site is the
+    /// shell's, in main.rs), so the settle is this
+    /// record's validation point; the record writes
+    /// nothing while it lives.
+    swaps: usize,
 }
 
 /// One in-flight group drag: where the press landed,
@@ -5112,6 +5411,17 @@ struct GroupDrag {
     press: V2,
     at: V2,
     figures: Vec<usize>,
+    /// Wave 3 (B1-11, IA-U3-88-1): the project identity
+    /// captured at Down (`core.project_swaps()`),
+    /// validated through
+    /// [`EditorCore::gesture_project_live`] at every
+    /// writing phase — on mismatch the gesture abandons
+    /// with no snapshot, no root writes and no undo
+    /// (U3-88 R1). The grabbed set is snapshotted at
+    /// Down, and the set itself settles in the swap
+    /// funnel (IA-U3-86-2, B1-06); this field guards the
+    /// in-flight record the funnel cannot reach.
+    swaps: usize,
 }
 
 thread_local! {
@@ -5270,6 +5580,25 @@ pub fn figures_in_marquee(core: &EditorCore, rect: [f32; 4]) -> Vec<usize> {
 /// with no positions — draws nothing then, the overlay
 /// stale-index discipline.
 pub fn figure_stage_bbox(core: &EditorCore, fi: usize) -> Option<[f32; 4]> {
+    figure_stage_bbox_with(core, fi, &|fi| {
+        Rc::new(feedback_positions(core, fi))
+    })
+}
+
+/// [`figure_stage_bbox`] with the figure's positions
+/// supplied by the caller (Wave 3, IA-U3-81-2): the
+/// stage's pass context hands down its memoised
+/// positions, so the marquee and gizmo passes read the
+/// values the figure pass drew instead of re-evaluating
+/// per box. The bounds and visibility checks run BEFORE
+/// the positions are requested, in the direct form's
+/// order — an out-of-range or hidden figure never
+/// reaches the evaluation.
+pub fn figure_stage_bbox_with(
+    core: &EditorCore,
+    fi: usize,
+    positions: &dyn Fn(usize) -> Rc<Vec<V2>>,
+) -> Option<[f32; 4]> {
     if fi >= core.project.figures.len() {
         return None;
     }
@@ -5277,7 +5606,7 @@ pub fn figure_stage_bbox(core: &EditorCore, fi: usize) -> Option<[f32; 4]> {
     if !visible.get(fi).copied().unwrap_or(false) {
         return None;
     }
-    let pos = feedback_positions(core, fi);
+    let pos = positions(fi);
     let mut it = pos.iter();
     let first = *it.next()?;
     let mut rect = [first[0], first[1], first[0], first[1]];
@@ -5306,7 +5635,13 @@ pub fn marquee_down(core: &mut EditorCore, p: V2) -> bool {
     if core.playing || core.draw_mode || core.camera_mode || core.dragging.is_some() {
         return false;
     }
-    MARQUEE_DRAG.with(|c| *c.borrow_mut() = Some(MarqueeDrag { anchor: p, at: p }));
+    MARQUEE_DRAG.with(|c| {
+        *c.borrow_mut() = Some(MarqueeDrag {
+            anchor: p,
+            at: p,
+            swaps: core.project_swaps(),
+        })
+    });
     true
 }
 
@@ -5348,6 +5683,15 @@ pub fn marquee_up(core: &mut EditorCore, p: V2, cancelled: bool) {
         return;
     };
     if cancelled {
+        return;
+    }
+    // Wave 3 (B1-11, IA-U3-88-1): the gesture's project
+    // was swapped away mid-drag — the record is already
+    // taken (dropped); the release must not resolve its
+    // rectangle against the NEW project (neither the
+    // click form's set clear nor the drag form's set
+    // replace may fire there).
+    if !core.gesture_project_live(d.swaps) {
         return;
     }
     let rect = marquee_rect(d.anchor, p);
@@ -5417,6 +5761,7 @@ pub fn group_drag_down(core: &mut EditorCore, p: V2, radius: f32) -> bool {
             press: p,
             at: p,
             figures: set,
+            swaps: core.project_swaps(),
         })
     });
     true
@@ -5432,7 +5777,10 @@ pub fn group_drag_move(core: &mut EditorCore, p: V2) -> bool {
     let alive = GROUP_DRAG.with(|c| {
         let mut cell = c.borrow_mut();
         match cell.as_mut() {
-            Some(d) if d.figures.iter().any(|&fi| fi < core.project.figures.len()) => {
+            Some(d)
+                if d.figures.iter().any(|&fi| fi < core.project.figures.len())
+                    && core.gesture_project_live(d.swaps) =>
+            {
                 d.at = p;
                 true
             }
@@ -5488,6 +5836,14 @@ pub fn group_drag_up(core: &mut EditorCore, p: V2, cancelled: bool) {
         return;
     };
     if cancelled {
+        return;
+    }
+    // Wave 3 (B1-11, IA-U3-88-1): the gesture's project
+    // was swapped away mid-drag — the record is already
+    // taken (dropped); the grabbed set's indices name
+    // the OLD project, so no snapshot, no root writes
+    // and no recap may land in the NEW project.
+    if !core.gesture_project_live(d.swaps) {
         return;
     }
     let delta = [p[0] - d.press[0], p[1] - d.press[1]];
@@ -5560,12 +5916,13 @@ fn draw_marquee_selection(
     core: &EditorCore,
     rt: &crate::rune_sec::stage_camera::RotTransform,
     s: f32,
+    pass: &StagePass,
 ) -> Shape {
     let accent = hex_color(SELECTION_ACCENT).unwrap_or(Color::WHITE);
     let delta = group_drag_delta().unwrap_or([0.0, 0.0]);
     let pad = 6.0 / s.max(0.05);
     for fi in figure_set(core) {
-        let Some(bb) = figure_stage_bbox(core, fi) else {
+        let Some(bb) = figure_stage_bbox_with(core, fi, &|fi| pass.positions(core, fi)) else {
             continue;
         };
         let corners = [
@@ -5936,6 +6293,20 @@ struct GuideDrag {
     kind: GuideDragKind,
     at: f32,
     band: f32,
+    /// Wave 3 (B1-11, IA-U3-88-1): the project identity
+    /// captured at Down (`core.project_swaps()`),
+    /// validated through
+    /// [`EditorCore::gesture_project_live`] at the
+    /// settle — on mismatch none of the stored-guide
+    /// ops fire in the NEW project (a MOVE record's
+    /// index names the OLD project's guide; a CREATE
+    /// would plant a guide the user dragged out of a
+    /// project that no longer exists; U3-88 R1). The
+    /// Move phase takes no core handle (its call site
+    /// is the shell's, in main.rs), so the settle is
+    /// this record's validation point; the record
+    /// writes nothing while it lives.
+    swaps: usize,
 }
 
 thread_local! {
@@ -6012,6 +6383,7 @@ pub fn guide_down(core: &mut EditorCore, p: V2, scale: f32, band_px: f32) -> boo
                     kind: GuideDragKind::Create { axis },
                     at: axis.coordinate(p),
                     band,
+                    swaps: core.project_swaps(),
                 })
             });
             return true;
@@ -6031,6 +6403,7 @@ pub fn guide_down(core: &mut EditorCore, p: V2, scale: f32, band_px: f32) -> boo
                 kind: GuideDragKind::Move { index, axis },
                 at: axis.coordinate(p),
                 band,
+                swaps: core.project_swaps(),
             })
         });
         return true;
@@ -6084,6 +6457,13 @@ pub fn guide_up(core: &mut EditorCore, p: V2, cancelled: bool) {
     if cancelled {
         return;
     }
+    // Wave 3 (B1-11, IA-U3-88-1): the gesture's project
+    // was swapped away mid-drag — the record is already
+    // taken (dropped); none of the stored-guide ops
+    // below may fire in the NEW project.
+    if !core.gesture_project_live(d.swaps) {
+        return;
+    }
     match d.kind {
         GuideDragKind::Create { axis } => {
             let pos = axis.coordinate(p);
@@ -6113,6 +6493,33 @@ pub fn guide_up(core: &mut EditorCore, p: V2, cancelled: bool) {
             }
         }
     }
+}
+
+/// Wave 3 (B1-11, IA-U3-88-2, stage-view half): drop
+/// EVERY in-flight stage gesture record this module
+/// owns — path, bend, marquee, group, guide — with no
+/// settle and no undo: the records hold the old
+/// project's indices, and a dropped gesture has
+/// nothing to put back (none of the five sessions
+/// writes before its release). This is the stage-view
+/// contribution to the cross-cell drop the audit
+/// prescribed for the shell's swap handling: the swap
+/// funnels live in editor.rs, which cannot reach these
+/// thread-local cells, and the per-record identity
+/// validation above (IA-U3-88-1) already makes a
+/// surviving record inert — this helper is the
+/// belt-and-braces drop for the shell/integrator to
+/// call from the poll's swap branch beside B1-06's
+/// core drop, so no corpse record lingers to be drawn
+/// or re-settled. The sprite drag (stage_sprites) is
+/// not here: it lives in its own module and is already
+/// asset-identity-guarded.
+pub fn drop_stage_gesture_sessions() {
+    PATH_DRAG.with(|c| *c.borrow_mut() = None);
+    BEND_DRAG.with(|c| *c.borrow_mut() = None);
+    MARQUEE_DRAG.with(|c| *c.borrow_mut() = None);
+    GROUP_DRAG.with(|c| *c.borrow_mut() = None);
+    GUIDE_DRAG.with(|c| *c.borrow_mut() = None);
 }
 
 #[cfg(test)]
@@ -8050,6 +8457,32 @@ mod tests {
         buf
     }
 
+    /// A solid-colour PNG encoded with NO compression and
+    /// NO filtering, so the encoded length is a pure
+    /// function of the dimensions' raw scanline total
+    /// (`h * (1 + 4w)` bytes): two different images whose
+    /// totals agree encode to exactly the same byte length.
+    /// That is the collision the content-hash sprite cache
+    /// key (IA-U3-87-3) exists to survive.
+    fn uncompressed_sprite_png(w: u32, h: u32, px: [u8; 4]) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba(px));
+        let mut buf = Vec::new();
+        let encoder = image::codecs::png::PngEncoder::new_with_quality(
+            std::io::Cursor::new(&mut buf),
+            image::codecs::png::CompressionType::Uncompressed,
+            image::codecs::png::FilterType::NoFilter,
+        );
+        image::ImageEncoder::write_image(
+            encoder,
+            img.as_raw(),
+            w,
+            h,
+            image::ExtendedColorType::Rgba8,
+        )
+        .expect("test PNG encodes");
+        buf
+    }
+
     fn sprite_key() -> model::InstanceKey {
         model::InstanceKey {
             frame: 0.0,
@@ -8247,6 +8680,55 @@ mod tests {
     }
 
     #[test]
+    fn sprite_bitmap_rebakes_on_same_length_content_change() {
+        // IA-U3-87-3 acceptance: two DIFFERENT images whose
+        // encodings have exactly the same byte length
+        // (20x10 and 11x18 share the raw scanline total
+        // 810). Under the old length-only cache key the
+        // second request was served the FIRST image's baked
+        // bitmap; the content-hash key must miss and re-bake,
+        // so the returned image carries the NEW dimensions.
+        let bytes_a = uncompressed_sprite_png(20, 10, [220, 30, 30, 255]);
+        let bytes_b = uncompressed_sprite_png(11, 18, [30, 30, 220, 255]);
+        assert_eq!(
+            bytes_a.len(),
+            bytes_b.len(),
+            "the collision precondition: same byte length"
+        );
+        assert_ne!(bytes_a, bytes_b, "different content, different hash");
+
+        let mut core = EditorCore::new();
+        core.project.assets = vec![model::ImageAsset {
+            name: "swap.png".to_string(),
+            png: bytes_a.clone(),
+        }];
+        let first = sprite_bitmap(&core.project, 0, false, false)
+            .expect("the first image bakes");
+        assert_eq!(first.size(), Some([20, 10]), "the first image's bitmap");
+
+        // Replace the asset's bytes IN PLACE with the
+        // same-length different image (the R3 failure path:
+        // an in-place replace, or an index shift landing
+        // different bytes of the same length at this index).
+        core.project.assets[0].png = bytes_b;
+        let second = sprite_bitmap(&core.project, 0, false, false)
+            .expect("the replacement bakes");
+        assert_eq!(
+            second.size(),
+            Some([11, 18]),
+            "a same-length replacement must re-bake, never serve the stale bitmap"
+        );
+
+        // The original content still resolves to its own
+        // entry — the two contents coexist under their own
+        // hashes rather than evicting each other by length.
+        core.project.assets[0].png = bytes_a;
+        let again = sprite_bitmap(&core.project, 0, false, false)
+            .expect("the original still bakes");
+        assert_eq!(again.size(), Some([20, 10]), "the original's own bitmap");
+    }
+
+    #[test]
     fn stage_shape_no_longer_paints_the_sprite_placeholder() {
         reset_view_nav();
         let size = [800.0, 600.0];
@@ -8298,6 +8780,81 @@ mod tests {
             "the sprite quad's points are not painted on the canvas"
         );
         reset_view_nav();
+    }
+
+    // --------------------------------------------------------
+    // Stage pass context (Wave 3 — IA-U3-29-1 / IA-U3-81-2)
+    // --------------------------------------------------------
+
+    /// The pass context's media stream and quad derivation
+    /// are the direct evaluations' values, byte for byte:
+    /// the context changes how OFTEN they are computed,
+    /// never what they are.
+    #[test]
+    fn stage_pass_media_stream_matches_direct_evaluation() {
+        let mut core = EditorCore::new();
+        core.project.assets = vec![model::ImageAsset {
+            name: "badge.png".to_string(),
+            png: solid_sprite_png(48, 24),
+        }];
+        core.project.sprites = vec![model::SpriteInstance {
+            asset: 0,
+            keys: vec![sprite_key()],
+        }];
+        let pass = StagePass::new(&core);
+        assert_eq!(
+            pass.media_items(),
+            stykanimate_rs::media::media_items(&core.project, core.display_frame()).as_slice(),
+            "the pass's one stream is the direct evaluation"
+        );
+        assert_eq!(
+            pass.sprite_quads(),
+            crate::stage_sprites::sprite_quads(&core.project, core.display_frame()).as_slice(),
+            "the pass's quads are the direct derivation"
+        );
+        assert_eq!(pass.sprite_quads().len(), 1, "the planted sprite places");
+    }
+
+    /// The positions memo evaluates each (figure, flavour)
+    /// pair once — repeated reads share the one result —
+    /// and the values are the core's own evaluations. Out
+    /// of setup mode the two flavours are the same call
+    /// and share a slot; in setup mode they stay apart,
+    /// each holding its own flavour's values (the text/FX
+    /// passes' plain flavour is preserved, not unified).
+    #[test]
+    fn stage_pass_memoises_positions_per_flavour() {
+        let core = EditorCore::new();
+        let pass = StagePass::new(&core);
+        let a = pass.positions(&core, 0);
+        let b = pass.positions(&core, 0);
+        assert!(Rc::ptr_eq(&a, &b), "one evaluation, shared by every reader");
+        assert_eq!(*a, core.positions_f(core.display_frame(), 0));
+        let plain = pass.positions_plain(&core, 0);
+        assert!(
+            Rc::ptr_eq(&a, &plain),
+            "out of setup mode both flavours are `positions_f` and share the slot"
+        );
+
+        let mut setup_core = EditorCore::new();
+        setup_core.setup_mode = true;
+        let pass = StagePass::new(&setup_core);
+        let setup = pass.positions(&setup_core, 0);
+        assert_eq!(
+            *setup,
+            setup_core.setup_positions_f(setup_core.display_frame(), 0),
+            "the setup-aware flavour is the rest pose"
+        );
+        let plain = pass.positions_plain(&setup_core, 0);
+        assert_eq!(
+            *plain,
+            setup_core.positions_f(setup_core.display_frame(), 0),
+            "the plain flavour stays `positions_f` even in setup mode"
+        );
+        assert!(
+            !Rc::ptr_eq(&setup, &plain),
+            "in setup mode the flavours are separate evaluations in separate slots"
+        );
     }
 
     // --------------------------------------------------------
@@ -9349,6 +9906,207 @@ mod tests {
         // nothing (it falls through to the marquee chain).
         assert!(!guide_down(&mut core, [300.0, 300.0], 1.0, RULER_THICKNESS_PX));
         assert!(!guide_drag_active());
+    }
+
+    // ---- Gesture identity across a project swap (Wave 3, B1-11) ----
+    //
+    // IA-U3-88-1's stage-view half: B1-06 landed the
+    // identity rule for the core/gizmo/dope/cue/graph
+    // gestures; these pins cover this module's five
+    // thread-local records. Every pin swaps through the
+    // real funnel (`note_project_swapped`) — the funnel
+    // lives in editor.rs and cannot reach these cells,
+    // so each record survives the swap carrying the OLD
+    // project's counter, and the phases' own validation
+    // through `gesture_project_live` is exactly what
+    // must abandon it: no write, no settle, no undo
+    // spent in the new project (U3-88 R1).
+
+    #[test]
+    fn b1_11_path_drag_begun_before_a_swap_writes_nothing_after_it() {
+        // Move leg: the first post-swap Move ends the
+        // drag instead of tracking for a settle.
+        let mut core = path_core();
+        core.show_paths = true;
+        let depth = core.undo_depth();
+        assert!(path_drag_down(&mut core, [40.0, 100.0]));
+        core.note_project_swapped();
+        assert!(!path_drag_move(&mut core, [90.0, 130.0]));
+        assert!(!path_drag_active(), "the stale record is dropped");
+        path_drag_up(&mut core, [90.0, 130.0], false);
+        assert!(approx2(core.project.frames[1].poses[0].root, [40.0, 100.0]));
+        assert_eq!(core.undo_depth(), depth);
+        // Up leg: a release with no intervening Move is
+        // abandoned by the settle's own check.
+        let mut core = path_core();
+        core.show_paths = true;
+        let depth = core.undo_depth();
+        assert!(path_drag_down(&mut core, [40.0, 100.0]));
+        core.note_project_swapped();
+        let status = core.status.clone();
+        path_drag_up(&mut core, [90.0, 130.0], false);
+        assert!(approx2(core.project.frames[1].poses[0].root, [40.0, 100.0]));
+        assert_eq!(core.undo_depth(), depth, "no undo spent in the new project");
+        assert_eq!(core.status, status, "an abandoned gesture posts no recap");
+        assert!(!path_drag_active());
+    }
+
+    #[test]
+    fn b1_11_bend_drag_begun_before_a_swap_writes_nothing_after_it() {
+        // Move leg.
+        let mut core = bend_test_core();
+        let (_ni, a, b) = bend_test_segment(&core);
+        let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+        let target = model::bend_mid(a, b, 0.7);
+        let depth = core.undo_depth();
+        assert!(bend_drag_down(&mut core, mid, 13.0));
+        core.note_project_swapped();
+        assert!(!bend_drag_move(&mut core, target));
+        assert!(!bend_drag_active(), "the stale record is dropped");
+        assert_eq!(core.undo_depth(), depth);
+        // Up leg: no snapshot, no stored bend row, no
+        // status in the new project.
+        let mut core = bend_test_core();
+        let (ni, a, b) = bend_test_segment(&core);
+        let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+        let target = model::bend_mid(a, b, 0.7);
+        let depth = core.undo_depth();
+        assert!(bend_drag_down(&mut core, mid, 13.0));
+        core.note_project_swapped();
+        let status = core.status.clone();
+        bend_drag_up(&mut core, target, false);
+        assert!(
+            core.project.frames[0].bends.is_empty()
+                || core.project.frames[0].bends[0][ni] == 0.0,
+            "no bend row written in the new project"
+        );
+        assert_eq!(core.undo_depth(), depth, "no snapshot spent in the new project");
+        assert_eq!(core.status, status, "an abandoned gesture posts no recap");
+        assert!(!bend_drag_active());
+    }
+
+    #[test]
+    fn b1_11_group_drag_begun_before_a_swap_writes_nothing_after_it() {
+        // U3-88 R1's named case: a group drag settling
+        // post-swap would move the NEW project's figures
+        // at the old set's indices under one fresh
+        // snapshot. The funnel settles the SET
+        // (IA-U3-86-2); the in-flight record's own
+        // snapshot is what this pin guards.
+        // Move leg.
+        let mut core = marquee_core();
+        set_figure_set(&mut core, vec![0, 1]);
+        let root0 = core.project.frames[0].poses[0].root;
+        assert!(group_drag_down(&mut core, root0, 13.0));
+        core.note_project_swapped();
+        assert!(!group_drag_move(&mut core, [root0[0] + 30.0, root0[1] + 10.0]));
+        assert!(group_drag_delta().is_none(), "the stale record is dropped");
+        clear_figure_set(&mut core);
+        // Up leg.
+        let mut core = marquee_core();
+        set_figure_set(&mut core, vec![0, 1]);
+        let root0 = core.project.frames[0].poses[0].root;
+        let root1 = core.project.frames[0].poses[1].root;
+        let depth = core.undo_depth();
+        assert!(group_drag_down(&mut core, root0, 13.0));
+        core.note_project_swapped();
+        let status = core.status.clone();
+        group_drag_up(&mut core, [root0[0] + 30.0, root0[1] + 10.0], false);
+        assert_eq!(core.project.frames[0].poses[0].root, root0);
+        assert_eq!(core.project.frames[0].poses[1].root, root1);
+        assert_eq!(core.undo_depth(), depth, "no snapshot spent in the new project");
+        assert_eq!(core.status, status, "an abandoned gesture posts no recap");
+        assert!(group_drag_delta().is_none());
+        clear_figure_set(&mut core);
+    }
+
+    #[test]
+    fn b1_11_marquee_settle_after_a_swap_changes_nothing() {
+        // The marquee's Move phase takes no core handle
+        // (the shell routes it from main.rs), so the
+        // settle is this record's validation point.
+        // Post-swap the release must neither replace the
+        // set with the new project's figures nor post
+        // its count — the funnel already cleared the
+        // set, and it stays cleared.
+        let mut core = marquee_core();
+        let bb = figure_stage_bbox(&core, 0).unwrap();
+        assert!(marquee_down(&mut core, [bb[2] + 30.0, bb[3] + 30.0]));
+        assert!(marquee_move([bb[0] - 30.0, bb[1] - 30.0]));
+        core.note_project_swapped();
+        let selected = core.selected_figure;
+        let status = core.status.clone();
+        marquee_up(&mut core, [bb[0] - 30.0, bb[1] - 30.0], false);
+        assert!(figure_set(&core).is_empty(), "the stale settle selects nothing");
+        assert_eq!(core.selected_figure, selected);
+        assert_eq!(core.status, status, "an abandoned gesture posts no count");
+        assert!(marquee_live_rect().is_none());
+    }
+
+    #[test]
+    fn b1_11_guide_settle_after_a_swap_fires_no_stored_guide_op() {
+        // The guide Move phase takes no core handle
+        // either, so the settle validates. A CREATE
+        // settling post-swap would plant a guide in the
+        // NEW project; a MOVE settling post-swap would
+        // move (or delete) the NEW project's guide at
+        // the old project's index.
+        use stykanimate_rs::model::GuideAxis;
+        // CREATE form.
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        assert!(guide_down(&mut core, [300.0, -9.0], 1.0, RULER_THICKNESS_PX));
+        core.note_project_swapped();
+        guide_up(&mut core, [300.0, 250.0], false);
+        assert_eq!(core.stored_guide_count(), 0, "no guide planted post-swap");
+        assert_eq!(core.undo_depth(), depth);
+        assert!(!guide_drag_active());
+        // MOVE form.
+        let mut core = EditorCore::new();
+        core.stored_guide_add(GuideAxis::Vertical, 480.0);
+        let depth = core.undo_depth();
+        assert!(guide_down(&mut core, [485.0, 300.0], 1.0, RULER_THICKNESS_PX));
+        core.note_project_swapped();
+        guide_up(&mut core, [600.0, 300.0], false);
+        assert_eq!(core.stored_guides()[0].position, 480.0, "the guide never moved");
+        assert_eq!(core.undo_depth(), depth, "no op spent in the new project");
+        assert!(!guide_drag_active());
+    }
+
+    #[test]
+    fn b1_11_drop_stage_gesture_sessions_drops_every_record() {
+        // IA-U3-88-2's stage-view half: the cross-cell
+        // drop clears all five session cells at once,
+        // settle-free. Each record is armed on its own
+        // core — the thread-local cells are the shared
+        // state under test.
+        let mut path = path_core();
+        path.show_paths = true;
+        assert!(path_drag_down(&mut path, [40.0, 100.0]));
+        let mut bend = bend_test_core();
+        let (_ni, a, b) = bend_test_segment(&bend);
+        let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+        assert!(bend_drag_down(&mut bend, mid, 13.0));
+        let mut marquee = marquee_core();
+        assert!(marquee_down(&mut marquee, [10.0, 10.0]));
+        let mut group = marquee_core();
+        set_figure_set(&mut group, vec![0, 1]);
+        let root0 = group.project.frames[0].poses[0].root;
+        assert!(group_drag_down(&mut group, root0, 13.0));
+        let mut guide = EditorCore::new();
+        assert!(guide_down(&mut guide, [300.0, -9.0], 1.0, RULER_THICKNESS_PX));
+        assert!(path_drag_active());
+        assert!(bend_drag_active());
+        assert!(marquee_live_rect().is_some());
+        assert!(group_drag_count().is_some());
+        assert!(guide_drag_active());
+        drop_stage_gesture_sessions();
+        assert!(!path_drag_active());
+        assert!(!bend_drag_active());
+        assert!(marquee_live_rect().is_none());
+        assert!(group_drag_count().is_none());
+        assert!(!guide_drag_active());
+        clear_figure_set(&mut group);
     }
 
     #[test]

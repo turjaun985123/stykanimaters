@@ -223,8 +223,13 @@ const DECODED_ASSET_CACHE_MAX: usize = 32;
 /// constructed directly (never `RandomState`) is a fixed-
 /// key SipHash, deterministic within the process — all the
 /// key needs, since the cache itself is per-thread and
-/// session-only. The length is folded in alongside.
-fn asset_bytes_hash(bytes: &[u8]) -> u64 {
+/// session-only. The length is folded in alongside. Also
+/// the content half of the stage sprite bitmap cache's key
+/// (`stage_view::SPRITE_BITMAPS`, IA-U3-87-3) — one hash
+/// for every content-keyed asset cache. `pub` (not
+/// `pub(crate)`) because `stage_view` lives in the binary
+/// crate and consumes this module as `stykanimate_rs::media`.
+pub fn asset_bytes_hash(bytes: &[u8]) -> u64 {
     use std::hash::Hasher;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     h.write(bytes);

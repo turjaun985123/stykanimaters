@@ -112,7 +112,7 @@ use rune::{col, el, row, text, El, ScrollSpec};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{FigureDef, SegmentMedia};
 
-use crate::chrome_view::{btn, btn_inert};
+use crate::chrome_view::{btn, btn_inert, danger_btn};
 use crate::rune_sec::design;
 use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icons;
@@ -748,7 +748,7 @@ fn mirror_button(core: &EditorCore, t: &Theme) -> El {
 /// refusals can never fire from here.
 fn delete_subtree_button(core: &EditorCore, t: &Theme) -> El {
     if delete_subtree_available(core) {
-        btn("rig-delete-subtree", "Delete subtree", false, t, |s| {
+        danger_btn("rig-delete-subtree", "Delete subtree", t, |s| {
             if let Some(ni) = s.core.selected_node {
                 s.core.delete_subtree(ni);
             }

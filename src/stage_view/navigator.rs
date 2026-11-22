@@ -293,6 +293,28 @@ pub fn nav_up(_cancelled: bool) -> bool {
 /// (small element / empty scene) it draws nothing at
 /// all.
 pub fn draw_navigator(mut shape: Shape, core: &EditorCore, el_size: [f32; 2]) -> Shape {
+    draw_navigator_with_positions(shape, core, el_size, &|fi| {
+        std::rc::Rc::new(feedback_positions(core, fi))
+    })
+}
+
+/// [`draw_navigator`] with the per-figure positions
+/// supplied by the caller (Wave 3, IA-U3-29-2 /
+/// IA-U3-81-2): the stage's pass context evaluates each
+/// figure's forward kinematics once per redraw and hands
+/// the results down, so the miniature reads the same
+/// values the figure pass drew instead of re-evaluating
+/// them. The flavour is this pass's own historical one —
+/// [`feedback_positions`], the display frame's
+/// setup-aware positions. Standalone callers keep the
+/// delegating [`draw_navigator`], whose closure evaluates
+/// exactly what the body evaluated before.
+pub fn draw_navigator_with_positions(
+    mut shape: Shape,
+    core: &EditorCore,
+    el_size: [f32; 2],
+    positions: &dyn Fn(usize) -> std::rc::Rc<Vec<V2>>,
+) -> Shape {
     let Some(map) = nav_map(core, el_size) else {
         return shape;
     };
@@ -336,7 +358,7 @@ pub fn draw_navigator(mut shape: Shape, core: &EditorCore, el_size: [f32; 2]) ->
         if !visible.get(fi).copied().unwrap_or(false) {
             continue;
         }
-        let pos = feedback_positions(core, fi);
+        let pos = positions(fi);
         let selected = core.selected_figure == fi;
         let ink = hex_color(fig.color)
             .unwrap_or(Color::WHITE)

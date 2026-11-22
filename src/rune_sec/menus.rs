@@ -1396,6 +1396,11 @@ mod tests {
         assert_eq!(shortcut_hint("menu-palette"), Some("Ctrl+K"));
         assert_eq!(shortcut_hint("copy-frame"), Some("Ctrl+C"));
         assert_eq!(shortcut_hint("paste-frame"), Some("Ctrl+V"));
+        // Wave 3 (IA-U3-06-1): Help ▸ Shortcuts joined the
+        // list — its item flips the same `menus.help_open`
+        // flag the F1 binding flips, so the keymap registry
+        // now names it as F1's menu twin.
+        assert_eq!(shortcut_hint("help"), Some("F1"));
         // Every other item key used by `menu_dropdown`
         // has no binding and must stay hint-less — if a
         // future binding is added to the shell, add its
@@ -1417,7 +1422,6 @@ mod tests {
             "view-centre",
             "view-toggle-left",
             "view-toggle-right",
-            "help",
         ] {
             assert_eq!(shortcut_hint(key), None, "{key} has no shell binding");
         }

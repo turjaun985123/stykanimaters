@@ -96,9 +96,12 @@ pub static BINDINGS: &[Binding] = &[
     Binding { id: "open-palette", keys: "Ctrl+K", action: "Open the command palette", section: "Shortcuts", scope: G, menu_key: Some("menu-palette"), command_key: None },
     // IA-RM28-5 (RM28): F1 toggles Help — a direct arm
     // in main.rs's `on_key` and in the panel's own
-    // `key_row_press`, so there is no menu or palette
-    // twin to name.
-    Binding { id: "help-toggle", keys: "F1", action: "Open or close Help", section: "Shortcuts", scope: G, menu_key: None, command_key: None },
+    // `key_row_press`. IA-U3-06-1: the Help menu's
+    // Shortcuts item (element key `help`) flips the
+    // same `menus.help_open` flag, so it IS this
+    // binding's menu twin and is named here; there is
+    // still no palette twin (no command toggles Help).
+    Binding { id: "help-toggle", keys: "F1", action: "Open or close Help", section: "Shortcuts", scope: G, menu_key: Some("help"), command_key: None },
     Binding { id: "palette-next", keys: "Down", action: "Next result in the command palette (palette open)", section: "Shortcuts", scope: P, menu_key: None, command_key: None },
     Binding { id: "palette-prev", keys: "Up", action: "Previous result in the command palette (palette open)", section: "Shortcuts", scope: P, menu_key: None, command_key: None },
     Binding { id: "palette-run", keys: "Enter", action: "Run the selected command (command palette open)", section: "Shortcuts", scope: P, menu_key: None, command_key: None },
@@ -266,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn menu_hints_cover_exactly_the_seven_true_twins() {
+    fn menu_hints_cover_exactly_the_eight_true_twins() {
         assert_eq!(menu_hint("undo"), Some("Ctrl+Z"));
         assert_eq!(menu_hint("redo"), Some("Ctrl+Shift+Z"));
         assert_eq!(menu_hint("save"), Some("Ctrl+S"));
@@ -274,6 +277,10 @@ mod tests {
         assert_eq!(menu_hint("onion"), Some("O"));
         assert_eq!(menu_hint("copy-frame"), Some("Ctrl+C"));
         assert_eq!(menu_hint("paste-frame"), Some("Ctrl+V"));
+        // IA-U3-06-1: Help ▸ Shortcuts flips the same
+        // `menus.help_open` flag F1 flips, so F1 is its
+        // true twin.
+        assert_eq!(menu_hint("help"), Some("F1"));
         // The honesty cases stay hint-less: the app-bar
         // Load button quick-loads the working file while
         // Ctrl+O opens the selected project file, and the
@@ -283,7 +290,7 @@ mod tests {
         assert_eq!(menu_hint("edit-delete-stroke"), None);
         assert_eq!(menu_hint("edit-delete-particle"), None);
         let hinted = BINDINGS.iter().filter(|b| b.menu_key.is_some()).count();
-        assert_eq!(hinted, 7);
+        assert_eq!(hinted, 8);
     }
 
     #[test]

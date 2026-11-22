@@ -196,7 +196,9 @@
 //! lifecycle actions the GUI could not perform at all
 //! before this wave (the table was MCP-only — A8 §2.1):
 //! **Import** (native file dialog → the shared
-//! `media::import_asset_file` op), **Rename** (the
+//! `media::import_spritesheet_file` op — a sheet with
+//! a slicing sidecar imports as its frames, any other
+//! image as one still; IA-U3-47-1), **Rename** (the
 //! library panel's rename-session discipline over
 //! `media::rename_asset`) and **Remove**
 //! (`media::remove_asset` — refused with the census
@@ -530,8 +532,11 @@ fn asset_thumb_el(image: &rune::Image) -> El {
 /// discipline in `dialogs`' fallback contract) — the
 /// press never invents a path. A refused import (bad
 /// magic, oversize, undecodable) posts the op's own
-/// refusal sentence; a successful one posts its
-/// "Asset imported" status.
+/// refusal sentence; a successful one posts its status
+/// — "Asset imported" for a plain image, the sheet
+/// op's "Spritesheet imported (…, N frame(s) …)" when
+/// a slicing sidecar sits next to the picked file
+/// (IA-U3-47-1).
 fn import_asset_dialog(s: &mut State) {
     if stykanimate_rs::dialogs::available_tool().is_none() {
         s.core.status =
@@ -548,7 +553,15 @@ fn import_asset_dialog(s: &mut State) {
         return;
     };
     let path = path.to_string_lossy().into_owned();
-    if let Err(e) = media::import_asset_file(&mut s.core, &path, None) {
+    // IA-U3-47-1: the press routes through the SHEET
+    // import op — the same op the MCP `asset_import_sheet`
+    // handler calls — so a sheet exported by this app
+    // (PNG + `.spritesheet.json` sidecar) re-imports as
+    // its frames instead of one still. With no sidecar
+    // the op's unsliced path IS `import_asset_file`:
+    // same funnel, same gates, same one-undo-step
+    // discipline, same status sentences.
+    if let Err(e) = media::import_spritesheet_file(&mut s.core, &path) {
         s.core.status = e;
     }
 }

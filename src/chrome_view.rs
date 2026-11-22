@@ -401,7 +401,11 @@ pub fn app_bar(s: &State, t: &Theme) -> El {
             // Wave 10 (C6): history navigation can change
             // the stroke list under the selection index —
             // the selection never survives an undo/redo.
-            s.stroke_selected = None;
+            // Wave 3 (B1-06, IA-U3-86-1): the
+            // reconciliation contract's history half
+            // generalises that clear to every shell
+            // selection.
+            crate::reconcile_shell_state_after_history(s);
         })
     };
     let redo_btn = if core.redo_depth() == 0 {
@@ -409,7 +413,10 @@ pub fn app_bar(s: &State, t: &Theme) -> El {
     } else {
         icon_btn("redo", "arrow-rotate-right", &redo_text, false, t, |s| {
             s.core.redo();
-            s.stroke_selected = None;
+            // Wave 3 (B1-06, IA-U3-86-1): the
+            // reconciliation contract's history half, as
+            // the undo button above.
+            crate::reconcile_shell_state_after_history(s);
         })
     };
     row()
