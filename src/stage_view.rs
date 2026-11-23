@@ -3766,7 +3766,7 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
             // corner marks and name labels — so the generic
             // placeholder skips them here rather than
             // double-painting the quad.
-            if sprite_quads.iter().any(|q| q.corners == corners) {
+            if sprite_quads.iter().any(|q| q.corners == *corners) {
                 continue;
             }
             let pts: Vec<[f32; 2]> = corners.iter().map(|p| rt.to_screen(*p)).collect();
